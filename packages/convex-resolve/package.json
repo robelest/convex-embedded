@@ -1,0 +1,67 @@
+{
+  "name": "convex-resolve",
+  "version": "0.0.1",
+  "description": "Offline-first sync library for Yjs documents between Concave and Convex.",
+  "type": "module",
+  "exports": {
+    "./package.json": "./package.json",
+    "./server": {
+      "types": "./dist/server/index.d.ts",
+      "import": "./dist/server/index.js"
+    },
+    "./client": {
+      "types": "./dist/client/index.d.ts",
+      "import": {
+        "@convex-dev/component-source": "./src/client/index.ts",
+        "default": "./dist/client/index.js"
+      }
+    },
+    "./convex.config": {
+      "types": "./dist/component/convex.config.d.ts",
+      "import": {
+        "@convex-dev/component-source": "./src/component/convex.config.ts",
+        "default": "./dist/component/convex.config.js"
+      }
+    },
+    "./test": {
+      "types": "./src/test.ts",
+      "import": "./src/test.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsdown",
+    "codegen": "convex codegen --component-dir ./src/component",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest",
+    "test:once": "vitest run",
+    "prepublishOnly": "bun run build"
+  },
+  "dependencies": {
+    "yjs": "^13.6.0",
+    "convex-helpers": "^0.1.0"
+  },
+  "peerDependencies": {
+    "convex": "^1.17.0"
+  },
+  "devDependencies": {
+    "convex": "catalog:",
+    "tsdown": "^0.12.0",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  },
+  "keywords": [
+    "convex",
+    "concave",
+    "yjs",
+    "crdt",
+    "offline-first",
+    "sync",
+    "local-first",
+    "component"
+  ],
+  "license": "MIT"
+}

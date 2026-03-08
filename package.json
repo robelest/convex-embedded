@@ -1,55 +1,22 @@
 {
-  "name": "convex-resolve",
-  "version": "0.0.1",
-  "description": "Offline-first sync library for Yjs documents between Concave and Convex.",
-  "type": "module",
-  "exports": {
-    "./server": {
-      "types": "./dist/server/index.d.ts",
-      "import": "./dist/server/index.js"
-    },
-    "./client": {
-      "types": "./dist/client/index.d.ts",
-      "import": "./dist/client/index.js"
-    },
-    "./component": {
-      "types": "./dist/component/convex.config.d.ts",
-      "import": "./dist/component/convex.config.js"
+  "name": "convex-resolve-monorepo",
+  "private": true,
+  "workspaces": {
+    "packages": ["packages/*", "demos/*"],
+    "catalog": {
+      "convex": "^1.17.0",
+      "vitest": "^4.0.18",
+      "typescript": "^5.9.0"
     }
   },
-  "files": [
-    "dist",
-    "src/component"
-  ],
   "scripts": {
-    "build": "tsdown",
-    "typecheck": "tsc --noEmit",
-    "test": "vitest",
-    "test:once": "vitest run",
-    "prepublishOnly": "bun run build"
+    "test": "bun --filter '*' test:once",
+    "build": "bun --filter convex-resolve build"
   },
   "dependencies": {
-    "yjs": "^13.6.0",
-    "convex-helpers": "^0.1.0"
-  },
-  "peerDependencies": {
-    "convex": "^1.17.0"
+    "convex": "^1.32.0"
   },
   "devDependencies": {
-    "convex": "^1.17.0",
-    "tsdown": "^0.12.0",
-    "typescript": "^5.9.0",
-    "vitest": "^4.0.18"
-  },
-  "keywords": [
-    "convex",
-    "concave",
-    "yjs",
-    "crdt",
-    "offline-first",
-    "sync",
-    "local-first",
-    "component"
-  ],
-  "license": "MIT"
+    "@convex-dev/action-retrier": "^0.3.0"
+  }
 }

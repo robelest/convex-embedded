@@ -25,6 +25,18 @@ import { createLogger } from "../shared/logger.js";
 
 const log = createLogger("register");
 
+/**
+ * Safely convert a Uint8Array to a proper ArrayBuffer.
+ * In some runtimes (e.g. edge-runtime used by convex-test), the
+ * Uint8Array.buffer property doesn't return a native ArrayBuffer,
+ * so we construct a fresh one and copy the bytes.
+ */
+function toArrayBuffer(data: Uint8Array): ArrayBuffer {
+  const buf = new ArrayBuffer(data.byteLength);
+  new Uint8Array(buf).set(data);
+  return buf;
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -131,7 +143,7 @@ export function register(config: RegisterConfig): RegisterResult {
         await ctx.runMutation(component.public.insertDelta, {
           collection: table,
           docId: args.docId,
-          update: new Uint8Array(update).buffer as ArrayBuffer,
+          update: toArrayBuffer(update),
         });
 
         log.debug(`_recordDelta: recorded delta for ${table}/${args.docId} (${update.byteLength} bytes)`);
@@ -196,7 +208,7 @@ export function register(config: RegisterConfig): RegisterResult {
             // Client is up to date
             results.push({ docId });
           } else {
-            results.push({ docId, diff: diff.buffer as ArrayBuffer });
+            results.push({ docId, diff: toArrayBuffer(diff) });
           }
         } catch (err) {
           log.error(`resolve: failed to compute diff for ${table}/${docId}`, err);

@@ -11,12 +11,16 @@
   },
   "scripts": {
     "test": "bun --filter '*' test:once",
-    "build": "bun --filter convex-resolve build"
+    "build": "bun --filter convex-resolve build",
+    "dev:convex": "bunx convex dev",
+    "dev:tanstack": "bun run --filter demo-tanstack-start dev"
   },
   "dependencies": {
-    "convex": "^1.32.0"
+    "convex": "^1.32.0",
+    "convex-resolve": "workspace:*"
   },
   "devDependencies": {
-    "@convex-dev/action-retrier": "^0.3.0"
+    "@convex-dev/action-retrier": "^0.3.0",
+    "@typescript/native-preview": "^7.0.0-dev.20260308.1"
   }
 }

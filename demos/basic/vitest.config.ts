@@ -2,9 +2,11 @@ import { defineConfig } from "vitest/config";
 import path from "path";
 
 export default defineConfig({
+  // Load .env.local from the monorepo root
+  envDir: "../..",
   test: {
     environment: "edge-runtime",
-    include: ["convex/**/*.test.ts"],
+    include: ["**/*.test.ts"],
   },
   resolve: {
     alias: {

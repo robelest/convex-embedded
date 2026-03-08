@@ -55,3 +55,19 @@ export const update = mutation(
     },
   }),
 );
+
+// List all tasks — used by the TanStack Start demo UI
+export const list = query({
+  args: {},
+  returns: v.array(
+    v.object({
+      _id: v.id("tasks"),
+      _creationTime: v.number(),
+      title: v.string(),
+      body: v.string(),
+    }),
+  ),
+  handler: async (ctx) => {
+    return await ctx.db.query("tasks").collect();
+  },
+});

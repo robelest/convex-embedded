@@ -8,13 +8,17 @@
  * @module
  */
 
+import type * as tasks from "../tasks.js";
+
 import type {
   ApiFromModules,
   FilterApi,
   FunctionReference,
 } from "convex/server";
 
-declare const fullApi: ApiFromModules<{}>;
+declare const fullApi: ApiFromModules<{
+  tasks: typeof tasks;
+}>;
 
 /**
  * A utility for referencing Convex functions in your app's public API.
@@ -42,4 +46,33 @@ export declare const internal: FilterApi<
   FunctionReference<any, "internal">
 >;
 
-export declare const components: {};
+export declare const components: {
+  resolve: {
+    public: {
+      cleanup: FunctionReference<
+        "mutation",
+        "internal",
+        { collection: string; docId: string; keepLatest?: number },
+        { deleted: number; kept: number }
+      >;
+      getLatestDelta: FunctionReference<
+        "query",
+        "internal",
+        { collection: string; docId: string },
+        { seq: number; update: ArrayBuffer } | null
+      >;
+      getLatestDeltas: FunctionReference<
+        "query",
+        "internal",
+        { collection: string; docIds: Array<string> },
+        Array<{ docId: string; seq: number; update: ArrayBuffer } | null>
+      >;
+      insertDelta: FunctionReference<
+        "mutation",
+        "internal",
+        { collection: string; docId: string; update: ArrayBuffer },
+        null
+      >;
+    };
+  };
+};

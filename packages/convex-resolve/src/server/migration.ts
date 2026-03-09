@@ -1,7 +1,7 @@
 /**
  * Migration runner for local schema versioning.
  *
- * Tracks which schema version each local Concave instance is on,
+ * Tracks which schema version each local embedded runtime instance is on,
  * diffs against the current app version, and runs user-supplied
  * migration functions in sequence before the app renders.
  *
@@ -43,7 +43,7 @@ interface VersionRecord {
 }
 
 // ---------------------------------------------------------------------------
-// Schema version table name — used in local Concave docstore
+// Schema version table name — used in local embedded runtime docstore
 // ---------------------------------------------------------------------------
 
 const VERSION_TABLE = "_resolve_schema_versions";
@@ -155,7 +155,7 @@ async function getStoredVersion(ctx: any, table: string): Promise<number | null>
     if (records.length === 0) return null;
     return records[0].version;
   } catch {
-    // Table might not exist yet on local Concave
+    // Table might not exist yet on local embedded runtime
     return null;
   }
 }

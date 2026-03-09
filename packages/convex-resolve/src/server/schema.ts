@@ -107,7 +107,7 @@ export function set<T>(
 
 /**
  * Marks a field as remote-only. It exists on the remote Convex backend
- * but is stripped from every payload sent to local Concave.
+ * but is stripped from every payload sent to local embedded runtime.
  *
  * Only needed on registered (synced) tables. Tables without register()
  * are never synced — they stay on remote by default.

@@ -1,16 +1,16 @@
 /**
- * runtime — creates a ConvexClient over a Concave transport.
+ * runtime — creates a ConvexClient over an embedded runtime transport.
  *
  * Usage:
- *   import { runtime } from 'convex-resolve/client';
+ *   import { runtime } from '@robelest/convex-resolve/client';
  *
- *   // With an embedded Concave runtime (e.g. Tauri, Electrobun)
- *   const concaveRuntime = createConcave({ ... });
- *   await concaveRuntime.start();
- *   const transport = concaveRuntime.createTransport();
+ *   // With an embedded local runtime (e.g. Tauri, Electrobun)
+ *   const localRuntime = createLocalRuntime({ ... });
+ *   await localRuntime.start();
+ *   const transport = localRuntime.createTransport();
  *   const rt = runtime.create(transport);
  *
- *   // With a remote Concave URL (Bun/Node/Cloudflare)
+ *   // With a remote local runtime URL (Bun/Node/Cloudflare)
  *   const rt = runtime.create({ clientUrl: 'http://localhost:3000' });
  *
  *   // rt.client is a standard ConvexClient
@@ -24,10 +24,10 @@ const log = createLogger("runtime");
 // ---------------------------------------------------------------------------
 
 /**
- * A Concave transport provides the URL and optional WebSocket constructor
- * needed to create a ConvexClient that talks to a local Concave instance.
+ * An embedded transport provides the URL and optional WebSocket constructor
+ * needed to create a ConvexClient that talks to a local runtime instance.
  */
-export interface ConcaveTransport {
+export interface EmbeddedTransport {
   /** The URL the ConvexClient connects to. */
   clientUrl: string;
   /** Custom WebSocket constructor for embedded transports. */
@@ -36,7 +36,7 @@ export interface ConcaveTransport {
 
 export interface RuntimeInstance {
   /** The transport this runtime uses. */
-  transport: ConcaveTransport;
+  transport: EmbeddedTransport;
   /**
    * Create a ConvexReactClient for this transport.
    * Caller must provide the ConvexReactClient constructor to avoid
@@ -53,13 +53,13 @@ export interface RuntimeInstance {
 // ---------------------------------------------------------------------------
 
 /**
- * Creates a runtime instance from a Concave transport.
+ * Creates a runtime instance from an embedded transport.
  *
  * The transport can be:
- *   - An object from concaveRuntime.createTransport() (embedded)
- *   - A simple { clientUrl } object (remote Concave server)
+ *   - An object from localRuntime.createTransport() (embedded)
+ *   - A simple { clientUrl } object (remote local runtime server)
  */
-function create(transport: ConcaveTransport): RuntimeInstance {
+function create(transport: EmbeddedTransport): RuntimeInstance {
   log.info(`runtime.create: clientUrl=${transport.clientUrl}`);
 
   return {

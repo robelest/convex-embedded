@@ -1,7 +1,7 @@
 /**
  * monitor — orchestrates resolve on connect/reconnect.
  *
- * The monitor bridges local Concave and remote Convex:
+ * The monitor bridges local embedded runtime and remote Convex:
  *   1. Monitors network state (online/offline)
  *   2. On connect: calls resolve() for every registered table
  *   3. Tracks resolve progress and exposes status to the app
@@ -40,11 +40,11 @@ const log = createLogger("monitor");
 
 /**
  * Table configuration for the monitor. Each table has a `resolve`
- * action reference that the monitor calls on connect/reconnect.
+ * query reference that the monitor calls on connect/reconnect.
  */
 export interface TableConfig {
-  /** The resolve action reference (from register() output). */
-  resolve: any; // FunctionReference<"action">
+  /** The resolve query reference (from register() output). */
+  resolve: any; // FunctionReference<"query">
 }
 
 export interface MonitorConfig {
@@ -173,10 +173,10 @@ function createMonitor(config: MonitorConfig): MonitorInstance {
       if (signal?.aborted) return;
 
       try {
-        // Call the resolve action on the remote.
+        // Call the resolve query on the remote.
         // For now, we resolve all documents (empty vector = full state).
         // In production, the app would track which docs are dirty.
-        await remoteClient.action(tableConfig.resolve, {
+        await remoteClient.query(tableConfig.resolve, {
           documents: [],
         });
 

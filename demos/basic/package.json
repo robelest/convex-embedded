@@ -7,7 +7,7 @@
     "test:once": "vitest run"
   },
   "dependencies": {
-    "convex-resolve": "workspace:*",
+    "@robelest/convex-resolve": "workspace:*",
     "convex": "catalog:",
     "yjs": "^13.6.0"
   },

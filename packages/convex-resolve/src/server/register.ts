@@ -1,7 +1,7 @@
 /**
  * register() — server-side entry point for convex-resolve.
  *
- * Generates the `resolve` action for a table and wires delta recording.
+ * Generates the `resolve` query for a table and wires delta recording.
  *
  * Usage:
  *   import { register } from 'convex-resolve/server';
@@ -69,7 +69,7 @@ export interface RegisterConfig {
 
 export interface RegisterResult {
   /**
-   * One-shot catch-up action — client sends state vectors, receives diffs.
+   * One-shot catch-up query — client sends state vectors, receives diffs.
    * This is the function reference the consuming app exports.
    */
   resolve: {
@@ -124,7 +124,7 @@ export function register(config: RegisterConfig): RegisterResult {
     returns: v.null(),
     handler: async (ctx: any, args: { docId: string }): Promise<null> => {
       if (!isRemote || !component) {
-        // On local Concave — no-op
+        // On local embedded runtime — no-op
         return null;
       }
 
@@ -157,7 +157,7 @@ export function register(config: RegisterConfig): RegisterResult {
   };
 
   // -------------------------------------------------------------------------
-  // resolve — one-shot catch-up action
+  // resolve — one-shot catch-up query
   // -------------------------------------------------------------------------
 
   const resolve = {
@@ -174,7 +174,7 @@ export function register(config: RegisterConfig): RegisterResult {
       args: { documents: Array<{ docId: string; vector: ArrayBuffer }> },
     ): Promise<Array<{ docId: string; diff?: ArrayBuffer }>> => {
       if (!isRemote || !component) {
-        // On local Concave — return empty diffs (no-op)
+        // On local embedded runtime — return empty diffs (no-op)
         return args.documents.map((d) => ({ docId: d.docId }));
       }
 

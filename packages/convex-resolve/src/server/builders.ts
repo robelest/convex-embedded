@@ -10,7 +10,7 @@
  * The returned `mutation` and `query` accept an optional `remote:` key:
  *   - On remote Convex: handler runs, then remote runs (same transaction),
  *     then _recordDelta is scheduled via ctx.scheduler.runAfter(0, ...).
- *   - On local Concave: handler runs only. remote is ignored.
+ *   - On local embedded runtime: handler runs only. remote is ignored.
  */
 import {
   type MutationBuilder,
@@ -85,7 +85,7 @@ export interface BuildersResult {
   /**
    * Mutation wrapper with remote: key support.
    * On remote Convex: runs handler, then remote (same tx), then schedules delta recording.
-   * On local Concave: runs handler only.
+   * On local embedded runtime: runs handler only.
    */
   mutation: (definition: {
     args: Record<string, any>;
@@ -97,7 +97,7 @@ export interface BuildersResult {
   /**
    * Query wrapper with remote: key support.
    * On remote Convex: runs handler, then remote with result.
-   * On local Concave: runs handler only.
+   * On local embedded runtime: runs handler only.
    */
   query: (definition: {
     args: Record<string, any>;
@@ -113,7 +113,7 @@ export interface BuildersResult {
  *
  * @param components - The `components` object from the app's _generated/api.
  *   If components.resolve exists, we're on remote Convex.
- *   If it's absent, we're on local Concave.
+ *   If it's absent, we're on local embedded runtime.
  * @param baseMutation - The base `mutation` builder from _generated/server.
  * @param baseQuery - The base `query` builder from _generated/server.
  */

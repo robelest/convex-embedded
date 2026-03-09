@@ -30,7 +30,7 @@ export type { DefineOptions, Definition, RegisterOptions } from "./schema.js";
 export { builders } from "./builders.js";
 export type { BuildersResult } from "./builders.js";
 
-// Register — generates resolve action + delta recording
+// Register — generates resolve query + delta recording
 export { register } from "./register.js";
 export type { RegisterConfig, RegisterResult } from "./register.js";
 

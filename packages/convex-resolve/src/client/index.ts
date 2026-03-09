@@ -6,9 +6,9 @@
  *   import { runtime, monitor, clientSchema } from 'convex-resolve/client';
  */
 
-// Runtime — creates ConvexClient over Concave transport
+// Runtime — creates ConvexClient over embedded transport
 export { runtime } from "./runtime.js";
-export type { ConcaveTransport, RuntimeInstance } from "./runtime.js";
+export type { EmbeddedTransport, RuntimeInstance } from "./runtime.js";
 
 // Monitor — orchestrates resolve on connect/reconnect
 export { monitor } from "./monitor.js";

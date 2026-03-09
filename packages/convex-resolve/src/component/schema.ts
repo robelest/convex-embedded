@@ -8,7 +8,7 @@ import { v } from "convex/values";
  * mutation on a registered table. Each delta is a complete
  * Y.encodeStateAsUpdateV2(doc), not an incremental diff.
  *
- * The `resolve` action only needs the latest delta per document to compute
+ * The `resolve` query only needs the latest delta per document to compute
  * a diff against the client's state vector.
  */
 export default defineSchema({

@@ -62,8 +62,19 @@ const VERSION_TABLE = "_resolve_schema_versions";
  * @param ctx - A Convex mutation context (ctx from a mutation handler)
  * @param config - Migration configuration
  */
+/** Minimal structural type for a Convex mutation context used by the migration runner. */
+interface MigrationCtx {
+  db: {
+    query(table: string): { filter(predicate: (q: unknown) => unknown): { collect(): Promise<Array<Record<string, unknown>>> }; collect(): Promise<Array<Record<string, unknown>>> };
+    patch(id: unknown, fields: Record<string, unknown>): Promise<void>;
+    insert(table: string, doc: Record<string, unknown>): Promise<unknown>;
+    delete(id: unknown): Promise<void>;
+  };
+  runMutation(fn: FunctionReference<"mutation">, args: Record<string, unknown>): Promise<unknown>;
+}
+
 export async function runMigrations(
-  ctx: any,
+  ctx: MigrationCtx,
   config: MigrationConfig,
 ): Promise<boolean> {
   const { table, schema: schemaDef, migrations = {}, onMigrationError } = config;
@@ -145,26 +156,26 @@ export async function runMigrations(
 // Version storage helpers
 // ---------------------------------------------------------------------------
 
-async function getStoredVersion(ctx: any, table: string): Promise<number | null> {
+async function getStoredVersion(ctx: MigrationCtx, table: string): Promise<number | null> {
   try {
     const records = await ctx.db
       .query(VERSION_TABLE)
-      .filter((q: any) => q.eq(q.field("table"), table))
+      .filter((q: unknown) => (q as { eq(a: unknown, b: unknown): unknown; field(name: string): unknown }).eq((q as { field(name: string): unknown }).field("table"), table))
       .collect();
 
     if (records.length === 0) return null;
-    return records[0].version;
+    return records[0].version as number;
   } catch {
     // Table might not exist yet on local embedded runtime
     return null;
   }
 }
 
-async function setStoredVersion(ctx: any, table: string, version: number): Promise<void> {
+async function setStoredVersion(ctx: MigrationCtx, table: string, version: number): Promise<void> {
   try {
     const existing = await ctx.db
       .query(VERSION_TABLE)
-      .filter((q: any) => q.eq(q.field("table"), table))
+      .filter((q: unknown) => (q as { eq(a: unknown, b: unknown): unknown; field(name: string): unknown }).eq((q as { field(name: string): unknown }).field("table"), table))
       .collect();
 
     if (existing.length > 0) {
@@ -187,7 +198,7 @@ async function setStoredVersion(ctx: any, table: string, version: number): Promi
 // ---------------------------------------------------------------------------
 
 async function applyDefaults(
-  ctx: any,
+  ctx: MigrationCtx,
   table: string,
   schemaDef: Definition,
   _targetVersion: number,
@@ -218,7 +229,7 @@ async function applyDefaults(
 // ---------------------------------------------------------------------------
 
 async function handleRecovery(
-  ctx: any,
+  ctx: MigrationCtx,
   table: string,
   recovery: RecoveryAction,
   targetVersion: number,

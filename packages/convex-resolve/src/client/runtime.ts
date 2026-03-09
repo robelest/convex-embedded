@@ -31,7 +31,7 @@ export interface EmbeddedTransport {
   /** The URL the ConvexClient connects to. */
   clientUrl: string;
   /** Custom WebSocket constructor for embedded transports. */
-  webSocketConstructor?: any;
+  webSocketConstructor?: unknown;
 }
 
 export interface RuntimeInstance {
@@ -43,8 +43,8 @@ export interface RuntimeInstance {
    * hard dependency on convex/react.
    */
   createClient<T>(
-    ClientConstructor: new (url: string, options?: any) => T,
-    options?: Record<string, any>,
+    ClientConstructor: new (url: string, options?: Record<string, unknown>) => T,
+    options?: Record<string, unknown>,
   ): T;
 }
 
@@ -66,10 +66,10 @@ function create(transport: EmbeddedTransport): RuntimeInstance {
     transport,
 
     createClient<T>(
-      ClientConstructor: new (url: string, options?: any) => T,
-      options?: Record<string, any>,
+      ClientConstructor: new (url: string, options?: Record<string, unknown>) => T,
+      options?: Record<string, unknown>,
     ): T {
-      const clientOptions: Record<string, any> = { ...options };
+      const clientOptions: Record<string, unknown> = { ...options };
 
       if (transport.webSocketConstructor) {
         clientOptions.webSocketConstructor = transport.webSocketConstructor;

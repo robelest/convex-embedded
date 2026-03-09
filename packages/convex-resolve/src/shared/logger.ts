@@ -4,7 +4,8 @@ type LogLevel = "debug" | "info" | "warn" | "error";
 
 function shouldLog(level: LogLevel): boolean {
   if (typeof globalThis !== "undefined" && "process" in globalThis) {
-    const envLevel = (globalThis as any).process?.env?.CONVEX_RESOLVE_LOG;
+    const g = globalThis as typeof globalThis & { process?: { env?: Record<string, string | undefined> } };
+    const envLevel = g.process?.env?.CONVEX_RESOLVE_LOG;
     if (!envLevel) return level !== "debug";
     const levels: LogLevel[] = ["debug", "info", "warn", "error"];
     return levels.indexOf(level) >= levels.indexOf(envLevel as LogLevel);

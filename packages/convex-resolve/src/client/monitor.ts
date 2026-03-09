@@ -44,12 +44,12 @@ const log = createLogger("monitor");
  */
 export interface TableConfig {
   /** The resolve query reference (from register() output). */
-  resolve: any; // FunctionReference<"query">
+  resolve: unknown;
 }
 
 export interface MonitorConfig {
   /** A ConvexClient pointed at the remote Convex backend. */
-  remoteClient: any;
+  remoteClient: { query(name: unknown, args: Record<string, unknown>): Promise<unknown> };
 
   /** Table configurations keyed by table name. */
   tables: Record<string, TableConfig>;
@@ -222,8 +222,8 @@ function createMonitor(config: MonitorConfig): MonitorInstance {
 
       // Check initial network state
       if (typeof globalThis !== "undefined" && "navigator" in globalThis) {
-        const nav = globalThis.navigator as any;
-        if (nav.onLine === false) {
+        const nav = (globalThis as { navigator?: { onLine?: boolean } }).navigator;
+        if (nav?.onLine === false) {
           emit({ status: "offline" });
         } else {
           handleOnline();

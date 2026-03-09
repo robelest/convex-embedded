@@ -14,7 +14,7 @@
     "rootDir": "src",
     "lib": ["ES2022", "DOM"],
     "paths": {
-      "$/*": ["./src/*"]
+      "@/*": ["./src/*"]
     }
   },
   "include": ["src/**/*"],

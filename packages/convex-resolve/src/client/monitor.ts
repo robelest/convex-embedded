@@ -29,8 +29,8 @@ import * as Y from "yjs";
 import type {
   MonitorStatus,
   ResolveProgress,
-} from "$/shared/types";
-import { createLogger } from "$/shared/logger";
+} from "@/shared/types";
+import { createLogger } from "@/shared/logger";
 
 const log = createLogger("monitor");
 

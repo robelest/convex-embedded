@@ -11,7 +11,7 @@
 
 import type { JSONValue } from "convex/values";
 
-import type { SubscriptionManager } from "$/sync/subscriptions";
+import type { SubscriptionManager } from "@/sync/subscriptions";
 
 // ---------------------------------------------------------------------------
 // Base64 helpers for LE-encoded u64 timestamps

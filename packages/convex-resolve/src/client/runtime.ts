@@ -15,7 +15,7 @@
  *
  *   // rt.client is a standard ConvexClient
  */
-import { createLogger } from "$/shared/logger";
+import { createLogger } from "@/shared/logger";
 
 const log = createLogger("runtime");
 

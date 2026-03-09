@@ -5,33 +5,26 @@ import type { Plugin } from "vite";
 const embeddedSrc = path.resolve(__dirname, "../convex-embedded/src");
 const resolveSrc = path.resolve(__dirname, "../convex-resolve/src");
 
-/**
- * Vite plugin that resolves `$/` imports based on which package the importer
- * belongs to. Each package's `$/` maps to its own `src/` directory.
- */
-function dollarAliasPlugin(): Plugin {
-  return {
-    name: "dollar-alias",
-    async resolveId(source, importer) {
-      if (!source.startsWith("$/") || !importer) return null;
-      const rest = source.slice(2); // strip "$/"
-      let base: string;
-      if (importer.includes("/convex-embedded/")) base = embeddedSrc;
-      else if (importer.includes("/convex-resolve/")) base = resolveSrc;
-      else return null;
-      // Delegate back to Vite so it can try .ts / .js / index.ts extensions
-      const resolved = await this.resolve(
-        path.join(base, rest),
-        importer,
-        { skipSelf: true },
-      );
-      return resolved ?? null;
-    },
-  };
-}
-
 export default defineConfig({
-  plugins: [dollarAliasPlugin()],
+  plugins: [
+    ((): Plugin => ({
+      name: "at-alias",
+      async resolveId(source, importer) {
+        if (!source.startsWith("@/") || !importer) return null;
+        const rest = source.slice(2);
+        let base: string;
+        if (importer.includes("/convex-embedded/")) base = embeddedSrc;
+        else if (importer.includes("/convex-resolve/")) base = resolveSrc;
+        else return null;
+        const resolved = await this.resolve(
+          path.join(base, rest),
+          importer,
+          { skipSelf: true },
+        );
+        return resolved ?? null;
+      },
+    }))(),
+  ],
   resolve: {
     alias: {
       "#embedded": embeddedSrc,

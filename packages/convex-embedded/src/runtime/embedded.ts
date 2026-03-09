@@ -8,25 +8,25 @@
  */
 
 import type { JSONValue } from "convex/values";
-import { Database } from "$/core/database";
-import { parseSchema } from "$/core/schema";
-import type { ParsedSchema, SchemaExport } from "$/core/schema";
-import { ModuleLoader } from "$/kernel/module-loader";
-import type { ConvexModule, FunctionPath } from "$/kernel/module-loader";
-import { resolveFunctionPath } from "$/kernel/module-loader";
-import { UdfExecutor } from "$/kernel/udf-executor";
-import { TransactionManager } from "$/kernel/transaction";
-import { SubscriptionManager } from "$/sync/subscriptions";
-import { SyncProtocolHandler } from "$/sync/protocol";
-import type { ClientMessage, ProtocolExecutor, ServerMessage } from "$/sync/protocol";
-import { SessionManager } from "$/sync/session";
-import { WriteFanout } from "$/runtime/write-fanout";
-import { createTransport } from "$/runtime/transport";
-import type { EmbeddedTransport } from "$/runtime/transport";
-import { AuthResolver } from "$/auth/resolver";
-import type { UserIdentity } from "$/auth/resolver";
-import { SchedulerExecutor } from "$/scheduler/executor";
-import { BlobStore } from "$/storage/blob-store";
+import { Database } from "@/core/database";
+import { parseSchema } from "@/core/schema";
+import type { ParsedSchema, SchemaExport } from "@/core/schema";
+import { ModuleLoader } from "@/kernel/module-loader";
+import type { ConvexModule, FunctionPath } from "@/kernel/module-loader";
+import { resolveFunctionPath } from "@/kernel/module-loader";
+import { UdfExecutor } from "@/kernel/udf-executor";
+import { TransactionManager } from "@/kernel/transaction";
+import { SubscriptionManager } from "@/sync/subscriptions";
+import { SyncProtocolHandler } from "@/sync/protocol";
+import type { ClientMessage, ProtocolExecutor, ServerMessage } from "@/sync/protocol";
+import { SessionManager } from "@/sync/session";
+import { WriteFanout } from "@/runtime/write-fanout";
+import { createTransport } from "@/runtime/transport";
+import type { EmbeddedTransport } from "@/runtime/transport";
+import { AuthResolver } from "@/auth/resolver";
+import type { UserIdentity } from "@/auth/resolver";
+import { SchedulerExecutor } from "@/scheduler/executor";
+import { BlobStore } from "@/storage/blob-store";
 
 // ---------------------------------------------------------------------------
 // Types

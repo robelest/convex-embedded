@@ -18,16 +18,16 @@
 import type { Value } from "convex/values";
 import { convexToJson, jsonToConvex } from "convex/values";
 
-import type { FunctionPath, ModuleLoader } from "$/kernel/module-loader";
-import { OpsContext, createOpsContext } from "$/kernel/ops";
+import type { FunctionPath, ModuleLoader } from "@/kernel/module-loader";
+import { OpsContext, createOpsContext } from "@/kernel/ops";
 import {
   createSyncSyscall,
   createAsyncSyscall,
   createJsSyscall,
-} from "$/kernel/syscalls";
-import type { RunUdfFn } from "$/kernel/syscalls";
+} from "@/kernel/syscalls";
+import type { RunUdfFn } from "@/kernel/syscalls";
 
-import type { Database } from "$/core/database";
+import type { Database } from "@/core/database";
 
 // ---------------------------------------------------------------------------
 // Global type augmentation for the Convex runtime

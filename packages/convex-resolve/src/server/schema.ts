@@ -17,8 +17,8 @@ import { v } from "convex/values";
 import type {
   Conflict,
   CrdtFieldDescriptor,
-} from "$/shared/types";
-import { CrdtType } from "$/shared/types";
+} from "@/shared/types";
+import { CrdtType } from "@/shared/types";
 
 // ---------------------------------------------------------------------------
 // Internal: CRDT field descriptor symbol
@@ -195,7 +195,7 @@ export function define(options: DefineOptions): Definition {
 
 // Import and re-export createConflict from shared (defined there to avoid
 // cross-boundary imports when client/ needs it)
-import { createConflict } from "$/shared/conflict";
+import { createConflict } from "@/shared/conflict";
 export { createConflict };
 
 // ---------------------------------------------------------------------------

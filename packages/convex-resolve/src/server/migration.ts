@@ -13,9 +13,9 @@ import type {
   MigrationErrorHandler,
   RecoveryAction,
   RecoveryContext,
-} from "$/shared/types";
-import type { Definition } from "$/server/schema";
-import { createLogger } from "$/shared/logger";
+} from "@/shared/types";
+import type { Definition } from "@/server/schema";
+import { createLogger } from "@/shared/logger";
 
 const log = createLogger("migration");
 

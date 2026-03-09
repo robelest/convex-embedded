@@ -2,7 +2,7 @@ import { defineConfig } from "tsdown";
 import { resolve } from "node:path";
 
 const jsExtensions = () => ({ js: '.js', dts: '.d.ts' });
-const srcAlias = { $: resolve(import.meta.dirname, "src") };
+const srcAlias = { "@": resolve(import.meta.dirname, "src") };
 
 export default defineConfig([
   {

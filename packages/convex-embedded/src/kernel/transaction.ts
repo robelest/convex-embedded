@@ -12,7 +12,7 @@
  *    backoff + jitter.
  */
 
-import type { DocumentId, Timestamp } from "$/core/types";
+import type { DocumentId, Timestamp } from "@/core/types";
 
 // ---------------------------------------------------------------------------
 // TransactionDatabase — the interface OccTransaction expects

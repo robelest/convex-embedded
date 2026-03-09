@@ -1,5 +1,15 @@
 <script lang="ts">
+	import { setConvexClientContext } from "convex-svelte";
+	import { getEmbeddedClient } from "@robelest/convex-embedded/browser";
+
 	let { children } = $props();
+
+	const modules = import.meta.glob(
+		["$convex/**/*.{ts,tsx,js,jsx}", "!$convex/convex.config.ts"],
+		{ eager: false },
+	);
+
+	setConvexClientContext(getEmbeddedClient({ modules }));
 </script>
 
 <svelte:head>
@@ -11,7 +21,6 @@
 </svelte:head>
 
 <div style="font-family: 'Inter', system-ui, sans-serif;">
-	<!-- Header -->
 	<header
 		style="border-bottom: 1px solid #e5e7eb; background: #fff; position: sticky; top: 0; z-index: 10;"
 	>
@@ -23,7 +32,6 @@
 		</div>
 	</header>
 
-	<!-- Content -->
 	<main style="max-width: 48rem; margin: 0 auto; padding: 1.5rem 1rem;">
 		{@render children()}
 	</main>

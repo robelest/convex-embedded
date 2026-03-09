@@ -1,29 +1,27 @@
 <script lang="ts">
-	import { useQuery, useMutation } from '$lib/convex.svelte.js';
-	import { api } from '@convex/_generated/api';
+	import { useQuery, useConvexClient } from "convex-svelte";
+	import { api } from "$convex/_generated/api";
 
 	const tasks = useQuery(api.tasks.list, {});
-	const createTask = useMutation(api.tasks.create);
-	const removeTask = useMutation(api.tasks.remove);
+	const client = useConvexClient();
 
-	let title = $state('');
-	let body = $state('');
+	let title = $state("");
+	let body = $state("");
 
 	async function handleAdd() {
 		const t = title.trim();
 		if (!t) return;
-		await createTask({ title: t, body: body.trim() });
-		title = '';
-		body = '';
+		await client.mutation(api.tasks.create, { title: t, body: body.trim() });
+		title = "";
+		body = "";
 	}
 
 	async function handleRemove(id: string) {
-		await removeTask({ id: id as any });
+		await client.mutation(api.tasks.remove, { id: id as any });
 	}
 </script>
 
 <section>
-	<!-- Add task form -->
 	<form
 		onsubmit={(e) => {
 			e.preventDefault();
@@ -49,7 +47,6 @@
 		</button>
 	</form>
 
-	<!-- Task list -->
 	{#if tasks.isLoading}
 		<p style="color: #9ca3af; font-size: 0.875rem; text-align: center; padding: 2rem 0;">
 			Loading...

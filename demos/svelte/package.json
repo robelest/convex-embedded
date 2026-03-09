@@ -13,7 +13,8 @@
 	},
 	"dependencies": {
 		"@robelest/convex-embedded": "workspace:*",
-		"convex": "^1.32.0"
+		"convex": "^1.32.0",
+		"convex-svelte": "^0.0.12"
 	},
 	"devDependencies": {
 		"@sveltejs/adapter-static": "^3.0.0",

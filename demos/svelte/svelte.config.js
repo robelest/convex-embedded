@@ -7,7 +7,7 @@ const config = {
 			fallback: 'index.html'
 		}),
 		alias: {
-			'@convex/*': '../../convex/*'
+			'$convex/*': '../../convex/*'
 		}
 	}
 };

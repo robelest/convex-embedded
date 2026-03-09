@@ -78,6 +78,9 @@ export interface MonitorInstance {
 
   /** Manually trigger a resolve cycle (e.g., after coming back online). */
   resolveNow(): Promise<void>;
+
+  /** Async dispose — delegates to stop(). */
+  [Symbol.asyncDispose](): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -271,6 +274,10 @@ function createMonitor(config: MonitorConfig): MonitorInstance {
       abortController?.abort();
       abortController = new AbortController();
       await resolveAll(abortController.signal);
+    },
+
+    async [Symbol.asyncDispose](): Promise<void> {
+      this.stop();
     },
   };
 }

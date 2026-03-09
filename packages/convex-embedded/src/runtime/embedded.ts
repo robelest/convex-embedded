@@ -246,8 +246,13 @@ export class EmbeddedRuntime {
     this._shutdown = true;
 
     this.scheduler.shutdown();
+    this.sessions.clear();
     this.subscriptions.clear();
     this.writeFanout.close();
+  }
+
+  async [Symbol.asyncDispose](): Promise<void> {
+    this.shutdown();
   }
 
   // -----------------------------------------------------------------------

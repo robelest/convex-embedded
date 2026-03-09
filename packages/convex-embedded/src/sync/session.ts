@@ -89,4 +89,12 @@ export class SessionManager {
       this._sessions.delete(id);
     }
   }
+
+  /** Remove all sessions, cleaning up their subscriptions. */
+  clear(): void {
+    for (const session of this._sessions.values()) {
+      session.cleanup();
+    }
+    this._sessions.clear();
+  }
 }

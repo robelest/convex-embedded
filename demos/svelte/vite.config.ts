@@ -15,6 +15,7 @@ export default defineConfig({
 			{ find: /^@\//, replacement: embeddedSrc + '/' },
 			// Resolve workspace package subpath exports to source.
 			{ find: '@robelest/convex-embedded/browser', replacement: embeddedSrc + '/browser/index.ts' },
+			{ find: '@robelest/convex-embedded/worker', replacement: embeddedSrc + '/browser/wa-sqlite-worker.ts' },
 			{ find: '@robelest/convex-embedded', replacement: embeddedSrc + '/index.ts' },
 		],
 	},

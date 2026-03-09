@@ -26,7 +26,6 @@ import type { EmbeddedTransport } from "@/runtime/transport";
 import { AuthResolver } from "@/auth/resolver";
 import type { UserIdentity } from "@/auth/resolver";
 import { SchedulerExecutor } from "@/scheduler/executor";
-import { BlobStore } from "@/storage/blob-store";
 import type { StorageAdapter } from "@/storage/adapter";
 
 // ---------------------------------------------------------------------------
@@ -73,7 +72,6 @@ export class EmbeddedRuntime {
   readonly writeFanout: WriteFanout;
   readonly auth: AuthResolver;
   readonly scheduler: SchedulerExecutor;
-  readonly blobStore: BlobStore;
 
   private _schema: ParsedSchema | null;
   private _storageAdapter: StorageAdapter | null;
@@ -147,10 +145,7 @@ export class EmbeddedRuntime {
       this.subscriptions.invalidate(tablesWritten);
     });
 
-    // 11. Blob store -------------------------------------------------------
-    this.blobStore = new BlobStore();
-
-    // 12. Scheduler --------------------------------------------------------
+    // 11. Scheduler --------------------------------------------------------
     this.scheduler = new SchedulerExecutor({
       db: this.db,
       runFunction: async (path: string, args: Record<string, unknown>) => {
@@ -185,6 +180,22 @@ export class EmbeddedRuntime {
    */
   hydrate(): Promise<void> {
     return this._hydrated;
+  }
+
+  /**
+   * Replace the hydration gate promise.
+   *
+   * Used by the browser entry point to defer message processing until
+   * the wa-sqlite worker is initialised and persisted data has been
+   * loaded. Must be called **before** the ConvexClient starts sending
+   * messages (i.e. before `createTransport()` opens a connection).
+   *
+   * When the provided promise resolves, any queued `handleMessage()`
+   * calls proceed and queries are re-evaluated against the now-populated
+   * in-memory database.
+   */
+  setHydrationGate(promise: Promise<void>): void {
+    this._hydrated = promise;
   }
 
   // -----------------------------------------------------------------------

@@ -53,8 +53,6 @@ export { WriteFanout } from "@/runtime/write-fanout";
 export { AuthResolver, createTestIdentity } from "@/auth/resolver";
 export type { UserIdentity } from "@/auth/resolver";
 
-export { BlobStore } from "@/storage/blob-store";
-
 export type {
   StorageAdapter,
   CommitBatch,

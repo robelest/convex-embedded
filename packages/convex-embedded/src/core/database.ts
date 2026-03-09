@@ -124,6 +124,21 @@ export class Database {
   }
 
   // -------------------------------------------------------------------------
+  // Storage management
+  // -------------------------------------------------------------------------
+
+  /**
+   * Attach (or replace) the durable storage adapter.
+   *
+   * This is used when the storage backend is initialised asynchronously
+   * (e.g. a wa-sqlite worker) after the `Database` is constructed.
+   * After calling this, invoke {@link hydrate} to load persisted data.
+   */
+  setStorage(storage: StorageAdapter): void {
+    this._storage = storage;
+  }
+
+  // -------------------------------------------------------------------------
   // Storage hydration
   // -------------------------------------------------------------------------
 
@@ -447,6 +462,20 @@ export class Database {
 
   storeFile(storageId: DocumentId, blob: Blob): void {
     this._blobStorage[storageId] = blob;
+
+    // Persist to durable storage (fire-and-forget).
+    this._storage?.storeBlob(storageId as string, blob).catch((err) => {
+      console.error("[convex-embedded] blob persist failed:", err);
+    });
+  }
+
+  deleteBlob(storageId: string): void {
+    delete this._blobStorage[storageId as DocumentId];
+
+    // Remove from durable storage (fire-and-forget).
+    this._storage?.deleteBlob(storageId).catch((err) => {
+      console.error("[convex-embedded] blob delete failed:", err);
+    });
   }
 
   getFile(storageId: DocumentId): Blob | null {

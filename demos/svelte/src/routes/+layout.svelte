@@ -1,15 +1,19 @@
 <script lang="ts">
 	import { setConvexClientContext } from "convex-svelte";
-	import { getEmbeddedClient } from "@robelest/convex-embedded/browser";
+	import { getClient } from "@robelest/convex-embedded/browser";
 
 	let { children } = $props();
 
 	const modules = import.meta.glob(
 		["$convex/**/*.{ts,tsx,js,jsx}", "!$convex/convex.config.ts"],
-		{ eager: false },
 	);
 
-	setConvexClientContext(getEmbeddedClient({ modules }));
+	setConvexClientContext(
+		getClient({
+			modules,
+			workerUrl: new URL("@robelest/convex-embedded/worker", import.meta.url),
+		}),
+	);
 </script>
 
 <svelte:head>

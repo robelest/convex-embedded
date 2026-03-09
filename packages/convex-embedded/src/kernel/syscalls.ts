@@ -356,6 +356,7 @@ export function createAsyncSyscall(
       case "1.0/storageDelete": {
         const { storageId } = args;
         db.delete("_storage", storageId);
+        db.deleteBlob(storageId);
         return JSON.stringify({});
       }
       case "1.0/storageGetUrl": {
@@ -375,6 +376,19 @@ export function createAsyncSyscall(
           "https://some-deployment.convex.cloud/api/storage/upload?token=" +
           Math.random();
         return JSON.stringify(convexToJson(url));
+      }
+      case "1.0/storageGetMetadata": {
+        const { storageId } = args;
+        const doc = db.get("_storage", storageId);
+        if (doc === null) {
+          return JSON.stringify(null);
+        }
+        return JSON.stringify({
+          storageId,
+          sha256: doc.sha256,
+          size: doc.size,
+          contentType: doc.contentType,
+        });
       }
 
       default: {
@@ -409,6 +423,7 @@ export function createJsSyscall(
         const storageId = db.insert("_storage", {
           size: blob.size,
           sha256: await blobSha(blob),
+          contentType: blob.type || undefined,
         });
         db.storeFile(storageId, blob);
         return storageId;

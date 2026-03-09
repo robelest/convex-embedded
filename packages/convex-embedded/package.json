@@ -12,6 +12,10 @@
       "types": "./dist/browser/index.d.ts",
       "import": "./dist/browser/index.js"
     },
+    "./worker": {
+      "types": "./dist/browser/wa-sqlite-worker.d.ts",
+      "import": "./dist/browser/wa-sqlite-worker.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [

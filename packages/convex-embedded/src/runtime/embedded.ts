@@ -77,6 +77,7 @@ export class EmbeddedRuntime {
 
   private _schema: ParsedSchema | null;
   private _storageAdapter: StorageAdapter | null;
+  private _transports: EmbeddedTransport[] = [];
   private _shutdown = false;
 
   constructor(options: EmbeddedRuntimeOptions) {
@@ -186,7 +187,9 @@ export class EmbeddedRuntime {
    * ConvexClient constructor.
    */
   createTransport(): EmbeddedTransport {
-    return createTransport(this);
+    const transport = createTransport(this);
+    this._transports.push(transport);
+    return transport;
   }
 
   // -----------------------------------------------------------------------
@@ -263,6 +266,12 @@ export class EmbeddedRuntime {
   shutdown(): void {
     if (this._shutdown) return;
     this._shutdown = true;
+
+    // Close all active WebSocket connections (clears ping intervals).
+    for (const transport of this._transports) {
+      transport.closeAll();
+    }
+    this._transports.length = 0;
 
     this.scheduler.shutdown();
     this.sessions.clear();

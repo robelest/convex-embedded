@@ -27,6 +27,13 @@ export interface EmbeddedTransport {
   url: string;
   /** WebSocket constructor that routes messages through the embedded runtime. */
   webSocketConstructor: new (url: string) => LoopbackWebSocket;
+  /**
+   * Close all active {@link LoopbackWebSocket} connections created by this
+   * transport. Clears ping keepalive intervals and fires `onclose` events.
+   *
+   * Called by {@link EmbeddedRuntime.shutdown} to prevent interval leaks.
+   */
+  closeAll(): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -51,6 +58,9 @@ export interface EmbeddedTransport {
  *                 to `new ConvexClient(url, { webSocketConstructor })`.
  */
 export function createTransport(runtime: ProtocolHandler): EmbeddedTransport {
+  // Track live WebSocket instances so we can close them on shutdown.
+  const activeSockets = new Set<LoopbackWebSocket>();
+
   const webSocketConstructor = LoopbackWebSocketConstructor(() => {
     // Per-connection session ID — captured from the first Connect message.
     let connectionSessionId: string | undefined;
@@ -74,8 +84,29 @@ export function createTransport(runtime: ProtocolHandler): EmbeddedTransport {
       return runtime.handleMessage(message);
     };
   });
+
+  // Wrap the constructor to track/untrack instances.
+  const TrackedWsConstructor = class extends webSocketConstructor {
+    constructor(url: string) {
+      super(url);
+      activeSockets.add(this);
+      // Remove from tracking when the socket closes (whether via
+      // explicit close() or runtime shutdown).
+      // Listen via addEventListener so we don't clobber the SDK's onclose.
+      const self = this;
+      this.addEventListener("close", () => { activeSockets.delete(self); });
+    }
+  };
+
   return {
     url: "http://embedded.local",
-    webSocketConstructor,
+    webSocketConstructor: TrackedWsConstructor,
+    closeAll(): void {
+      // Snapshot the set since close() triggers removal via the listener.
+      for (const ws of [...activeSockets]) {
+        ws.close(1001, "runtime shutdown");
+      }
+      activeSockets.clear();
+    },
   };
 }

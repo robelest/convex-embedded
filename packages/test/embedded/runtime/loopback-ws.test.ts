@@ -3,6 +3,7 @@ import {
   LoopbackWebSocket,
   LoopbackWebSocketConstructor,
 } from "#embedded/runtime/loopback-ws";
+import { createTransport } from "#embedded/runtime/transport";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -460,5 +461,132 @@ describe("LoopbackWebSocketConstructor", () => {
     // Should work with just a url — no second arg needed
     const ws = new WsClass("ws://localhost");
     expect(ws.url).toBe("ws://localhost");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// createTransport — closeAll
+// ---------------------------------------------------------------------------
+
+describe("createTransport", () => {
+  /** Minimal protocol handler that echoes messages. */
+  function stubRuntime() {
+    return {
+      handleMessage: vi.fn(async (message: string) => {
+        return [JSON.stringify({ echo: JSON.parse(message) })];
+      }),
+    };
+  }
+
+  describe("closeAll", () => {
+    it("closes all active WebSocket connections", async () => {
+      const transport = createTransport(stubRuntime());
+
+      const ws1 = new transport.webSocketConstructor("ws://a");
+      const ws2 = new transport.webSocketConstructor("ws://b");
+      await flushMicrotasks();
+
+      expect(ws1.readyState).toBe(LoopbackWebSocket.OPEN);
+      expect(ws2.readyState).toBe(LoopbackWebSocket.OPEN);
+
+      transport.closeAll();
+
+      expect(ws1.readyState).toBe(LoopbackWebSocket.CLOSED);
+      expect(ws2.readyState).toBe(LoopbackWebSocket.CLOSED);
+    });
+
+    it("fires onclose events with code 1001", async () => {
+      const transport = createTransport(stubRuntime());
+
+      const ws = new transport.webSocketConstructor("ws://a");
+      await flushMicrotasks();
+
+      const onclose = vi.fn();
+      ws.onclose = onclose;
+
+      transport.closeAll();
+
+      expect(onclose).toHaveBeenCalledOnce();
+      expect(onclose).toHaveBeenCalledWith(
+        expect.objectContaining({ code: 1001, reason: "runtime shutdown" }),
+      );
+    });
+
+    it("clears ping intervals so they don't leak", async () => {
+      vi.useFakeTimers();
+      try {
+        const transport = createTransport(stubRuntime());
+
+        const ws = new transport.webSocketConstructor("ws://a");
+        await flushMicrotasks();
+
+        const onmessage = vi.fn();
+        ws.onmessage = onmessage;
+
+        // closeAll should clear the interval
+        transport.closeAll();
+        expect(ws.readyState).toBe(LoopbackWebSocket.CLOSED);
+
+        // Advance time past the ping interval — no ping should fire.
+        vi.advanceTimersByTime(60_000);
+
+        // onmessage should not have been called (no Ping after close).
+        expect(onmessage).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it("is idempotent", async () => {
+      const transport = createTransport(stubRuntime());
+
+      const ws = new transport.webSocketConstructor("ws://a");
+      await flushMicrotasks();
+
+      transport.closeAll();
+      // Second call should not throw
+      transport.closeAll();
+
+      expect(ws.readyState).toBe(LoopbackWebSocket.CLOSED);
+    });
+
+    it("does not affect sockets that were already closed", async () => {
+      const transport = createTransport(stubRuntime());
+
+      const ws1 = new transport.webSocketConstructor("ws://a");
+      const ws2 = new transport.webSocketConstructor("ws://b");
+      await flushMicrotasks();
+
+      // Manually close ws1 before calling closeAll
+      ws1.close();
+      expect(ws1.readyState).toBe(LoopbackWebSocket.CLOSED);
+
+      const onclose2 = vi.fn();
+      ws2.onclose = onclose2;
+
+      transport.closeAll();
+
+      // ws2 should have been closed
+      expect(ws2.readyState).toBe(LoopbackWebSocket.CLOSED);
+      expect(onclose2).toHaveBeenCalledOnce();
+    });
+
+    it("does not track sockets created after closeAll", async () => {
+      const transport = createTransport(stubRuntime());
+
+      const ws1 = new transport.webSocketConstructor("ws://a");
+      await flushMicrotasks();
+
+      transport.closeAll();
+      expect(ws1.readyState).toBe(LoopbackWebSocket.CLOSED);
+
+      // New socket after closeAll should work independently
+      const ws2 = new transport.webSocketConstructor("ws://b");
+      await flushMicrotasks();
+      expect(ws2.readyState).toBe(LoopbackWebSocket.OPEN);
+
+      // Clean up
+      ws2.close();
+    });
   });
 });

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { createConflict } from "./conflict.js";
-import type { ConflictEntry } from "./types.js";
+import { createConflict } from "#resolve/shared/conflict.js";
+import type { ConflictEntry } from "#resolve/shared/types.js";
 
 describe("createConflict", () => {
   it("constructs a Conflict with values array", () => {

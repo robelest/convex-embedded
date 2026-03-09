@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
-import { builders } from "./builders.js";
+import { builders } from "#resolve/server/builders.js";
 
 describe("builders()", () => {
-  describe("when components.resolve is absent (local Concave)", () => {
+  describe("when components.resolve is absent (local embedded runtime)", () => {
     const { mutation, query } = builders({});
 
     it("mutation runs handler only", async () => {

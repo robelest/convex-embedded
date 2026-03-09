@@ -1,7 +1,7 @@
 {
-  "name": "convex-resolve",
+  "name": "@robelest/convex-resolve",
   "version": "0.0.1",
-  "description": "Offline-first sync library for Yjs documents between Concave and Convex.",
+  "description": "Offline-first sync library for Yjs documents between local and remote Convex.",
   "type": "module",
   "exports": {
     "./package.json": "./package.json",
@@ -36,8 +36,8 @@
     "build": "tsdown",
     "codegen": "convex codegen --component-dir ./src/component",
     "typecheck": "tsc --noEmit",
-    "test": "vitest",
-    "test:once": "vitest run",
+    "test": "bun --filter @robelest/convex-edge-tests test -- --project resolve",
+    "test:once": "bun --filter @robelest/convex-edge-tests test:once -- --project resolve",
     "prepublishOnly": "bun run build"
   },
   "dependencies": {
@@ -55,7 +55,6 @@
   },
   "keywords": [
     "convex",
-    "concave",
     "yjs",
     "crdt",
     "offline-first",

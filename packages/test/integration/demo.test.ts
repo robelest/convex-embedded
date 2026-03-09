@@ -11,10 +11,10 @@
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { convexTest } from "convex-test";
-import { register as registerResolveComponent } from "convex-resolve/test";
+import { register as registerResolveComponent } from "@robelest/convex-resolve/test";
 import * as Y from "yjs";
-import schema from "../../convex/schema.js";
-import { api } from "../../convex/_generated/api.js";
+import schema from "../../../convex/schema.js";
+import { api } from "../../../convex/_generated/api.js";
 
 /** Safely convert a Uint8Array to a proper ArrayBuffer for Convex v.bytes() */
 function toArrayBuffer(data: Uint8Array): ArrayBuffer {
@@ -42,7 +42,7 @@ function readRegister(fields: Y.Map<unknown>, key: string): unknown {
 }
 
 // Glob all app modules for convex-test
-const modules = import.meta.glob("../../convex/**/*.ts");
+const modules = import.meta.glob("../../../convex/**/*.ts");
 
 describe("convex-resolve integration", () => {
   beforeEach(() => {

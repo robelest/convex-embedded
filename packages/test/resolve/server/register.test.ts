@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import * as Y from "yjs";
 import { v } from "convex/values";
-import { register } from "./register.js";
-import { define, register as registerField, prose } from "./schema.js";
+import { register } from "#resolve/server/register.js";
+import { define, register as registerField, prose } from "#resolve/server/schema.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -69,7 +69,7 @@ describe("register()", () => {
 });
 
 describe("_recordDelta handler", () => {
-  it("is a no-op on local Concave (no component)", async () => {
+  it("is a no-op on local embedded runtime (no component)", async () => {
     const { _recordDelta } = register({
       table: "tasks",
       schema: makeSchema(),
@@ -152,7 +152,7 @@ describe("_recordDelta handler", () => {
 });
 
 describe("resolve handler", () => {
-  it("returns empty diffs on local Concave (no component)", async () => {
+  it("returns empty diffs on local embedded runtime (no component)", async () => {
     const { resolve } = register({
       table: "tasks",
       schema: makeSchema(),
@@ -353,7 +353,7 @@ describe("wrapMutation()", () => {
     );
   });
 
-  it("does not schedule on local Concave", async () => {
+  it("does not schedule on local embedded runtime", async () => {
     const { wrapMutation } = register({
       table: "tasks",
       schema: makeSchema(),

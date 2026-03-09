@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { monitor } from "./monitor.js";
+import { monitor } from "#resolve/client/monitor.js";
 
 describe("monitor.create()", () => {
   let originalAddEventListener: typeof globalThis.addEventListener | undefined;
@@ -38,7 +38,7 @@ describe("monitor.create()", () => {
   });
 
   it("returns a MonitorInstance with expected methods", () => {
-    const remoteClient = { action: vi.fn().mockResolvedValue([]) };
+    const remoteClient = { query: vi.fn().mockResolvedValue([]) };
 
     const m = monitor.create({
       remoteClient,
@@ -53,7 +53,7 @@ describe("monitor.create()", () => {
   });
 
   it("starts with idle status before start()", () => {
-    const remoteClient = { action: vi.fn().mockResolvedValue([]) };
+    const remoteClient = { query: vi.fn().mockResolvedValue([]) };
 
     const m = monitor.create({
       remoteClient,
@@ -65,7 +65,7 @@ describe("monitor.create()", () => {
 
   it("transitions to resolving on start() when online", async () => {
     const remoteClient = {
-      action: vi.fn().mockResolvedValue([]),
+      query: vi.fn().mockResolvedValue([]),
     };
 
     const m = monitor.create({
@@ -94,7 +94,7 @@ describe("monitor.create()", () => {
       configurable: true,
     });
 
-    const remoteClient = { action: vi.fn() };
+    const remoteClient = { query: vi.fn() };
 
     const m = monitor.create({
       remoteClient,
@@ -107,14 +107,14 @@ describe("monitor.create()", () => {
     m.start();
 
     expect(statuses).toContain("offline");
-    expect(remoteClient.action).not.toHaveBeenCalled();
+    expect(remoteClient.query).not.toHaveBeenCalled();
 
     m.stop();
   });
 
-  it("calls resolve action for each table", async () => {
+  it("calls resolve query for each table", async () => {
     const remoteClient = {
-      action: vi.fn().mockResolvedValue([]),
+      query: vi.fn().mockResolvedValue([]),
     };
 
     const m = monitor.create({
@@ -128,11 +128,11 @@ describe("monitor.create()", () => {
     m.start();
     await new Promise((r) => setTimeout(r, 50));
 
-    expect(remoteClient.action).toHaveBeenCalledTimes(2);
-    expect(remoteClient.action).toHaveBeenCalledWith("tasks.resolve", {
+    expect(remoteClient.query).toHaveBeenCalledTimes(2);
+    expect(remoteClient.query).toHaveBeenCalledWith("tasks.resolve", {
       documents: [],
     });
-    expect(remoteClient.action).toHaveBeenCalledWith("comments.resolve", {
+    expect(remoteClient.query).toHaveBeenCalledWith("comments.resolve", {
       documents: [],
     });
 
@@ -141,7 +141,7 @@ describe("monitor.create()", () => {
 
   it("transitions to error when resolve fails after retries", async () => {
     const remoteClient = {
-      action: vi.fn().mockRejectedValue(new Error("network error")),
+      query: vi.fn().mockRejectedValue(new Error("network error")),
     };
 
     const m = monitor.create({
@@ -163,7 +163,7 @@ describe("monitor.create()", () => {
   });
 
   it("on() returns unsubscribe function", () => {
-    const remoteClient = { action: vi.fn().mockResolvedValue([]) };
+    const remoteClient = { query: vi.fn().mockResolvedValue([]) };
 
     const m = monitor.create({
       remoteClient,
@@ -189,7 +189,7 @@ describe("monitor.create()", () => {
 
   it("start() is idempotent", async () => {
     const remoteClient = {
-      action: vi.fn().mockResolvedValue([]),
+      query: vi.fn().mockResolvedValue([]),
     };
 
     const m = monitor.create({
@@ -204,14 +204,14 @@ describe("monitor.create()", () => {
     await new Promise((r) => setTimeout(r, 50));
 
     // Should only have been called once (for one table)
-    expect(remoteClient.action).toHaveBeenCalledTimes(1);
+    expect(remoteClient.query).toHaveBeenCalledTimes(1);
 
     m.stop();
   });
 
   it("stop() cleans up and sets status to idle", async () => {
     const remoteClient = {
-      action: vi.fn().mockResolvedValue([]),
+      query: vi.fn().mockResolvedValue([]),
     };
 
     const m = monitor.create({
@@ -228,7 +228,7 @@ describe("monitor.create()", () => {
 
   it("resolveNow() triggers a resolve cycle", async () => {
     const remoteClient = {
-      action: vi.fn().mockResolvedValue([]),
+      query: vi.fn().mockResolvedValue([]),
     };
 
     const m = monitor.create({
@@ -238,7 +238,7 @@ describe("monitor.create()", () => {
 
     await m.resolveNow();
 
-    expect(remoteClient.action).toHaveBeenCalledTimes(1);
+    expect(remoteClient.query).toHaveBeenCalledTimes(1);
     expect(m.getStatus()).toEqual({ status: "resolved" });
   });
 });

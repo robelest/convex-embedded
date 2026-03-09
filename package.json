@@ -1,5 +1,5 @@
 {
-  "name": "convex-resolve-monorepo",
+  "name": "@robelest/convex-edge",
   "private": true,
   "workspaces": {
     "packages": ["packages/*", "demos/*"],
@@ -10,17 +10,23 @@
     }
   },
   "scripts": {
-    "test": "bun --filter '*' test:once",
-    "build": "bun --filter convex-resolve build",
+    "test": "bun --filter @robelest/convex-edge-tests test:once",
+    "build": "bun --filter @robelest/convex-resolve --filter @robelest/convex-embedded build",
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix",
+    "fmt": "oxfmt .",
+    "fmt:check": "oxfmt --check .",
     "dev:convex": "bunx convex dev",
     "dev:tanstack": "bun run --filter demo-tanstack-start dev"
   },
   "dependencies": {
     "convex": "^1.32.0",
-    "convex-resolve": "workspace:*"
+    "@robelest/convex-resolve": "workspace:*"
   },
   "devDependencies": {
     "@convex-dev/action-retrier": "^0.3.0",
-    "@typescript/native-preview": "^7.0.0-dev.20260308.1"
+    "@typescript/native-preview": "^7.0.0-dev.20260308.1",
+    "oxfmt": "^0.36.0",
+    "oxlint": "^1.51.0"
   }
 }

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { view } from "./view.js";
+import { view } from "#resolve/server/view.js";
 
 describe("view.public()", () => {
   it("returns query unchanged", () => {

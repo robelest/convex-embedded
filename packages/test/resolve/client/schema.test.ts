@@ -10,7 +10,7 @@ import {
   encodeStateVector,
   applyUpdate,
   encodeState,
-} from "./schema.js";
+} from "#resolve/client/schema.js";
 
 // ---------------------------------------------------------------------------
 // Prose helpers

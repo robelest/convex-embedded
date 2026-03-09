@@ -27,6 +27,7 @@ import { AuthResolver } from "@/auth/resolver";
 import type { UserIdentity } from "@/auth/resolver";
 import { SchedulerExecutor } from "@/scheduler/executor";
 import { BlobStore } from "@/storage/blob-store";
+import type { StorageAdapter } from "@/storage/adapter";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -37,6 +38,8 @@ export interface EmbeddedRuntimeOptions {
   modules: Record<string, () => Promise<ConvexModule>>;
   /** Optional Convex schema definition (the default export from schema.ts). */
   schema?: SchemaExport;
+  /** Optional durable storage backend. When omitted the runtime is purely in-memory. */
+  storage?: StorageAdapter;
 }
 
 // ---------------------------------------------------------------------------
@@ -73,6 +76,7 @@ export class EmbeddedRuntime {
   readonly blobStore: BlobStore;
 
   private _schema: ParsedSchema | null;
+  private _storageAdapter: StorageAdapter | null;
   private _shutdown = false;
 
   constructor(options: EmbeddedRuntimeOptions) {
@@ -83,9 +87,10 @@ export class EmbeddedRuntime {
 
     // 1. Parse schema (if provided) ----------------------------------------
     this._schema = options.schema ? parseSchema(options.schema) : null;
+    this._storageAdapter = options.storage ?? null;
 
     // 2. Core database -----------------------------------------------------
-    this.db = new Database(this._schema);
+    this.db = new Database(this._schema, options.storage);
 
     // 3. Module loader -----------------------------------------------------
     this.moduleLoader = new ModuleLoader(options.modules);
@@ -154,6 +159,20 @@ export class EmbeddedRuntime {
         );
       },
     });
+  }
+
+  // -----------------------------------------------------------------------
+  // Storage hydration
+  // -----------------------------------------------------------------------
+
+  /**
+   * Hydrate the database from durable storage.
+   *
+   * Must be called (and awaited) before the first client message when a
+   * {@link StorageAdapter} is configured. No-op without storage.
+   */
+  async hydrate(): Promise<void> {
+    await this.db.hydrate();
   }
 
   // -----------------------------------------------------------------------
@@ -249,6 +268,9 @@ export class EmbeddedRuntime {
     this.sessions.clear();
     this.subscriptions.clear();
     this.writeFanout.close();
+    this._storageAdapter?.close?.()?.catch((err) => {
+      console.error("[convex-embedded] storage close failed:", err);
+    });
   }
 
   async [Symbol.asyncDispose](): Promise<void> {

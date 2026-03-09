@@ -25,6 +25,7 @@ import type {
 } from "@/core/types";
 import { QueryEngine } from "@/core/query-engine";
 import type { DocumentIterator } from "@/core/query-engine";
+import type { StorageAdapter } from "@/storage/adapter";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -52,7 +53,7 @@ export class Database {
   private _documents: Record<DocumentId, StoredDocument> = {};
 
   /** Blob storage keyed by `_storage` document ID. */
-  private _storage: Record<DocumentId, Blob> = {};
+  private _blobStorage: Record<DocumentId, Blob> = {};
 
   /** Auto-incrementing counter used to generate document IDs. */
   private _nextDocId: number = 10000;
@@ -79,6 +80,11 @@ export class Database {
    */
   private _tablesWritten: Set<string> = new Set();
 
+  // ---- Storage adapter ----------------------------------------------------
+
+  /** Optional durable storage backend. */
+  private _storage: StorageAdapter | null = null;
+
   // ---- Transaction state --------------------------------------------------
 
   /**
@@ -101,8 +107,9 @@ export class Database {
   // Constructor
   // -------------------------------------------------------------------------
 
-  constructor(schema: ParsedSchema | null) {
+  constructor(schema: ParsedSchema | null, storage?: StorageAdapter) {
     this._schema = schema;
+    this._storage = storage ?? null;
 
     if (schema !== null) {
       validateSchemaDefinition(schema);
@@ -114,6 +121,44 @@ export class Database {
     };
 
     this.queryEngine = new QueryEngine(schema, iterateDocs);
+  }
+
+  // -------------------------------------------------------------------------
+  // Storage hydration
+  // -------------------------------------------------------------------------
+
+  /**
+   * Hydrate the database from durable storage.
+   *
+   * Must be called (and awaited) before the first transaction when a
+   * {@link StorageAdapter} is configured. No-op when running without
+   * storage.
+   */
+  async hydrate(): Promise<void> {
+    if (this._storage === null) return;
+
+    const [documents, meta, blobs] = await Promise.all([
+      this._storage.getDocuments(),
+      this._storage.getMeta(),
+      this._storage.getBlobs(),
+    ]);
+
+    // Restore documents.
+    for (const doc of documents) {
+      this._documents[doc._id] = doc;
+    }
+
+    // Restore metadata counters.
+    if (meta !== null) {
+      this._timestamp = meta.timestamp;
+      this._nextDocId = meta.nextDocId;
+      this._lastCreationTime = meta.lastCreationTime;
+    }
+
+    // Restore blobs.
+    for (const { id, blob } of blobs) {
+      this._blobStorage[id as DocumentId] = blob;
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -159,13 +204,18 @@ export class Database {
     }
 
     if (this._writes.length === 0) {
-      // Outermost commit — apply writes to persistent storage.
+      // Outermost commit — apply writes to in-memory storage.
+      const puts: StoredDocument[] = [];
+      const deletes: string[] = [];
+
       for (const [id, write] of Object.entries(lastWrites)) {
         const _id = id as DocumentId;
         if (write === null) {
           delete this._documents[_id];
+          deletes.push(id);
         } else {
           this._documents[_id] = write;
+          puts.push(write);
         }
       }
 
@@ -175,6 +225,23 @@ export class Database {
         this._timestamp += 1;
       }
       this._tablesWritten.clear();
+
+      // Persist to durable storage (fire-and-forget).
+      if (this._storage !== null && (puts.length > 0 || deletes.length > 0)) {
+        this._storage
+          .commit({
+            puts,
+            deletes,
+            meta: {
+              timestamp: this._timestamp,
+              nextDocId: this._nextDocId,
+              lastCreationTime: this._lastCreationTime,
+            },
+          })
+          .catch((err) => {
+            console.error("[convex-embedded] storage commit failed:", err);
+          });
+      }
 
       return { timestamp: this._timestamp, tablesWritten };
     }
@@ -379,14 +446,14 @@ export class Database {
   // -------------------------------------------------------------------------
 
   storeFile(storageId: DocumentId, blob: Blob): void {
-    this._storage[storageId] = blob;
+    this._blobStorage[storageId] = blob;
   }
 
   getFile(storageId: DocumentId): Blob | null {
     if (this.get("_storage", storageId) === null) {
       return null;
     }
-    return this._storage[storageId] ?? null;
+    return this._blobStorage[storageId] ?? null;
   }
 
   // -------------------------------------------------------------------------

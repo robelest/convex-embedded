@@ -8,7 +8,7 @@
  * ```ts
  * import { createEmbeddedClient } from "@robelest/convex-embedded/browser";
  *
- * const client = createEmbeddedClient({
+ * const client = await createEmbeddedClient({
  *   modules: import.meta.glob("./convex/** /*.ts"),
  *   schema,
  * });
@@ -23,29 +23,14 @@ import { EmbeddedRuntime } from "@/runtime/embedded";
 import type { EmbeddedRuntimeOptions } from "@/runtime/embedded";
 import { createTransport } from "@/runtime/transport";
 
-// ---------------------------------------------------------------------------
-// Persistence adapter (interface-only for now)
-// ---------------------------------------------------------------------------
+// Re-export storage types so consumers can implement custom adapters.
+export type {
+  StorageAdapter,
+  CommitBatch,
+  DatabaseMeta,
+} from "@/storage/adapter";
 
-/**
- * Storage backend for persisting embedded runtime state.
- *
- * Modeled after Replicate's `StorageAdapter` — a minimal key/value
- * interface over opaque byte buffers. Implementations can target
- * IndexedDB, OPFS via wa-sqlite, or any other browser storage.
- */
-export interface PersistenceAdapter {
-  /** Read a value by key. Returns `undefined` if not found. */
-  get(key: string): Promise<Uint8Array | undefined>;
-  /** Write a value by key. */
-  set(key: string, value: Uint8Array): Promise<void>;
-  /** Delete a value by key. */
-  delete(key: string): Promise<void>;
-  /** List all keys matching the given prefix. */
-  keys(prefix: string): Promise<string[]>;
-  /** Optional cleanup hook (e.g. close database connection). */
-  close?(): void;
-}
+export { memoryStorage } from "@/storage/memory";
 
 // ---------------------------------------------------------------------------
 // Client options
@@ -66,10 +51,10 @@ export interface EmbeddedClientOptions {
     "webSocketConstructor"
   >;
   /**
-   * Optional persistence adapter for durable storage.
+   * Optional storage adapter for durable persistence.
    * When omitted the runtime is purely in-memory.
    */
-  persistence?: PersistenceAdapter;
+  storage?: EmbeddedRuntimeOptions["storage"];
 }
 
 // ---------------------------------------------------------------------------
@@ -87,18 +72,23 @@ export interface EmbeddedClientOptions {
  *
  * This is the primary browser entry point. It:
  * 1. Creates an {@link EmbeddedRuntime} from the provided modules/schema.
- * 2. Builds a loopback transport (no network).
- * 3. Returns a standard `ConvexClient` connected to that transport.
+ * 2. Hydrates from durable storage (if a storage adapter is provided).
+ * 3. Builds a loopback transport (no network).
+ * 4. Returns a standard `ConvexClient` connected to that transport.
  *
  * @returns A `ConvexClient` that talks to the local embedded runtime.
  */
-export function createEmbeddedClient(
+export async function createEmbeddedClient(
   options: EmbeddedClientOptions,
-): ConvexClient {
+): Promise<ConvexClient> {
   const runtime = new EmbeddedRuntime({
     modules: options.modules,
     schema: options.schema,
+    storage: options.storage,
   });
+
+  // Hydrate from durable storage before accepting connections.
+  await runtime.hydrate();
 
   const transport = createTransport(runtime);
 
@@ -116,7 +106,7 @@ export function createEmbeddedClient(
 // Singleton helper
 // ---------------------------------------------------------------------------
 
-let _singleton: ConvexClient | null = null;
+let _singletonPromise: Promise<ConvexClient> | null = null;
 
 /**
  * Get (or create) a singleton `ConvexClient` backed by the embedded runtime.
@@ -128,16 +118,16 @@ let _singleton: ConvexClient | null = null;
  * ```ts
  * import { getEmbeddedClient } from "@robelest/convex-embedded/browser";
  *
- * const client = getEmbeddedClient({
+ * const client = await getEmbeddedClient({
  *   modules: import.meta.glob("./convex/*.ts"),
  * });
  * ```
  */
 export function getEmbeddedClient(
   options: EmbeddedClientOptions,
-): ConvexClient {
-  if (!_singleton) {
-    _singleton = createEmbeddedClient(options);
+): Promise<ConvexClient> {
+  if (!_singletonPromise) {
+    _singletonPromise = createEmbeddedClient(options);
   }
-  return _singleton;
+  return _singletonPromise;
 }

@@ -55,6 +55,14 @@ export type { UserIdentity } from "@/auth/resolver";
 
 export { BlobStore } from "@/storage/blob-store";
 
+export type {
+  StorageAdapter,
+  CommitBatch,
+  DatabaseMeta,
+} from "@/storage/adapter";
+
+export { memoryStorage } from "@/storage/memory";
+
 export { SubscriptionManager } from "@/sync/subscriptions";
 
 // ---------------------------------------------------------------------------

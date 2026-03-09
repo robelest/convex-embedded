@@ -57,6 +57,7 @@ export class LoopbackWebSocket {
     Promise.resolve().then(() => {
       if (this.readyState !== CONNECTING) return;
       this.readyState = OPEN;
+      console.debug("[convex-embedded:ws] open", url);
       const event = { type: "open" };
       this.onopen?.(event);
       this._emit("open", event);
@@ -72,18 +73,28 @@ export class LoopbackWebSocket {
       throw new Error("WebSocket is not open");
     }
 
+    const msgType = (() => {
+      try { return JSON.parse(data).type; } catch { return "?"; }
+    })();
+    console.debug("[convex-embedded:ws] send", msgType);
+
     // Fire-and-forget: handler is async but we schedule delivery on the
     // microtask queue so that ConvexClient's send() remains synchronous.
     this._handler(data).then(
       (responses) => {
         for (const response of responses) {
           if (this.readyState !== OPEN) break;
+          const respType = (() => {
+            try { return JSON.parse(response).type; } catch { return "?"; }
+          })();
+          console.debug("[convex-embedded:ws] recv", respType);
           const event = { type: "message", data: response };
           this.onmessage?.(event);
           this._emit("message", event);
         }
       },
       (error) => {
+        console.error("[convex-embedded:ws] handler error:", error);
         const event = { type: "error", error };
         this.onerror?.(event);
         this._emit("error", event);
@@ -95,6 +106,7 @@ export class LoopbackWebSocket {
   close(_code?: number, _reason?: string): void {
     if (this.readyState === CLOSED) return;
     this.readyState = CLOSED;
+    console.debug("[convex-embedded:ws] close", _code, _reason);
     const event = { type: "close", code: _code ?? 1000, reason: _reason ?? "" };
     this.onclose?.(event);
     this._emit("close", event);

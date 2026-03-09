@@ -91,11 +91,18 @@ export function createSyncSyscall(
  * Create the asynchronous syscall router.
  *
  * Handles all database reads/writes, scheduling, action delegation,
- * storage operations, and nested UDF invocation.
+ * storage operations, nested UDF invocation, and auth identity lookup.
+ *
+ * @param db       Database instance for reads/writes.
+ * @param runUdf   Callback for nested UDF invocation.
+ * @param options  Optional configuration.
+ * @param options.getIdentity  Returns the current user identity (if any).
+ *                             Called by `1.0/getUserIdentity` syscall.
  */
 export function createAsyncSyscall(
   db: DatabaseFake,
   runUdf: RunUdfFn,
+  options?: { getIdentity?: () => Promise<any> },
 ): (op: string, jsonArgs: string) => Promise<string> {
   const self = async (op: string, jsonArgs: string): Promise<string> => {
     const args = JSON.parse(jsonArgs);
@@ -160,6 +167,17 @@ export function createAsyncSyscall(
           count += 1;
         }
         return JSON.stringify(count);
+      }
+
+      // ----- Auth -----
+
+      case "1.0/getUserIdentity": {
+        // The SDK's setupAuth calls this to get the current user identity.
+        if (options?.getIdentity) {
+          const identity = await options.getIdentity();
+          return JSON.stringify(identity);
+        }
+        return JSON.stringify(null);
       }
 
       // ----- Scheduling -----

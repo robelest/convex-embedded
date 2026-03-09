@@ -74,6 +74,11 @@ export class EmbeddedRuntime {
   private _shutdown = false;
 
   constructor(options: EmbeddedRuntimeOptions) {
+    console.debug(
+      "[convex-embedded] creating runtime, modules:",
+      Object.keys(options.modules).length,
+    );
+
     // 1. Parse schema (if provided) ----------------------------------------
     this._schema = options.schema ? parseSchema(options.schema) : null;
 
@@ -96,6 +101,7 @@ export class EmbeddedRuntime {
         path: FunctionPath,
         args: any,
       ) => this._runUdf(type, path, args),
+      getIdentity: () => this.auth.getUserIdentity(),
     });
 
     // 5. Transaction manager -----------------------------------------------
@@ -185,16 +191,32 @@ export class EmbeddedRuntime {
    * satisfies the `ProtocolHandler` interface expected by the transport.
    */
   async handleMessage(message: string): Promise<string[]> {
-    const parsed: ClientMessage = JSON.parse(message);
+    let parsed: ClientMessage;
+    try {
+      parsed = JSON.parse(message);
+    } catch (err) {
+      console.error("[convex-embedded] failed to parse message:", err);
+      return [JSON.stringify({ type: "FatalError", error: "Invalid JSON" })];
+    }
+
+    console.debug("[convex-embedded] handleMessage:", parsed.type);
 
     // Extract or synthesize a session ID.
     const sessionId =
       (parsed as any).sessionId ?? "default";
 
-    const responses: ServerMessage[] =
-      await this.syncProtocol.handleMessage(sessionId, parsed);
+    try {
+      const responses: ServerMessage[] =
+        await this.syncProtocol.handleMessage(sessionId, parsed);
 
-    return responses.map((r) => JSON.stringify(r));
+      return responses.map((r) => JSON.stringify(r));
+    } catch (err) {
+      console.error("[convex-embedded] protocol error on", parsed.type, ":", err);
+      return [JSON.stringify({
+        type: "FatalError",
+        error: err instanceof Error ? err.message : String(err),
+      })];
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -292,18 +314,33 @@ export class EmbeddedRuntime {
    * We translate these into our internal `_runUdf` dispatch which goes
    * through `UdfExecutor.executeQuery/Mutation/Action`.
    */
+  /**
+   * Build the executor facade that {@link SyncProtocolHandler} expects.
+   *
+   * The protocol calls:
+   *   - `executor.runQuery(udfPath, ...args)`
+   *   - `executor.runMutation(udfPath, ...args)`
+   *   - `executor.runAction(udfPath, ...args)`
+   *
+   * The SDK sends `args` as a single-element array `[convexToJson(userArgs)]`.
+   * Our `_runUdf` → `executeQuery/Mutation/Action` handles deserialization
+   * internally via `func.invokeQuery(argsStr)` which expects the raw
+   * JSON-serialized args. We pass the first element through as the args
+   * object.
+   */
   private _buildProtocolExecutor() {
     return {
       runQuery: async (udfPath: string, ...args: any[]) => {
         const path = resolveFunctionPath({ name: udfPath });
-        const convexArgs = args.length === 1 ? args[0] : (args[0] ?? {});
+        // args[0] is the convexToJson'd args object from the client
+        const convexArgs = args[0] ?? {};
         const result = await this._runUdf("query", path, convexArgs);
         return result;
       },
 
       runMutation: async (udfPath: string, ...args: any[]) => {
         const path = resolveFunctionPath({ name: udfPath });
-        const convexArgs = args.length === 1 ? args[0] : (args[0] ?? {});
+        const convexArgs = args[0] ?? {};
         // Wrap db.commit to capture tablesWritten for invalidation.
         const originalCommit = this.db.commit.bind(this.db);
         let capturedTablesWritten: Set<string> | undefined;
@@ -330,7 +367,7 @@ export class EmbeddedRuntime {
 
       runAction: async (udfPath: string, ...args: any[]) => {
         const path = resolveFunctionPath({ name: udfPath });
-        const convexArgs = args.length === 1 ? args[0] : (args[0] ?? {});
+        const convexArgs = args[0] ?? {};
         return this._runUdf("action", path, convexArgs);
       },
     };

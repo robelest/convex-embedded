@@ -144,6 +144,10 @@ export class ModuleLoader {
       ]),
     );
     this.prefix = findModulesRoot(Object.keys(modules));
+    console.debug(
+      "[convex-embedded:loader] prefix:", this.prefix,
+      "modules:", Object.keys(this.modules).map((k) => k.slice(this.prefix.length)),
+    );
   }
 
   /**
@@ -162,6 +166,7 @@ export class ModuleLoader {
         `Could not find module for: "${path}". Available modules: ${available}`,
       );
     }
+    console.debug("[convex-embedded:loader] loading:", path);
     return await loader();
   }
 }

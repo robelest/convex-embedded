@@ -1,14 +1,22 @@
 /**
- * UDF execution engine with global patching for determinism.
+ * UDF execution engine following the convex-test invocation pattern.
  *
  * Runs Convex queries, mutations, and actions by:
- * 1. Creating an OpsContext for deterministic random/time/console
- * 2. Patching globals (Math.random, Date.now, crypto.randomUUID)
- * 3. Installing syscall handlers on `globalThis.Convex`
- * 4. Loading the target module and invoking the exported function
- * 5. Managing transactions (commit for mutations, rollback for queries)
- * 6. Restoring original globals
+ * 1. Installing syscall handlers on `globalThis.Convex`
+ * 2. Creating an OpsContext for deterministic random/time
+ * 3. Patching globals (Math.random, Date.now, crypto.randomUUID)
+ * 4. Loading the target module and resolving the registered function export
+ * 5. Calling func.invokeQuery/invokeMutation/invokeAction (NOT raw _handler)
+ *    so the Convex SDK builds ctx (db, auth, scheduler, storage) via syscalls
+ * 6. Managing transactions (commit for mutations, rollback for queries)
+ * 7. Restoring original globals
+ *
+ * This matches how convex-test invokes UDFs — the SDK's invoke* methods
+ * call setupWriter/setupReader/setupAuth internally, which use our
+ * installed globalThis.Convex.syscall / asyncSyscall handlers.
  */
+import { convexToJson, jsonToConvex } from "convex/values";
+
 import type { FunctionPath, ModuleLoader } from "./module-loader.js";
 import { OpsContext, createOpsContext } from "./ops.js";
 import {
@@ -85,6 +93,9 @@ function restoreGlobals(saved: SavedGlobals): void {
 /**
  * Extract the handler function from a registered Convex function export.
  * The Convex SDK wraps user handlers in objects with an `_handler` property.
+ *
+ * Used only for the test-wrapper path. When the function has `invokeQuery`
+ * or `invokeMutation`, we prefer those (see _resolveFunc).
  */
 function getHandler(func: any): ((ctx: any, args: any) => any) | null {
   if (typeof func === "function") return func;
@@ -101,21 +112,35 @@ export interface UdfExecutorOptions {
   db: DatabaseFake;
   moduleLoader: ModuleLoader;
   runUdf: RunUdfFn;
+  /** Optional callback for `1.0/getUserIdentity` syscall (auth). */
+  getIdentity?: () => Promise<any>;
 }
 
 /**
  * Executes Convex user-defined functions (queries, mutations, actions)
  * with proper global patching, syscall wiring, and transaction management.
+ *
+ * For real Convex SDK functions (those registered with `query()`, `mutation()`,
+ * `action()` from `convex/server`), we call their `invokeQuery` / `invokeMutation`
+ * / `invokeAction` methods. This lets the SDK build the full `ctx` object
+ * (db, auth, scheduler, storage) using our installed syscalls — exactly matching
+ * how convex-test works.
+ *
+ * For test wrappers (simple functions or objects with `_handler` but no `invoke*`),
+ * we fall back to calling the handler directly with an empty ctx. This is fine for
+ * unit tests that don't need the SDK's ctx wiring.
  */
 export class UdfExecutor {
   private _db: DatabaseFake;
   private _moduleLoader: ModuleLoader;
   private _runUdf: RunUdfFn;
+  private _getIdentity?: () => Promise<any>;
 
-  constructor({ db, moduleLoader, runUdf }: UdfExecutorOptions) {
+  constructor({ db, moduleLoader, runUdf, getIdentity }: UdfExecutorOptions) {
     this._db = db;
     this._moduleLoader = moduleLoader;
     this._runUdf = runUdf;
+    this._getIdentity = getIdentity;
   }
 
   // -----------------------------------------------------------------------
@@ -130,12 +155,22 @@ export class UdfExecutor {
     return this._runWithGlobals(async () => {
       this._db.startTransaction();
       try {
-        const handler = await this._resolveHandler(functionPath, "query");
-        const ctx = this._buildQueryCtx();
-        const result = await handler(ctx, args ?? {});
-        return result;
+        const func = await this._resolveFunc(functionPath, "query");
+
+        // Prefer SDK's invokeQuery if available (real registered functions).
+        if (typeof func.invokeQuery === "function") {
+          const argsStr = JSON.stringify(convexToJson([args ?? {}]));
+          const rawResult = await func.invokeQuery(argsStr);
+          return jsonToConvex(JSON.parse(rawResult));
+        }
+
+        // Fallback for test wrappers: call handler directly.
+        const handler = getHandler(func);
+        if (handler === null) {
+          throw this._noHandlerError(functionPath);
+        }
+        return await handler({}, args ?? {});
       } finally {
-        // Queries are read-only: always rollback
         this._db.rollbackWrites();
       }
     });
@@ -149,9 +184,24 @@ export class UdfExecutor {
     return this._runWithGlobals(async () => {
       this._db.startTransaction();
       try {
-        const handler = await this._resolveHandler(functionPath, "mutation");
-        const ctx = this._buildMutationCtx();
-        const result = await handler(ctx, args ?? {});
+        const func = await this._resolveFunc(functionPath, "mutation");
+
+        let result: any;
+
+        // Prefer SDK's invokeMutation if available.
+        if (typeof func.invokeMutation === "function") {
+          const argsStr = JSON.stringify(convexToJson([args ?? {}]));
+          const rawResult = await func.invokeMutation(argsStr);
+          result = jsonToConvex(JSON.parse(rawResult));
+        } else {
+          // Fallback for test wrappers.
+          const handler = getHandler(func);
+          if (handler === null) {
+            throw this._noHandlerError(functionPath);
+          }
+          result = await handler({}, args ?? {});
+        }
+
         this._db.commit();
         return result;
       } catch (error) {
@@ -167,9 +217,23 @@ export class UdfExecutor {
    */
   async executeAction(functionPath: FunctionPath, args: any): Promise<any> {
     return this._runWithGlobals(async () => {
-      const handler = await this._resolveHandler(functionPath, "action");
-      const ctx = this._buildActionCtx();
-      return await handler(ctx, args ?? {});
+      const func = await this._resolveFunc(functionPath, "action");
+
+      // Prefer SDK's invokeAction if available.
+      // Note: invokeAction takes (requestId, argsStr) — 2 args.
+      if (typeof func.invokeAction === "function") {
+        const requestId = "" + Math.random();
+        const argsStr = JSON.stringify(convexToJson([args ?? {}]));
+        const rawResult = await func.invokeAction(requestId, argsStr);
+        return jsonToConvex(JSON.parse(rawResult));
+      }
+
+      // Fallback for test wrappers.
+      const handler = getHandler(func);
+      if (handler === null) {
+        throw this._noHandlerError(functionPath);
+      }
+      return await handler({}, args ?? {});
     });
   }
 
@@ -193,7 +257,9 @@ export class UdfExecutor {
     const previousConvex = globalThis.Convex;
     globalThis.Convex = {
       syscall: createSyncSyscall(this._db),
-      asyncSyscall: createAsyncSyscall(this._db, this._runUdf),
+      asyncSyscall: createAsyncSyscall(this._db, this._runUdf, {
+        getIdentity: this._getIdentity,
+      }),
       jsSyscall: createJsSyscall(this._db),
     };
 
@@ -206,19 +272,22 @@ export class UdfExecutor {
   }
 
   // -----------------------------------------------------------------------
-  // Internal: module & handler resolution
+  // Internal: module & function resolution
   // -----------------------------------------------------------------------
 
   /**
-   * Load a module via the {@link ModuleLoader} and extract the named export.
+   * Load a module via the {@link ModuleLoader} and return the raw function
+   * export object. Unlike `_resolveHandler` (removed), this returns the
+   * *whole* registered function object — not just `_handler` — so the
+   * caller can check for `invokeQuery` / `invokeMutation` / `invokeAction`.
    *
    * UDF paths use the format `"module:export"` (e.g. `"messages:list"`).
    * If no export name is specified, `"default"` is assumed.
    */
-  private async _resolveHandler(
+  private async _resolveFunc(
     functionPath: FunctionPath,
     expectedType: "query" | "mutation" | "action",
-  ): Promise<(ctx: any, args: any) => any> {
+  ): Promise<any> {
     const [modulePath, maybeExportName] = functionPath.udfPath.split(":");
     const exportName =
       maybeExportName === undefined ? "default" : maybeExportName;
@@ -230,14 +299,6 @@ export class UdfExecutor {
       throw new Error(
         `Expected a Convex function exported from module "${modulePath}" ` +
           `as \`${exportName}\`, but there is no such export.`,
-      );
-    }
-
-    const handler = getHandler(func);
-    if (handler === null) {
-      throw new Error(
-        `Expected a Convex function exported from module "${modulePath}" ` +
-          `as \`${exportName}\`, but got: ${func}`,
       );
     }
 
@@ -271,30 +332,16 @@ export class UdfExecutor {
         break;
     }
 
-    return handler;
+    return func;
   }
 
-  // -----------------------------------------------------------------------
-  // Internal: context builders
-  // -----------------------------------------------------------------------
-
-  /**
-   * Build the context object for a query invocation.
-   *
-   * The Convex SDK's `queryGeneric` / `mutationGeneric` / `actionGeneric`
-   * wrappers construct the full ctx (db, auth, storage, scheduler)
-   * internally via the syscalls installed on `globalThis.Convex`.
-   * We return an empty object here; the SDK augments it.
-   */
-  private _buildQueryCtx(): any {
-    return {};
-  }
-
-  private _buildMutationCtx(): any {
-    return {};
-  }
-
-  private _buildActionCtx(): any {
-    return {};
+  private _noHandlerError(functionPath: FunctionPath): Error {
+    const [modulePath, maybeExportName] = functionPath.udfPath.split(":");
+    const exportName =
+      maybeExportName === undefined ? "default" : maybeExportName;
+    return new Error(
+      `Expected a Convex function exported from module "${modulePath}" ` +
+        `as \`${exportName}\`, but could not extract a handler.`,
+    );
   }
 }

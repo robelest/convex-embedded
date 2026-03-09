@@ -4,6 +4,9 @@
  * Implements the server side of the Convex sync protocol that ConvexClient
  * speaks. The handler parses incoming client messages, delegates execution
  * to the provided executor, and returns the appropriate server responses.
+ *
+ * Wire format matches the real Convex backend so that the standard
+ * `ConvexReactClient` / `ConvexClient` can talk to us without modification.
  */
 
 import type { JSONValue } from "convex/values";
@@ -11,15 +14,55 @@ import type { JSONValue } from "convex/values";
 import type { SubscriptionManager } from "./subscriptions.js";
 
 // ---------------------------------------------------------------------------
+// Base64 helpers for LE-encoded u64 timestamps
+// ---------------------------------------------------------------------------
+
+/**
+ * Encode a numeric timestamp as a base64-encoded little-endian 8-byte u64.
+ *
+ * The Convex SDK encodes `ts` fields using `Long.toBytesLE()` → base64.
+ * We replicate that here without pulling in the Long library.
+ */
+function numberToEncodedU64(n: number): string {
+  const bytes = new Uint8Array(8);
+  // Write as unsigned 64-bit LE — JS numbers are safe up to 2^53.
+  let val = n;
+  for (let i = 0; i < 8; i++) {
+    bytes[i] = val & 0xff;
+    val = Math.floor(val / 256);
+  }
+  return btoa(String.fromCharCode(...bytes));
+}
+
+// ---------------------------------------------------------------------------
 // State version
 // ---------------------------------------------------------------------------
 
-/** Monotonically increasing version that tracks query-set state. */
+/**
+ * Server state version matching the real Convex wire format.
+ *
+ * On the wire, `ts` is a base64-encoded LE u64 string. The SDK's
+ * `parseServerMessage` decodes it into a Long internally.
+ */
 export type StateVersion = {
-  querySetVersion: number;
-  ts: number;
+  querySet: number;
+  ts: number; // internal numeric — encoded to base64 on the wire
   identity: number;
 };
+
+type EncodedStateVersion = {
+  querySet: number;
+  ts: string; // base64-encoded LE u64
+  identity: number;
+};
+
+function encodeStateVersion(v: StateVersion): EncodedStateVersion {
+  return {
+    querySet: v.querySet,
+    ts: numberToEncodedU64(v.ts),
+    identity: v.identity,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Client → Server messages
@@ -30,23 +73,37 @@ export type ClientMessage =
   | ClientModifyQuerySet
   | ClientMutation
   | ClientAction
-  | ClientAuthenticate;
+  | ClientAuthenticate
+  | ClientEvent;
 
 interface ClientConnect {
   type: "Connect";
   sessionId: string;
+  connectionCount: number;
+  lastCloseReason: string | null;
+  maxObservedTimestamp?: string | undefined;
+  clientTs: number;
 }
 
 interface ClientModifyQuerySet {
   type: "ModifyQuerySet";
   baseVersion: number;
-  /** Queries to add — each carries a token, the function path, and args. */
-  modifications: Array<{
-    type: "Add" | "Remove";
-    queryToken: string;
-    udfPath?: string;
-    args?: JSONValue[];
-  }>;
+  newVersion: number;
+  modifications: Array<AddQuery | RemoveQuery>;
+}
+
+interface AddQuery {
+  type: "Add";
+  queryId: number;
+  udfPath: string;
+  args: JSONValue[];
+  journal?: string | null | undefined;
+  componentPath?: string | undefined;
+}
+
+interface RemoveQuery {
+  type: "Remove";
+  queryId: number;
 }
 
 interface ClientMutation {
@@ -54,6 +111,7 @@ interface ClientMutation {
   requestId: number;
   udfPath: string;
   args: JSONValue[];
+  componentPath?: string | undefined;
 }
 
 interface ClientAction {
@@ -61,60 +119,116 @@ interface ClientAction {
   requestId: number;
   udfPath: string;
   args: JSONValue[];
+  componentPath?: string | undefined;
 }
 
 interface ClientAuthenticate {
   type: "Authenticate";
-  token: string;
+  tokenType: "User" | "Admin" | "None";
+  value?: string;
+  baseVersion: number;
+  impersonating?: any;
+}
+
+interface ClientEvent {
+  type: "Event";
+  eventType: string;
+  event: any;
 }
 
 // ---------------------------------------------------------------------------
-// Server → Client messages
+// Server → Client messages (encoded wire format)
 // ---------------------------------------------------------------------------
+
+type StateModification =
+  | {
+      type: "QueryUpdated";
+      queryId: number;
+      value: JSONValue;
+      logLines: string[];
+      journal: string | null;
+    }
+  | {
+      type: "QueryFailed";
+      queryId: number;
+      errorMessage: string;
+      logLines: string[];
+      errorData: JSONValue;
+      journal: string | null;
+    }
+  | {
+      type: "QueryRemoved";
+      queryId: number;
+    };
 
 export type ServerMessage =
   | ServerTransition
   | ServerMutationResponse
   | ServerActionResponse
-  | ServerAuthError;
+  | ServerAuthError
+  | ServerFatalError
+  | ServerPing;
 
 interface ServerTransition {
   type: "Transition";
-  startVersion: StateVersion;
-  endVersion: StateVersion;
-  modifications: Record<string, { result: JSONValue | undefined; logLines: string[] }>;
+  startVersion: EncodedStateVersion;
+  endVersion: EncodedStateVersion;
+  modifications: StateModification[];
 }
 
 interface ServerMutationResponse {
   type: "MutationResponse";
   requestId: number;
   success: boolean;
-  result?: JSONValue;
-  errorMessage?: string;
+  result: JSONValue;
+  ts?: string; // base64-encoded LE u64 — present on success
+  logLines: string[];
+  errorData?: JSONValue;
 }
 
 interface ServerActionResponse {
   type: "ActionResponse";
   requestId: number;
   success: boolean;
-  result?: JSONValue;
-  errorMessage?: string;
+  result: JSONValue;
+  logLines: string[];
+  errorData?: JSONValue;
 }
 
 interface ServerAuthError {
   type: "AuthError";
-  errorMessage: string;
+  error: string;
+  baseVersion: number;
+  authUpdateAttempted: boolean;
+}
+
+interface ServerFatalError {
+  type: "FatalError";
+  error: string;
+}
+
+interface ServerPing {
+  type: "Ping";
 }
 
 // ---------------------------------------------------------------------------
 // Session state tracked per-connection inside the handler
 // ---------------------------------------------------------------------------
 
+/** A tracked query subscription that can be re-evaluated after mutations. */
+interface ActiveQuery {
+  queryId: number;
+  udfPath: string;
+  args: JSONValue[];
+}
+
 interface SessionState {
   /** Current state version for this session. */
   version: StateVersion;
   /** Auth identity set via Authenticate, if any. */
   identity: unknown | null;
+  /** Active query subscriptions keyed by queryId. */
+  activeQueries: Map<number, ActiveQuery>;
 }
 
 // ---------------------------------------------------------------------------
@@ -144,6 +258,9 @@ export class SyncProtocolHandler {
   /** Per-session bookkeeping. */
   private _sessions: Map<string, SessionState> = new Map();
 
+  /** Monotonically increasing internal timestamp. */
+  private _ts = 0;
+
   constructor(opts: SyncProtocolHandlerOptions) {
     this._executor = opts.executor;
     this._subscriptions = opts.subscriptions;
@@ -158,9 +275,10 @@ export class SyncProtocolHandler {
     sessionId: string,
     message: ClientMessage,
   ): Promise<ServerMessage[]> {
+    console.debug("[convex-embedded:protocol]", message.type, sessionId);
     switch (message.type) {
       case "Connect":
-        return this._handleConnect(sessionId);
+        return this._handleConnect(sessionId, message);
       case "ModifyQuerySet":
         return this._handleModifyQuerySet(sessionId, message);
       case "Mutation":
@@ -169,6 +287,9 @@ export class SyncProtocolHandler {
         return this._handleAction(sessionId, message);
       case "Authenticate":
         return this._handleAuthenticate(sessionId, message);
+      case "Event":
+        // Events are client telemetry — acknowledge silently.
+        return [];
     }
   }
 
@@ -176,12 +297,17 @@ export class SyncProtocolHandler {
   // Internals
   // -----------------------------------------------------------------------
 
+  private _nextTs(): number {
+    return ++this._ts;
+  }
+
   private _getOrCreateSession(sessionId: string): SessionState {
     let session = this._sessions.get(sessionId);
     if (!session) {
       session = {
-        version: { querySetVersion: 0, ts: 0, identity: 0 },
+        version: { querySet: 0, ts: 0, identity: 0 },
         identity: null,
+        activeQueries: new Map(),
       };
       this._sessions.set(sessionId, session);
     }
@@ -189,15 +315,24 @@ export class SyncProtocolHandler {
   }
 
   /** Connect — acknowledge the session with an empty transition. */
-  private _handleConnect(sessionId: string): ServerMessage[] {
+  private _handleConnect(
+    sessionId: string,
+    _message: ClientConnect,
+  ): ServerMessage[] {
+    // On reconnect, reset the session state so the client can rebuild.
     const session = this._getOrCreateSession(sessionId);
-    const version = { ...session.version };
+    // Reset to zero so the client can send a fresh ModifyQuerySet
+    session.version = { querySet: 0, ts: 0, identity: 0 };
+    session.identity = null;
+    session.activeQueries.clear();
+
+    const version = encodeStateVersion(session.version);
     return [
       {
         type: "Transition",
         startVersion: version,
         endVersion: version,
-        modifications: {},
+        modifications: [],
       },
     ];
   }
@@ -209,73 +344,137 @@ export class SyncProtocolHandler {
   ): Promise<ServerMessage[]> {
     const session = this._getOrCreateSession(sessionId);
     const startVersion = { ...session.version };
-    const modifications: Record<
-      string,
-      { result: JSONValue | undefined; logLines: string[] }
-    > = {};
+    const modifications: StateModification[] = [];
 
     for (const mod of message.modifications) {
-      if (mod.type === "Add" && mod.udfPath) {
+      if (mod.type === "Add") {
+        // Track this query so we can re-evaluate it after mutations.
+        session.activeQueries.set(mod.queryId, {
+          queryId: mod.queryId,
+          udfPath: mod.udfPath,
+          args: mod.args ?? [],
+        });
+
         try {
           const result = await this._executor.runQuery(
             mod.udfPath,
             ...(mod.args ?? []),
           );
-          modifications[mod.queryToken] = { result, logLines: [] };
+          modifications.push({
+            type: "QueryUpdated",
+            queryId: mod.queryId,
+            value: result,
+            logLines: [],
+            journal: null,
+          });
         } catch (err: any) {
-          modifications[mod.queryToken] = {
-            result: undefined,
+          modifications.push({
+            type: "QueryFailed",
+            queryId: mod.queryId,
+            errorMessage: err.message ?? String(err),
             logLines: [err.message ?? String(err)],
-          };
+            errorData: null,
+            journal: null,
+          });
         }
+      } else if (mod.type === "Remove") {
+        session.activeQueries.delete(mod.queryId);
       }
-      // For "Remove" we just acknowledge — unsubscribe is handled at the
-      // session layer.
     }
 
     session.version = {
       ...session.version,
-      querySetVersion: session.version.querySetVersion + 1,
+      querySet: message.newVersion,
+      ts: this._nextTs(),
     };
 
     return [
       {
         type: "Transition",
-        startVersion,
-        endVersion: { ...session.version },
+        startVersion: encodeStateVersion(startVersion),
+        endVersion: encodeStateVersion(session.version),
         modifications,
       },
     ];
   }
 
-  /** Mutation — execute and return success/error. */
+  /** Mutation — execute, re-evaluate active queries, return both responses. */
   private async _handleMutation(
-    _sessionId: string,
+    sessionId: string,
     message: ClientMutation,
   ): Promise<ServerMessage[]> {
+    const session = this._getOrCreateSession(sessionId);
+    let mutationResponse: ServerMessage;
+
     try {
       const result = await this._executor.runMutation(
         message.udfPath,
         ...(message.args ?? []),
       );
-      return [
-        {
-          type: "MutationResponse",
-          requestId: message.requestId,
-          success: true,
-          result,
-        },
-      ];
+      mutationResponse = {
+        type: "MutationResponse",
+        requestId: message.requestId,
+        success: true,
+        result: result ?? null,
+        ts: numberToEncodedU64(this._nextTs()),
+        logLines: [],
+      };
     } catch (err: any) {
-      return [
-        {
-          type: "MutationResponse",
-          requestId: message.requestId,
-          success: false,
-          errorMessage: err.message ?? String(err),
-        },
-      ];
+      mutationResponse = {
+        type: "MutationResponse",
+        requestId: message.requestId,
+        success: false,
+        result: err.message ?? String(err),
+        logLines: [],
+      };
     }
+
+    const responses: ServerMessage[] = [mutationResponse];
+
+    // Re-evaluate all active queries and send a Transition with updated results.
+    if (session.activeQueries.size > 0) {
+      const startVersion = { ...session.version };
+      const modifications: StateModification[] = [];
+
+      for (const q of session.activeQueries.values()) {
+        try {
+          const result = await this._executor.runQuery(
+            q.udfPath,
+            ...q.args,
+          );
+          modifications.push({
+            type: "QueryUpdated",
+            queryId: q.queryId,
+            value: result,
+            logLines: [],
+            journal: null,
+          });
+        } catch (err: any) {
+          modifications.push({
+            type: "QueryFailed",
+            queryId: q.queryId,
+            errorMessage: err.message ?? String(err),
+            logLines: [err.message ?? String(err)],
+            errorData: null,
+            journal: null,
+          });
+        }
+      }
+
+      session.version = {
+        ...session.version,
+        ts: this._nextTs(),
+      };
+
+      responses.push({
+        type: "Transition",
+        startVersion: encodeStateVersion(startVersion),
+        endVersion: encodeStateVersion(session.version),
+        modifications,
+      });
+    }
+
+    return responses;
   }
 
   /** Action — execute and return success/error. */
@@ -293,7 +492,8 @@ export class SyncProtocolHandler {
           type: "ActionResponse",
           requestId: message.requestId,
           success: true,
-          result,
+          result: result ?? null,
+          logLines: [],
         },
       ];
     } catch (err: any) {
@@ -302,7 +502,8 @@ export class SyncProtocolHandler {
           type: "ActionResponse",
           requestId: message.requestId,
           success: false,
-          errorMessage: err.message ?? String(err),
+          result: err.message ?? String(err),
+          logLines: [],
         },
       ];
     }
@@ -315,8 +516,28 @@ export class SyncProtocolHandler {
   ): Promise<ServerMessage[]> {
     const session = this._getOrCreateSession(sessionId);
 
+    // "None" tokenType means clearing auth — always succeeds.
+    if (message.tokenType === "None") {
+      session.identity = null;
+      const startVersion = { ...session.version };
+      session.version = {
+        ...session.version,
+        identity: session.version.identity + 1,
+      };
+      return [
+        {
+          type: "Transition",
+          startVersion: encodeStateVersion(startVersion),
+          endVersion: encodeStateVersion(session.version),
+          modifications: [],
+        },
+      ];
+    }
+
     try {
-      const identity = await this._auth.verifyToken(message.token);
+      const identity = await this._auth.verifyToken(
+        message.value ?? "",
+      );
       session.identity = identity;
 
       const startVersion = { ...session.version };
@@ -328,16 +549,18 @@ export class SyncProtocolHandler {
       return [
         {
           type: "Transition",
-          startVersion,
-          endVersion: { ...session.version },
-          modifications: {},
+          startVersion: encodeStateVersion(startVersion),
+          endVersion: encodeStateVersion(session.version),
+          modifications: [],
         },
       ];
     } catch (err: any) {
       return [
         {
           type: "AuthError",
-          errorMessage: err.message ?? String(err),
+          error: err.message ?? String(err),
+          baseVersion: message.baseVersion,
+          authUpdateAttempted: true,
         },
       ];
     }

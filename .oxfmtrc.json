@@ -1,0 +1,11 @@
+{
+  "proseWrap": "always",
+  "printWidth": 80,
+  "sortImports": {},
+  "ignorePatterns": [
+    "**/dist/**",
+    "**/_generated/**",
+    "**/node_modules/**",
+    "bun.lock"
+  ]
+}

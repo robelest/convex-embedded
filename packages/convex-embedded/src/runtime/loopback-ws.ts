@@ -15,6 +15,13 @@ const OPEN = 1;
 const CLOSING = 2;
 const CLOSED = 3;
 
+/**
+ * Interval (ms) between server Ping messages. The Convex SDK's
+ * `web_socket_manager` expects periodic server messages to avoid
+ * triggering an inactivity-based reconnect (~60 s default).
+ */
+const PING_INTERVAL_MS = 30_000;
+
 // ---------------------------------------------------------------------------
 // LoopbackWebSocket
 // ---------------------------------------------------------------------------
@@ -48,6 +55,7 @@ export class LoopbackWebSocket {
 
   private _handler: (message: string) => Promise<string[]>;
   private _listeners: Map<string, Set<(ev: any) => void>> = new Map();
+  private _pingInterval: ReturnType<typeof setInterval> | null = null;
 
   constructor(url: string, handler: (message: string) => Promise<string[]>) {
     this.url = url;
@@ -61,6 +69,10 @@ export class LoopbackWebSocket {
       const event = { type: "open" };
       this.onopen?.(event);
       this._emit("open", event);
+
+      // Start periodic Ping keepalive so the SDK doesn't trigger an
+      // inactivity-based reconnect.
+      this._startPingInterval();
     });
   }
 
@@ -106,6 +118,7 @@ export class LoopbackWebSocket {
   close(_code?: number, _reason?: string): void {
     if (this.readyState === CLOSED) return;
     this.readyState = CLOSED;
+    this._stopPingInterval();
     console.debug("[convex-embedded:ws] close", _code, _reason);
     const event = { type: "close", code: _code ?? 1000, reason: _reason ?? "" };
     this.onclose?.(event);
@@ -123,6 +136,27 @@ export class LoopbackWebSocket {
 
   removeEventListener(type: string, listener: (ev: any) => void): void {
     this._listeners.get(type)?.delete(listener);
+  }
+
+  /** Start sending periodic Ping messages to keep the connection alive. */
+  private _startPingInterval(): void {
+    this._pingInterval = setInterval(() => {
+      if (this.readyState !== OPEN) {
+        this._stopPingInterval();
+        return;
+      }
+      const pingEvent = { type: "message", data: JSON.stringify({ type: "Ping" }) };
+      this.onmessage?.(pingEvent);
+      this._emit("message", pingEvent);
+    }, PING_INTERVAL_MS);
+  }
+
+  /** Clear the Ping keepalive interval. */
+  private _stopPingInterval(): void {
+    if (this._pingInterval !== null) {
+      clearInterval(this._pingInterval);
+      this._pingInterval = null;
+    }
   }
 
   private _emit(type: string, event: any): void {
@@ -143,14 +177,27 @@ export class LoopbackWebSocket {
  * Creates a WebSocket constructor compatible with ConvexClient's
  * `webSocketConstructor` option.
  *
- * @param handler  Called for every message sent by ConvexClient. Must return
- *                 an array of response JSON strings to deliver back.
+ * Accepts either:
+ * - A **handler factory** (zero-arg function returning a handler) — a fresh
+ *   handler is created for each WebSocket instance, allowing per-connection
+ *   state (e.g. capturing the session ID from the first `Connect` message).
+ * - A **handler** directly — shared across all instances (legacy behaviour).
+ *
+ * @param handlerOrFactory  A message handler, or a factory that returns one.
  */
 export function LoopbackWebSocketConstructor(
-  handler: (message: string) => Promise<string[]>,
+  handlerOrFactory:
+    | ((message: string) => Promise<string[]>)
+    | (() => (message: string) => Promise<string[]>),
 ): new (url: string) => LoopbackWebSocket {
+  // Detect factory vs handler: a factory takes 0 args; a handler takes 1.
+  const isFactory = handlerOrFactory.length === 0;
+
   return class extends LoopbackWebSocket {
     constructor(url: string) {
+      const handler = isFactory
+        ? (handlerOrFactory as () => (message: string) => Promise<string[]>)()
+        : (handlerOrFactory as (message: string) => Promise<string[]>);
       super(url, handler);
     }
   };

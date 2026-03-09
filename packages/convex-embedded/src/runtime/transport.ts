@@ -27,6 +27,15 @@ interface ProtocolHandler {
 /**
  * Build the transport config that ConvexClient expects.
  *
+ * Each `LoopbackWebSocket` instance (one per connection/reconnect) gets its
+ * own handler closure that captures the session ID from the first `Connect`
+ * message and injects it into all subsequent messages on that connection.
+ *
+ * This fixes the session-ID-mismatch bug: only `Connect` messages include
+ * `sessionId` on the wire — `ModifyQuerySet`, `Mutation`, etc. do not. By
+ * capturing the session ID per-connection, all messages on the same socket
+ * are routed to the same protocol session.
+ *
  * @param runtime  Any object with a `handleMessage` method (the sync
  *                 protocol handler exposed by `EmbeddedRuntime`).
  * @returns        `{ url, webSocketConstructor }` suitable for passing
@@ -36,9 +45,29 @@ export function createTransport(runtime: ProtocolHandler): {
   url: string;
   webSocketConstructor: any;
 } {
-  const webSocketConstructor = LoopbackWebSocketConstructor(
-    (message: string) => runtime.handleMessage(message),
-  );
+  const webSocketConstructor = LoopbackWebSocketConstructor(() => {
+    // Per-connection session ID — captured from the first Connect message.
+    let connectionSessionId: string | undefined;
+
+    return async (message: string): Promise<string[]> => {
+      // Peek at the message to capture sessionId from Connect.
+      try {
+        const parsed = JSON.parse(message);
+        if (parsed.type === "Connect" && parsed.sessionId) {
+          connectionSessionId = parsed.sessionId;
+        }
+        // Inject the captured sessionId so that EmbeddedRuntime.handleMessage
+        // always has a consistent sessionId for this connection.
+        if (connectionSessionId && !parsed.sessionId) {
+          parsed.sessionId = connectionSessionId;
+          return runtime.handleMessage(JSON.stringify(parsed));
+        }
+      } catch {
+        // Parse failed — fall through to let handleMessage deal with it.
+      }
+      return runtime.handleMessage(message);
+    };
+  });
   return {
     url: "http://embedded.local",
     webSocketConstructor,

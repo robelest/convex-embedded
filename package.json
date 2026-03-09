@@ -17,15 +17,14 @@
     "fmt": "oxfmt .",
     "fmt:check": "oxfmt --check .",
     "dev:convex": "bunx convex dev",
-    "dev:tanstack": "bun run --filter demo-tanstack-start dev"
+    "dev:svelte": "bun --filter demo-svelte dev"
   },
   "dependencies": {
-    "convex": "^1.32.0",
-    "@robelest/convex-resolve": "workspace:*"
+    "convex": "^1.32.0"
   },
   "devDependencies": {
     "@convex-dev/action-retrier": "^0.3.0",
-    "@typescript/native-preview": "^7.0.0-dev.20260308.1",
+    "@typescript/native-preview": "^7.0.0-dev.20260309.1",
     "oxfmt": "^0.36.0",
     "oxlint": "^1.51.0"
   }

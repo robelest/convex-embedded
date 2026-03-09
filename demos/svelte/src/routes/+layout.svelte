@@ -9,10 +9,7 @@
 		{ eager: false },
 	);
 
-	const clientReady = getEmbeddedClient({ modules }).then((client) => {
-		setConvexClientContext(client);
-		return client;
-	});
+	setConvexClientContext(getEmbeddedClient({ modules }));
 </script>
 
 <svelte:head>
@@ -36,12 +33,6 @@
 	</header>
 
 	<main style="max-width: 48rem; margin: 0 auto; padding: 1.5rem 1rem;">
-		{#await clientReady}
-			<p style="color: #9ca3af;">Loading embedded runtime...</p>
-		{:then}
-			{@render children()}
-		{:catch error}
-			<p style="color: #ef4444;">Failed to initialize: {error.message}</p>
-		{/await}
+		{@render children()}
 	</main>
 </div>

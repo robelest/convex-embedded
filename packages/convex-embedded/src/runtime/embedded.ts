@@ -78,6 +78,7 @@ export class EmbeddedRuntime {
   private _schema: ParsedSchema | null;
   private _storageAdapter: StorageAdapter | null;
   private _transports: EmbeddedTransport[] = [];
+  private _hydrated: Promise<void>;
   private _shutdown = false;
 
   constructor(options: EmbeddedRuntimeOptions) {
@@ -160,6 +161,14 @@ export class EmbeddedRuntime {
         );
       },
     });
+
+    // 13. Hydrate from storage (fire-and-forget) ---------------------------
+    //     Messages are gated behind this promise in handleMessage(), so
+    //     the runtime is safe to construct synchronously — hydration
+    //     completes before any client traffic is processed.
+    this._hydrated = this.db.hydrate().catch((err) => {
+      console.error("[convex-embedded] hydration failed:", err);
+    });
   }
 
   // -----------------------------------------------------------------------
@@ -167,13 +176,15 @@ export class EmbeddedRuntime {
   // -----------------------------------------------------------------------
 
   /**
-   * Hydrate the database from durable storage.
+   * Wait for storage hydration to complete.
    *
-   * Must be called (and awaited) before the first client message when a
-   * {@link StorageAdapter} is configured. No-op without storage.
+   * Hydration starts automatically in the constructor. Callers that need
+   * to guarantee the database is populated before proceeding can `await`
+   * this method, but it is not required — {@link handleMessage} gates
+   * on the same promise internally.
    */
-  async hydrate(): Promise<void> {
-    await this.db.hydrate();
+  hydrate(): Promise<void> {
+    return this._hydrated;
   }
 
   // -----------------------------------------------------------------------
@@ -216,6 +227,9 @@ export class EmbeddedRuntime {
    * satisfies the `ProtocolHandler` interface expected by the transport.
    */
   async handleMessage(message: string): Promise<string[]> {
+    // Wait for storage hydration to complete before processing any message.
+    await this._hydrated;
+
     let parsed: ClientMessage;
     try {
       parsed = JSON.parse(message);

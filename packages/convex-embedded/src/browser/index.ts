@@ -8,7 +8,7 @@
  * ```ts
  * import { createEmbeddedClient } from "@robelest/convex-embedded/browser";
  *
- * const client = await createEmbeddedClient({
+ * const client = createEmbeddedClient({
  *   modules: import.meta.glob("./convex/** /*.ts"),
  *   schema,
  * });
@@ -21,7 +21,6 @@ import { ConvexClient } from "convex/browser";
 import type { BaseConvexClientOptions } from "convex/browser";
 import { EmbeddedRuntime } from "@/runtime/embedded";
 import type { EmbeddedRuntimeOptions } from "@/runtime/embedded";
-import { createTransport } from "@/runtime/transport";
 
 // Re-export storage types so consumers can implement custom adapters.
 export type {
@@ -72,25 +71,25 @@ export interface EmbeddedClientOptions {
  *
  * This is the primary browser entry point. It:
  * 1. Creates an {@link EmbeddedRuntime} from the provided modules/schema.
- * 2. Hydrates from durable storage (if a storage adapter is provided).
- * 3. Builds a loopback transport (no network).
- * 4. Returns a standard `ConvexClient` connected to that transport.
+ * 2. Builds a loopback transport (no network).
+ * 3. Returns a standard `ConvexClient` connected to that transport.
+ *
+ * Storage hydration (if a {@link StorageAdapter} is configured) starts
+ * automatically in the constructor and completes before the first
+ * protocol message is processed — no `await` needed.
  *
  * @returns A `ConvexClient` that talks to the local embedded runtime.
  */
-export async function createEmbeddedClient(
+export function createEmbeddedClient(
   options: EmbeddedClientOptions,
-): Promise<ConvexClient> {
+): ConvexClient {
   const runtime = new EmbeddedRuntime({
     modules: options.modules,
     schema: options.schema,
     storage: options.storage,
   });
 
-  // Hydrate from durable storage before accepting connections.
-  await runtime.hydrate();
-
-  const transport = createTransport(runtime);
+  const transport = runtime.createTransport();
 
   return new ConvexClient(transport.url, {
     ...options.clientOptions,
@@ -106,7 +105,7 @@ export async function createEmbeddedClient(
 // Singleton helper
 // ---------------------------------------------------------------------------
 
-let _singletonPromise: Promise<ConvexClient> | null = null;
+let _singleton: ConvexClient | null = null;
 
 /**
  * Get (or create) a singleton `ConvexClient` backed by the embedded runtime.
@@ -118,16 +117,16 @@ let _singletonPromise: Promise<ConvexClient> | null = null;
  * ```ts
  * import { getEmbeddedClient } from "@robelest/convex-embedded/browser";
  *
- * const client = await getEmbeddedClient({
+ * const client = getEmbeddedClient({
  *   modules: import.meta.glob("./convex/*.ts"),
  * });
  * ```
  */
 export function getEmbeddedClient(
   options: EmbeddedClientOptions,
-): Promise<ConvexClient> {
-  if (!_singletonPromise) {
-    _singletonPromise = createEmbeddedClient(options);
+): ConvexClient {
+  if (!_singleton) {
+    _singleton = createEmbeddedClient(options);
   }
-  return _singletonPromise;
+  return _singleton;
 }

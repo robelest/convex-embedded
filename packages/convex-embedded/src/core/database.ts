@@ -176,6 +176,51 @@ export class Database {
     }
   }
 
+  /**
+   * Re-read a single table from durable storage into the in-memory store.
+   *
+   * Used by cross-tab sync: when another tab writes to a table, this
+   * method replaces the in-memory documents for that table with the
+   * current state from IndexedDB (via the wa-sqlite worker). Also
+   * syncs metadata counters so IDs and timestamps remain monotonic.
+   *
+   * No-op when running without a storage adapter.
+   */
+  async syncTable(tableName: string): Promise<void> {
+    if (this._storage === null) return;
+
+    const [docs, meta] = await Promise.all([
+      this._storage.getDocumentsByTable(tableName),
+      this._storage.getMeta(),
+    ]);
+
+    // Remove all current in-memory docs for this table.
+    const suffix = `;${tableName}`;
+    for (const id of Object.keys(this._documents)) {
+      if (id.endsWith(suffix)) {
+        delete this._documents[id as DocumentId];
+      }
+    }
+
+    // Replace with what's in storage.
+    for (const doc of docs) {
+      this._documents[doc._id] = doc;
+    }
+
+    // Sync metadata counters so IDs remain monotonic across tabs.
+    if (meta !== null) {
+      if (meta.timestamp > this._timestamp) {
+        this._timestamp = meta.timestamp;
+      }
+      if (meta.nextDocId > this._nextDocId) {
+        this._nextDocId = meta.nextDocId;
+      }
+      if (meta.lastCreationTime > this._lastCreationTime) {
+        this._lastCreationTime = meta.lastCreationTime;
+      }
+    }
+  }
+
   // -------------------------------------------------------------------------
   // MVCC timestamp
   // -------------------------------------------------------------------------

@@ -132,6 +132,16 @@ export async function createWaSqliteStorage(
       );
     },
 
+    async getDocumentsByTable(tableName: string): Promise<StoredDocument[]> {
+      const jsonStrings = (await rpc(worker, {
+        method: "getDocumentsByTable",
+        tableName,
+      })) as string[];
+      return jsonStrings.map(
+        (s) => JSON.parse(s) as StoredDocument,
+      );
+    },
+
     async getMeta(): Promise<DatabaseMeta | null> {
       return (await rpc(worker, { method: "getMeta" })) as DatabaseMeta | null;
     },

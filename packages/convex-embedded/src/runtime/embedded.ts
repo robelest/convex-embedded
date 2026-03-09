@@ -139,10 +139,11 @@ export class EmbeddedRuntime {
     // 10. Write fanout (cross-tab) -----------------------------------------
     this.writeFanout = new WriteFanout();
 
-    // Wire cross-tab write fanout: when a remote tab writes, invalidate
-    // local subscriptions so queries re-evaluate.
+    // Wire cross-tab write fanout: when a remote tab writes, re-read
+    // the affected tables from IndexedDB, re-evaluate active queries,
+    // and push updated results to the ConvexClient.
     this.writeFanout.onNotification((tablesWritten) => {
-      this.subscriptions.invalidate(tablesWritten);
+      void this._handleCrossTabSync(tablesWritten);
     });
 
     // 11. Scheduler --------------------------------------------------------
@@ -281,6 +282,44 @@ export class EmbeddedRuntime {
     if (tablesWritten.size === 0) return;
     this.subscriptions.invalidate(tablesWritten);
     this.writeFanout.notify(tablesWritten);
+  }
+
+  // -----------------------------------------------------------------------
+  // Cross-tab sync
+  // -----------------------------------------------------------------------
+
+  /**
+   * Handle a cross-tab write notification from another tab.
+   *
+   * 1. Re-read the affected tables from IndexedDB (each tab's wa-sqlite
+   *    worker reads the same shared database).
+   * 2. Re-evaluate all active queries against the now-updated in-memory
+   *    database.
+   * 3. Push `Transition` messages through the loopback WebSocket so the
+   *    ConvexClient sees the updated query results instantly.
+   */
+  private async _handleCrossTabSync(tablesWritten: Set<string>): Promise<void> {
+    try {
+      // 1. Re-read affected tables from IndexedDB into memory.
+      await Promise.all(
+        Array.from(tablesWritten).map((table) => this.db.syncTable(table)),
+      );
+
+      // 2. Re-evaluate all active queries.
+      const updates = await this.syncProtocol.reEvaluateQueries();
+
+      // 3. Push Transition messages to all connected loopback sockets.
+      for (const [, messages] of updates) {
+        for (const msg of messages) {
+          const data = JSON.stringify(msg);
+          for (const transport of this._transports) {
+            transport.pushMessage(data);
+          }
+        }
+      }
+    } catch (err) {
+      console.error("[convex-embedded] cross-tab sync failed:", err);
+    }
   }
 
   // -----------------------------------------------------------------------

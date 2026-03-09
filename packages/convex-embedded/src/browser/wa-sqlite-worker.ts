@@ -25,6 +25,7 @@
 export type StorageRequest =
   | { id: number; method: "init"; name: string; wasmModule: WebAssembly.Module }
   | { id: number; method: "getDocuments" }
+  | { id: number; method: "getDocumentsByTable"; tableName: string }
   | { id: number; method: "getMeta" }
   | { id: number; method: "getBlobs" }
   | {
@@ -192,6 +193,14 @@ async function handleGetDocuments(): Promise<string[]> {
   return rows.map((row) => row.data as string);
 }
 
+async function handleGetDocumentsByTable(tableName: string): Promise<string[]> {
+  const rows = await serializedExecute(
+    "SELECT data FROM documents WHERE id LIKE ?",
+    [`%;${tableName}`],
+  );
+  return rows.map((row) => row.data as string);
+}
+
 async function handleGetMeta(): Promise<{
   timestamp: number;
   nextDocId: number;
@@ -313,6 +322,10 @@ async function handleMessage(request: StorageRequest): Promise<void> {
 
       case "getDocuments":
         result = await handleGetDocuments();
+        break;
+
+      case "getDocumentsByTable":
+        result = await handleGetDocumentsByTable(request.tableName);
         break;
 
       case "getMeta":

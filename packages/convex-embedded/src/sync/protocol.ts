@@ -326,6 +326,70 @@ export class SyncProtocolHandler {
     }
   }
 
+  /**
+   * Re-evaluate all active queries across all sessions.
+   *
+   * Used by cross-tab sync: when another tab writes, the runtime
+   * re-reads the affected tables from IndexedDB, then calls this
+   * method to re-run every active query and produce `Transition`
+   * messages that can be pushed to the ConvexClient.
+   *
+   * @returns A map of session IDs to arrays of server messages
+   *   (`Transition` with `QueryUpdated` / `QueryFailed` modifications).
+   *   Sessions with no active queries are omitted.
+   */
+  async reEvaluateQueries(): Promise<Map<string, ServerMessage[]>> {
+    const result = new Map<string, ServerMessage[]>();
+
+    for (const [sessionId, session] of this._sessions) {
+      if (session.activeQueries.size === 0) continue;
+
+      const startVersion = { ...session.version };
+      const modifications: StateModification[] = [];
+
+      for (const q of session.activeQueries.values()) {
+        try {
+          const queryResult = await this._executor.runQuery(
+            q.udfPath,
+            ...q.args,
+          );
+          modifications.push({
+            type: "QueryUpdated",
+            queryId: q.queryId,
+            value: queryResult,
+            logLines: [],
+            journal: null,
+          });
+        } catch (err: unknown) {
+          modifications.push({
+            type: "QueryFailed",
+            queryId: q.queryId,
+            errorMessage: errorMessage(err),
+            logLines: [errorMessage(err)],
+            errorData: extractErrorData(err) ?? null,
+            journal: null,
+          });
+        }
+      }
+
+      session.version = {
+        ...session.version,
+        ts: this._nextTs(),
+      };
+
+      result.set(sessionId, [
+        {
+          type: "Transition",
+          startVersion: encodeStateVersion(startVersion),
+          endVersion: encodeStateVersion(session.version),
+          modifications,
+        },
+      ]);
+    }
+
+    return result;
+  }
+
   // -----------------------------------------------------------------------
   // Internals
   // -----------------------------------------------------------------------

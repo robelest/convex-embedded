@@ -158,6 +158,20 @@ export class LoopbackWebSocket {
     this._emit("close", event);
   }
 
+  /**
+   * Deliver a server-initiated message to this WebSocket.
+   *
+   * Triggers `onmessage` and any `addEventListener("message", ...)` listeners,
+   * exactly as if the message were a response to a `send()` call. Used by the
+   * transport's `pushMessage` for cross-tab sync.
+   */
+  deliverMessage(data: string): void {
+    if (this.readyState !== OPEN) return;
+    const event = { type: "message" as const, data };
+    this.onmessage?.(event);
+    this._emit("message", event);
+  }
+
   addEventListener(type: string, listener: (ev: LoopbackEvent) => void): void {
     let set = this._listeners.get(type);
     if (!set) {

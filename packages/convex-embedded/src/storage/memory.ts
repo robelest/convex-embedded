@@ -28,6 +28,13 @@ export function memoryStorage(): StorageAdapter {
       return Array.from(documents.values());
     },
 
+    async getDocumentsByTable(tableName: string): Promise<StoredDocument[]> {
+      const suffix = `;${tableName}`;
+      return Array.from(documents.values()).filter(
+        (doc) => (doc._id as string).endsWith(suffix),
+      );
+    },
+
     async getMeta(): Promise<DatabaseMeta | null> {
       return meta;
     },

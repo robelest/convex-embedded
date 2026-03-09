@@ -34,6 +34,14 @@ export interface EmbeddedTransport {
    * Called by {@link EmbeddedRuntime.shutdown} to prevent interval leaks.
    */
   closeAll(): void;
+  /**
+   * Push a server-initiated message to all active WebSocket connections.
+   *
+   * Used by cross-tab sync to deliver `Transition` messages containing
+   * re-evaluated query results after another tab writes to the shared
+   * IndexedDB store.
+   */
+  pushMessage(data: string): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -107,6 +115,11 @@ export function createTransport(runtime: ProtocolHandler): EmbeddedTransport {
         ws.close(1001, "runtime shutdown");
       }
       activeSockets.clear();
+    },
+    pushMessage(data: string): void {
+      for (const ws of activeSockets) {
+        ws.deliverMessage(data);
+      }
     },
   };
 }

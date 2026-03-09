@@ -74,6 +74,17 @@ export interface StorageAdapter {
   /** Return every persisted document, across all tables. */
   getDocuments(): Promise<StoredDocument[]>;
 
+  /**
+   * Return persisted documents for a single table.
+   *
+   * Used by cross-tab sync to incrementally re-read only the tables
+   * that were written by another tab, rather than re-loading everything.
+   *
+   * The document ID format is `"<number>;<tableName>"`, so implementations
+   * can filter with e.g. `WHERE id LIKE '%;tableName'`.
+   */
+  getDocumentsByTable(tableName: string): Promise<StoredDocument[]>;
+
   /** Return persisted metadata, or `null` on first run. */
   getMeta(): Promise<DatabaseMeta | null>;
 

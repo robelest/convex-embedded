@@ -8,12 +8,15 @@
     "start": "vite preview"
   },
   "dependencies": {
-    "convex-resolve": "workspace:*",
+    "@robelest/convex-embedded": "workspace:*",
+    "@tailwindcss/vite": "^4.2.1",
+    "@tanstack/react-router": "^1.121.0",
+    "@tanstack/react-start": "^1.121.0",
     "convex": "catalog:",
+    "@robelest/convex-resolve": "workspace:*",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "@tanstack/react-start": "^1.121.0",
-    "@tanstack/react-router": "^1.121.0",
+    "tailwindcss": "^4.2.1",
     "yjs": "^13.6.0"
   },
   "devDependencies": {

@@ -6,7 +6,7 @@ import {
   define,
   registerField,
   prose,
-} from "convex-resolve/server";
+} from "@robelest/convex-resolve/server";
 
 // CRDT schema definition for the tasks table
 const taskSchema = define({
@@ -52,6 +52,17 @@ export const update = mutation(
       const { id, ...fields } = args;
       await ctx.db.patch(id, fields);
       return id;
+    },
+  }),
+);
+
+// Wrapped mutation — removes a task
+export const remove = mutation(
+  wrapMutation(api.tasks.recordDelta, {
+    args: { id: v.id("tasks") },
+    handler: async (ctx, args) => {
+      await ctx.db.delete(args.id);
+      return args.id;
     },
   }),
 );

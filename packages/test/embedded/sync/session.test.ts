@@ -26,7 +26,7 @@ describe("Session", () => {
     it("initializes lastStateVersion with zeroed-out values", () => {
       const session = new Session("s1");
       expect(session.lastStateVersion).toEqual({
-        querySetVersion: 0,
+        querySet: 0,
         ts: 0,
         identity: 0,
       });

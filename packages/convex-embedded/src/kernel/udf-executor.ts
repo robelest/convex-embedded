@@ -15,6 +15,7 @@
  * call setupWriter/setupReader/setupAuth internally, which use our
  * installed globalThis.Convex.syscall / asyncSyscall handlers.
  */
+import type { Value } from "convex/values";
 import { convexToJson, jsonToConvex } from "convex/values";
 
 import type { FunctionPath, ModuleLoader } from "./module-loader.js";
@@ -26,8 +27,7 @@ import {
 } from "./syscalls.js";
 import type { RunUdfFn } from "./syscalls.js";
 
-// TODO: type properly once database.ts is finalized
-type DatabaseFake = any;
+import type { Database } from "../core/database.js";
 
 // ---------------------------------------------------------------------------
 // Global type augmentation for the Convex runtime
@@ -38,7 +38,7 @@ declare global {
   var Convex: {
     syscall: (op: string, args: string) => string;
     asyncSyscall: (op: string, args: string) => Promise<string>;
-    jsSyscall: (op: string, args: Record<string, any>) => Promise<any>;
+    jsSyscall: (op: string, args: Record<string, unknown>) => Promise<unknown>;
   } | undefined;
 }
 
@@ -97,10 +97,12 @@ function restoreGlobals(saved: SavedGlobals): void {
  * Used only for the test-wrapper path. When the function has `invokeQuery`
  * or `invokeMutation`, we prefer those (see _resolveFunc).
  */
-function getHandler(func: any): ((ctx: any, args: any) => any) | null {
-  if (typeof func === "function") return func;
-  if (func && typeof func._handler === "function") return func._handler;
-  if (func && typeof func.handler === "function") return func.handler;
+type HandlerFn = (ctx: Record<string, unknown>, args: Record<string, unknown>) => unknown;
+
+function getHandler(func: Record<string, unknown>): HandlerFn | null {
+  if (typeof func === "function") return func as unknown as HandlerFn;
+  if (func && typeof func._handler === "function") return func._handler as HandlerFn;
+  if (func && typeof func.handler === "function") return func.handler as HandlerFn;
   return null;
 }
 
@@ -109,11 +111,11 @@ function getHandler(func: any): ((ctx: any, args: any) => any) | null {
 // ---------------------------------------------------------------------------
 
 export interface UdfExecutorOptions {
-  db: DatabaseFake;
+  db: Database;
   moduleLoader: ModuleLoader;
   runUdf: RunUdfFn;
   /** Optional callback for `1.0/getUserIdentity` syscall (auth). */
-  getIdentity?: () => Promise<any>;
+  getIdentity?: () => Promise<unknown>;
 }
 
 /**
@@ -131,10 +133,10 @@ export interface UdfExecutorOptions {
  * unit tests that don't need the SDK's ctx wiring.
  */
 export class UdfExecutor {
-  private _db: DatabaseFake;
+  private _db: Database;
   private _moduleLoader: ModuleLoader;
   private _runUdf: RunUdfFn;
-  private _getIdentity?: () => Promise<any>;
+  private _getIdentity?: () => Promise<unknown>;
 
   constructor({ db, moduleLoader, runUdf, getIdentity }: UdfExecutorOptions) {
     this._db = db;
@@ -151,7 +153,7 @@ export class UdfExecutor {
    * Execute a query function. Read-only — starts a transaction for
    * snapshot isolation but always rolls back (no writes persisted).
    */
-  async executeQuery(functionPath: FunctionPath, args: any): Promise<any> {
+  async executeQuery(functionPath: FunctionPath, args: Record<string, unknown>): Promise<unknown> {
     return this._runWithGlobals(async () => {
       this._db.startTransaction();
       try {
@@ -159,7 +161,7 @@ export class UdfExecutor {
 
         // Prefer SDK's invokeQuery if available (real registered functions).
         if (typeof func.invokeQuery === "function") {
-          const argsStr = JSON.stringify(convexToJson([args ?? {}]));
+          const argsStr = JSON.stringify(convexToJson([(args ?? {}) as Value]));
           const rawResult = await func.invokeQuery(argsStr);
           return jsonToConvex(JSON.parse(rawResult));
         }
@@ -180,17 +182,17 @@ export class UdfExecutor {
    * Execute a mutation function. Wraps in a transaction and commits
    * on success, rolls back on error.
    */
-  async executeMutation(functionPath: FunctionPath, args: any): Promise<any> {
+  async executeMutation(functionPath: FunctionPath, args: Record<string, unknown>): Promise<unknown> {
     return this._runWithGlobals(async () => {
       this._db.startTransaction();
       try {
         const func = await this._resolveFunc(functionPath, "mutation");
 
-        let result: any;
+        let result: unknown;
 
         // Prefer SDK's invokeMutation if available.
         if (typeof func.invokeMutation === "function") {
-          const argsStr = JSON.stringify(convexToJson([args ?? {}]));
+          const argsStr = JSON.stringify(convexToJson([(args ?? {}) as Value]));
           const rawResult = await func.invokeMutation(argsStr);
           result = jsonToConvex(JSON.parse(rawResult));
         } else {
@@ -215,7 +217,7 @@ export class UdfExecutor {
    * Execute an action function. Actions do not run inside a transaction
    * but can invoke queries and mutations via the syscall layer.
    */
-  async executeAction(functionPath: FunctionPath, args: any): Promise<any> {
+  async executeAction(functionPath: FunctionPath, args: Record<string, unknown>): Promise<unknown> {
     return this._runWithGlobals(async () => {
       const func = await this._resolveFunc(functionPath, "action");
 
@@ -223,7 +225,7 @@ export class UdfExecutor {
       // Note: invokeAction takes (requestId, argsStr) — 2 args.
       if (typeof func.invokeAction === "function") {
         const requestId = "" + Math.random();
-        const argsStr = JSON.stringify(convexToJson([args ?? {}]));
+        const argsStr = JSON.stringify(convexToJson([(args ?? {}) as Value]));
         const rawResult = await func.invokeAction(requestId, argsStr);
         return jsonToConvex(JSON.parse(rawResult));
       }
@@ -287,7 +289,7 @@ export class UdfExecutor {
   private async _resolveFunc(
     functionPath: FunctionPath,
     expectedType: "query" | "mutation" | "action",
-  ): Promise<any> {
+  ): Promise<Record<string, unknown>> {
     const [modulePath, maybeExportName] = functionPath.udfPath.split(":");
     const exportName =
       maybeExportName === undefined ? "default" : maybeExportName;

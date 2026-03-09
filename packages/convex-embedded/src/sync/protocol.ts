@@ -64,6 +64,11 @@ function encodeStateVersion(v: StateVersion): EncodedStateVersion {
   };
 }
 
+/** Extract a message string from an unknown caught value. */
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
 // ---------------------------------------------------------------------------
 // Client → Server messages
 // ---------------------------------------------------------------------------
@@ -226,7 +231,7 @@ interface SessionState {
   /** Current state version for this session. */
   version: StateVersion;
   /** Auth identity set via Authenticate, if any. */
-  identity: unknown | null;
+  identity: unknown;
   /** Active query subscriptions keyed by queryId. */
   activeQueries: Map<number, ActiveQuery>;
 }
@@ -235,12 +240,24 @@ interface SessionState {
 // SyncProtocolHandler
 // ---------------------------------------------------------------------------
 
+/** Executor interface expected by the sync protocol handler. */
+export interface ProtocolExecutor {
+  runQuery(udfPath: string, ...args: unknown[]): Promise<JSONValue>;
+  runMutation(udfPath: string, ...args: unknown[]): Promise<JSONValue>;
+  runAction(udfPath: string, ...args: unknown[]): Promise<JSONValue>;
+}
+
+/** Auth interface expected by the sync protocol handler. */
+export interface ProtocolAuth {
+  verifyToken(token: string): Promise<unknown>;
+}
+
 export interface SyncProtocolHandlerOptions {
-  /** Function executor — expected to expose `runQuery`, `runMutation`, `runAction`. */
-  executor: any;
+  /** Function executor for running queries, mutations, and actions. */
+  executor: ProtocolExecutor;
   subscriptions: SubscriptionManager;
-  /** Auth handler — expected to expose `verifyToken(token: string)`. */
-  auth: any;
+  /** Auth handler for token verification. */
+  auth: ProtocolAuth;
 }
 
 /**
@@ -251,9 +268,9 @@ export interface SyncProtocolHandlerOptions {
  * back over the wire.
  */
 export class SyncProtocolHandler {
-  private _executor: any;
+  private _executor: ProtocolExecutor;
   private _subscriptions: SubscriptionManager;
-  private _auth: any;
+  private _auth: ProtocolAuth;
 
   /** Per-session bookkeeping. */
   private _sessions: Map<string, SessionState> = new Map();
@@ -367,12 +384,12 @@ export class SyncProtocolHandler {
             logLines: [],
             journal: null,
           });
-        } catch (err: any) {
+        } catch (err: unknown) {
           modifications.push({
             type: "QueryFailed",
             queryId: mod.queryId,
-            errorMessage: err.message ?? String(err),
-            logLines: [err.message ?? String(err)],
+            errorMessage: errorMessage(err),
+            logLines: [errorMessage(err)],
             errorData: null,
             journal: null,
           });
@@ -419,12 +436,12 @@ export class SyncProtocolHandler {
         ts: numberToEncodedU64(this._nextTs()),
         logLines: [],
       };
-    } catch (err: any) {
+    } catch (err: unknown) {
       mutationResponse = {
         type: "MutationResponse",
         requestId: message.requestId,
         success: false,
-        result: err.message ?? String(err),
+        result: errorMessage(err),
         logLines: [],
       };
     }
@@ -449,12 +466,12 @@ export class SyncProtocolHandler {
             logLines: [],
             journal: null,
           });
-        } catch (err: any) {
+        } catch (err: unknown) {
           modifications.push({
             type: "QueryFailed",
             queryId: q.queryId,
-            errorMessage: err.message ?? String(err),
-            logLines: [err.message ?? String(err)],
+            errorMessage: errorMessage(err),
+            logLines: [errorMessage(err)],
             errorData: null,
             journal: null,
           });
@@ -496,13 +513,13 @@ export class SyncProtocolHandler {
           logLines: [],
         },
       ];
-    } catch (err: any) {
+    } catch (err: unknown) {
       return [
         {
           type: "ActionResponse",
           requestId: message.requestId,
           success: false,
-          result: err.message ?? String(err),
+          result: errorMessage(err),
           logLines: [],
         },
       ];
@@ -554,11 +571,11 @@ export class SyncProtocolHandler {
           modifications: [],
         },
       ];
-    } catch (err: any) {
+    } catch (err: unknown) {
       return [
         {
           type: "AuthError",
-          error: err.message ?? String(err),
+          error: errorMessage(err),
           baseVersion: message.baseVersion,
           authUpdateAttempted: true,
         },

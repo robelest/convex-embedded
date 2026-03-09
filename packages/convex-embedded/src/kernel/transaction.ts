@@ -15,6 +15,22 @@
 import type { DocumentId, Timestamp } from "../core/types.js";
 
 // ---------------------------------------------------------------------------
+// TransactionDatabase — the interface OccTransaction expects
+// ---------------------------------------------------------------------------
+
+/**
+ * Subset of the Database interface used by OccTransaction.
+ * Defined here to avoid circular dependencies with database.ts.
+ */
+export interface TransactionDatabase {
+  startTransaction(): void;
+  commit(): void;
+  rollbackWrites(): void;
+  getDocumentTimestamp(id: DocumentId): Timestamp | null;
+  getTableLastWriteTimestamp(tableName: string): Timestamp | null;
+}
+
+// ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
@@ -125,17 +141,8 @@ export class OccConflictError extends Error {
 }
 
 export interface OccTransactionOptions {
-  /**
-   * The database instance (`DatabaseFake` or compatible).
-   *
-   * Expected interface:
-   * - `startTransaction(): void`
-   * - `commit(): void`
-   * - `rollbackWrites(): void`
-   * - `getDocumentTimestamp(id: DocumentId): Timestamp | null`
-   * - `getTableLastWriteTimestamp(tableName: string): Timestamp | null`
-   */
-  db: any;
+  /** The database instance implementing the transaction interface. */
+  db: TransactionDatabase;
   maxRetries?: number;
 }
 
@@ -153,7 +160,7 @@ export interface OccTransactionOptions {
  * The retry budget defaults to `OCC_MAX_RETRIES` (5).
  */
 export class OccTransaction {
-  private readonly _db: any;
+  private readonly _db: TransactionDatabase;
   private readonly _maxRetries: number;
 
   /** Document-level read set: documentId → timestamp at read time. */

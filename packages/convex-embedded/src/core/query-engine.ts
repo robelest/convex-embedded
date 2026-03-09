@@ -40,14 +40,14 @@ function isSimpleObject(value: unknown): boolean {
 /** Walk a dot-separated field path on a document. */
 export function evaluateFieldPath(
   fieldPath: string,
-  document: any,
+  document: GenericDocument,
 ): Value | undefined {
   const pathParts = fieldPath.split(".");
-  let result: Value | undefined = document;
+  let result: Value | undefined = document as Value;
   for (const p of pathParts) {
     result =
       result !== undefined && result !== null && isSimpleObject(result)
-        ? (result as any)[p]
+        ? ((result as Record<string, Value | undefined>)[p] as Value | undefined)
         : undefined;
   }
   return result;
@@ -67,92 +67,98 @@ function evaluateValue(value: JSONValue): Value | undefined {
 
 export function evaluateFilter(
   document: GenericDocument,
-  filter: any,
+  filter: FilterJson,
 ): Value | undefined {
-  if (filter.$eq !== undefined) {
+  // FilterJson is a discriminated union of operator objects | JSONValue.
+  // TypeScript can't narrow the union via property access because JSONValue
+  // includes `{ [key: string]: JSONValue }`. We cast to `any` at the boundary
+  // and access operator fields directly — this is a runtime interpreter.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const f = filter as any;
+  if (f.$eq !== undefined) {
     return (
       compareValues(
-        evaluateFilter(document, filter.$eq[0]),
-        evaluateFilter(document, filter.$eq[1]),
+        evaluateFilter(document, f.$eq[0]),
+        evaluateFilter(document, f.$eq[1]),
       ) === 0
     );
   }
-  if (filter.$neq !== undefined) {
+  if (f.$neq !== undefined) {
     return (
       compareValues(
-        evaluateFilter(document, filter.$neq[0]),
-        evaluateFilter(document, filter.$neq[1]),
+        evaluateFilter(document, f.$neq[0]),
+        evaluateFilter(document, f.$neq[1]),
       ) !== 0
     );
   }
-  if (filter.$and !== undefined) {
-    return filter.$and.every((child: any) => evaluateFilter(document, child));
+  if (f.$and !== undefined) {
+    return f.$and.every((child: FilterJson) => evaluateFilter(document, child));
   }
-  if (filter.$or !== undefined) {
-    return filter.$or.some((child: any) => evaluateFilter(document, child));
+  if (f.$or !== undefined) {
+    return f.$or.some((child: FilterJson) => evaluateFilter(document, child));
   }
-  if (filter.$not !== undefined) {
-    return !evaluateFilter(document, filter.$not);
+  if (f.$not !== undefined) {
+    return !evaluateFilter(document, f.$not);
   }
-  if (filter.$gt !== undefined) {
+  if (f.$gt !== undefined) {
     return (
-      evaluateFilter(document, filter.$gt[0])! >
-      evaluateFilter(document, filter.$gt[1])!
+      evaluateFilter(document, f.$gt[0])! >
+      evaluateFilter(document, f.$gt[1])!
     );
   }
-  if (filter.$gte !== undefined) {
+  if (f.$gte !== undefined) {
     return (
-      evaluateFilter(document, filter.$gte[0])! >=
-      evaluateFilter(document, filter.$gte[1])!
+      evaluateFilter(document, f.$gte[0])! >=
+      evaluateFilter(document, f.$gte[1])!
     );
   }
-  if (filter.$lt !== undefined) {
+  if (f.$lt !== undefined) {
     return (
-      evaluateFilter(document, filter.$lt[0])! <
-      evaluateFilter(document, filter.$lt[1])!
+      evaluateFilter(document, f.$lt[0])! <
+      evaluateFilter(document, f.$lt[1])!
     );
   }
-  if (filter.$lte !== undefined) {
+  if (f.$lte !== undefined) {
     return (
-      evaluateFilter(document, filter.$lte[0])! <=
-      evaluateFilter(document, filter.$lte[1])!
+      evaluateFilter(document, f.$lte[0])! <=
+      evaluateFilter(document, f.$lte[1])!
     );
   }
-  if (filter.$add !== undefined) {
+  if (f.$add !== undefined) {
     return (
-      (evaluateFilter(document, filter.$add[0]) as number) +
-      (evaluateFilter(document, filter.$add[1]) as number)
+      (evaluateFilter(document, f.$add[0]) as number) +
+      (evaluateFilter(document, f.$add[1]) as number)
     );
   }
-  if (filter.$sub !== undefined) {
+  if (f.$sub !== undefined) {
     return (
-      (evaluateFilter(document, filter.$sub[0]) as number) -
-      (evaluateFilter(document, filter.$sub[1]) as number)
+      (evaluateFilter(document, f.$sub[0]) as number) -
+      (evaluateFilter(document, f.$sub[1]) as number)
     );
   }
-  if (filter.$mul !== undefined) {
+  if (f.$mul !== undefined) {
     return (
-      (evaluateFilter(document, filter.$mul[0]) as number) *
-      (evaluateFilter(document, filter.$mul[1]) as number)
+      (evaluateFilter(document, f.$mul[0]) as number) *
+      (evaluateFilter(document, f.$mul[1]) as number)
     );
   }
-  if (filter.$div !== undefined) {
+  if (f.$div !== undefined) {
     return (
-      (evaluateFilter(document, filter.$div[0]) as number) /
-      (evaluateFilter(document, filter.$div[1]) as number)
+      (evaluateFilter(document, f.$div[0]) as number) /
+      (evaluateFilter(document, f.$div[1]) as number)
     );
   }
-  if (filter.$mod !== undefined) {
+  if (f.$mod !== undefined) {
     return (
-      (evaluateFilter(document, filter.$mod[0]) as number) %
-      (evaluateFilter(document, filter.$mod[1]) as number)
+      (evaluateFilter(document, f.$mod[0]) as number) %
+      (evaluateFilter(document, f.$mod[1]) as number)
     );
   }
-  if (filter.$field !== undefined) {
-    return evaluateFieldPath(filter.$field, document);
+  if (f.$field !== undefined) {
+    return evaluateFieldPath(f.$field, document);
   }
-  if (filter.$literal !== undefined) {
-    return evaluateValue(filter.$literal);
+  if (f.$literal !== undefined) {
+    return evaluateValue(f.$literal);
   }
   throw new Error(`not implemented: ${JSON.stringify(filter)}`);
 }
@@ -413,7 +419,7 @@ export class QueryEngine {
     vector: number[],
     expressions: SerializedRangeExpression[],
     limit: number,
-  ): Array<{ _id: any; _score: number }> {
+  ): Array<{ _id: string; _score: number }> {
     const results: GenericDocument[] = [];
     const [tableName, indexName] = tableAndIndexName.split(".");
     this._iterateDocs(tableName, (doc) => {
@@ -436,7 +442,7 @@ export class QueryEngine {
     const { vectorField } = vectorIndex;
     const idsAndScores = results.map((doc) => {
       const score = cosineSimilarity(vector, doc[vectorField] as number[]);
-      return { _id: doc._id, _score: score };
+      return { _id: doc._id as string, _score: score };
     });
     idsAndScores.sort((a, b) => b._score - a._score);
     return idsAndScores.slice(0, limit);

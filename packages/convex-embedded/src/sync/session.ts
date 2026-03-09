@@ -25,13 +25,13 @@ export class Session {
   /** Active query subscriptions keyed by queryToken. */
   activeQueries: Map<string, ActiveQuery> = new Map();
   /** Current auth identity, or `null` if unauthenticated. */
-  identity: any | null = null;
+  identity: unknown = null;
   /** Last state version sent to this client. */
   lastStateVersion: StateVersion;
 
   constructor(id: string) {
     this.id = id;
-    this.lastStateVersion = { querySetVersion: 0, ts: 0, identity: 0 };
+    this.lastStateVersion = { querySet: 0, ts: 0, identity: 0 };
   }
 
   /** Unsubscribe all active queries and clear the map. */

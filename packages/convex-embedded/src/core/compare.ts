@@ -42,7 +42,7 @@ function compareSameTypeValues<T>(v1: T, v2: T): number {
     return v1 < v2 ? -1 : v1 === v2 ? 0 : 1;
   }
   if (!Array.isArray(v1) || !Array.isArray(v2)) {
-    throw new Error(`Unexpected type ${v1 as any}`);
+    throw new Error(`Unexpected type ${String(v1)}`);
   }
   for (let i = 0; i < v1.length && i < v2.length; i++) {
     const cmp = compareAsTuples(v1[i], v2[i]);
@@ -59,7 +59,7 @@ function compareSameTypeValues<T>(v1: T, v2: T): number {
  * Map a Convex value to a `[typeTag, comparable]` tuple so that
  * cross-type ordering works correctly.
  */
-function makeComparable(v: Value | undefined): [number, any] {
+function makeComparable(v: Value | undefined): [number, unknown] {
   if (v === undefined) return [0, undefined];
   if (v === null) return [1, null];
   if (typeof v === "bigint") return [2, v];

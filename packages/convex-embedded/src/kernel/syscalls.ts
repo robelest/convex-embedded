@@ -9,6 +9,7 @@
  * Ported from convex-test, refactored to accept explicit db/runner
  * parameters instead of relying on globals.
  */
+import type { Value } from "convex/values";
 import { convexToJson, jsonToConvex } from "convex/values";
 
 import type { FunctionPath } from "./module-loader.js";
@@ -17,8 +18,8 @@ import {
   createFunctionHandle,
 } from "./module-loader.js";
 
-// TODO: type properly once database.ts is finalized
-type DatabaseFake = any;
+import type { Database } from "../core/database.js";
+import type { DocumentId } from "../core/types.js";
 
 // ---------------------------------------------------------------------------
 // RunUdfFn — the callback used to invoke nested queries/mutations/actions
@@ -27,8 +28,8 @@ type DatabaseFake = any;
 export type RunUdfFn = (
   type: "query" | "mutation" | "action",
   path: FunctionPath,
-  args: any,
-) => Promise<any>;
+  args: Record<string, unknown>,
+) => Promise<unknown>;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -54,7 +55,7 @@ async function blobSha(blob: Blob): Promise<string> {
  * - `1.0/db/normalizeId`
  */
 export function createSyncSyscall(
-  db: DatabaseFake,
+  db: Database,
 ): (op: string, jsonArgs: string) => string {
   return (op: string, jsonArgs: string): string => {
     const args = JSON.parse(jsonArgs);
@@ -100,9 +101,9 @@ export function createSyncSyscall(
  *                             Called by `1.0/getUserIdentity` syscall.
  */
 export function createAsyncSyscall(
-  db: DatabaseFake,
+  db: Database,
   runUdf: RunUdfFn,
-  options?: { getIdentity?: () => Promise<any> },
+  options?: { getIdentity?: () => Promise<unknown> },
 ): (op: string, jsonArgs: string) => Promise<string> {
   const self = async (op: string, jsonArgs: string): Promise<string> => {
     const args = JSON.parse(jsonArgs);
@@ -131,7 +132,7 @@ export function createAsyncSyscall(
       // ----- Document writes -----
 
       case "1.0/insert": {
-        const _id = db.insert(args.table, jsonToConvex(args.value));
+        const _id = db.insert(args.table, jsonToConvex(args.value) as Record<string, unknown>);
         return JSON.stringify({ _id });
       }
       case "1.0/shallowMerge": {
@@ -195,7 +196,7 @@ export function createAsyncSyscall(
           reference,
           functionHandle,
         });
-        const parsedArgs = jsonToConvex(fnArgs);
+        const parsedArgs = jsonToConvex(fnArgs) as Record<string, unknown>;
         const jobId = db.insert("_scheduled_functions", {
           args: [parsedArgs],
           name: functionPath.udfPath,
@@ -208,12 +209,13 @@ export function createAsyncSyscall(
           (async () => {
             // Check if canceled before running
             const job = db.get("_scheduled_functions", jobId);
-            if (job === null || job.state.kind === "canceled") {
+            const jobState = job?.state as { kind: string } | null;
+            if (job === null || jobState?.kind === "canceled") {
               return;
             }
-            if (job.state.kind !== "pending") {
+            if (jobState?.kind !== "pending") {
               throw new Error(
-                `\`convex-embedded\` invariant error: Unexpected scheduled function state when starting it: ${job.state.kind}`,
+                `\`convex-embedded\` invariant error: Unexpected scheduled function state when starting it: ${jobState?.kind}`,
               );
             }
             db.patch("_scheduled_functions", jobId, {
@@ -231,23 +233,28 @@ export function createAsyncSyscall(
                 state: { kind: "failed" },
                 completedTime: Date.now(),
               });
-              if (typeof db.jobFinished === "function") {
-                db.jobFinished(jobId);
+              // Notify if the db supports job completion callbacks
+              const dbExt1 = db as unknown as Record<string, unknown>;
+              if (typeof dbExt1.jobFinished === "function") {
+                (dbExt1.jobFinished as (id: string) => void)(jobId);
               }
               return;
             }
 
             const finishedJob = db.get("_scheduled_functions", jobId);
+            const finishedState = finishedJob?.state as { kind: string } | null;
             if (
               finishedJob !== null &&
-              finishedJob.state.kind === "inProgress"
+              finishedState?.kind === "inProgress"
             ) {
               db.patch("_scheduled_functions", jobId, {
                 state: { kind: "success" },
               });
             }
-            if (typeof db.jobFinished === "function") {
-              db.jobFinished(jobId);
+            // Notify if the db supports job completion callbacks
+            const dbExt2 = db as unknown as Record<string, unknown>;
+            if (typeof dbExt2.jobFinished === "function") {
+              (dbExt2.jobFinished as (id: string) => void)(jobId);
             }
           }) as () => void,
           Math.max(0, tsInSecs * 1000 - Date.now()),
@@ -267,20 +274,20 @@ export function createAsyncSyscall(
       case "1.0/actions/query": {
         const { name, args: queryArgs } = args;
         const functionPath = resolveFunctionPath({ name });
-        const result = await runUdf("query", functionPath, queryArgs);
-        return JSON.stringify(convexToJson(result));
+        const result = await runUdf("query", functionPath, queryArgs as Record<string, unknown>);
+        return JSON.stringify(convexToJson(result as Value));
       }
       case "1.0/actions/mutation": {
         const { name, args: mutationArgs } = args;
         const functionPath = resolveFunctionPath({ name });
-        const result = await runUdf("mutation", functionPath, mutationArgs);
-        return JSON.stringify(convexToJson(result));
+        const result = await runUdf("mutation", functionPath, mutationArgs as Record<string, unknown>);
+        return JSON.stringify(convexToJson(result as Value));
       }
       case "1.0/actions/action": {
         const { name, args: actionArgs } = args;
         const functionPath = resolveFunctionPath({ name });
-        const result = await runUdf("action", functionPath, actionArgs);
-        return JSON.stringify(convexToJson(result));
+        const result = await runUdf("action", functionPath, actionArgs as Record<string, unknown>);
+        return JSON.stringify(convexToJson(result as Value));
       }
 
       case "1.0/actions/schedule": {
@@ -314,7 +321,7 @@ export function createAsyncSyscall(
           functionHandle,
           args: udfArgsJson,
         } = args;
-        const udfArgs = jsonToConvex(udfArgsJson);
+        const udfArgs = jsonToConvex(udfArgsJson) as Record<string, unknown>;
         const functionPath = resolveFunctionPath({
           name,
           reference,
@@ -322,11 +329,11 @@ export function createAsyncSyscall(
         });
         if (udfType === "query") {
           const result = await runUdf("query", functionPath, udfArgs);
-          return JSON.stringify(convexToJson(result));
+          return JSON.stringify(convexToJson(result as Value));
         }
         if (udfType === "mutation") {
           const result = await runUdf("mutation", functionPath, udfArgs);
-          return JSON.stringify(convexToJson(result));
+          return JSON.stringify(convexToJson(result as Value));
         }
         throw new Error(
           `\`convex-embedded\` does not support udf type: "${udfType}"`,
@@ -393,9 +400,9 @@ export function createAsyncSyscall(
  * - `storage/getBlob`
  */
 export function createJsSyscall(
-  db: DatabaseFake,
-): (op: string, args: Record<string, any>) => Promise<any> {
-  return async (op: string, args: Record<string, any>): Promise<any> => {
+  db: Database,
+): (op: string, args: Record<string, unknown>) => Promise<unknown> {
+  return async (op: string, args: Record<string, unknown>): Promise<unknown> => {
     switch (op) {
       case "storage/storeBlob": {
         const { blob } = args as { blob: Blob };
@@ -407,7 +414,7 @@ export function createJsSyscall(
         return storageId;
       }
       case "storage/getBlob": {
-        const { storageId } = args as { storageId: string };
+        const { storageId } = args as { storageId: DocumentId };
         return db.getFile(storageId);
       }
       default: {

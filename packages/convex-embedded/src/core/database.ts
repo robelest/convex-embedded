@@ -235,8 +235,8 @@ export class Database {
   }
 
   /** Insert a new document. Returns the generated `_id`. */
-  insert(table: TableName, value: any): DocumentId {
-    this._validate(table, value);
+  insert(table: TableName, value: Record<string, unknown>): DocumentId {
+    this._validate(table, value as GenericDocument);
     const _id = this._generateId(table);
     const now = Date.now();
     const _creationTime =
@@ -250,13 +250,13 @@ export class Database {
   patch(
     tableName: TableName | undefined,
     id: DocumentId,
-    value: Record<string, any>,
+    value: Record<string, unknown>,
   ): void {
     this._validateId(tableName, id);
 
     if (typeof value !== "object" || value === null) {
       throw new Error(
-        `Invalid argument \`value\` in \`db.patch\`, expected object but got '${typeof value}': ${value as any}`,
+        `Invalid argument \`value\` in \`db.patch\`, expected object but got '${typeof value}': ${String(value)}`,
       );
     }
 
@@ -288,13 +288,13 @@ export class Database {
     delete value["_creationTime"];
 
     // Resolve any $undefined sentinels.
-    const convexValue: any = {};
+    const convexValue: Record<string, unknown> = {};
     for (const [key, v] of Object.entries(value)) {
       convexValue[key] = evaluateValue(v as JSONValue);
     }
 
     const merged = { ...fields, ...convexValue };
-    this._validate(tableNameFromId(_id as string)!, merged);
+    this._validate(tableNameFromId(_id as string)!, merged as GenericDocument);
     this._addWrite(id, { _id, _creationTime, ...merged });
   }
 
@@ -302,13 +302,13 @@ export class Database {
   replace(
     tableName: TableName | undefined,
     id: DocumentId,
-    value: Record<string, any>,
+    value: Record<string, unknown>,
   ): void {
     this._validateId(tableName, id);
 
     if (typeof value !== "object" || value === null) {
       throw new Error(
-        `Invalid argument \`value\` in \`db.replace\`, expected object but got '${typeof value}': ${value as any}`,
+        `Invalid argument \`value\` in \`db.replace\`, expected object but got '${typeof value}': ${String(value)}`,
       );
     }
 
@@ -336,12 +336,12 @@ export class Database {
     delete value["_id"];
     delete value["_creationTime"];
 
-    const convexValue: any = {};
+    const convexValue: Record<string, unknown> = {};
     for (const [key, v] of Object.entries(value)) {
       convexValue[key] = evaluateValue(v as JSONValue);
     }
 
-    this._validate(tableNameFromId(document._id as string)!, convexValue);
+    this._validate(tableNameFromId(document._id as string)!, convexValue as GenericDocument);
     this._addWrite(id, {
       ...convexValue,
       _id: document._id,
@@ -422,7 +422,7 @@ export class Database {
     vector: number[],
     expressions: SerializedRangeExpression[],
     limit: number,
-  ): Array<{ _id: any; _score: number }> {
+  ): Array<{ _id: string; _score: number }> {
     return this.queryEngine.vectorSearch(
       tableAndIndexName,
       vector,
@@ -454,7 +454,7 @@ export class Database {
   ): asserts id is DocumentId {
     if (typeof id !== "string") {
       throw new Error(
-        `Invalid argument \`id\`, expected string but got '${typeof id}': ${id as any}`,
+        `Invalid argument \`id\`, expected string but got '${typeof id}': ${String(id)}`,
       );
     }
 
@@ -464,7 +464,7 @@ export class Database {
 
     if (typeof expectedTableName !== "string") {
       throw new Error(
-        `Invalid argument \`tableName\`, expected string but got '${typeof expectedTableName}': ${expectedTableName as any}`,
+        `Invalid argument \`tableName\`, expected string but got '${typeof expectedTableName}': ${String(expectedTableName)}`,
       );
     }
 

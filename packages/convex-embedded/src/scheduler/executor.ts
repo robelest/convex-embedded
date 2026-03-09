@@ -6,21 +6,23 @@
  * in the embedded runtime.
  */
 
+import type { Database } from "../core/database.js";
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 interface SchedulerExecutorOptions {
   /** Reference to the database (reserved for future job persistence). */
-  db: any;
+  db: Database;
   /** Callback that executes a Convex function by path + args. */
-  runFunction: (path: string, args: any) => Promise<void>;
+  runFunction: (path: string, args: Record<string, unknown>) => Promise<void>;
 }
 
 interface PendingJob {
   timerId: ReturnType<typeof setTimeout>;
   functionPath: string;
-  args: any;
+  args: Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------
@@ -35,8 +37,8 @@ interface PendingJob {
  * cleared.
  */
 export class SchedulerExecutor {
-  private _db: any;
-  private _runFunction: (path: string, args: any) => Promise<void>;
+  private _db: Database;
+  private _runFunction: (path: string, args: Record<string, unknown>) => Promise<void>;
   private _pending: Map<string, PendingJob> = new Map();
   private _nextId = 1;
 
@@ -53,7 +55,7 @@ export class SchedulerExecutor {
    * @param delayMs       Delay in milliseconds (0 = next tick).
    * @returns A unique job ID that can be passed to {@link cancelJob}.
    */
-  schedule(functionPath: string, args: any, delayMs: number): string {
+  schedule(functionPath: string, args: Record<string, unknown>, delayMs: number): string {
     const jobId = `job_${this._nextId++}`;
 
     const timerId = setTimeout(() => {

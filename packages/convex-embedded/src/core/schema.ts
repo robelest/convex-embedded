@@ -91,7 +91,7 @@ export function isValidIdentifier(name: string): boolean {
 // ---------------------------------------------------------------------------
 
 /** Validate a document value against a ValidatorJSON tree. */
-export function validateValidator(validator: ValidatorJSON, value: any): void {
+export function validateValidator(validator: ValidatorJSON, value: Value): void {
   switch (validator.type) {
     case "null":
       if (value !== null) {
@@ -145,7 +145,7 @@ export function validateValidator(validator: ValidatorJSON, value: any): void {
     case "literal":
       if (value !== validator.value) {
         throw new Error(
-          `Validator error: Expected \`${validator.value as any}\`, got \`${value}\``,
+          `Validator error: Expected \`${String(validator.value)}\`, got \`${value}\``,
         );
       }
       return;
@@ -204,24 +204,27 @@ export function validateValidator(validator: ValidatorJSON, value: any): void {
           `Validator error: Expected a plain old JavaScript \`object\`, got \`${value}\``,
         );
       }
-      for (const [k, { fieldType, optional }] of Object.entries(
-        validator.value,
-      )) {
-        if (value[k] === undefined) {
-          if (!optional) {
+      {
+        const obj = value as Record<string, Value | undefined>;
+        for (const [k, { fieldType, optional }] of Object.entries(
+          validator.value,
+        )) {
+          if (obj[k] === undefined) {
+            if (!optional) {
+              throw new Error(
+                `Validator error: Missing required field \`${k}\` in object`,
+              );
+            }
+          } else {
+            validateValidator(fieldType, obj[k]!);
+          }
+        }
+        for (const k of Object.keys(obj)) {
+          if (validator.value[k] === undefined) {
             throw new Error(
-              `Validator error: Missing required field \`${k}\` in object`,
+              `Validator error: Unexpected field \`${k}\` in object`,
             );
           }
-        } else {
-          validateValidator(fieldType, value[k]);
-        }
-      }
-      for (const k of Object.keys(value)) {
-        if (validator.value[k] === undefined) {
-          throw new Error(
-            `Validator error: Unexpected field \`${k}\` in object`,
-          );
         }
       }
       return;
@@ -251,11 +254,17 @@ export function validateFieldNames(validator: ValidatorJSON): void {
  * file. We call the private `.export()` on each table definition, matching
  * what `convex-test` does.
  */
-export function parseSchema(schema: any): ParsedSchema {
+/** Shape of the object returned by a Convex SchemaDefinition's internal export. */
+interface SchemaExport {
+  schemaValidation: boolean;
+  tables: Record<string, { export(): TableSchema }>;
+}
+
+export function parseSchema(schema: SchemaExport): ParsedSchema {
   return {
     schemaValidation: schema.schemaValidation,
     tables: new Map(
-      Object.entries(schema.tables).map(([name, tableSchema]: [string, any]) => [
+      Object.entries(schema.tables).map(([name, tableSchema]: [string, { export(): TableSchema }]) => [
         name,
         tableSchema.export(),
       ]),

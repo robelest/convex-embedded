@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { ConvexError } from "convex/values";
 import { SyncProtocolHandler } from "#embedded/sync/protocol";
 import type {
   ClientMessage,
@@ -634,6 +635,144 @@ describe("SyncProtocolHandler", () => {
 
       expect(msg.modifications[1].queryId).toBe(1);
       expect(msg.modifications[1].value).toEqual([{ name: "Bob" }]);
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // ConvexError propagation
+  // -----------------------------------------------------------------------
+
+  describe("ConvexError propagation", () => {
+    it("query failure includes errorData when UDF throws ConvexError", async () => {
+      const { handler, executor } = createHandler();
+      executor.runQuery.mockRejectedValue(
+        new ConvexError({ code: "NOT_FOUND", id: "abc123" }),
+      );
+
+      const messages = await handler.handleMessage("s1", {
+        type: "ModifyQuerySet",
+        baseVersion: 0,
+        newVersion: 1,
+        modifications: [
+          { type: "Add", queryId: 0, udfPath: "items:get", args: [] },
+        ],
+      } as ClientMessage);
+
+      const mod = (messages[0] as any).modifications[0];
+      expect(mod.type).toBe("QueryFailed");
+      expect(mod.errorData).toEqual({ code: "NOT_FOUND", id: "abc123" });
+    });
+
+    it("query failure has null errorData for plain Error", async () => {
+      const { handler, executor } = createHandler();
+      executor.runQuery.mockRejectedValue(new Error("plain error"));
+
+      const messages = await handler.handleMessage("s1", {
+        type: "ModifyQuerySet",
+        baseVersion: 0,
+        newVersion: 1,
+        modifications: [
+          { type: "Add", queryId: 0, udfPath: "items:get", args: [] },
+        ],
+      } as ClientMessage);
+
+      const mod = (messages[0] as any).modifications[0];
+      expect(mod.type).toBe("QueryFailed");
+      expect(mod.errorData).toBeNull();
+    });
+
+    it("mutation failure includes errorData when UDF throws ConvexError", async () => {
+      const { handler, executor } = createHandler();
+      executor.runMutation.mockRejectedValue(
+        new ConvexError("access denied"),
+      );
+
+      const messages = await handler.handleMessage("s1", {
+        type: "Mutation",
+        requestId: 1,
+        udfPath: "items:delete",
+        args: [{}],
+      } as ClientMessage);
+
+      const msg = messages[0] as any;
+      expect(msg.type).toBe("MutationResponse");
+      expect(msg.success).toBe(false);
+      expect(msg.errorData).toBe("access denied");
+    });
+
+    it("mutation failure omits errorData for plain Error", async () => {
+      const { handler, executor } = createHandler();
+      executor.runMutation.mockRejectedValue(new Error("internal"));
+
+      const messages = await handler.handleMessage("s1", {
+        type: "Mutation",
+        requestId: 2,
+        udfPath: "items:delete",
+        args: [{}],
+      } as ClientMessage);
+
+      const msg = messages[0] as any;
+      expect(msg.type).toBe("MutationResponse");
+      expect(msg.success).toBe(false);
+      expect(msg.errorData).toBeUndefined();
+    });
+
+    it("action failure includes errorData when UDF throws ConvexError", async () => {
+      const { handler, executor } = createHandler();
+      executor.runAction.mockRejectedValue(
+        new ConvexError({ reason: "rate_limited", retryAfter: 30 }),
+      );
+
+      const messages = await handler.handleMessage("s1", {
+        type: "Action",
+        requestId: 5,
+        udfPath: "api:call",
+        args: [],
+      } as ClientMessage);
+
+      const msg = messages[0] as any;
+      expect(msg.type).toBe("ActionResponse");
+      expect(msg.success).toBe(false);
+      expect(msg.errorData).toEqual({ reason: "rate_limited", retryAfter: 30 });
+    });
+
+    it("action failure omits errorData for plain Error", async () => {
+      const { handler, executor } = createHandler();
+      executor.runAction.mockRejectedValue(new Error("timeout"));
+
+      const messages = await handler.handleMessage("s1", {
+        type: "Action",
+        requestId: 6,
+        udfPath: "api:call",
+        args: [],
+      } as ClientMessage);
+
+      const msg = messages[0] as any;
+      expect(msg.type).toBe("ActionResponse");
+      expect(msg.success).toBe(false);
+      expect(msg.errorData).toBeUndefined();
+    });
+
+    it("ConvexError with nested object data round-trips correctly", async () => {
+      const { handler, executor } = createHandler();
+      const nestedData = {
+        errors: [
+          { field: "email", message: "invalid format" },
+          { field: "age", message: "must be positive" },
+        ],
+        code: 422,
+      };
+      executor.runMutation.mockRejectedValue(new ConvexError(nestedData));
+
+      const messages = await handler.handleMessage("s1", {
+        type: "Mutation",
+        requestId: 10,
+        udfPath: "users:create",
+        args: [{}],
+      } as ClientMessage);
+
+      const msg = messages[0] as any;
+      expect(msg.errorData).toEqual(nestedData);
     });
   });
 });

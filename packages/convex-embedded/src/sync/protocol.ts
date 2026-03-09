@@ -9,6 +9,7 @@
  * `ConvexReactClient` / `ConvexClient` can talk to us without modification.
  */
 
+import { convexToJson } from "convex/values";
 import type { JSONValue } from "convex/values";
 
 import type { SubscriptionManager } from "@/sync/subscriptions";
@@ -67,6 +68,21 @@ function encodeStateVersion(v: StateVersion): EncodedStateVersion {
 /** Extract a message string from an unknown caught value. */
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/** Extract ConvexError data from a thrown value, if present. */
+function extractErrorData(err: unknown): JSONValue | undefined {
+  if (
+    typeof err === "object" &&
+    err !== null &&
+    Symbol.for("ConvexError") in err
+  ) {
+    const data = (err as { data?: unknown }).data;
+    return data !== undefined
+      ? (convexToJson(data as any) as JSONValue)
+      : undefined;
+  }
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -390,7 +406,7 @@ export class SyncProtocolHandler {
             queryId: mod.queryId,
             errorMessage: errorMessage(err),
             logLines: [errorMessage(err)],
-            errorData: null,
+            errorData: extractErrorData(err) ?? null,
             journal: null,
           });
         }
@@ -437,12 +453,14 @@ export class SyncProtocolHandler {
         logLines: [],
       };
     } catch (err: unknown) {
+      const data = extractErrorData(err);
       mutationResponse = {
         type: "MutationResponse",
         requestId: message.requestId,
         success: false,
         result: errorMessage(err),
         logLines: [],
+        ...(data !== undefined && { errorData: data }),
       };
     }
 
@@ -472,7 +490,7 @@ export class SyncProtocolHandler {
             queryId: q.queryId,
             errorMessage: errorMessage(err),
             logLines: [errorMessage(err)],
-            errorData: null,
+            errorData: extractErrorData(err) ?? null,
             journal: null,
           });
         }
@@ -514,6 +532,7 @@ export class SyncProtocolHandler {
         },
       ];
     } catch (err: unknown) {
+      const data = extractErrorData(err);
       return [
         {
           type: "ActionResponse",
@@ -521,6 +540,7 @@ export class SyncProtocolHandler {
           success: false,
           result: errorMessage(err),
           logLines: [],
+          ...(data !== undefined && { errorData: data }),
         },
       ];
     }

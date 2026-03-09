@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { BlobStore } from "#embedded/storage/blob-store.js";
+import { BlobStore } from "#embedded/storage/blob-store";
 
 describe("BlobStore", () => {
   it("store: stores a blob and returns a unique storage ID", async () => {

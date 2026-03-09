@@ -5,8 +5,8 @@ import {
   tableNameFromId,
   validateFieldNames,
   parseSchema,
-} from "#embedded/core/schema.js";
-import type { ValidatorJSON, ObjectFieldType } from "#embedded/core/schema.js";
+} from "#embedded/core/schema";
+import type { ValidatorJSON, ObjectFieldType } from "#embedded/core/schema";
 
 // ---------------------------------------------------------------------------
 // Helpers

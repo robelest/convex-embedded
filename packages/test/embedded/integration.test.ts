@@ -6,14 +6,14 @@
  */
 import { describe, it, expect, vi } from "vitest";
 
-import { Database } from "#embedded/core/database.js";
-import type { ParsedSchema } from "#embedded/core/schema.js";
+import { Database } from "#embedded/core/database";
+import type { ParsedSchema } from "#embedded/core/schema";
 import type {
   DocumentId,
   SerializedQuery,
   SerializedRangeExpression,
-} from "#embedded/core/types.js";
-import { SubscriptionManager } from "#embedded/sync/subscriptions.js";
+} from "#embedded/core/types";
+import { SubscriptionManager } from "#embedded/sync/subscriptions";
 
 // ---------------------------------------------------------------------------
 // Helpers

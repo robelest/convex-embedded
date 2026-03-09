@@ -16,8 +16,8 @@ import {
   mergeUpdate,
   isDiffEmpty,
   createConflict,
-} from "#resolve/server/schema.js";
-import { CrdtType } from "#resolve/shared/types.js";
+} from "#resolve/server/schema";
+import { CrdtType } from "#resolve/shared/types";
 
 // ---------------------------------------------------------------------------
 // Field constructors

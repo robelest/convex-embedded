@@ -1,6 +1,8 @@
 import { defineConfig } from "tsdown";
+import { resolve } from "node:path";
 
 const jsExtensions = () => ({ js: '.js', dts: '.d.ts' });
+const srcAlias = { $: resolve(import.meta.dirname, "src") };
 
 export default defineConfig([
   {
@@ -12,6 +14,7 @@ export default defineConfig([
     platform: "node",
     external: [/^convex/, "yjs", "convex-helpers"],
     outExtensions: jsExtensions,
+    alias: srcAlias,
   },
   {
     entry: { "client/index": "src/client/index.ts" },
@@ -22,6 +25,7 @@ export default defineConfig([
     platform: "browser",
     external: [/^convex/, "yjs", "convex-helpers"],
     outExtensions: jsExtensions,
+    alias: srcAlias,
   },
   {
     entry: ["src/component/**/*.ts"],

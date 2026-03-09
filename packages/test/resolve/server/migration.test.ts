@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { runMigrations, migration } from "#resolve/server/migration.js";
-import { define, register as registerField } from "#resolve/server/schema.js";
+import { runMigrations, migration } from "#resolve/server/migration";
+import { define, register as registerField } from "#resolve/server/schema";
 import { v } from "convex/values";
 
 // ---------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { OpsContext, createOpsContext } from "#embedded/kernel/ops.js";
+import { OpsContext, createOpsContext } from "#embedded/kernel/ops";
 
 describe("OpsContext", () => {
   // ---------------------------------------------------------------------------

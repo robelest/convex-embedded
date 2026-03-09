@@ -9,8 +9,8 @@
  * Re-exports Conflict<T> for convenience.
  */
 import * as Y from "yjs";
-import type { Conflict, ConflictEntry } from "../shared/types.js";
-import { createConflict } from "../shared/conflict.js";
+import type { Conflict, ConflictEntry } from "$/shared/types";
+import { createConflict } from "$/shared/conflict";
 
 // ---------------------------------------------------------------------------
 // Prose helpers

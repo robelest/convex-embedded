@@ -5,8 +5,8 @@
  * into the embedded runtime's in-memory protocol handler via LoopbackWebSocket.
  */
 
-import { LoopbackWebSocketConstructor } from "./loopback-ws.js";
-import type { LoopbackWebSocket } from "./loopback-ws.js";
+import { LoopbackWebSocketConstructor } from "$/runtime/loopback-ws";
+import type { LoopbackWebSocket } from "$/runtime/loopback-ws";
 
 // ---------------------------------------------------------------------------
 // Types

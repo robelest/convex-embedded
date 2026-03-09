@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { SubscriptionManager } from "#embedded/sync/subscriptions.js";
+import { SubscriptionManager } from "#embedded/sync/subscriptions";
 
 describe("SubscriptionManager", () => {
   // -------------------------------------------------------------------------

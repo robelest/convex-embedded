@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
 import * as Y from "yjs";
 import { v } from "convex/values";
-import { register } from "#resolve/server/register.js";
-import { define, register as registerField, prose } from "#resolve/server/schema.js";
+import { register } from "#resolve/server/register";
+import { define, register as registerField, prose } from "#resolve/server/schema";
 
 // ---------------------------------------------------------------------------
 // Helpers

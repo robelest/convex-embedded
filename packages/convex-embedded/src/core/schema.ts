@@ -255,7 +255,7 @@ export function validateFieldNames(validator: ValidatorJSON): void {
  * what `convex-test` does.
  */
 /** Shape of the object returned by a Convex SchemaDefinition's internal export. */
-interface SchemaExport {
+export interface SchemaExport {
   schemaValidation: boolean;
   tables: Record<string, { export(): TableSchema }>;
 }

@@ -4,7 +4,7 @@
  * Lives in shared/ so both server/ and client/ can import it
  * without cross-boundary dependencies.
  */
-import type { Conflict, ConflictEntry } from "./types.js";
+import type { Conflict, ConflictEntry } from "$/shared/types";
 
 /**
  * Create a Conflict<T> from an array of ConflictEntry<T>.

@@ -6,7 +6,7 @@
  * in the embedded runtime.
  */
 
-import type { Database } from "../core/database.js";
+import type { Database } from "$/core/database";
 
 // ---------------------------------------------------------------------------
 // Types

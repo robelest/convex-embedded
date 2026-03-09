@@ -1,11 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { SyncProtocolHandler } from "#embedded/sync/protocol.js";
+import { SyncProtocolHandler } from "#embedded/sync/protocol";
 import type {
   ClientMessage,
   ServerMessage,
   StateVersion,
-} from "#embedded/sync/protocol.js";
-import { SubscriptionManager } from "#embedded/sync/subscriptions.js";
+} from "#embedded/sync/protocol";
+import { SubscriptionManager } from "#embedded/sync/subscriptions";
 
 // ---------------------------------------------------------------------------
 // Helpers

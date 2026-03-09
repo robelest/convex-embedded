@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { WriteFanout } from "#embedded/runtime/write-fanout.js";
+import { WriteFanout } from "#embedded/runtime/write-fanout";
 
 // ---------------------------------------------------------------------------
 // Mock BroadcastChannel

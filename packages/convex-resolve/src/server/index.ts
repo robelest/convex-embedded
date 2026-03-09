@@ -23,24 +23,24 @@ export {
   computeDiff,
   mergeUpdate,
   isDiffEmpty,
-} from "./schema.js";
-export type { DefineOptions, Definition, RegisterOptions } from "./schema.js";
+} from "$/server/schema";
+export type { DefineOptions, Definition, RegisterOptions } from "$/server/schema";
 
 // Builders — mutation/query wrappers with remote: key
-export { builders } from "./builders.js";
-export type { BuildersResult } from "./builders.js";
+export { builders } from "$/server/builders";
+export type { BuildersResult } from "$/server/builders";
 
 // Register — generates resolve query + delta recording
-export { register } from "./register.js";
-export type { RegisterConfig, RegisterResult } from "./register.js";
+export { register } from "$/server/register";
+export type { RegisterConfig, RegisterResult } from "$/server/register";
 
 // Views — query scoping utilities
-export { view } from "./view.js";
-export type { ViewFilter } from "./view.js";
+export { view } from "$/server/view";
+export type { ViewFilter } from "$/server/view";
 
 // Migration — local schema versioning
-export { migration, runMigrations } from "./migration.js";
-export type { MigrationConfig } from "./migration.js";
+export { migration, runMigrations } from "$/server/migration";
+export type { MigrationConfig } from "$/server/migration";
 
 // Re-export shared types for convenience
 export type {
@@ -51,5 +51,5 @@ export type {
   MigrationErrorHandler,
   RecoveryAction,
   RecoveryContext,
-} from "../shared/types.js";
-export { CrdtType } from "../shared/types.js";
+} from "$/shared/types";
+export { CrdtType } from "$/shared/types";

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { compareValues } from "#embedded/core/compare.js";
+import { compareValues } from "#embedded/core/compare";
 
 // ---------------------------------------------------------------------------
 // Helpers

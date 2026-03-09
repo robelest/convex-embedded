@@ -12,8 +12,8 @@ import type { GenericDocument } from "convex/server";
 import type { JSONValue, Value } from "convex/values";
 import { jsonToConvex } from "convex/values";
 
-import type { ParsedSchema } from "./schema.js";
-import { tableNameFromId, validateValidator, validateSchemaDefinition } from "./schema.js";
+import type { ParsedSchema } from "$/core/schema";
+import { tableNameFromId, validateValidator, validateSchemaDefinition } from "$/core/schema";
 import type {
   DocumentId,
   QueryId,
@@ -22,9 +22,9 @@ import type {
   StoredDocument,
   TableName,
   Timestamp,
-} from "./types.js";
-import { QueryEngine } from "./query-engine.js";
-import type { DocumentIterator } from "./query-engine.js";
+} from "$/core/types";
+import { QueryEngine } from "$/core/query-engine";
+import type { DocumentIterator } from "$/core/query-engine";
 
 // ---------------------------------------------------------------------------
 // Helpers

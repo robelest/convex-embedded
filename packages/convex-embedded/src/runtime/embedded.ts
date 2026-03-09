@@ -7,25 +7,26 @@
  * ConvexClient can talk to via an in-memory transport.
  */
 
-import { Database } from "../core/database.js";
-import { parseSchema } from "../core/schema.js";
-import type { ParsedSchema } from "../core/schema.js";
-import { ModuleLoader } from "../kernel/module-loader.js";
-import type { FunctionPath } from "../kernel/module-loader.js";
-import { resolveFunctionPath } from "../kernel/module-loader.js";
-import { UdfExecutor } from "../kernel/udf-executor.js";
-import { TransactionManager } from "../kernel/transaction.js";
-import { SubscriptionManager } from "../sync/subscriptions.js";
-import { SyncProtocolHandler } from "../sync/protocol.js";
-import type { ClientMessage, ServerMessage } from "../sync/protocol.js";
-import { SessionManager } from "../sync/session.js";
-import { WriteFanout } from "./write-fanout.js";
-import { createTransport } from "./transport.js";
-import type { EmbeddedTransport } from "./transport.js";
-import { AuthResolver } from "../auth/resolver.js";
-import type { UserIdentity } from "../auth/resolver.js";
-import { SchedulerExecutor } from "../scheduler/executor.js";
-import { BlobStore } from "../storage/blob-store.js";
+import type { JSONValue } from "convex/values";
+import { Database } from "$/core/database";
+import { parseSchema } from "$/core/schema";
+import type { ParsedSchema, SchemaExport } from "$/core/schema";
+import { ModuleLoader } from "$/kernel/module-loader";
+import type { ConvexModule, FunctionPath } from "$/kernel/module-loader";
+import { resolveFunctionPath } from "$/kernel/module-loader";
+import { UdfExecutor } from "$/kernel/udf-executor";
+import { TransactionManager } from "$/kernel/transaction";
+import { SubscriptionManager } from "$/sync/subscriptions";
+import { SyncProtocolHandler } from "$/sync/protocol";
+import type { ClientMessage, ProtocolExecutor, ServerMessage } from "$/sync/protocol";
+import { SessionManager } from "$/sync/session";
+import { WriteFanout } from "$/runtime/write-fanout";
+import { createTransport } from "$/runtime/transport";
+import type { EmbeddedTransport } from "$/runtime/transport";
+import { AuthResolver } from "$/auth/resolver";
+import type { UserIdentity } from "$/auth/resolver";
+import { SchedulerExecutor } from "$/scheduler/executor";
+import { BlobStore } from "$/storage/blob-store";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -33,9 +34,9 @@ import { BlobStore } from "../storage/blob-store.js";
 
 export interface EmbeddedRuntimeOptions {
   /** Vite `import.meta.glob` record pointing at your Convex modules. */
-  modules: Record<string, () => Promise<any>>;
+  modules: Record<string, () => Promise<ConvexModule>>;
   /** Optional Convex schema definition (the default export from schema.ts). */
-  schema?: any;
+  schema?: SchemaExport;
 }
 
 // ---------------------------------------------------------------------------
@@ -100,7 +101,7 @@ export class EmbeddedRuntime {
       runUdf: (
         type: "query" | "mutation" | "action",
         path: FunctionPath,
-        args: any,
+        args: Record<string, unknown>,
       ) => this._runUdf(type, path, args),
       getIdentity: () => this.auth.getUserIdentity(),
     });
@@ -145,12 +146,13 @@ export class EmbeddedRuntime {
     // 12. Scheduler --------------------------------------------------------
     this.scheduler = new SchedulerExecutor({
       db: this.db,
-      runFunction: (path: string, args: any) =>
-        this._runUdf(
+      runFunction: async (path: string, args: Record<string, unknown>) => {
+        await this._runUdf(
           "mutation",
           resolveFunctionPath({ name: path }),
           args,
-        ),
+        );
+      },
     });
   }
 
@@ -204,7 +206,7 @@ export class EmbeddedRuntime {
 
     // Extract or synthesize a session ID.
     const sessionId =
-      (parsed as any).sessionId ?? "default";
+      (parsed as unknown as Record<string, unknown>).sessionId as string ?? "default";
 
     try {
       const responses: ServerMessage[] =
@@ -264,8 +266,8 @@ export class EmbeddedRuntime {
   private async _runUdf(
     type: "query" | "mutation" | "action",
     path: FunctionPath,
-    args: any,
-  ): Promise<any> {
+    args: Record<string, unknown>,
+  ): Promise<unknown> {
     switch (type) {
       case "query":
         return this.executor.executeQuery(path, args);
@@ -329,19 +331,19 @@ export class EmbeddedRuntime {
    * JSON-serialized args. We pass the first element through as the args
    * object.
    */
-  private _buildProtocolExecutor() {
+  private _buildProtocolExecutor(): ProtocolExecutor {
     return {
-      runQuery: async (udfPath: string, ...args: any[]) => {
+      runQuery: async (udfPath: string, ...args: unknown[]) => {
         const path = resolveFunctionPath({ name: udfPath });
         // args[0] is the convexToJson'd args object from the client
-        const convexArgs = args[0] ?? {};
-        const result = await this._runUdf("query", path, convexArgs);
-        return result;
+        const convexArgs = (args[0] ?? {}) as Record<string, unknown>;
+        // _runUdf always returns JSON-serialisable values for queries
+        return await this._runUdf("query", path, convexArgs) as JSONValue;
       },
 
-      runMutation: async (udfPath: string, ...args: any[]) => {
+      runMutation: async (udfPath: string, ...args: unknown[]) => {
         const path = resolveFunctionPath({ name: udfPath });
-        const convexArgs = args[0] ?? {};
+        const convexArgs = (args[0] ?? {}) as Record<string, unknown>;
         // Wrap db.commit to capture tablesWritten for invalidation.
         const originalCommit = this.db.commit.bind(this.db);
         let capturedTablesWritten: Set<string> | undefined;
@@ -359,17 +361,17 @@ export class EmbeddedRuntime {
             this.onMutationCommit(capturedTablesWritten);
           }
 
-          return result;
+          return result as JSONValue;
         } finally {
           // Restore original commit.
           this.db.commit = originalCommit;
         }
       },
 
-      runAction: async (udfPath: string, ...args: any[]) => {
+      runAction: async (udfPath: string, ...args: unknown[]) => {
         const path = resolveFunctionPath({ name: udfPath });
-        const convexArgs = args[0] ?? {};
-        return this._runUdf("action", path, convexArgs);
+        const convexArgs = (args[0] ?? {}) as Record<string, unknown>;
+        return await this._runUdf("action", path, convexArgs) as JSONValue;
       },
     };
   }

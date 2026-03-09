@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { createLogger } from "#resolve/shared/logger.js";
+import { createLogger } from "#resolve/shared/logger";
 
 describe("createLogger", () => {
   beforeEach(() => {

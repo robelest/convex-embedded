@@ -12,14 +12,14 @@
 import type { Value } from "convex/values";
 import { convexToJson, jsonToConvex } from "convex/values";
 
-import type { FunctionPath } from "./module-loader.js";
+import type { FunctionPath } from "$/kernel/module-loader";
 import {
   resolveFunctionPath,
   createFunctionHandle,
-} from "./module-loader.js";
+} from "$/kernel/module-loader";
 
-import type { Database } from "../core/database.js";
-import type { DocumentId } from "../core/types.js";
+import type { Database } from "$/core/database";
+import type { DocumentId } from "$/core/types";
 
 // ---------------------------------------------------------------------------
 // RunUdfFn — the callback used to invoke nested queries/mutations/actions

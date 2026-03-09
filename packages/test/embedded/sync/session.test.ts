@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { Session, SessionManager } from "#embedded/sync/session.js";
+import { Session, SessionManager } from "#embedded/sync/session";
 
 // ---------------------------------------------------------------------------
 // Session

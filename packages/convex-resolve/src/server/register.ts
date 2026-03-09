@@ -18,10 +18,10 @@
 import * as Y from "yjs";
 import type { FunctionReference } from "convex/server";
 import { v } from "convex/values";
-import type { Definition } from "./schema.js";
-import { encodeDocumentState, computeDiff, isDiffEmpty } from "./schema.js";
-import type { MigrationErrorHandler } from "../shared/types.js";
-import { createLogger } from "../shared/logger.js";
+import type { Definition } from "$/server/schema";
+import { encodeDocumentState, computeDiff, isDiffEmpty } from "$/server/schema";
+import type { MigrationErrorHandler } from "$/shared/types";
+import { createLogger } from "$/shared/logger";
 
 const log = createLogger("register");
 

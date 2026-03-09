@@ -131,11 +131,14 @@ export function resolveFunctionPath(
  * const listFn = mod["list"]; // the exported query/mutation/action
  * ```
  */
+/** A lazily-loaded ES module — its named exports keyed by export name. */
+export type ConvexModule = Record<string, unknown>;
+
 export class ModuleLoader {
   private readonly prefix: string;
-  private readonly modules: Record<string, () => Promise<any>>;
+  private readonly modules: Record<string, () => Promise<ConvexModule>>;
 
-  constructor(modules: Record<string, () => Promise<any>>) {
+  constructor(modules: Record<string, () => Promise<ConvexModule>>) {
     // Strip file extensions so callers don't need to specify them.
     this.modules = Object.fromEntries(
       Object.entries(modules).map(([path, loader]) => [
@@ -154,7 +157,7 @@ export class ModuleLoader {
    * Load the module for a given UDF module path (the part before the `:` in a
    * function path, e.g. `"messages"` or `"lib/utils"`).
    */
-  async load(path: string): Promise<any> {
+  async load(path: string): Promise<ConvexModule> {
     const key = this.prefix + path;
     const loader = this.modules[key];
     if (loader === undefined) {

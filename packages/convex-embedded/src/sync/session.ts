@@ -6,7 +6,7 @@
  * creates, retrieves, and tears down sessions.
  */
 
-import type { StateVersion } from "./protocol.js";
+import type { StateVersion } from "$/sync/protocol";
 
 // ---------------------------------------------------------------------------
 // Session

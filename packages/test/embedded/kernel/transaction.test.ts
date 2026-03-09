@@ -4,7 +4,7 @@ import {
   OccTransaction,
   OccConflictError,
   OCC_MAX_RETRIES,
-} from "#embedded/kernel/transaction.js";
+} from "#embedded/kernel/transaction";
 
 // ---------------------------------------------------------------------------
 // TransactionManager

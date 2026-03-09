@@ -20,7 +20,7 @@ import {
   type GenericDataModel,
   type FunctionReference,
 } from "convex/server";
-import { createLogger } from "../shared/logger.js";
+import { createLogger } from "$/shared/logger";
 
 const log = createLogger("builders");
 

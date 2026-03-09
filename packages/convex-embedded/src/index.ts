@@ -30,15 +30,15 @@
 export {
   EmbeddedRuntime,
   type EmbeddedRuntimeOptions,
-} from "./runtime/embedded.js";
+} from "$/runtime/embedded";
 
-export { createTransport } from "./runtime/transport.js";
-export type { EmbeddedTransport } from "./runtime/transport.js";
+export { createTransport } from "$/runtime/transport";
+export type { EmbeddedTransport } from "$/runtime/transport";
 
 export {
   LoopbackWebSocket,
   LoopbackWebSocketConstructor,
-} from "./runtime/loopback-ws.js";
+} from "$/runtime/loopback-ws";
 
 export type {
   LoopbackEvent,
@@ -46,16 +46,16 @@ export type {
   LoopbackMessageEvent,
   LoopbackCloseEvent,
   LoopbackErrorEvent,
-} from "./runtime/loopback-ws.js";
+} from "$/runtime/loopback-ws";
 
-export { WriteFanout } from "./runtime/write-fanout.js";
+export { WriteFanout } from "$/runtime/write-fanout";
 
-export { AuthResolver, createTestIdentity } from "./auth/resolver.js";
-export type { UserIdentity } from "./auth/resolver.js";
+export { AuthResolver, createTestIdentity } from "$/auth/resolver";
+export type { UserIdentity } from "$/auth/resolver";
 
-export { BlobStore } from "./storage/blob-store.js";
+export { BlobStore } from "$/storage/blob-store";
 
-export { SubscriptionManager } from "./sync/subscriptions.js";
+export { SubscriptionManager } from "$/sync/subscriptions";
 
 // ---------------------------------------------------------------------------
 // Convenience factory
@@ -64,7 +64,7 @@ export { SubscriptionManager } from "./sync/subscriptions.js";
 import {
   EmbeddedRuntime,
   type EmbeddedRuntimeOptions,
-} from "./runtime/embedded.js";
+} from "$/runtime/embedded";
 
 /**
  * Create an embedded Convex runtime.

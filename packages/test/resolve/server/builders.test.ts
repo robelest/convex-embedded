@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { builders } from "#resolve/server/builders.js";
+import { builders } from "#resolve/server/builders";
 
 describe("builders()", () => {
   describe("when components.resolve is absent (local embedded runtime)", () => {

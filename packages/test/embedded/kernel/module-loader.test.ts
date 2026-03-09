@@ -4,7 +4,7 @@ import {
   createFunctionHandle,
   getFunctionFromHandle,
   resolveFunctionPath,
-} from "#embedded/kernel/module-loader.js";
+} from "#embedded/kernel/module-loader";
 
 // ---------------------------------------------------------------------------
 // Helpers

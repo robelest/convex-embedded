@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { monitor } from "#resolve/client/monitor.js";
+import { monitor } from "#resolve/client/monitor";
 
 describe("monitor.create()", () => {
   let originalAddEventListener: typeof globalThis.addEventListener | undefined;

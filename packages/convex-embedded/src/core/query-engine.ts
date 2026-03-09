@@ -9,7 +9,7 @@ import type { GenericDocument } from "convex/server";
 import type { JSONValue, Value } from "convex/values";
 import { jsonToConvex } from "convex/values";
 
-import { compareValues } from "./compare.js";
+import { compareValues } from "$/core/compare";
 import type {
   FilterJson,
   IndexInfo,
@@ -20,8 +20,8 @@ import type {
   Source,
   StoredDocument,
   VectorIndexInfo,
-} from "./types.js";
-import type { ParsedSchema } from "./schema.js";
+} from "$/core/types";
+import type { ParsedSchema } from "$/core/schema";
 
 // ---------------------------------------------------------------------------
 // Helpers

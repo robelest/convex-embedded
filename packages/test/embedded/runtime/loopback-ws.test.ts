@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import {
   LoopbackWebSocket,
   LoopbackWebSocketConstructor,
-} from "#embedded/runtime/loopback-ws.js";
+} from "#embedded/runtime/loopback-ws";
 
 // ---------------------------------------------------------------------------
 // Helpers

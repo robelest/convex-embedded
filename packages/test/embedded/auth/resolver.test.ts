@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { AuthResolver, createTestIdentity } from "#embedded/auth/resolver.js";
+import { AuthResolver, createTestIdentity } from "#embedded/auth/resolver";
 
 describe("AuthResolver", () => {
   it("initial state: getUserIdentity returns null", async () => {

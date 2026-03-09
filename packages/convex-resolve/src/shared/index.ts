@@ -14,8 +14,8 @@ export type {
   ResolveDocumentResponse,
   PushRequest,
   PushDocumentRequest,
-} from "./types.js";
+} from "$/shared/types";
 
-export { CrdtType } from "./types.js";
-export { createLogger } from "./logger.js";
-export { createConflict } from "./conflict.js";
+export { CrdtType } from "$/shared/types";
+export { createLogger } from "$/shared/logger";
+export { createConflict } from "$/shared/conflict";

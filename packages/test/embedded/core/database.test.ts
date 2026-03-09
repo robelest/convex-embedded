@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { Database } from "#embedded/core/database.js";
-import type { ParsedSchema } from "#embedded/core/schema.js";
+import { Database } from "#embedded/core/database";
+import type { ParsedSchema } from "#embedded/core/schema";
 
 // ---------------------------------------------------------------------------
 // Helpers

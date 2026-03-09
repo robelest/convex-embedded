@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { Database } from "#embedded/core/database.js";
-import { evaluateFieldPath, evaluateFilter } from "#embedded/core/query-engine.js";
-import type { ParsedSchema } from "#embedded/core/schema.js";
-import type { SerializedQuery } from "#embedded/core/types.js";
+import { Database } from "#embedded/core/database";
+import { evaluateFieldPath, evaluateFilter } from "#embedded/core/query-engine";
+import type { ParsedSchema } from "#embedded/core/schema";
+import type { SerializedQuery } from "#embedded/core/types";
 
 // ---------------------------------------------------------------------------
 // Helpers

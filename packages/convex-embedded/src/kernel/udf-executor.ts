@@ -18,16 +18,16 @@
 import type { Value } from "convex/values";
 import { convexToJson, jsonToConvex } from "convex/values";
 
-import type { FunctionPath, ModuleLoader } from "./module-loader.js";
-import { OpsContext, createOpsContext } from "./ops.js";
+import type { FunctionPath, ModuleLoader } from "$/kernel/module-loader";
+import { OpsContext, createOpsContext } from "$/kernel/ops";
 import {
   createSyncSyscall,
   createAsyncSyscall,
   createJsSyscall,
-} from "./syscalls.js";
-import type { RunUdfFn } from "./syscalls.js";
+} from "$/kernel/syscalls";
+import type { RunUdfFn } from "$/kernel/syscalls";
 
-import type { Database } from "../core/database.js";
+import type { Database } from "$/core/database";
 
 // ---------------------------------------------------------------------------
 // Global type augmentation for the Convex runtime
@@ -296,17 +296,20 @@ export class UdfExecutor {
 
     const mod = await this._moduleLoader.load(modulePath);
 
-    const func = mod[exportName];
-    if (func === undefined) {
+    const rawExport = mod[exportName];
+    if (rawExport === undefined) {
       throw new Error(
         `Expected a Convex function exported from module "${modulePath}" ` +
           `as \`${exportName}\`, but there is no such export.`,
       );
     }
 
-    // Validate that the export's declared type matches what we expect.
     // The Convex SDK sets flags like `isQuery`, `isMutation`, `isAction`
-    // on the registered function objects.
+    // on the registered function objects. We need to cast to access them
+    // since ConvexModule values are typed as `unknown`.
+    const func = rawExport as Record<string, unknown>;
+
+    // Validate that the export's declared type matches what we expect.
     switch (expectedType) {
       case "query":
         if (func.isQuery === false || func.isMutation || func.isAction) {

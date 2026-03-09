@@ -21,6 +21,7 @@ import type { ClientMessage, ServerMessage } from "../sync/protocol.js";
 import { SessionManager } from "../sync/session.js";
 import { WriteFanout } from "./write-fanout.js";
 import { createTransport } from "./transport.js";
+import type { EmbeddedTransport } from "./transport.js";
 import { AuthResolver } from "../auth/resolver.js";
 import type { UserIdentity } from "../auth/resolver.js";
 import { SchedulerExecutor } from "../scheduler/executor.js";
@@ -163,7 +164,7 @@ export class EmbeddedRuntime {
    * Returns `{ url, webSocketConstructor }` — pass these to the
    * ConvexClient constructor.
    */
-  createTransport(): { url: string; webSocketConstructor: any } {
+  createTransport(): EmbeddedTransport {
     return createTransport(this);
   }
 

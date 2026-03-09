@@ -33,10 +33,19 @@ export {
 } from "./runtime/embedded.js";
 
 export { createTransport } from "./runtime/transport.js";
+export type { EmbeddedTransport } from "./runtime/transport.js";
 
 export {
   LoopbackWebSocket,
   LoopbackWebSocketConstructor,
+} from "./runtime/loopback-ws.js";
+
+export type {
+  LoopbackEvent,
+  LoopbackOpenEvent,
+  LoopbackMessageEvent,
+  LoopbackCloseEvent,
+  LoopbackErrorEvent,
 } from "./runtime/loopback-ws.js";
 
 export { WriteFanout } from "./runtime/write-fanout.js";

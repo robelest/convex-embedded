@@ -6,6 +6,7 @@
  */
 
 import { LoopbackWebSocketConstructor } from "./loopback-ws.js";
+import type { LoopbackWebSocket } from "./loopback-ws.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -18,6 +19,14 @@ import { LoopbackWebSocketConstructor } from "./loopback-ws.js";
  */
 interface ProtocolHandler {
   handleMessage(message: string): Promise<string[]>;
+}
+
+/** Transport configuration for ConvexClient. */
+export interface EmbeddedTransport {
+  /** URL passed to ConvexClient (placeholder — no real network is used). */
+  url: string;
+  /** WebSocket constructor that routes messages through the embedded runtime. */
+  webSocketConstructor: new (url: string) => LoopbackWebSocket;
 }
 
 // ---------------------------------------------------------------------------
@@ -41,10 +50,7 @@ interface ProtocolHandler {
  * @returns        `{ url, webSocketConstructor }` suitable for passing
  *                 to `new ConvexClient(url, { webSocketConstructor })`.
  */
-export function createTransport(runtime: ProtocolHandler): {
-  url: string;
-  webSocketConstructor: any;
-} {
+export function createTransport(runtime: ProtocolHandler): EmbeddedTransport {
   const webSocketConstructor = LoopbackWebSocketConstructor(() => {
     // Per-connection session ID — captured from the first Connect message.
     let connectionSessionId: string | undefined;

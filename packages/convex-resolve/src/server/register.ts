@@ -132,16 +132,15 @@ export function register(config: RegisterConfig): RegisterResult {
 
   /**
    * Probe whether the resolve component is available at runtime.
-   * - Query context: uses ctx.runQuery(component.public.getLatestDeltas)
-   * - Mutation context: uses ctx.runMutation(component.public.insertDelta)
+   *
+   * Always uses a read-only query (getLatestDeltas with empty docIds)
+   * so the probe never writes to the deltas table. Both query and
+   * mutation contexts have access to ctx.runQuery.
    *
    * On remote Convex the call succeeds → cache isRemote = true.
    * On embedded the call throws "Could not find module" → isRemote = false.
    */
-  async function detectRuntime(
-    ctx: any,
-    mode: "query" | "mutation",
-  ): Promise<boolean> {
+  async function detectRuntime(ctx: any): Promise<boolean> {
     if (_runtimeKnown) return _isRemote;
 
     if (!component) {
@@ -151,28 +150,15 @@ export function register(config: RegisterConfig): RegisterResult {
       return false;
     }
 
-    const probe =
-      mode === "query"
-        ? Fx.from({
-            ok: () =>
-              ctx.runQuery(component.public.getLatestDeltas, {
-                collection: table,
-                docIds: [],
-              }),
-            err: (e) => e,
-          })
-        : Fx.from({
-            ok: () =>
-              ctx.runMutation(component.public.insertDelta, {
-                collection: "__probe__",
-                docId: "__probe__",
-                update: toArrayBuffer(new Uint8Array(0)),
-              }),
-            err: (e) => e,
-          });
-
     await Fx.run(
-      probe.pipe(
+      Fx.from({
+        ok: () =>
+          ctx.runQuery(component.public.getLatestDeltas, {
+            collection: table,
+            docIds: [],
+          }),
+        err: (e) => e,
+      }).pipe(
         Fx.fold({
           ok: () => {
             _runtimeKnown = true;
@@ -207,7 +193,7 @@ export function register(config: RegisterConfig): RegisterResult {
     },
     returns: v.null(),
     handler: async (ctx: any, args: { docId: string }): Promise<null> => {
-      if (!(await detectRuntime(ctx, "mutation"))) {
+      if (!(await detectRuntime(ctx))) {
         return null;
       }
 
@@ -266,7 +252,7 @@ export function register(config: RegisterConfig): RegisterResult {
       ctx: any,
       args: { documents: Array<{ docId: string; vector: ArrayBuffer }> },
     ): Promise<Array<{ docId: string; diff?: ArrayBuffer }>> => {
-      if (!(await detectRuntime(ctx, "query"))) {
+      if (!(await detectRuntime(ctx))) {
         // On local embedded runtime — return empty diffs (no-op)
         return args.documents.map((d) => ({ docId: d.docId }));
       }
@@ -344,7 +330,7 @@ export function register(config: RegisterConfig): RegisterResult {
         // entirely to avoid the overhead on local-only mutations.
         const needsRemote = remote || recordDeltaRef;
         const isRemote = needsRemote
-          ? await detectRuntime(ctx, "mutation")
+          ? await detectRuntime(ctx)
           : false;
 
         // 2. On remote, run the remote: block in the same transaction

@@ -1,12 +1,8 @@
 import { ConvexError } from "convex/values";
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 
 import { SyncProtocolHandler } from "#embedded/sync/protocol";
-import type {
-  ClientMessage,
-  ServerMessage,
-  StateVersion,
-} from "#embedded/sync/protocol";
+import type { ClientMessage } from "#embedded/sync/protocol";
 import { SubscriptionManager } from "#embedded/sync/subscriptions";
 
 // ---------------------------------------------------------------------------

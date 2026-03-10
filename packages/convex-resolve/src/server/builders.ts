@@ -12,14 +12,7 @@
  *     then _recordDelta is scheduled via ctx.scheduler.runAfter(0, ...).
  *   - On local embedded runtime: handler runs only. remote is ignored.
  */
-import {
-  type MutationBuilder,
-  type QueryBuilder,
-  type GenericMutationCtx,
-  type GenericQueryCtx,
-  type GenericDataModel,
-  type FunctionReference,
-} from "convex/server";
+import { type FunctionReference } from "convex/server";
 
 import { createLogger } from "@/shared/logger";
 

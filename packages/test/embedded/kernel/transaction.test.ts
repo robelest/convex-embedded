@@ -326,7 +326,7 @@ describe("OccTransaction", () => {
 
   it("uses default OCC_MAX_RETRIES when maxRetries is not specified", () => {
     const db = createMockDb();
-    const tx = new OccTransaction({ db });
+    const _tx = new OccTransaction({ db });
 
     // We can't directly inspect _maxRetries, but we can verify OCC_MAX_RETRIES
     // is exported and has a reasonable value

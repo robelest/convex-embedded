@@ -980,7 +980,7 @@ function timeout(ms: number) {
  *
  * @category Combinator
  */
-function retry<E>(policy: RetryPolicy<E>) {
+function _retry<E>(policy: RetryPolicy<E>) {
   return <A>(self: Fx<A, E>): Fx<A, E> =>
     new FxImpl(async () => {
       let attempt = 0;
@@ -996,12 +996,21 @@ function retry<E>(policy: RetryPolicy<E>) {
     });
 }
 
-// Attach schedule builders as properties on the retry function
-retry.exponential = schedule.exponential;
-retry.jittered = schedule.jittered;
-retry.recurs = schedule.recurs;
-retry.compose = schedule.compose;
-retry.while = schedule.while_;
+/**
+ * `retry` is both a combinator and a namespace.
+ *
+ * - As a combinator: `Fx.retry(policy)` returns a function for `.pipe()`.
+ * - As a namespace: `Fx.retry.exponential(100)`, `Fx.retry.jittered(...)`, etc.
+ *
+ * Merged via `Object.assign` to produce clean DTS output.
+ */
+const retry = Object.assign(_retry, {
+  exponential: schedule.exponential,
+  jittered: schedule.jittered,
+  recurs: schedule.recurs,
+  compose: schedule.compose,
+  while: schedule.while_,
+});
 
 // ---------------------------------------------------------------------------
 // Resource management

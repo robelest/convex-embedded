@@ -229,19 +229,21 @@ export class UdfExecutor {
     functionPath: FunctionPath,
     args: Record<string, unknown>,
   ): Promise<MutationResult> {
-    const self = this;
+    const db = this._db;
+    const resolveFunc = this._resolveFunc.bind(this);
+    const noHandlerError = this._noHandlerError.bind(this);
     return this._runWithGlobals(() =>
       Fx.run(
         Fx.bracket(
           // Acquire: start transaction
           Fx.sync(() => {
-            self._db.startTransaction();
+            db.startTransaction();
           }),
           // Use: run the mutation
           () =>
             Fx.gen(function* () {
               const func: Record<string, unknown> = yield* Fx.promise(() =>
-                self._resolveFunc(functionPath, "mutation"),
+                resolveFunc(functionPath, "mutation"),
               );
 
               let result: unknown;
@@ -259,21 +261,21 @@ export class UdfExecutor {
               } else {
                 const handler = getHandler(func);
                 if (handler === null) {
-                  return yield* Fx.fail(self._noHandlerError(functionPath));
+                  return yield* Fx.fail(noHandlerError(functionPath));
                 }
                 result = yield* Fx.promise(() =>
                   Promise.resolve(handler({}, args ?? {})),
                 );
               }
 
-              const { tablesWritten } = self._db.commit();
+              const { tablesWritten } = db.commit();
               return { result, tablesWritten } as MutationResult;
             }),
           // Release: rollback on failure (commit already happened on success path)
           (_tx, exit) =>
             Fx.sync(() => {
               if (exit._tag === "Failure") {
-                self._db.rollbackWrites();
+                db.rollbackWrites();
               }
             }),
         ),

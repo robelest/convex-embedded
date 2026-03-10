@@ -13,14 +13,12 @@ import { compareValues } from "@/core/compare";
 import type { ParsedSchema } from "@/core/schema";
 import type {
   FilterJson,
-  IndexInfo,
   QueryId,
   SerializedQuery,
   SerializedRangeExpression,
   SerializedSearchFilter,
   Source,
   StoredDocument,
-  VectorIndexInfo,
 } from "@/core/types";
 
 // ---------------------------------------------------------------------------

@@ -244,13 +244,7 @@ describe("compareValues", () => {
       it(`${label}: compare(a,b) > 0 ⟹ compare(b,a) < 0`, () => {
         const ab = compareValues(a, b);
         const ba = compareValues(b, a);
-        if (ab > 0) {
-          expect(ba).toBeLessThan(0);
-        } else if (ab < 0) {
-          expect(ba).toBeGreaterThan(0);
-        } else {
-          expect(ba).toBe(0);
-        }
+        expect(Math.sign(ba)).toBe(-Math.sign(ab));
       });
     }
   });

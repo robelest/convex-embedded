@@ -303,7 +303,9 @@ describe("Database — schema validation", () => {
   it("inserting an invalid document throws (missing required field)", () => {
     const db = createSchemaDb();
     db.startTransaction();
-    expect(() => db.insert("messages", { body: "hello" })).toThrow();
+    expect(() => db.insert("messages", { body: "hello" })).toThrow(
+      /Missing required field/,
+    );
   });
 
   it("inserting an invalid document throws (extra field)", () => {
@@ -311,15 +313,15 @@ describe("Database — schema validation", () => {
     db.startTransaction();
     expect(() =>
       db.insert("messages", { body: "hello", author: "alice", extra: true }),
-    ).toThrow();
+    ).toThrow(/Unexpected field/);
   });
 
   it("inserting an invalid document throws (wrong type)", () => {
     const db = createSchemaDb();
     db.startTransaction();
-    expect(() =>
-      db.insert("messages", { body: 123, author: "alice" }),
-    ).toThrow();
+    expect(() => db.insert("messages", { body: 123, author: "alice" })).toThrow(
+      /Validator error/,
+    );
   });
 
   it("inserting into an unschema'd table (not in schema) succeeds", () => {
@@ -392,6 +394,8 @@ describe("Database — error cases", () => {
 
   it("write outside transaction throws", () => {
     const db = createDb();
-    expect(() => db.insert("tasks", { title: "fail" })).toThrow();
+    expect(() => db.insert("tasks", { title: "fail" })).toThrow(
+      /outside of transaction/,
+    );
   });
 });

@@ -101,9 +101,8 @@ export function createTransport(runtime: ProtocolHandler): EmbeddedTransport {
       // Remove from tracking when the socket closes (whether via
       // explicit close() or runtime shutdown).
       // Listen via addEventListener so we don't clobber the SDK's onclose.
-      const self = this;
       this.addEventListener("close", () => {
-        activeSockets.delete(self);
+        activeSockets.delete(this);
       });
     }
   };
@@ -113,7 +112,7 @@ export function createTransport(runtime: ProtocolHandler): EmbeddedTransport {
     webSocketConstructor: TrackedWsConstructor,
     closeAll(): void {
       // Snapshot the set since close() triggers removal via the listener.
-      for (const ws of [...activeSockets]) {
+      for (const ws of Array.from(activeSockets)) {
         ws.close(1001, "runtime shutdown");
       }
       activeSockets.clear();

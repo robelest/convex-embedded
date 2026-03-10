@@ -1,6 +1,7 @@
 import { Fx } from "@robelest/fx";
 import type { FunctionReference } from "convex/server";
 import { v } from "convex/values";
+
 /**
  * register() — server-side entry point for convex-resolve.
  *
@@ -18,8 +19,6 @@ import { v } from "convex/values";
  *     migrations: { 2: internal.migrations.tasksV2 },
  *   });
  */
-import * as Y from "yjs";
-
 import type { Definition } from "@/server/schema";
 import { encodeDocumentState, computeDiff, isDiffEmpty } from "@/server/schema";
 import { createLogger } from "@/shared/logger";

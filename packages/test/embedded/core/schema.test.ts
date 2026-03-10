@@ -7,7 +7,7 @@ import {
   validateFieldNames,
   parseSchema,
 } from "#embedded/core/schema";
-import type { ValidatorJSON, ObjectFieldType } from "#embedded/core/schema";
+import type { ValidatorJSON } from "#embedded/core/schema";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -185,7 +185,9 @@ describe("validateValidator", () => {
 
     it("rejects a non-matching string", () => {
       const validator: ValidatorJSON = { type: "literal", value: "active" };
-      expect(() => validateValidator(validator, "inactive")).toThrow();
+      expect(() => validateValidator(validator, "inactive")).toThrow(
+        /Expected/,
+      );
     });
 
     it("accepts the exact matching value (number)", () => {
@@ -195,7 +197,7 @@ describe("validateValidator", () => {
 
     it("rejects a different number", () => {
       const validator: ValidatorJSON = { type: "literal", value: 42 };
-      expect(() => validateValidator(validator, 43)).toThrow();
+      expect(() => validateValidator(validator, 43)).toThrow(/Expected/);
     });
 
     it("accepts the exact matching value (boolean)", () => {
@@ -205,7 +207,7 @@ describe("validateValidator", () => {
 
     it("rejects false when literal is true", () => {
       const validator: ValidatorJSON = { type: "literal", value: true };
-      expect(() => validateValidator(validator, false)).toThrow();
+      expect(() => validateValidator(validator, false)).toThrow(/Expected/);
     });
   });
 
@@ -223,7 +225,9 @@ describe("validateValidator", () => {
     });
 
     it("rejects an id for the wrong table", () => {
-      expect(() => validateValidator(validator, "10000;users")).toThrow();
+      expect(() => validateValidator(validator, "10000;users")).toThrow(
+        /Expected ID for table/,
+      );
     });
 
     it("rejects a non-string value", () => {
@@ -231,7 +235,9 @@ describe("validateValidator", () => {
     });
 
     it("rejects a string without semicolon", () => {
-      expect(() => validateValidator(validator, "abc")).toThrow();
+      expect(() => validateValidator(validator, "abc")).toThrow(
+        /Expected ID for table/,
+      );
     });
   });
 
@@ -285,7 +291,9 @@ describe("validateValidator", () => {
     });
 
     it("rejects a value matching no variant", () => {
-      expect(() => validateValidator(validator, true)).toThrow();
+      expect(() => validateValidator(validator, true)).toThrow(
+        /Expected one of/,
+      );
     });
   });
 

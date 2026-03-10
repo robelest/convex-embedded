@@ -180,7 +180,7 @@ describe("monitor.create()", () => {
     // Force an emit
     expect(listener).toHaveBeenCalled();
 
-    const callCount = listener.mock.calls.length;
+    const _callCount = listener.mock.calls.length;
     unsub();
 
     // After unsub, no more calls even if status changes

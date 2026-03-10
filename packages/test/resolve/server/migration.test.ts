@@ -1,5 +1,5 @@
 import { v } from "convex/values";
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 
 import { runMigrations, migration } from "#resolve/server/migration";
 import { define, register as registerField } from "#resolve/server/schema";
@@ -16,7 +16,7 @@ function createMockCtx() {
       query: (tableName: string) => {
         const data = tables[tableName] ?? [];
         return {
-          filter: (fn: any) => ({
+          filter: (_fn: any) => ({
             collect: async () => {
               // Simple mock filter — just return all (filter is a no-op mock)
               return data;

@@ -8,11 +8,7 @@ import { describe, it, expect, vi } from "vitest";
 
 import { Database } from "#embedded/core/database";
 import type { ParsedSchema } from "#embedded/core/schema";
-import type {
-  DocumentId,
-  SerializedQuery,
-  SerializedRangeExpression,
-} from "#embedded/core/types";
+import type { DocumentId, SerializedQuery } from "#embedded/core/types";
 import { SubscriptionManager } from "#embedded/sync/subscriptions";
 
 // ---------------------------------------------------------------------------
@@ -315,15 +311,17 @@ describe("Integration: Schema Validation", () => {
   it("rejects documents with wrong field type", () => {
     const db = new Database(messagesSchema());
     db.startTransaction();
-    expect(() =>
-      db.insert("messages", { body: 123, author: "alice" }),
-    ).toThrow();
+    expect(() => db.insert("messages", { body: 123, author: "alice" })).toThrow(
+      /Validator error/,
+    );
   });
 
   it("rejects documents with missing required field", () => {
     const db = new Database(messagesSchema());
     db.startTransaction();
-    expect(() => db.insert("messages", { body: "hi" })).toThrow();
+    expect(() => db.insert("messages", { body: "hi" })).toThrow(
+      /Missing required field/,
+    );
   });
 
   it("rejects documents with extra fields", () => {
@@ -331,7 +329,7 @@ describe("Integration: Schema Validation", () => {
     db.startTransaction();
     expect(() =>
       db.insert("messages", { body: "hi", author: "alice", extra: true }),
-    ).toThrow();
+    ).toThrow(/Unexpected field/);
   });
 
   it("patch also validates against schema", () => {
@@ -339,7 +337,9 @@ describe("Integration: Schema Validation", () => {
     db.startTransaction();
     const id = db.insert("messages", { body: "hi", author: "alice" });
     // Patching body to a number should fail.
-    expect(() => db.patch("messages", id, { body: 42 })).toThrow();
+    expect(() => db.patch("messages", id, { body: 42 })).toThrow(
+      /Validator error/,
+    );
   });
 
   it("replace also validates against schema", () => {
@@ -347,7 +347,9 @@ describe("Integration: Schema Validation", () => {
     db.startTransaction();
     const id = db.insert("messages", { body: "hi", author: "alice" });
     // Replace with missing required field.
-    expect(() => db.replace("messages", id, { body: "new" })).toThrow();
+    expect(() => db.replace("messages", id, { body: "new" })).toThrow(
+      /Missing required field/,
+    );
   });
 
   it("inserting into table not in schema is allowed (no validation)", () => {
@@ -1075,17 +1077,21 @@ describe("Integration: Snapshot Isolation", () => {
 describe("Integration: Error Cases", () => {
   it("write outside transaction throws", () => {
     const db = new Database(null);
-    expect(() => db.insert("tasks", { title: "fail" })).toThrow();
+    expect(() => db.insert("tasks", { title: "fail" })).toThrow(
+      /outside of transaction/,
+    );
   });
 
   it("commit without transaction throws", () => {
     const db = new Database(null);
-    expect(() => db.commit()).toThrow();
+    expect(() => db.commit()).toThrow(/already committed or rolled back/);
   });
 
   it("rollback without transaction throws", () => {
     const db = new Database(null);
-    expect(() => db.rollbackWrites()).toThrow();
+    expect(() => db.rollbackWrites()).toThrow(
+      /already committed or rolled back/,
+    );
   });
 
   it("patch on non-existent document throws", () => {
@@ -1133,7 +1139,7 @@ describe("Integration: Error Cases", () => {
   it("get with wrong table name throws", () => {
     const db = freshDb();
     const id = db.insert("tasks", { title: "a" });
-    expect(() => db.get("users", id)).toThrow();
+    expect(() => db.get("users", id)).toThrow(/expected ID in table/);
     db.rollbackWrites();
   });
 

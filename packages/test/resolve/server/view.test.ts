@@ -50,7 +50,7 @@ describe("view.authenticated()", () => {
 
 describe("view.ownership()", () => {
   it("filters by owner field when authenticated", async () => {
-    const filterFn = vi.fn((fn: any) => {
+    const filterFn = vi.fn((_fn: any) => {
       // Simulate the filter builder
       return "filtered";
     });

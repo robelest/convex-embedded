@@ -26,7 +26,6 @@ import { Fx } from "@robelest/fx";
  *   m.on('change', (status) => console.log(status));
  *   m.stop();
  */
-import * as Y from "yjs";
 
 import { createLogger } from "@/shared/logger";
 import type { MonitorStatus, ResolveProgress } from "@/shared/types";

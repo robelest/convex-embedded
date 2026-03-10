@@ -39,11 +39,6 @@ export interface MigrationConfig {
   onMigrationError?: MigrationErrorHandler;
 }
 
-interface VersionRecord {
-  table: string;
-  version: number;
-}
-
 // ---------------------------------------------------------------------------
 // Schema version table name — used in local embedded runtime docstore
 // ---------------------------------------------------------------------------

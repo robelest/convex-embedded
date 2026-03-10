@@ -5,7 +5,7 @@
  * ValidatorJSON shape that `SchemaDefinition.export()` produces.
  */
 import type { JSONValue, Value } from "convex/values";
-import { convexToJson, jsonToConvex } from "convex/values";
+import { convexToJson } from "convex/values";
 
 // ---------------------------------------------------------------------------
 // Public types

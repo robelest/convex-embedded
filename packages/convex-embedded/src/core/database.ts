@@ -347,7 +347,7 @@ export class Database {
   get(
     tableName: TableName | undefined,
     id: DocumentId,
-    options: { countRead?: boolean } = {},
+    _options: { countRead?: boolean } = {},
   ): StoredDocument | null {
     this._validateId(tableName, id);
 

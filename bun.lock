@@ -35,6 +35,9 @@
     "packages/convex-embedded": {
       "name": "@robelest/convex-embedded",
       "version": "0.0.1",
+      "dependencies": {
+        "@robelest/fx": "workspace:*",
+      },
       "devDependencies": {
         "convex": "catalog:",
         "tsdown": "^0.12.0",
@@ -49,6 +52,7 @@
       "name": "@robelest/convex-resolve",
       "version": "0.0.1",
       "dependencies": {
+        "@robelest/fx": "workspace:*",
         "convex-helpers": "^0.1.0",
         "yjs": "^13.6.0",
       },
@@ -61,6 +65,10 @@
       "peerDependencies": {
         "convex": "^1.17.0",
       },
+    },
+    "packages/fx": {
+      "name": "@robelest/fx",
+      "version": "0.0.1",
     },
     "packages/test": {
       "name": "@robelest/convex-edge-tests",
@@ -251,6 +259,8 @@
     "@robelest/convex-embedded": ["@robelest/convex-embedded@workspace:packages/convex-embedded"],
 
     "@robelest/convex-resolve": ["@robelest/convex-resolve@workspace:packages/convex-resolve"],
+
+    "@robelest/fx": ["@robelest/fx@workspace:packages/fx"],
 
     "@rolldown/binding-android-arm64": ["@rolldown/binding-android-arm64@1.0.0-rc.8", "", { "os": "android", "cpu": "arm64" }, "sha512-5bcmMQDWEfWUq3m79Mcf/kbO6e5Jr6YjKSsA1RnpXR6k73hQ9z1B17+4h93jXpzHvS18p7bQHM1HN/fSd+9zog=="],
 
@@ -561,6 +571,8 @@
     "why-is-node-running": ["why-is-node-running@2.3.0", "", { "dependencies": { "siginfo": "^2.0.0", "stackback": "0.0.2" }, "bin": { "why-is-node-running": "cli.js" } }, "sha512-hUrmaWBdVDcxvYqnyh09zunKzROWjbZTiNy8dBEjkS7ehEDQibXJ7XvlmtbwuTclUiIyN+CyXQD4Vmko8fNm8w=="],
 
     "ws": ["ws@8.18.0", "", { "peerDependencies": { "bufferutil": "^4.0.1", "utf-8-validate": ">=5.0.2" }, "optionalPeers": ["bufferutil", "utf-8-validate"] }, "sha512-8VbfWfHLbbwu3+N6OKsOMpBdT4kXPDDB9cJk2bJ6mh9ucxdlnNvH1e+roYkKmN9Nxw2yjz7VzeO9oOz2zJ04Pw=="],
+
+    "yaml": ["yaml@2.8.2", "", { "bin": { "yaml": "bin.mjs" } }, "sha512-mplynKqc1C2hTVYxd0PU2xQAc22TI1vShAYGksCCfxbn/dFwnHTNi1bvYsBTkhdUNtGIf5xNOg938rrSSYvS9A=="],
 
     "yjs": ["yjs@13.6.29", "", { "dependencies": { "lib0": "^0.2.99" } }, "sha512-kHqDPdltoXH+X4w1lVmMtddE3Oeqq48nM40FD5ojTd8xYhQpzIDcfE2keMSU5bAgRPJBe225WTUdyUgj1DtbiQ=="],
 

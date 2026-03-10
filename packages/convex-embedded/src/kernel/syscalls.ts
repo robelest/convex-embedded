@@ -103,7 +103,15 @@ export function createSyncSyscall(
 export function createAsyncSyscall(
   db: Database,
   runUdf: RunUdfFn,
-  options?: { getIdentity?: () => Promise<unknown> },
+  options?: {
+    getIdentity?: () => Promise<unknown>;
+    /**
+     * Optional set of active timer IDs. When provided, `setTimeout` calls
+     * from the `1.0/schedule` syscall register their timer IDs here so the
+     * runtime can clear them on shutdown (prevents leaked timers).
+     */
+    activeTimers?: Set<ReturnType<typeof setTimeout>>;
+  },
 ): (op: string, jsonArgs: string) => Promise<string> {
   const self = async (op: string, jsonArgs: string): Promise<string> => {
     const args = JSON.parse(jsonArgs);
@@ -204,9 +212,13 @@ export function createAsyncSyscall(
           state: { kind: "pending" },
         });
 
-        // Fire-and-forget: execute the scheduled function after the delay
-        setTimeout(
+        // Fire-and-forget: execute the scheduled function after the delay.
+        // Register the timer in activeTimers (if provided) so the runtime
+        // can clear it on shutdown, preventing leaked timers.
+        const timerId = setTimeout(
           (async () => {
+            options?.activeTimers?.delete(timerId);
+
             // Check if canceled before running
             const job = db.get("_scheduled_functions", jobId);
             const jobState = job?.state as { kind: string } | null;
@@ -259,6 +271,7 @@ export function createAsyncSyscall(
           }) as () => void,
           Math.max(0, tsInSecs * 1000 - Date.now()),
         );
+        options?.activeTimers?.add(timerId);
 
         return JSON.stringify(convexToJson(jobId));
       }

@@ -7,6 +7,7 @@
  * ConvexClient can talk to via an in-memory transport.
  */
 
+import { Fx, detach } from "@robelest/fx";
 import type { JSONValue } from "convex/values";
 import { Database } from "@/core/database";
 import { parseSchema } from "@/core/schema";
@@ -79,6 +80,13 @@ export class EmbeddedRuntime {
   private _hydrated: Promise<void>;
   private _shutdown = false;
 
+  /**
+   * Shared set of active timer IDs from scheduled function `setTimeout`
+   * calls (via `1.0/schedule` syscall). Cleared on {@link shutdown} to
+   * prevent leaked timers accessing the database after teardown.
+   */
+  private _activeTimers = new Set<ReturnType<typeof setTimeout>>();
+
   constructor(options: EmbeddedRuntimeOptions) {
     console.debug(
       "[convex-embedded] creating runtime, modules:",
@@ -109,6 +117,7 @@ export class EmbeddedRuntime {
         args: Record<string, unknown>,
       ) => this._runUdf(type, path, args),
       getIdentity: () => this.auth.getUserIdentity(),
+      activeTimers: this._activeTimers,
     });
 
     // 5. Transaction manager -----------------------------------------------
@@ -158,13 +167,21 @@ export class EmbeddedRuntime {
       },
     });
 
-    // 13. Hydrate from storage (fire-and-forget) ---------------------------
+    // 13. Hydrate from storage -----------------------------------------------
     //     Messages are gated behind this promise in handleMessage(), so
     //     the runtime is safe to construct synchronously — hydration
     //     completes before any client traffic is processed.
-    this._hydrated = this.db.hydrate().catch((err) => {
-      console.error("[convex-embedded] hydration failed:", err);
-    });
+    this._hydrated = Fx.run(
+      Fx.from({
+        ok: () => this.db.hydrate(),
+        err: (err) => err as Error,
+      }).pipe(
+        Fx.inspect((err) =>
+          Fx.sync(() => console.error("[convex-embedded] hydration failed:", err)),
+        ),
+        Fx.recover(() => Fx.unit),
+      ),
+    );
   }
 
   // -----------------------------------------------------------------------
@@ -338,12 +355,22 @@ export class EmbeddedRuntime {
     this._transports.length = 0;
 
     this.scheduler.shutdown();
+
+    // Clear any untracked scheduled-function timers from syscalls.
+    for (const timerId of this._activeTimers) {
+      clearTimeout(timerId);
+    }
+    this._activeTimers.clear();
+
     this.sessions.clear();
     this.subscriptions.clear();
     this.writeFanout.close();
-    this._storageAdapter?.close?.()?.catch((err) => {
-      console.error("[convex-embedded] storage close failed:", err);
-    });
+    if (this._storageAdapter?.close) {
+      detach(
+        () => this._storageAdapter!.close!(),
+        "[convex-embedded] storage close failed:",
+      );
+    }
   }
 
   async [Symbol.asyncDispose](): Promise<void> {
@@ -373,24 +400,8 @@ export class EmbeddedRuntime {
         return this.executor.executeQuery(path, args);
 
       case "mutation": {
-        const result = await this.executor.executeMutation(path, args);
-        // After executeMutation commits internally, the Database's commit()
-        // has already bumped the timestamp and returned tablesWritten. But
-        // the UdfExecutor doesn't surface that to us. We work around this
-        // by noting that the Database.commit() is called inside
-        // executeMutation, and we can't intercept it there without modifying
-        // UdfExecutor. Instead, we check if the DB timestamp changed and
-        // do a broad invalidation, or we rely on the protocol handler's
-        // mutation path (which calls _runUdf → executeMutation) returning
-        // results that trigger a Transition re-query on the client side.
-        //
-        // For proper invalidation we need the tables that were written.
-        // Since the UdfExecutor calls db.commit() internally, and commit()
-        // returns { timestamp, tablesWritten }, but UdfExecutor doesn't
-        // expose that, we hook into the Database's commit method.
-        //
-        // The simplest reliable approach: wrap db.commit to capture
-        // tablesWritten. This is done via _wrapCommitOnce below.
+        const { result, tablesWritten } = await this.executor.executeMutation(path, args);
+        this.onMutationCommit(tablesWritten);
         return result;
       }
 
@@ -444,28 +455,8 @@ export class EmbeddedRuntime {
       runMutation: async (udfPath: string, ...args: unknown[]) => {
         const path = resolveFunctionPath({ name: udfPath });
         const convexArgs = (args[0] ?? {}) as Record<string, unknown>;
-        // Wrap db.commit to capture tablesWritten for invalidation.
-        const originalCommit = this.db.commit.bind(this.db);
-        let capturedTablesWritten: Set<string> | undefined;
-        this.db.commit = () => {
-          const commitResult = originalCommit();
-          capturedTablesWritten = commitResult.tablesWritten;
-          return commitResult;
-        };
-
-        try {
-          const result = await this._runUdf("mutation", path, convexArgs);
-
-          // Invalidate subscriptions + notify cross-tab fanout.
-          if (capturedTablesWritten !== undefined && capturedTablesWritten.size > 0) {
-            this.onMutationCommit(capturedTablesWritten);
-          }
-
-          return result as JSONValue;
-        } finally {
-          // Restore original commit.
-          this.db.commit = originalCommit;
-        }
+        const result = await this._runUdf("mutation", path, convexArgs);
+        return result as JSONValue;
       },
 
       runAction: async (udfPath: string, ...args: unknown[]) => {

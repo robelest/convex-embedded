@@ -8,6 +8,7 @@ export default defineConfig({
   dts: true,
   clean: true,
   external: ["convex", "convex/*"],
+  noExternal: ["@robelest/fx"],
   alias: {
     "@": resolve(import.meta.dirname, "src"),
   },

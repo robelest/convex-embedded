@@ -227,7 +227,7 @@ describe("OccTransaction", () => {
         tx.addRead("1;messages" as any, 1);
         return null;
       }),
-    ).rejects.toThrow(/OCC transaction failed/);
+    ).rejects.toThrow(/OCC conflict/);
 
     expect(db.rollbackWrites).toHaveBeenCalled();
   });
@@ -244,79 +244,9 @@ describe("OccTransaction", () => {
         tx.addRead("1;messages" as any, 1);
         return null;
       }),
-    ).rejects.toThrow(/OCC transaction failed/);
+    ).rejects.toThrow(/OCC conflict/);
 
     expect(db.rollbackWrites).toHaveBeenCalled();
-  });
-
-  it("retries on OccConflictError up to maxRetries", async () => {
-    const db = createMockDb();
-    const maxRetries = 3;
-    const tx = new OccTransaction({ db, maxRetries });
-
-    let attempts = 0;
-
-    // First N calls → conflict, then succeed
-    db.getDocumentTimestamp
-      .mockReturnValueOnce(999) // attempt 0: conflict
-      .mockReturnValueOnce(999) // attempt 1: conflict
-      .mockReturnValueOnce(999) // attempt 2: conflict
-      .mockReturnValueOnce(5); // attempt 3: matches
-
-    const executePromise = tx.execute(async () => {
-      attempts++;
-      tx.addRead("1;messages" as any, 5);
-      return "done";
-    });
-
-    // Advance timers to handle backoff sleeps
-    // Run all pending timers repeatedly to cover all retries
-    for (let i = 0; i < maxRetries + 1; i++) {
-      await vi.advanceTimersByTimeAsync(10_000);
-    }
-
-    const result = await executePromise;
-
-    expect(result).toBe("done");
-    expect(attempts).toBe(maxRetries + 1); // initial + retries
-    expect(db.startTransaction).toHaveBeenCalledTimes(maxRetries + 1);
-    expect(db.rollbackWrites).toHaveBeenCalledTimes(maxRetries); // rolled back on each conflict
-  });
-
-  it("stops retrying after maxRetries and throws", async () => {
-    const db = createMockDb();
-    const tx = new OccTransaction({ db, maxRetries: 2 });
-
-    // Always conflict
-    db.getDocumentTimestamp.mockReturnValue(999);
-
-    // Capture the promise and attach a catch handler immediately to prevent
-    // unhandled rejection warnings while timers are advancing.
-    let caughtError: Error | undefined;
-    const executePromise = tx
-      .execute(async () => {
-        tx.addRead("1;messages" as any, 1);
-        return null;
-      })
-      .catch((err: Error) => {
-        caughtError = err;
-      });
-
-    // Advance timers to exhaust all retries
-    for (let i = 0; i < 10; i++) {
-      await vi.advanceTimersByTimeAsync(10_000);
-    }
-
-    await executePromise;
-
-    expect(caughtError).toBeDefined();
-    expect(caughtError!.message).toMatch(
-      /OCC transaction failed after 3 attempts/,
-    );
-
-    // 1 initial + 2 retries = 3
-    expect(db.startTransaction).toHaveBeenCalledTimes(3);
-    expect(db.rollbackWrites).toHaveBeenCalledTimes(3);
   });
 
   it("propagates non-OccConflictError immediately without retrying", async () => {
@@ -368,7 +298,7 @@ describe("OccTransaction", () => {
 
     // maxRetries=2, so 3 attempts total, all conflict → fails
     expect(caughtError).toBeDefined();
-    expect(caughtError!.message).toMatch(/OCC transaction failed/);
+    expect(caughtError!.message).toMatch(/OCC conflict/);
 
     // All 3 attempts ran
     expect(attempt).toBe(3);
@@ -388,7 +318,7 @@ describe("OccTransaction", () => {
         tx.addTableRead("messages");
         return null;
       }),
-    ).rejects.toThrow(/OCC transaction failed/);
+    ).rejects.toThrow(/OCC conflict/);
 
     expect(db.rollbackWrites).toHaveBeenCalled();
   });

@@ -17,6 +17,7 @@
  */
 import type { Value } from "convex/values";
 import { convexToJson, jsonToConvex } from "convex/values";
+import { Fx } from "@robelest/fx";
 
 import type { FunctionPath, ModuleLoader } from "@/kernel/module-loader";
 import { OpsContext, createOpsContext } from "@/kernel/ops";
@@ -110,12 +111,27 @@ function getHandler(func: Record<string, unknown>): HandlerFn | null {
 // UdfExecutor
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Return types
+// ---------------------------------------------------------------------------
+
+export interface MutationResult {
+  result: unknown;
+  tablesWritten: Set<string>;
+}
+
 export interface UdfExecutorOptions {
   db: Database;
   moduleLoader: ModuleLoader;
   runUdf: RunUdfFn;
   /** Optional callback for `1.0/getUserIdentity` syscall (auth). */
   getIdentity?: () => Promise<unknown>;
+  /**
+   * Optional set of active timer IDs from scheduled function `setTimeout`
+   * calls. When provided, the runtime can clear these on shutdown to
+   * prevent leaked timers.
+   */
+  activeTimers?: Set<ReturnType<typeof setTimeout>>;
 }
 
 /**
@@ -137,12 +153,14 @@ export class UdfExecutor {
   private _moduleLoader: ModuleLoader;
   private _runUdf: RunUdfFn;
   private _getIdentity?: () => Promise<unknown>;
+  private _activeTimers?: Set<ReturnType<typeof setTimeout>>;
 
-  constructor({ db, moduleLoader, runUdf, getIdentity }: UdfExecutorOptions) {
+  constructor({ db, moduleLoader, runUdf, getIdentity, activeTimers }: UdfExecutorOptions) {
     this._db = db;
     this._moduleLoader = moduleLoader;
     this._runUdf = runUdf;
     this._getIdentity = getIdentity;
+    this._activeTimers = activeTimers;
   }
 
   // -----------------------------------------------------------------------
@@ -181,36 +199,61 @@ export class UdfExecutor {
   /**
    * Execute a mutation function. Wraps in a transaction and commits
    * on success, rolls back on error.
+   *
+   * Uses Fx.bracket to manage the transaction lifecycle:
+   * - Acquire: startTransaction()
+   * - Use: run mutation body + commit()
+   * - Release (failure only): rollbackWrites()
    */
-  async executeMutation(functionPath: FunctionPath, args: Record<string, unknown>): Promise<unknown> {
-    return this._runWithGlobals(async () => {
-      this._db.startTransaction();
-      try {
-        const func = await this._resolveFunc(functionPath, "mutation");
+  async executeMutation(functionPath: FunctionPath, args: Record<string, unknown>): Promise<MutationResult> {
+    const self = this;
+    return this._runWithGlobals(() =>
+      Fx.run(
+        Fx.bracket(
+          // Acquire: start transaction
+          Fx.sync(() => {
+            self._db.startTransaction();
+          }),
+          // Use: run the mutation
+          () =>
+            Fx.gen(function* () {
+              const func: Record<string, unknown> = yield* Fx.promise(() =>
+                self._resolveFunc(functionPath, "mutation")
+              );
 
-        let result: unknown;
+              let result: unknown;
+              if (typeof func.invokeMutation === "function") {
+                const invokeMutation = func.invokeMutation as (argsStr: string) => Promise<string>;
+                const argsStr = JSON.stringify(
+                  convexToJson([(args ?? {}) as Value])
+                );
+                const rawResult: string = yield* Fx.promise(() =>
+                  invokeMutation(argsStr)
+                );
+                result = jsonToConvex(JSON.parse(rawResult));
+              } else {
+                const handler = getHandler(func);
+                if (handler === null) {
+                  return yield* Fx.fail(self._noHandlerError(functionPath));
+                }
+                result = yield* Fx.promise(() =>
+                  Promise.resolve(handler({}, args ?? {}))
+                );
+              }
 
-        // Prefer SDK's invokeMutation if available.
-        if (typeof func.invokeMutation === "function") {
-          const argsStr = JSON.stringify(convexToJson([(args ?? {}) as Value]));
-          const rawResult = await func.invokeMutation(argsStr);
-          result = jsonToConvex(JSON.parse(rawResult));
-        } else {
-          // Fallback for test wrappers.
-          const handler = getHandler(func);
-          if (handler === null) {
-            throw this._noHandlerError(functionPath);
-          }
-          result = await handler({}, args ?? {});
-        }
-
-        this._db.commit();
-        return result;
-      } catch (error) {
-        this._db.rollbackWrites();
-        throw error;
-      }
-    });
+              const { tablesWritten } = self._db.commit();
+              return { result, tablesWritten } as MutationResult;
+            }),
+          // Release: rollback on failure (commit already happened on success path)
+          (_tx, exit) =>
+            Fx.sync(() => {
+              if (exit._tag === "Failure") {
+                self._db.rollbackWrites();
+              }
+            }),
+        ),
+      ),
+    );
   }
 
   /**
@@ -261,6 +304,7 @@ export class UdfExecutor {
       syscall: createSyncSyscall(this._db),
       asyncSyscall: createAsyncSyscall(this._db, this._runUdf, {
         getIdentity: this._getIdentity,
+        activeTimers: this._activeTimers,
       }),
       jsSyscall: createJsSyscall(this._db),
     };

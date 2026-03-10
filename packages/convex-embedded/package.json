@@ -29,6 +29,9 @@
     "test:once": "bun --filter @robelest/convex-edge-tests test:once -- --project embedded",
     "prepublishOnly": "bun run build"
   },
+  "dependencies": {
+    "@robelest/fx": "workspace:*"
+  },
   "peerDependencies": {
     "convex": "^1.17.0"
   },

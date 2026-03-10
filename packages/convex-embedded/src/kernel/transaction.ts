@@ -13,6 +13,7 @@
  */
 
 import type { DocumentId, Timestamp } from "@/core/types";
+import { Fx } from "@robelest/fx";
 
 // ---------------------------------------------------------------------------
 // TransactionDatabase — the interface OccTransaction expects
@@ -36,7 +37,6 @@ export interface TransactionDatabase {
 
 export const OCC_MAX_RETRIES = 5;
 export const OCC_BASE_DELAY_MS = 50;
-export const OCC_MAX_DELAY_MS = 5_000;
 
 // ---------------------------------------------------------------------------
 // TransactionManager — promise-based mutex for sequential execution
@@ -205,50 +205,39 @@ export class OccTransaction {
    * conflict, using exponential backoff with jitter.
    */
   async execute<T>(fn: () => Promise<T>): Promise<T> {
-    let lastError: Error | undefined;
+    const retrySchedule = Fx.retry.compose(
+      Fx.retry.jittered(Fx.retry.exponential(OCC_BASE_DELAY_MS)),
+      Fx.retry.recurs(this._maxRetries),
+    );
 
-    for (let attempt = 0; attempt <= this._maxRetries; attempt++) {
+    const attempt = Fx.defer(() => {
       // Reset read tracking for each attempt.
       this._readSet.clear();
       this._tablesRead.clear();
 
-      try {
-        // 1. Begin
-        this._db.startTransaction();
+      this._db.startTransaction();
 
-        // 2. Execute user function
-        const result = await fn();
+      return Fx.from({ ok: () => fn(), err: (e) => e }).pipe(
+        Fx.then((result) =>
+          Fx.from({
+            ok: () => {
+              this._validateReadSet();
+              this._db.commit();
+              return result;
+            },
+            err: (e) => e,
+          })
+        ),
+        Fx.recover((err) => {
+          this._db.rollbackWrites();
+          return err instanceof OccConflictError
+            ? Fx.fail(err)
+            : Fx.fatal(err);
+        }),
+      );
+    });
 
-        // 3. Validate read set
-        this._validateReadSet();
-
-        // 4. Commit
-        this._db.commit();
-
-        return result;
-      } catch (err) {
-        // Always rollback the staged writes on failure.
-        this._db.rollbackWrites();
-
-        if (err instanceof OccConflictError) {
-          lastError = err;
-
-          // Don't backoff after the last allowed attempt — we'll throw.
-          if (attempt < this._maxRetries) {
-            await sleep(backoffDelay(attempt));
-          }
-          // Loop around to retry.
-          continue;
-        }
-
-        // Non-conflict errors propagate immediately.
-        throw err;
-      }
-    }
-
-    throw new Error(
-      `OCC transaction failed after ${this._maxRetries + 1} attempts: ${lastError?.message}`,
-    );
+    return Fx.run(attempt.pipe(Fx.retry(retrySchedule)));
   }
 
   // -------------------------------------------------------------------------
@@ -336,27 +325,4 @@ export class OccTransaction {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
-/**
- * Compute the backoff delay for a given attempt number.
- *
- * Formula: `min(BASE * 2^attempt + jitter, MAX)`
- * where jitter ∈ [0, BASE).
- */
-function backoffDelay(attempt: number): number {
-  const jitter = Math.random() * OCC_BASE_DELAY_MS;
-  return Math.min(
-    OCC_BASE_DELAY_MS * Math.pow(2, attempt) + jitter,
-    OCC_MAX_DELAY_MS,
-  );
-}
-
-/**
- * Promise-based sleep.
- */
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}

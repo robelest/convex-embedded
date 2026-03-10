@@ -16,6 +16,7 @@ import type {
 } from "@/shared/types";
 import type { Definition } from "@/server/schema";
 import { createLogger } from "@/shared/logger";
+import { Fx } from "@robelest/fx";
 
 const log = createLogger("migration");
 
@@ -172,25 +173,36 @@ async function getStoredVersion(ctx: MigrationCtx, table: string): Promise<numbe
 }
 
 async function setStoredVersion(ctx: MigrationCtx, table: string, version: number): Promise<void> {
-  try {
-    const existing = await ctx.db
-      .query(VERSION_TABLE)
-      .filter((q: unknown) => (q as { eq(a: unknown, b: unknown): unknown; field(name: string): unknown }).eq((q as { field(name: string): unknown }).field("table"), table))
-      .collect();
+  await Fx.run(
+    Fx.from({
+      ok: async () => {
+        const existing = await ctx.db
+          .query(VERSION_TABLE)
+          .filter((q: unknown) => (q as { eq(a: unknown, b: unknown): unknown; field(name: string): unknown }).eq((q as { field(name: string): unknown }).field("table"), table))
+          .collect();
 
-    if (existing.length > 0) {
-      await ctx.db.patch(existing[0]._id, { version });
-    } else {
-      await ctx.db.insert(VERSION_TABLE, { table, version });
-    }
-  } catch {
-    // Best effort — if the table doesn't exist, try to create the record
-    try {
-      await ctx.db.insert(VERSION_TABLE, { table, version });
-    } catch {
-      log.warn(`setStoredVersion: could not store version for ${table}`);
-    }
-  }
+        if (existing.length > 0) {
+          await ctx.db.patch(existing[0]._id, { version });
+        } else {
+          await ctx.db.insert(VERSION_TABLE, { table, version });
+        }
+      },
+      err: (err) => err as Error,
+    }).pipe(
+      // Primary path failed — fall back to a plain insert
+      Fx.recover(() =>
+        Fx.from({
+          ok: () => ctx.db.insert(VERSION_TABLE, { table, version }),
+          err: (err) => err as Error,
+        })
+      ),
+      // If even the fallback failed, log and swallow
+      Fx.inspect((err) =>
+        Fx.sync(() => log.warn(`setStoredVersion: could not store version for ${table}`, err))
+      ),
+      Fx.recover(() => Fx.unit),
+    ),
+  );
 }
 
 // ---------------------------------------------------------------------------

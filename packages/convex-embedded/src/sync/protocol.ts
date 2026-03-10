@@ -9,6 +9,7 @@
  * `ConvexReactClient` / `ConvexClient` can talk to us without modification.
  */
 
+import { Fx } from "@robelest/fx";
 import { convexToJson } from "convex/values";
 import type { JSONValue } from "convex/values";
 
@@ -345,32 +346,10 @@ export class SyncProtocolHandler {
       if (session.activeQueries.size === 0) continue;
 
       const startVersion = { ...session.version };
-      const modifications: StateModification[] = [];
 
-      for (const q of session.activeQueries.values()) {
-        try {
-          const queryResult = await this._executor.runQuery(
-            q.udfPath,
-            ...q.args,
-          );
-          modifications.push({
-            type: "QueryUpdated",
-            queryId: q.queryId,
-            value: queryResult,
-            logLines: [],
-            journal: null,
-          });
-        } catch (err: unknown) {
-          modifications.push({
-            type: "QueryFailed",
-            queryId: q.queryId,
-            errorMessage: errorMessage(err),
-            logLines: [errorMessage(err)],
-            errorData: extractErrorData(err) ?? null,
-            journal: null,
-          });
-        }
-      }
+      const modifications = await Fx.run(
+        Fx.each([...session.activeQueries.values()], (q) => this._evaluateQuery(q)),
+      );
 
       session.version = {
         ...session.version,
@@ -409,6 +388,35 @@ export class SyncProtocolHandler {
       this._sessions.set(sessionId, session);
     }
     return session;
+  }
+
+  /**
+   * Run a single query and return the appropriate state modification.
+   * Catches errors and returns a QueryFailed modification instead of throwing.
+   */
+  private _evaluateQuery(q: {
+    queryId: number;
+    udfPath: string;
+    args: unknown[];
+  }): Fx<StateModification> {
+    return Fx.attempt(
+      () => this._executor.runQuery(q.udfPath, ...q.args),
+      (value): StateModification => ({
+        type: "QueryUpdated",
+        queryId: q.queryId,
+        value: value as JSONValue,
+        logLines: [],
+        journal: null,
+      }),
+      (err): StateModification => ({
+        type: "QueryFailed",
+        queryId: q.queryId,
+        errorMessage: errorMessage(err),
+        logLines: [errorMessage(err)],
+        errorData: extractErrorData(err) ?? null,
+        journal: null,
+      }),
+    );
   }
 
   /** Connect — acknowledge the session with an empty transition. */
@@ -452,28 +460,14 @@ export class SyncProtocolHandler {
           args: mod.args ?? [],
         });
 
-        try {
-          const result = await this._executor.runQuery(
-            mod.udfPath,
-            ...(mod.args ?? []),
-          );
-          modifications.push({
-            type: "QueryUpdated",
+        const modification = await Fx.run(
+          this._evaluateQuery({
             queryId: mod.queryId,
-            value: result,
-            logLines: [],
-            journal: null,
-          });
-        } catch (err: unknown) {
-          modifications.push({
-            type: "QueryFailed",
-            queryId: mod.queryId,
-            errorMessage: errorMessage(err),
-            logLines: [errorMessage(err)],
-            errorData: extractErrorData(err) ?? null,
-            journal: null,
-          });
-        }
+            udfPath: mod.udfPath,
+            args: mod.args ?? [],
+          }),
+        );
+        modifications.push(modification);
       } else if (mod.type === "Remove") {
         session.activeQueries.delete(mod.queryId);
       }
@@ -501,64 +495,45 @@ export class SyncProtocolHandler {
     message: ClientMutation,
   ): Promise<ServerMessage[]> {
     const session = this._getOrCreateSession(sessionId);
-    let mutationResponse: ServerMessage;
 
-    try {
-      const result = await this._executor.runMutation(
-        message.udfPath,
-        ...(message.args ?? []),
-      );
-      mutationResponse = {
-        type: "MutationResponse",
-        requestId: message.requestId,
-        success: true,
-        result: result ?? null,
-        ts: numberToEncodedU64(this._nextTs()),
-        logLines: [],
-      };
-    } catch (err: unknown) {
-      const data = extractErrorData(err);
-      mutationResponse = {
-        type: "MutationResponse",
-        requestId: message.requestId,
-        success: false,
-        result: errorMessage(err),
-        logLines: [],
-        ...(data !== undefined && { errorData: data }),
-      };
-    }
+    const mutationResponse: ServerMessage = await Fx.run(
+      Fx.attempt(
+        () =>
+          this._executor.runMutation(
+            message.udfPath,
+            ...(message.args ?? []),
+          ),
+        (result): ServerMessage => ({
+          type: "MutationResponse",
+          requestId: message.requestId,
+          success: true,
+          result: result ?? null,
+          ts: numberToEncodedU64(this._nextTs()),
+          logLines: [],
+        }),
+        (err): ServerMessage => {
+          const data = extractErrorData(err);
+          return {
+            type: "MutationResponse",
+            requestId: message.requestId,
+            success: false,
+            result: errorMessage(err),
+            logLines: [],
+            ...(data !== undefined && { errorData: data }),
+          };
+        },
+      ),
+    );
 
     const responses: ServerMessage[] = [mutationResponse];
 
     // Re-evaluate all active queries and send a Transition with updated results.
     if (session.activeQueries.size > 0) {
       const startVersion = { ...session.version };
-      const modifications: StateModification[] = [];
 
-      for (const q of session.activeQueries.values()) {
-        try {
-          const result = await this._executor.runQuery(
-            q.udfPath,
-            ...q.args,
-          );
-          modifications.push({
-            type: "QueryUpdated",
-            queryId: q.queryId,
-            value: result,
-            logLines: [],
-            journal: null,
-          });
-        } catch (err: unknown) {
-          modifications.push({
-            type: "QueryFailed",
-            queryId: q.queryId,
-            errorMessage: errorMessage(err),
-            logLines: [errorMessage(err)],
-            errorData: extractErrorData(err) ?? null,
-            journal: null,
-          });
-        }
-      }
+      const modifications = await Fx.run(
+        Fx.each([...session.activeQueries.values()], (q) => this._evaluateQuery(q)),
+      );
 
       session.version = {
         ...session.version,
@@ -581,33 +556,34 @@ export class SyncProtocolHandler {
     _sessionId: string,
     message: ClientAction,
   ): Promise<ServerMessage[]> {
-    try {
-      const result = await this._executor.runAction(
-        message.udfPath,
-        ...(message.args ?? []),
-      );
-      return [
-        {
+    const response: ServerMessage = await Fx.run(
+      Fx.attempt(
+        () =>
+          this._executor.runAction(
+            message.udfPath,
+            ...(message.args ?? []),
+          ),
+        (result): ServerMessage => ({
           type: "ActionResponse",
           requestId: message.requestId,
           success: true,
           result: result ?? null,
           logLines: [],
+        }),
+        (err): ServerMessage => {
+          const data = extractErrorData(err);
+          return {
+            type: "ActionResponse",
+            requestId: message.requestId,
+            success: false,
+            result: errorMessage(err),
+            logLines: [],
+            ...(data !== undefined && { errorData: data }),
+          };
         },
-      ];
-    } catch (err: unknown) {
-      const data = extractErrorData(err);
-      return [
-        {
-          type: "ActionResponse",
-          requestId: message.requestId,
-          success: false,
-          result: errorMessage(err),
-          logLines: [],
-          ...(data !== undefined && { errorData: data }),
-        },
-      ];
-    }
+      ),
+    );
+    return [response];
   }
 
   /** Authenticate — verify the token and return a Transition or AuthError. */
@@ -635,18 +611,21 @@ export class SyncProtocolHandler {
       ];
     }
 
-    try {
-      const identity = await this._auth.verifyToken(
-        message.value ?? "",
-      );
-      session.identity = identity;
+    const authResult = await Fx.run(
+      Fx.attempt(
+        () => this._auth.verifyToken(message.value ?? ""),
+        (identity) => ({ success: true as const, identity }),
+        (err) => ({ success: false as const, error: errorMessage(err) }),
+      ),
+    );
 
+    if (authResult.success) {
+      session.identity = authResult.identity;
       const startVersion = { ...session.version };
       session.version = {
         ...session.version,
         identity: session.version.identity + 1,
       };
-
       return [
         {
           type: "Transition",
@@ -655,11 +634,11 @@ export class SyncProtocolHandler {
           modifications: [],
         },
       ];
-    } catch (err: unknown) {
+    } else {
       return [
         {
           type: "AuthError",
-          error: errorMessage(err),
+          error: authResult.error,
           baseVersion: message.baseVersion,
           authUpdateAttempted: true,
         },

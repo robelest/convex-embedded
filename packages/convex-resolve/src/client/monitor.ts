@@ -26,6 +26,7 @@
  *   m.stop();
  */
 import * as Y from "yjs";
+import { Fx } from "@robelest/fx";
 import type {
   MonitorStatus,
   ResolveProgress,
@@ -170,41 +171,63 @@ function createMonitor(config: MonitorConfig): MonitorInstance {
     signal?: AbortSignal,
   ): Promise<void> {
     let attempts = 0;
-    let delay = retryDelayMs;
 
-    while (attempts < maxRetries) {
-      if (signal?.aborted) return;
+    const retrySchedule = Fx.retry.while(
+      Fx.retry.compose(
+        Fx.retry.jittered(Fx.retry.exponential(retryDelayMs)),
+        Fx.retry.recurs(maxRetries - 1),
+      ),
+      (meta) => {
+        // Stop retrying if the signal has been aborted
+        if (signal?.aborted) return false;
+        const err = meta.input as Error;
+        if (err instanceof DOMException && err.name === "AbortError") return false;
+        return true;
+      },
+    );
 
-      try {
-        // Call the resolve query on the remote.
-        // For now, we resolve all documents (empty vector = full state).
-        // In production, the app would track which docs are dirty.
-        await remoteClient.query(tableConfig.resolve, {
-          documents: [],
-        });
-
-        log.debug(`monitor: resolved table "${tableName}"`);
-        return;
-      } catch (err) {
-        attempts++;
-        if (attempts >= maxRetries) throw err;
-
-        log.warn(
-          `monitor: resolve attempt ${attempts}/${maxRetries} failed for "${tableName}", retrying in ${delay}ms`,
-          err,
-        );
-
-        await sleep(delay, signal);
-        delay *= 2; // Exponential backoff
+    const attempt = Fx.defer(() => {
+      if (signal?.aborted) {
+        return Fx.fail(new DOMException("Aborted", "AbortError"));
       }
-    }
+      attempts++;
+      return Fx.from({
+        ok: () => remoteClient.query(tableConfig.resolve, { documents: [] }),
+        err: (err) => err as Error,
+      });
+    }).pipe(
+      Fx.inspect((err) =>
+        Fx.sync(() => {
+          if (!(err instanceof DOMException && err.name === "AbortError")) {
+            log.warn(
+              `monitor: resolve attempt ${attempts}/${maxRetries} failed for "${tableName}"`,
+              err,
+            );
+          }
+        }),
+      ),
+    );
+
+    await Fx.run(
+      attempt.pipe(
+        Fx.retry(retrySchedule),
+        Fx.tap(() =>
+          Fx.sync(() =>
+            log.debug(`monitor: resolved table "${tableName}"`),
+          ),
+        ),
+      ),
+    );
   }
 
   function handleOnline() {
     log.info("monitor: online event — starting resolve");
+    abortController?.abort();
     abortController = new AbortController();
     resolveAll(abortController.signal).catch((err) => {
-      log.error("monitor: resolveAll unhandled error", err);
+      if (!(err instanceof DOMException && err.name === "AbortError")) {
+        log.error("monitor: resolveAll unhandled error", err);
+      }
     });
   }
 
@@ -280,30 +303,6 @@ function createMonitor(config: MonitorConfig): MonitorInstance {
       this.stop();
     },
   };
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function sleep(ms: number, signal?: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(new DOMException("Aborted", "AbortError"));
-      return;
-    }
-
-    const timer = setTimeout(resolve, ms);
-
-    signal?.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(timer);
-        reject(new DOMException("Aborted", "AbortError"));
-      },
-      { once: true },
-    );
-  });
 }
 
 // ---------------------------------------------------------------------------

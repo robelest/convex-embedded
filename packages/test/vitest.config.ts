@@ -4,6 +4,7 @@ import type { Plugin } from "vite";
 
 const embeddedSrc = path.resolve(__dirname, "../convex-embedded/src");
 const resolveSrc = path.resolve(__dirname, "../convex-resolve/src");
+const fxSrc = path.resolve(__dirname, "../fx/src");
 
 export default defineConfig({
   plugins: [
@@ -29,6 +30,7 @@ export default defineConfig({
     alias: {
       "#embedded": embeddedSrc,
       "#resolve": resolveSrc,
+      "@robelest/fx": path.join(fxSrc, "index.ts"),
       // Integration tests: resolve workspace package exports to source
       "@robelest/convex-resolve/server": path.join(
         resolveSrc,

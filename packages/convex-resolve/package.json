@@ -41,6 +41,7 @@
     "prepublishOnly": "bun run build"
   },
   "dependencies": {
+    "@robelest/fx": "workspace:*",
     "yjs": "^13.6.0",
     "convex-helpers": "^0.1.0"
   },

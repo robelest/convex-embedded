@@ -13,6 +13,8 @@
  * @packageDocumentation
  */
 
+import { Fx } from "@robelest/fx";
+
 import type { StoredDocument } from "@/core/types";
 import type {
   CommitBatch,
@@ -113,16 +115,44 @@ export async function createWaSqliteStorage(
       : options.workerUrl.href
     : new URL("./wa-sqlite-worker.js", import.meta.url).href;
 
-  // Spawn the Dedicated Worker.
-  const worker = new Worker(workerUrl, { type: "module" });
+  // Use Fx.bracket to guarantee the Worker is terminated
+  // if initialisation fails (prevents leaked workers).
+  return Fx.run(
+    Fx.bracket(
+      // Acquire: spawn the Dedicated Worker.
+      Fx.sync(() => new Worker(workerUrl, { type: "module" })),
 
-  // Initialise wa-sqlite inside the worker. WebAssembly.Module is
-  // transferable via postMessage (per spec).
-  await rpc(worker, { method: "init", name, wasmModule });
+      // Use: initialise wa-sqlite and build the StorageAdapter proxy.
+      (worker) =>
+        Fx.from({
+          ok: async () => {
+            // WebAssembly.Module is transferable via postMessage (per spec).
+            await rpc(worker, { method: "init", name, wasmModule });
+            return _buildAdapter(worker);
+          },
+          err: (err) =>
+            new Error(
+              `wa-sqlite worker init failed: ${err instanceof Error ? err.message : String(err)}`,
+            ),
+        }),
 
-  // -- StorageAdapter implementation (main-thread proxy) -------------------
+      // Release: terminate the worker on failure only.
+      (worker, exit) => {
+        if (exit._tag === "Failure") {
+          worker.terminate();
+        }
+        return Fx.unit;
+      },
+    ),
+  );
+}
 
-  const adapter: StorageAdapter = {
+/**
+ * Build the {@link StorageAdapter} proxy that delegates to the Worker.
+ * Extracted from `createWaSqliteStorage` for clarity.
+ */
+function _buildAdapter(worker: Worker): StorageAdapter {
+  return {
     async getDocuments(): Promise<StoredDocument[]> {
       const jsonStrings = (await rpc(worker, {
         method: "getDocuments",
@@ -198,6 +228,4 @@ export async function createWaSqliteStorage(
       worker.terminate();
     },
   };
-
-  return adapter;
 }

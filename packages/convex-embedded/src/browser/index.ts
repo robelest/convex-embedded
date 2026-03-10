@@ -32,6 +32,7 @@
 
 import { ConvexClient } from "convex/browser";
 import type { BaseConvexClientOptions } from "convex/browser";
+import { Fx } from "@robelest/fx";
 import { EmbeddedRuntime } from "@/runtime/embedded";
 import type { EmbeddedRuntimeOptions } from "@/runtime/embedded";
 import type { ConvexModule } from "@/kernel/module-loader";
@@ -190,41 +191,60 @@ export function createClient(options: ClientOptions): ConvexClient {
  *
  * If WASM compilation or worker init fails, the promise still resolves
  * (the runtime continues as in-memory-only, no persistence).
+ *
+ * Uses `Fx.gen` to compose the 4-step pipeline (compile WASM →
+ * create wa-sqlite storage → attach to database → hydrate) with an
+ * `Fx.recover` fallback to in-memory.
  */
-async function initStorage(
+function initStorage(
   runtime: EmbeddedRuntime,
   name: string,
   workerUrl?: URL | string,
 ): Promise<void> {
-  try {
-    const wasmModule = await compileWasmModule();
+  const pipeline = Fx.gen(function* () {
+    // Step 1: Compile the WASM module.
+    const wasmModule = yield* Fx.from({
+      ok: () => compileWasmModule(),
+      err: (err) => err as Error,
+    });
+
     if (!wasmModule) {
       // SSR or non-browser environment — skip persistence.
       console.debug("[convex-embedded] WASM not available, skipping persistence");
       return;
     }
 
-    const storage = await createWaSqliteStorage({
-      name,
-      wasmModule,
-      workerUrl,
+    // Step 2: Create the wa-sqlite storage adapter (worker init).
+    const storage = yield* Fx.from({
+      ok: () => createWaSqliteStorage({ name, wasmModule, workerUrl }),
+      err: (err) => err as Error,
     });
 
-    // Attach the storage adapter to the database for persistence.
+    // Step 3: Attach the storage adapter to the database for persistence.
     runtime.db.setStorage(storage);
 
-    // Hydrate: load all persisted documents, metadata, and blobs from
-    // IndexedDB into the in-memory database.
-    await runtime.db.hydrate();
+    // Step 4: Hydrate — load all persisted documents, metadata, and blobs
+    // from IndexedDB into the in-memory database.
+    yield* Fx.from({
+      ok: () => runtime.db.hydrate(),
+      err: (err) => err as Error,
+    });
 
     console.debug("[convex-embedded] wa-sqlite storage ready");
-  } catch (err) {
-    // Resolve (don't reject) — the runtime falls back to in-memory.
-    console.error(
-      "[convex-embedded] wa-sqlite storage init failed, continuing in-memory:",
-      err,
-    );
-  }
+  });
+
+  // Catch all errors — the runtime falls back to in-memory.
+  const safe = pipeline.pipe(
+    Fx.recover(() =>
+      Fx.sync(() => {
+        console.error(
+          "[convex-embedded] wa-sqlite storage init failed, continuing in-memory",
+        );
+      }),
+    ),
+  );
+
+  return Fx.run(safe);
 }
 
 // ---------------------------------------------------------------------------

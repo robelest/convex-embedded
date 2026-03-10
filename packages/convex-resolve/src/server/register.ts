@@ -22,6 +22,7 @@ import type { Definition } from "@/server/schema";
 import { encodeDocumentState, computeDiff, isDiffEmpty } from "@/server/schema";
 import type { MigrationErrorHandler } from "@/shared/types";
 import { createLogger } from "@/shared/logger";
+import { Fx } from "@robelest/fx";
 
 const log = createLogger("register");
 
@@ -128,29 +129,33 @@ export function register(config: RegisterConfig): RegisterResult {
         return null;
       }
 
-      try {
-        // Read the current document from the main table
-        const doc = await ctx.db.get(args.docId);
-        if (!doc) {
-          log.warn(`_recordDelta: document ${args.docId} not found in table "${table}"`);
-          return null;
-        }
+      await Fx.run(
+        Fx.from({
+          ok: async () => {
+            const doc = await ctx.db.get(args.docId);
+            if (!doc) {
+              log.warn(`_recordDelta: document ${args.docId} not found in table "${table}"`);
+              return;
+            }
 
-        // Encode the full Yjs state from the document row
-        const update = encodeDocumentState(schemaDef, doc);
+            const update = encodeDocumentState(schemaDef, doc);
 
-        // Write to the component's deltas table
-        await ctx.runMutation(component.public.insertDelta, {
-          collection: table,
-          docId: args.docId,
-          update: toArrayBuffer(update),
-        });
+            await ctx.runMutation(component.public.insertDelta, {
+              collection: table,
+              docId: args.docId,
+              update: toArrayBuffer(update),
+            });
 
-        log.debug(`_recordDelta: recorded delta for ${table}/${args.docId} (${update.byteLength} bytes)`);
-      } catch (err) {
-        log.error(`_recordDelta: failed for ${table}/${args.docId}`, err);
-        // Don't throw — delta recording failures shouldn't break the app
-      }
+            log.debug(`_recordDelta: recorded delta for ${table}/${args.docId} (${update.byteLength} bytes)`);
+          },
+          err: (err) => err,
+        }).pipe(
+          Fx.inspect((err) =>
+            Fx.sync(() => log.error(`_recordDelta: failed for ${table}/${args.docId}`, err)),
+          ),
+          Fx.recover(() => Fx.unit),
+        ),
+      );
 
       return null;
     },
@@ -251,12 +256,17 @@ export function register(config: RegisterConfig): RegisterResult {
         if (isRemote && recordDeltaRef && ctx.scheduler) {
           const docId = extractDocId(result, fnArgs);
           if (docId) {
-            try {
-              await ctx.scheduler.runAfter(0, recordDeltaRef, { docId });
-            } catch (err) {
-              log.warn(`wrapMutation: failed to schedule delta recording for ${table}`, err);
-              // Don't throw — delta recording failures shouldn't break the mutation
-            }
+            await Fx.run(
+              Fx.from({
+                ok: () => ctx.scheduler.runAfter(0, recordDeltaRef, { docId }),
+                err: (err) => err,
+              }).pipe(
+                Fx.inspect((err) =>
+                  Fx.sync(() => log.warn(`wrapMutation: failed to schedule delta recording for ${table}`, err)),
+                ),
+                Fx.recover(() => Fx.unit),
+              ),
+            );
           }
         }
 

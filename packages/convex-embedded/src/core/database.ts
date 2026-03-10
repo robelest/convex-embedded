@@ -12,6 +12,7 @@ import type { GenericDocument } from "convex/server";
 import type { JSONValue, Value } from "convex/values";
 import { jsonToConvex } from "convex/values";
 
+import { detach } from "@robelest/fx";
 import type { ParsedSchema } from "@/core/schema";
 import { tableNameFromId, validateValidator, validateSchemaDefinition } from "@/core/schema";
 import type {
@@ -288,8 +289,9 @@ export class Database {
 
       // Persist to durable storage (fire-and-forget).
       if (this._storage !== null && (puts.length > 0 || deletes.length > 0)) {
-        this._storage
-          .commit({
+        const storage = this._storage;
+        detach(
+          () => storage.commit({
             puts,
             deletes,
             meta: {
@@ -297,10 +299,9 @@ export class Database {
               nextDocId: this._nextDocId,
               lastCreationTime: this._lastCreationTime,
             },
-          })
-          .catch((err) => {
-            console.error("[convex-embedded] storage commit failed:", err);
-          });
+          }),
+          "[convex-embedded] storage commit failed:",
+        );
       }
 
       return { timestamp: this._timestamp, tablesWritten };
@@ -509,18 +510,26 @@ export class Database {
     this._blobStorage[storageId] = blob;
 
     // Persist to durable storage (fire-and-forget).
-    this._storage?.storeBlob(storageId as string, blob).catch((err) => {
-      console.error("[convex-embedded] blob persist failed:", err);
-    });
+    if (this._storage) {
+      const storage = this._storage;
+      detach(
+        () => storage.storeBlob(storageId as string, blob),
+        "[convex-embedded] blob persist failed:",
+      );
+    }
   }
 
   deleteBlob(storageId: string): void {
     delete this._blobStorage[storageId as DocumentId];
 
     // Remove from durable storage (fire-and-forget).
-    this._storage?.deleteBlob(storageId).catch((err) => {
-      console.error("[convex-embedded] blob delete failed:", err);
-    });
+    if (this._storage) {
+      const storage = this._storage;
+      detach(
+        () => storage.deleteBlob(storageId),
+        "[convex-embedded] blob delete failed:",
+      );
+    }
   }
 
   getFile(storageId: DocumentId): Blob | null {

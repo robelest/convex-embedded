@@ -180,8 +180,10 @@ export function embeddedTest(options: EmbeddedTestOptions): EmbeddedTestContext 
     switch (type) {
       case "query":
         return executor.executeQuery(path, args);
-      case "mutation":
-        return executor.executeMutation(path, args);
+      case "mutation": {
+        const { result } = await executor.executeMutation(path, args);
+        return result;
+      }
       case "action":
         return executor.executeAction(path, args);
     }
@@ -203,7 +205,8 @@ export function embeddedTest(options: EmbeddedTestOptions): EmbeddedTestContext 
 
     async mutation(path: string, args?: any): Promise<any> {
       const functionPath = resolveFunctionPath({ name: path });
-      return executor.executeMutation(functionPath, args ?? {});
+      const { result } = await executor.executeMutation(functionPath, args ?? {});
+      return result;
     },
 
     async action(path: string, args?: any): Promise<any> {

@@ -18,6 +18,13 @@ export type {
   TableConfig,
 } from "@/client/monitor";
 
+// ID Map — local UUID ↔ remote Convex ID translation
+export { IdMap } from "@/client/id-map";
+
+// Pending Queue — persistent mutation queue
+export { PendingQueue } from "@/client/pending-queue";
+export type { PendingEntry } from "@/client/pending-queue";
+
 // Schema — client-side CRDT field helpers
 export { clientSchema } from "@/client/schema";
 export {

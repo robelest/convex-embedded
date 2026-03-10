@@ -1,27 +1,57 @@
 <script lang="ts">
-	import { useQuery, useConvexClient } from "convex-svelte";
+	import { getContext } from "svelte";
+	import { useQuery } from "convex-svelte";
 	import { api } from "$convex/_generated/api";
+	import type { MonitorStatus, MonitorInstance } from "@robelest/convex-resolve/client";
 
 	const tasks = useQuery(api.tasks.list, {});
-	const client = useConvexClient();
+
+	const getSyncStatus = getContext<() => MonitorStatus>("syncStatus");
+	const m = getContext<MonitorInstance>("monitor");
 
 	let title = $state("");
 	let body = $state("");
 
+	const statusLabel = $derived.by(() => {
+		const s = getSyncStatus();
+		switch (s.status) {
+			case "idle":
+				return { text: "Local only", color: "#9ca3af", bg: "#f3f4f6" };
+			case "offline":
+				return { text: "Offline", color: "#f59e0b", bg: "#fffbeb" };
+			case "resolving":
+				return { text: "Syncing\u2026", color: "#3b82f6", bg: "#eff6ff" };
+			case "resolved":
+				return { text: "Synced", color: "#10b981", bg: "#ecfdf5" };
+			case "error":
+				return { text: "Sync error", color: "#ef4444", bg: "#fef2f2" };
+		}
+	});
+
 	async function handleAdd() {
 		const t = title.trim();
 		if (!t) return;
-		await client.mutation(api.tasks.create, { title: t, body: body.trim() });
+		await m.mutation(api.tasks.create, { title: t, body: body.trim() });
 		title = "";
 		body = "";
 	}
 
 	async function handleRemove(id: string) {
-		await client.mutation(api.tasks.remove, { id: id as any });
+		await m.mutation(api.tasks.remove, { id: id as any });
 	}
 </script>
 
 <section>
+	<!-- Sync status indicator -->
+	<div
+		style="display: flex; align-items: center; gap: 0.5rem; margin-bottom: 1rem; padding: 0.375rem 0.75rem; border-radius: 9999px; width: fit-content; font-size: 0.75rem; font-weight: 500; background: {statusLabel.bg}; color: {statusLabel.color};"
+	>
+		<span
+			style="width: 0.5rem; height: 0.5rem; border-radius: 9999px; background: {statusLabel.color};"
+		></span>
+		{statusLabel.text}
+	</div>
+
 	<form
 		onsubmit={(e) => {
 			e.preventDefault();

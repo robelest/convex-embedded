@@ -10,6 +10,8 @@ const embeddedSrc = path.resolve(
 
 export default defineConfig({
   plugins: [sveltekit()],
+  envDir: "../..",
+  envPrefix: ["VITE_", "CONVEX_"],
   build: {
     target: "esnext",
   },

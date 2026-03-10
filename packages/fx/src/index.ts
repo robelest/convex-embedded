@@ -14,7 +14,7 @@
  * **Constructors**: `Fx.succeed`, `Fx.sync`, `Fx.promise`, `Fx.from`,
  * `Fx.fail`, `Fx.fatal`, `Fx.defer`, `Fx.unit`
  *
- * **Combinators**: `Fx.map`, `Fx.then`, `Fx.tap`, `Fx.inspect`,
+ * **Combinators**: `Fx.map`, `Fx.chain`, `Fx.tap`, `Fx.inspect`,
  * `Fx.recover`, `Fx.fold`, `Fx.retry`, `Fx.timeout`, `Fx.delay`
  *
  * **Retry policies**: `Fx.retry.exponential`, `Fx.retry.jittered`,

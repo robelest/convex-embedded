@@ -219,7 +219,7 @@ export class OccTransaction {
       this._db.startTransaction();
 
       return Fx.from({ ok: () => fn(), err: (e) => e }).pipe(
-        Fx.then((result) =>
+        Fx.chain((result) =>
           Fx.from({
             ok: () => {
               this._validateReadSet();

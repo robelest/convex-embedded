@@ -65,7 +65,7 @@
  *   err: (e) => e as NetworkError,
  * }).pipe(
  *   Fx.map((user) => user.profile),
- *   Fx.then((profile) =>
+ *   Fx.chain((profile) =>
  *     Fx.from({
  *       ok: () => enrichProfile(profile),
  *       err: (e) => e as EnrichError,

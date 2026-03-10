@@ -210,9 +210,9 @@ function promise<A>(f: () => Promise<A>): Fx<A, never> {
  *
  * @example
  * ```ts
- * // Wrapping a fallible function in an OCC transaction, chaining with Fx.then
+ * // Wrapping a fallible function in an OCC transaction, chaining with Fx.chain
  * const attempt = Fx.from({ ok: () => fn(), err: (e) => e }).pipe(
- *   Fx.then((result) =>
+ *   Fx.chain((result) =>
  *     Fx.from({
  *       ok: () => {
  *         this._validateReadSet();
@@ -406,7 +406,7 @@ function fatal(defect: unknown): Fx<never, never> {
  *   this._db.startTransaction();
  *
  *   return Fx.from({ ok: () => fn(), err: (e) => e }).pipe(
- *     Fx.then((result) =>
+ *     Fx.chain((result) =>
  *       Fx.from({
  *         ok: () => {
  *           this._validateReadSet();
@@ -489,7 +489,7 @@ const unit: Fx<void, never> = sync(() => undefined);
  * is never called.
  *
  * For transformations that may themselves fail or produce another `Fx`, use
- * {@link then} instead.
+ * {@link chain} instead.
  *
  * @param f - A pure function that transforms the success value `A` into `B`.
  *
@@ -506,7 +506,7 @@ const unit: Fx<void, never> = sync(() => undefined);
  * );
  * ```
  *
- * @see {@link then} — FlatMap/chain when the transformation returns an Fx.
+ * @see {@link chain} — FlatMap/chain when the transformation returns an Fx.
  * @see {@link fold} — Collapses both success and failure paths.
  * @see {@link tap} — Side-effects on success without changing the value.
  *
@@ -524,7 +524,7 @@ function map<A, B>(f: (a: A) => B) {
  * Chain a new computation from the success value (flatMap/bind).
  *
  * @remarks
- * `then` is the monadic bind operation. When the upstream `Fx` succeeds,
+ * `chain` is the monadic bind operation. When the upstream `Fx` succeeds,
  * `f` is called with the success value and must return a new `Fx`. If the
  * upstream fails, the failure short-circuits — `f` is never called and the
  * original error passes through.
@@ -543,7 +543,7 @@ function map<A, B>(f: (a: A) => B) {
  * ```ts
  * // Chain validation after a database read in an OCC transaction
  * Fx.from({ ok: () => fn(), err: (e) => e }).pipe(
- *   Fx.then((result) =>
+ *   Fx.chain((result) =>
  *     Fx.from({
  *       ok: () => {
  *         this._validateReadSet();
@@ -562,7 +562,7 @@ function map<A, B>(f: (a: A) => B) {
  *
  * @category Combinator
  */
-function then<A, B, E2>(f: (a: A) => Fx<B, E2>) {
+function chain<A, B, E2>(f: (a: A) => Fx<B, E2>) {
   return <E>(self: Fx<A, E>): Fx<B, E | E2> =>
     new FxImpl(async () => {
       const r = await self._run();
@@ -606,7 +606,7 @@ function then<A, B, E2>(f: (a: A) => Fx<B, E2>) {
  *
  * @see {@link inspect} — The failure-side counterpart of `tap`.
  * @see {@link map} — Transform the value instead of side-effecting.
- * @see {@link then} — Chain when you need to replace the value.
+ * @see {@link chain} — Chain when you need to replace the value.
  *
  * @category Combinator
  */
@@ -939,7 +939,7 @@ function timeout(ms: number) {
  *   this._tablesRead.clear();
  *   this._db.startTransaction();
  *   return Fx.from({ ok: () => fn(), err: (e) => e }).pipe(
- *     Fx.then((result) =>
+ *     Fx.chain((result) =>
  *       Fx.from({
  *         ok: () => { this._validateReadSet(); this._db.commit(); return result; },
  *         err: (e) => e,
@@ -1477,7 +1477,7 @@ function attempt<A, B>(
  * });
  * ```
  *
- * @see {@link then} — Pipeline-style sequential chaining.
+ * @see {@link chain} — Pipeline-style sequential chaining.
  * @see {@link guard} — Early return inside generators.
  * @see {@link run} — Execute the resulting Fx.
  *
@@ -1523,7 +1523,7 @@ function gen<A, E>(f: () => Generator<Fx<unknown, E>, A, unknown>): Fx<A, E> {
  *   rather than the `FxFatal` wrapper.
  *
  * `run` should be called at the boundary of your program — typically once at
- * the top level. Inside `Fx` pipelines, use combinators ({@link then},
+ * the top level. Inside `Fx` pipelines, use combinators ({@link chain},
  * {@link map}, {@link gen}) to sequence computations instead of calling `run`
  * in the middle.
  *
@@ -1651,7 +1651,7 @@ export class TimeoutError extends Error {
  *
  * **Combinators** — Transform and compose (data-last for `.pipe()`):
  * - {@link map} — Transform success value.
- * - {@link then} — FlatMap/chain.
+ * - {@link chain} — FlatMap/chain.
  * - {@link tap} — Side-effect on success.
  * - {@link inspect} — Side-effect on failure.
  * - {@link recover} — Catch typed errors.
@@ -1709,7 +1709,7 @@ export const Fx = {
 
   // Combinators
   map,
-  then,
+  chain,
   tap,
   inspect,
   recover,

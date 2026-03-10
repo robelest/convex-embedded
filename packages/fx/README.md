@@ -10,8 +10,8 @@ Gleam-inspired naming.
 - **Typed errors**: Recoverable errors (`Fx.fail`) tracked in the type system,
   separate from unrecoverable defects (`Fx.fatal`).
 - **Zero dependencies**, under 10 KB.
-- **Gleam-inspired one-word names**: `map`, `then`, `tap`, `inspect`, `recover`,
-  `fold`. Everything lives under the `Fx.*` namespace.
+- **Gleam-inspired one-word names**: `map`, `chain`, `tap`, `inspect`,
+  `recover`, `fold`. Everything lives under the `Fx.*` namespace.
 - **Two composition styles**: `.pipe()` chaining with data-last combinators, or
   `Fx.gen` generators for imperative-looking sequential code.
 
@@ -84,7 +84,7 @@ All combinators return functions suitable for `.pipe()`:
 
 ```ts
 Fx.map(fn); // returns (fx: Fx<A, E>) => Fx<B, E>
-Fx.then(fn); // returns (fx: Fx<A, E>) => Fx<B, E | E2>
+Fx.chain(fn); // returns (fx: Fx<A, E>) => Fx<B, E | E2>
 Fx.recover(fn); // returns (fx: Fx<A, E>) => Fx<A | B, E2>
 ```
 
@@ -317,10 +317,10 @@ Transform the success value. Does not run on failure.
 Fx.succeed(21).pipe(Fx.map((x) => x * 2)); // Fx<number, never> → 42
 ```
 
-#### `Fx.then(fn)`
+#### `Fx.chain(fn)`
 
 ```ts
-function then<A, B, E2>(
+function chain<A, B, E2>(
   f: (a: A) => Fx<B, E2>,
 ): <E>(self: Fx<A, E>) => Fx<B, E | E2>;
 ```
@@ -330,7 +330,7 @@ the union of both. Short-circuits on failure of the original.
 
 ```ts
 Fx.succeed(userId).pipe(
-  Fx.then((id) =>
+  Fx.chain((id) =>
     Fx.from({
       ok: () => fetchUser(id),
       err: (e) => new FetchError(e),
@@ -835,7 +835,7 @@ const attempt = Fx.defer(() => {
   this._db.startTransaction();
 
   return Fx.from({ ok: () => fn(), err: (e) => e }).pipe(
-    Fx.then((result) =>
+    Fx.chain((result) =>
       Fx.from({
         ok: () => {
           this._validateReadSet();

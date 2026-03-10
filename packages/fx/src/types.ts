@@ -241,7 +241,7 @@ export interface Fx<A, E = never> {
    *
    * @remarks
    * `.pipe()` is the primary way to compose Fx operations. All combinators
-   * in the `Fx` namespace (`Fx.map`, `Fx.then`, `Fx.recover`, etc.) are
+   * in the `Fx` namespace (`Fx.map`, `Fx.chain`, `Fx.recover`, etc.) are
    * designed as data-last functions that return a function, making them
    * directly usable with `.pipe()`.
    *
@@ -271,7 +271,7 @@ export interface Fx<A, E = never> {
    * ```
    *
    * @see {@link Fx.map} — Transform the success value.
-   * @see {@link Fx.then} — Chain to another `Fx`.
+   * @see {@link Fx.chain} — Chain to another `Fx`.
    * @see {@link Fx.recover} — Handle errors.
    */
   pipe<B>(ab: (self: Fx<A, E>) => B): B;

@@ -63,6 +63,8 @@ export { memoryStorage } from "@/storage/memory";
 
 export { SubscriptionManager } from "@/sync/subscriptions";
 
+export { SystemPaths } from "@/kernel/system-functions";
+
 // ---------------------------------------------------------------------------
 // Convenience factory
 // ---------------------------------------------------------------------------

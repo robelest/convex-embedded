@@ -18,6 +18,8 @@ import type { ParsedSchema, SchemaExport } from "@/core/schema";
 import { ModuleLoader } from "@/kernel/module-loader";
 import type { ConvexModule, FunctionPath } from "@/kernel/module-loader";
 import { resolveFunctionPath } from "@/kernel/module-loader";
+import { SYSTEM_FUNCTIONS } from "@/kernel/system-functions";
+import type { SystemFunctionDef } from "@/kernel/system-functions";
 import { TransactionManager } from "@/kernel/transaction";
 import { UdfExecutor } from "@/kernel/udf-executor";
 import { createTransport } from "@/runtime/transport";
@@ -404,6 +406,10 @@ export class EmbeddedRuntime {
    * - The protocol executor bridge (for top-level calls from clients)
    * - The scheduler (for deferred function execution)
    *
+   * System functions (paths starting with `_system:`) are intercepted
+   * here and executed directly against the database — they bypass the
+   * module loader and UDF executor entirely.
+   *
    * After a mutation executes, the commit result is inspected and
    * subscriptions + fanout are notified of written tables.
    */
@@ -412,6 +418,12 @@ export class EmbeddedRuntime {
     path: FunctionPath,
     args: Record<string, unknown>,
   ): Promise<unknown> {
+    // Intercept system functions — bypass module loader entirely.
+    const systemFn = SYSTEM_FUNCTIONS[path.udfPath];
+    if (systemFn !== undefined) {
+      return this._runSystemFunction(systemFn, type, args);
+    }
+
     switch (type) {
       case "query":
         return this.executor.executeQuery(path, args);
@@ -431,6 +443,59 @@ export class EmbeddedRuntime {
       default:
         throw new Error(`Unknown UDF type: ${type}`);
     }
+  }
+
+  /**
+   * Execute a system function directly against the database.
+   *
+   * System functions run within a transaction managed by Fx.bracket:
+   * - Acquire: start transaction
+   * - Use: run the handler, commit on success (mutations) or rollback (queries)
+   * - Release: rollback on failure
+   */
+  private _runSystemFunction(
+    def: SystemFunctionDef,
+    calledAs: "query" | "mutation" | "action",
+    args: Record<string, unknown>,
+  ): Promise<unknown> {
+    if (calledAs === "mutation" && def.type === "query") {
+      return Promise.reject(
+        new Error("Cannot call a system query as a mutation"),
+      );
+    }
+    if (calledAs === "query" && def.type === "mutation") {
+      return Promise.reject(
+        new Error("Cannot call a system mutation as a query"),
+      );
+    }
+
+    const db = this.db;
+    const onCommit = this.onMutationCommit.bind(this);
+
+    return Fx.run(
+      Fx.bracket(
+        Fx.sync(() => {
+          db.startTransaction();
+        }),
+        () =>
+          Fx.sync(() => {
+            const result = def.handler(db, args);
+            if (def.type === "mutation") {
+              const { tablesWritten } = db.commit();
+              onCommit(tablesWritten);
+            } else {
+              db.rollbackWrites();
+            }
+            return result;
+          }),
+        (_tx, exit) =>
+          Fx.sync(() => {
+            if (exit._tag === "Failure") {
+              db.rollbackWrites();
+            }
+          }),
+      ),
+    );
   }
 
   // -----------------------------------------------------------------------

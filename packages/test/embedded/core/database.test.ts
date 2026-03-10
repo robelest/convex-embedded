@@ -41,11 +41,11 @@ function createSchemaDb(): Database {
 // ---------------------------------------------------------------------------
 
 describe("Database — ID generation", () => {
-  it('insert creates IDs in "N;tableName" format', () => {
+  it('insert creates UUID-format IDs', () => {
     const db = createDb();
     db.startTransaction();
     const id = db.insert("tasks", { title: "test" });
-    expect(id).toMatch(/^\d+;tasks$/);
+    expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
     db.commit();
   });
 
@@ -116,7 +116,7 @@ describe("Database — CRUD", () => {
   it("get on non-existent ID returns null", () => {
     const db = createDb();
     db.startTransaction();
-    const result = db.get("tasks", "99999;tasks" as any);
+    const result = db.get(undefined, "00000000-0000-4000-8000-000000000000" as any);
     expect(result).toBeNull();
     db.commit();
   });
@@ -368,7 +368,7 @@ describe("Database — error cases", () => {
   it("patch on non-existent document throws", () => {
     const db = createDb();
     db.startTransaction();
-    expect(() => db.patch("tasks", "99999;tasks" as any, { x: 1 })).toThrow(
+    expect(() => db.patch("tasks", "00000000-0000-4000-8000-000000000000" as any, { x: 1 })).toThrow(
       /non-existent/,
     );
     db.commit();
@@ -377,7 +377,7 @@ describe("Database — error cases", () => {
   it("delete on non-existent document throws", () => {
     const db = createDb();
     db.startTransaction();
-    expect(() => db.delete("tasks", "99999;tasks" as any)).toThrow(
+    expect(() => db.delete("tasks", "00000000-0000-4000-8000-000000000000" as any)).toThrow(
       /non-existent/,
     );
     db.commit();
@@ -387,7 +387,7 @@ describe("Database — error cases", () => {
     const db = createDb();
     db.startTransaction();
     expect(() =>
-      db.replace("tasks", "99999;tasks" as any, { title: "new" }),
+      db.replace("tasks", "00000000-0000-4000-8000-000000000000" as any, { title: "new" }),
     ).toThrow(/non-existent/);
     db.commit();
   });

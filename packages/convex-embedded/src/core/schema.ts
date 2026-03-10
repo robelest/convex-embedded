@@ -64,11 +64,21 @@ export type ParsedSchema = {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Extract table name from our `"<number>;<tableName>"` ID format. */
-export function tableNameFromId(id: string): string | null {
-  const parts = id.split(";");
-  if (parts.length !== 2) return null;
-  return parts[1];
+/**
+ * Look up the table name for a given document ID.
+ *
+ * Accepts an optional `lookup` function backed by `Database._idTableMap`.
+ * When no lookup is provided, returns `null` (the ID cannot be resolved
+ * without the runtime map).
+ */
+export function tableNameFromId(
+  id: string,
+  lookup?: (id: string) => string | undefined,
+): string | null {
+  if (lookup) {
+    return lookup(id) ?? null;
+  }
+  return null;
 }
 
 function isSimpleObject(value: unknown): boolean {
@@ -90,10 +100,17 @@ export function isValidIdentifier(name: string): boolean {
 // Validation
 // ---------------------------------------------------------------------------
 
-/** Validate a document value against a ValidatorJSON tree. */
+/**
+ * Validate a document value against a ValidatorJSON tree.
+ *
+ * @param idLookup  Optional function that maps a UUID string to its table
+ *                  name. Required for `v.id("tableName")` validation when
+ *                  using UUID-based IDs.
+ */
 export function validateValidator(
   validator: ValidatorJSON,
   value: Value,
+  idLookup?: (id: string) => string | undefined,
 ): void {
   switch (validator.type) {
     case "null":
@@ -159,7 +176,7 @@ export function validateValidator(
           `Validator error: Expected \`string\`, got \`${value}\``,
         );
       }
-      if (tableNameFromId(value) !== validator.tableName) {
+      if (tableNameFromId(value, idLookup) !== validator.tableName) {
         throw new Error(
           `Validator error: Expected ID for table "${validator.tableName}", got \`${value}\``,
         );
@@ -173,7 +190,7 @@ export function validateValidator(
         );
       }
       for (const v of value) {
-        validateValidator(validator.value, v);
+        validateValidator(validator.value, v, idLookup);
       }
       return;
 
@@ -181,7 +198,7 @@ export function validateValidator(
       let isValid = false;
       for (const v of validator.value) {
         try {
-          validateValidator(v, value);
+          validateValidator(v, value, idLookup);
           isValid = true;
           break;
         } catch {
@@ -219,7 +236,7 @@ export function validateValidator(
               );
             }
           } else {
-            validateValidator(fieldType, obj[k]!);
+            validateValidator(fieldType, obj[k]!, idLookup);
           }
         }
         for (const k of Object.keys(obj)) {

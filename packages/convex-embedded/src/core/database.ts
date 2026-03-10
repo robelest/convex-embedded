@@ -7,7 +7,8 @@ import { Fx } from "@robelest/fx";
  *  - Per-transaction tracking of which tables were written
  *  - Delegation to QueryEngine for query evaluation
  *
- * ID format: `"<number>;<tableName>"` (same as convex-test)
+ * ID format: UUIDs generated via `crypto.randomUUID()`.
+ * A separate `_idTableMap` maps each UUID to its table name.
  */
 import type { GenericDocument } from "convex/server";
 import type { JSONValue, Value } from "convex/values";
@@ -17,7 +18,6 @@ import { QueryEngine } from "@/core/query-engine";
 import type { DocumentIterator } from "@/core/query-engine";
 import type { ParsedSchema } from "@/core/schema";
 import {
-  tableNameFromId,
   validateValidator,
   validateSchemaDefinition,
 } from "@/core/schema";
@@ -60,8 +60,12 @@ export class Database {
   /** Blob storage keyed by `_storage` document ID. */
   private _blobStorage: Record<DocumentId, Blob> = {};
 
-  /** Auto-incrementing counter used to generate document IDs. */
-  private _nextDocId: number = 10000;
+  /**
+   * Maps each document UUID to its table name.
+   * Populated on insert (when UUID is generated) and on hydrate/syncTable
+   * (derived from stored documents).
+   */
+  private _idTableMap: Map<string, string> = new Map();
 
   /** Last creation-time value emitted, used to guarantee monotonic times. */
   private _lastCreationTime: number = 0;
@@ -163,15 +167,17 @@ export class Database {
       this._storage.getBlobs(),
     ]);
 
-    // Restore documents.
-    for (const doc of documents) {
+    // Restore documents and rebuild ID→table map.
+    for (const { doc, tableName } of documents) {
       this._documents[doc._id] = doc;
+      if (tableName) {
+        this._idTableMap.set(doc._id as string, tableName);
+      }
     }
 
     // Restore metadata counters.
     if (meta !== null) {
       this._timestamp = meta.timestamp;
-      this._nextDocId = meta.nextDocId;
       this._lastCreationTime = meta.lastCreationTime;
     }
 
@@ -200,25 +206,23 @@ export class Database {
     ]);
 
     // Remove all current in-memory docs for this table.
-    const suffix = `;${tableName}`;
     for (const id of Object.keys(this._documents)) {
-      if (id.endsWith(suffix)) {
+      if (this._idTableMap.get(id) === tableName) {
         delete this._documents[id as DocumentId];
+        this._idTableMap.delete(id);
       }
     }
 
-    // Replace with what's in storage.
+    // Replace with what's in storage and rebuild map entries.
     for (const doc of docs) {
       this._documents[doc._id] = doc;
+      this._idTableMap.set(doc._id as string, tableName);
     }
 
-    // Sync metadata counters so IDs remain monotonic across tabs.
+    // Sync metadata counters so timestamps remain monotonic across tabs.
     if (meta !== null) {
       if (meta.timestamp > this._timestamp) {
         this._timestamp = meta.timestamp;
-      }
-      if (meta.nextDocId > this._nextDocId) {
-        this._nextDocId = meta.nextDocId;
       }
       if (meta.lastCreationTime > this._lastCreationTime) {
         this._lastCreationTime = meta.lastCreationTime;
@@ -262,15 +266,15 @@ export class Database {
 
     // Track which tables are affected by this commit level.
     for (const id of Object.keys(lastWrites)) {
-      const table = tableNameFromId(id);
-      if (table !== null) {
+      const table = this._idTableMap.get(id);
+      if (table !== undefined) {
         this._tablesWritten.add(table);
       }
     }
 
     if (this._writes.length === 0) {
       // Outermost commit — apply writes to in-memory storage.
-      const puts: StoredDocument[] = [];
+      const puts: Array<{ doc: StoredDocument; tableName: string }> = [];
       const deletes: string[] = [];
 
       for (const [id, write] of Object.entries(lastWrites)) {
@@ -280,7 +284,8 @@ export class Database {
           deletes.push(id);
         } else {
           this._documents[_id] = write;
-          puts.push(write);
+          const table = this._idTableMap.get(id) ?? "";
+          puts.push({ doc: write, tableName: table });
         }
       }
 
@@ -301,7 +306,6 @@ export class Database {
               deletes,
               meta: {
                 timestamp: this._timestamp,
-                nextDocId: this._nextDocId,
                 lastCreationTime: this._lastCreationTime,
               },
             }),
@@ -349,7 +353,9 @@ export class Database {
     id: DocumentId,
     _options: { countRead?: boolean } = {},
   ): StoredDocument | null {
-    this._validateId(tableName, id);
+    if (!this._validateId(tableName, id)) {
+      return null;
+    }
 
     let hasPendingWrite = false;
     let document: StoredDocument | null = null;
@@ -370,10 +376,11 @@ export class Database {
     return document;
   }
 
-  /** Insert a new document. Returns the generated `_id`. */
+  /** Insert a new document. Returns the generated UUID `_id`. */
   insert(table: TableName, value: Record<string, unknown>): DocumentId {
     this._validate(table, value as GenericDocument);
-    const _id = this._generateId(table);
+    const _id = crypto.randomUUID() as unknown as DocumentId;
+    this._idTableMap.set(_id as string, table);
     const now = Date.now();
     const _creationTime =
       now <= this._lastCreationTime ? this._lastCreationTime + 0.001 : now;
@@ -388,7 +395,9 @@ export class Database {
     id: DocumentId,
     value: Record<string, unknown>,
   ): void {
-    this._validateId(tableName, id);
+    if (!this._validateId(tableName, id)) {
+      throw new Error(`Patch on non-existent document with ID "${id}"`);
+    }
 
     if (typeof value !== "object" || value === null) {
       throw new Error(
@@ -430,7 +439,7 @@ export class Database {
     }
 
     const merged = { ...fields, ...convexValue };
-    this._validate(tableNameFromId(_id as string)!, merged as GenericDocument);
+    this._validate(this._idTableMap.get(_id as string)!, merged as GenericDocument);
     this._addWrite(id, { _id, _creationTime, ...merged });
   }
 
@@ -440,7 +449,9 @@ export class Database {
     id: DocumentId,
     value: Record<string, unknown>,
   ): void {
-    this._validateId(tableName, id);
+    if (!this._validateId(tableName, id)) {
+      throw new Error(`Replace on non-existent document with ID "${id}"`);
+    }
 
     if (typeof value !== "object" || value === null) {
       throw new Error(
@@ -478,7 +489,7 @@ export class Database {
     }
 
     this._validate(
-      tableNameFromId(document._id as string)!,
+      this._idTableMap.get(document._id as string)!,
       convexValue as GenericDocument,
     );
     this._addWrite(id, {
@@ -490,7 +501,9 @@ export class Database {
 
   /** Mark a document as deleted. */
   delete(tableName: TableName | undefined, id: DocumentId): void {
-    this._validateId(tableName, id);
+    if (!this._validateId(tableName, id)) {
+      throw new Error("Delete on non-existent doc");
+    }
 
     const document = this.get(tableName, id);
     if (document === null) {
@@ -509,8 +522,17 @@ export class Database {
    */
   normalizeId(table: TableName, idString: string): DocumentId | null {
     if (typeof idString !== "string") return null;
-    const isInTable = idString.endsWith(`;${table}`);
-    return isInTable ? (idString as DocumentId) : null;
+    return this._idTableMap.get(idString) === table
+      ? (idString as DocumentId)
+      : null;
+  }
+
+  /**
+   * Look up the table name for a given document ID.
+   * Returns `undefined` if the ID is not known.
+   */
+  getTableForId(id: string): string | undefined {
+    return this._idTableMap.get(id);
   }
 
   // -------------------------------------------------------------------------
@@ -596,26 +618,22 @@ export class Database {
   }
 
   // -------------------------------------------------------------------------
-  // Private: ID generation & validation
+  // Private: ID validation
   // -------------------------------------------------------------------------
 
   /**
-   * Generate a new document ID in the `"<number>;<tableName>"` format.
-   */
-  private _generateId(table: TableName): DocumentId {
-    const id = this._nextDocId.toString() + ";" + table;
-    this._nextDocId += 1;
-    return id as DocumentId;
-  }
-
-  /**
-   * Assert that `id` is a string whose embedded table name matches
-   * `expectedTableName` (when non-undefined).
+   * Validate that `id` is a string whose table (looked up in `_idTableMap`)
+   * matches `expectedTableName` (when non-undefined).
+   *
+   * Returns `true` if the ID is known and valid, `false` if the ID is a
+   * valid UUID string but not present in `_idTableMap` (deleted or never
+   * existed). Throws only for genuinely invalid arguments (wrong type,
+   * wrong table).
    */
   private _validateId(
     expectedTableName: unknown,
     id: unknown,
-  ): asserts id is DocumentId {
+  ): id is DocumentId {
     if (typeof id !== "string") {
       throw new Error(
         `Invalid argument \`id\`, expected string but got '${typeof id}': ${String(id)}`,
@@ -623,7 +641,7 @@ export class Database {
     }
 
     if (expectedTableName === undefined) {
-      return;
+      return true;
     }
 
     if (typeof expectedTableName !== "string") {
@@ -632,11 +650,11 @@ export class Database {
       );
     }
 
-    const actualTableName = tableNameFromId(id);
-    if (actualTableName === null) {
-      throw new Error(
-        `Invalid argument \`id\`, expected ID value but got '${id}'`,
-      );
+    const actualTableName = this._idTableMap.get(id);
+    if (actualTableName === undefined) {
+      // ID is not known — could be deleted or never existed.
+      // Return false so callers (get/delete/patch/replace) can handle it.
+      return false;
     }
 
     if (actualTableName !== expectedTableName) {
@@ -644,6 +662,8 @@ export class Database {
         `Invalid argument \`id\`, expected ID in table '${expectedTableName}' but got ID in table '${actualTableName}'`,
       );
     }
+
+    return true;
   }
 
   // -------------------------------------------------------------------------
@@ -662,7 +682,7 @@ export class Database {
     if (validator === undefined) {
       return;
     }
-    validateValidator(validator, doc);
+    validateValidator(validator, doc, (id) => this._idTableMap.get(id));
   }
 
   // -------------------------------------------------------------------------
@@ -702,7 +722,7 @@ export class Database {
     tableName: string,
     callback: (doc: StoredDocument) => void,
   ): void {
-    const isInTable = (id: string) => tableNameFromId(id) === tableName;
+    const isInTable = (id: string) => this._idTableMap.get(id) === tableName;
 
     // Collect all IDs that belong to the table (committed + staged).
     const ids = new Set(Object.keys(this._documents).filter(isInTable));

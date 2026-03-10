@@ -85,7 +85,6 @@ describe("Database persistence", () => {
       const meta = await storage.getMeta();
       expect(meta).not.toBeNull();
       expect(meta!.timestamp).toBe(2);
-      expect(meta!.nextDocId).toBeGreaterThan(10000);
 
       // Session 2: verify timestamp and IDs continue from where they left off
       const { db: db2 } = await createPersistedDb(storage);

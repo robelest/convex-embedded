@@ -25,15 +25,23 @@ import type { StoredDocument } from "@/core/types";
  * Metadata required to restore a {@link Database} to its pre-shutdown state.
  *
  * These counters are updated on every committed write and must survive
- * restarts so IDs, timestamps, and creation times remain monotonic.
+ * restarts so timestamps and creation times remain monotonic.
  */
 export interface DatabaseMeta {
   /** MVCC timestamp — monotonically increasing on each write-commit. */
   timestamp: number;
-  /** Next auto-increment document ID counter. */
-  nextDocId: number;
   /** Last assigned `_creationTime` (monotonic). */
   lastCreationTime: number;
+}
+
+/**
+ * A document paired with its table name, used during persistence.
+ * The table name is stored alongside the document so that
+ * `getDocumentsByTable` can filter without parsing the ID.
+ */
+export interface StoredDocumentWithTable {
+  doc: StoredDocument;
+  tableName: string;
 }
 
 /**
@@ -43,8 +51,8 @@ export interface DatabaseMeta {
  * entire transaction atomically.
  */
 export interface CommitBatch {
-  /** Documents that were inserted or replaced in this commit. */
-  puts: StoredDocument[];
+  /** Documents with their table names, inserted or replaced in this commit. */
+  puts: StoredDocumentWithTable[];
   /** IDs of documents that were deleted in this commit. */
   deletes: string[];
   /** Updated counters after this commit. */
@@ -71,8 +79,8 @@ export interface CommitBatch {
 export interface StorageAdapter {
   // -- Hydration (called once on startup) ----------------------------------
 
-  /** Return every persisted document, across all tables. */
-  getDocuments(): Promise<StoredDocument[]>;
+  /** Return every persisted document (with table name), across all tables. */
+  getDocuments(): Promise<StoredDocumentWithTable[]>;
 
   /**
    * Return persisted documents for a single table.
@@ -80,8 +88,8 @@ export interface StorageAdapter {
    * Used by cross-tab sync to incrementally re-read only the tables
    * that were written by another tab, rather than re-loading everything.
    *
-   * The document ID format is `"<number>;<tableName>"`, so implementations
-   * can filter with e.g. `WHERE id LIKE '%;tableName'`.
+   * Documents are stored with an associated `tableName`, so implementations
+   * filter by the stored table name column/field.
    */
   getDocumentsByTable(tableName: string): Promise<StoredDocument[]>;
 

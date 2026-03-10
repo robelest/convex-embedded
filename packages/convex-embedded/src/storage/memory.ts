@@ -10,6 +10,7 @@ import type {
   CommitBatch,
   DatabaseMeta,
   StorageAdapter,
+  StoredDocumentWithTable,
 } from "@/storage/adapter";
 
 // ---------------------------------------------------------------------------
@@ -24,18 +25,21 @@ import type {
  */
 export function memoryStorage(): StorageAdapter {
   const documents = new Map<string, StoredDocument>();
+  const tableMap = new Map<string, string>(); // id → tableName
   const blobs = new Map<string, Blob>();
   let meta: DatabaseMeta | null = null;
 
   return {
-    async getDocuments(): Promise<StoredDocument[]> {
-      return Array.from(documents.values());
+    async getDocuments(): Promise<StoredDocumentWithTable[]> {
+      return Array.from(documents.entries()).map(([id, doc]) => ({
+        doc,
+        tableName: tableMap.get(id) ?? "",
+      }));
     },
 
     async getDocumentsByTable(tableName: string): Promise<StoredDocument[]> {
-      const suffix = `;${tableName}`;
-      return Array.from(documents.values()).filter((doc) =>
-        (doc._id as string).endsWith(suffix),
+      return Array.from(documents.values()).filter(
+        (doc) => tableMap.get(doc._id as string) === tableName,
       );
     },
 
@@ -48,11 +52,13 @@ export function memoryStorage(): StorageAdapter {
     },
 
     async commit(batch: CommitBatch): Promise<void> {
-      for (const doc of batch.puts) {
+      for (const { doc, tableName } of batch.puts) {
         documents.set(doc._id as string, doc);
+        tableMap.set(doc._id as string, tableName);
       }
       for (const id of batch.deletes) {
         documents.delete(id);
+        tableMap.delete(id);
       }
       meta = batch.meta;
     },
@@ -67,6 +73,7 @@ export function memoryStorage(): StorageAdapter {
 
     async clear(): Promise<void> {
       documents.clear();
+      tableMap.clear();
       blobs.clear();
       meta = null;
     },

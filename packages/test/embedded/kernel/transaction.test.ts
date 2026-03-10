@@ -144,6 +144,10 @@ function createMockDb() {
     rollbackWrites: vi.fn(),
     getDocumentTimestamp: vi.fn().mockReturnValue(1),
     getTableLastWriteTimestamp: vi.fn().mockReturnValue(null),
+    getTableForId: vi.fn().mockImplementation((_: string) => {
+      // Return "messages" for any ID passed in tests
+      return "messages";
+    }),
   };
 }
 
@@ -192,11 +196,11 @@ describe("OccTransaction", () => {
     db.getDocumentTimestamp.mockReturnValue(100);
 
     await tx.execute(async () => {
-      tx.addRead("1;messages" as any, 100);
+      tx.addRead("aaaaaaaa-0000-4000-8000-000000000001" as any, 100);
       return null;
     });
 
-    expect(db.getDocumentTimestamp).toHaveBeenCalledWith("1;messages");
+    expect(db.getDocumentTimestamp).toHaveBeenCalledWith("aaaaaaaa-0000-4000-8000-000000000001");
     expect(db.commit).toHaveBeenCalledOnce();
   });
 
@@ -225,7 +229,7 @@ describe("OccTransaction", () => {
 
     await expect(
       tx.execute(async () => {
-        tx.addRead("1;messages" as any, 1);
+        tx.addRead("aaaaaaaa-0000-4000-8000-000000000001" as any, 1);
         return null;
       }),
     ).rejects.toThrow(/OCC conflict/);
@@ -242,7 +246,7 @@ describe("OccTransaction", () => {
 
     await expect(
       tx.execute(async () => {
-        tx.addRead("1;messages" as any, 1);
+        tx.addRead("aaaaaaaa-0000-4000-8000-000000000001" as any, 1);
         return null;
       }),
     ).rejects.toThrow(/OCC conflict/);
@@ -283,7 +287,7 @@ describe("OccTransaction", () => {
       .execute(async () => {
         attempt++;
         readTimestampsPerAttempt.push([attempt]);
-        tx.addRead(`${attempt};messages` as any, 5);
+        tx.addRead(`aaaaaaaa-0000-4000-8000-00000000000${attempt}` as any, 5);
         return "ok";
       })
       .catch((err: Error) => {

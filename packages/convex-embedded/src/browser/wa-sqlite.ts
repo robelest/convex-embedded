@@ -24,6 +24,7 @@ import type {
   CommitBatch,
   DatabaseMeta,
   StorageAdapter,
+  StoredDocumentWithTable,
 } from "@/storage/adapter";
 
 // ---------------------------------------------------------------------------
@@ -153,11 +154,14 @@ export async function createWaSqliteStorage(
  */
 function _buildAdapter(worker: Worker): StorageAdapter {
   return {
-    async getDocuments(): Promise<StoredDocument[]> {
-      const jsonStrings = (await rpc(worker, {
+    async getDocuments(): Promise<StoredDocumentWithTable[]> {
+      const rows = (await rpc(worker, {
         method: "getDocuments",
-      })) as string[];
-      return jsonStrings.map((s) => JSON.parse(s) as StoredDocument);
+      })) as Array<{ data: string; tableName: string }>;
+      return rows.map((row) => ({
+        doc: JSON.parse(row.data) as StoredDocument,
+        tableName: row.tableName,
+      }));
     },
 
     async getDocumentsByTable(tableName: string): Promise<StoredDocument[]> {
@@ -185,8 +189,9 @@ function _buildAdapter(worker: Worker): StorageAdapter {
 
     async commit(batch: CommitBatch): Promise<void> {
       // Serialise documents to JSON strings for transport.
-      const puts = batch.puts.map((doc) => ({
+      const puts = batch.puts.map(({ doc, tableName }) => ({
         _id: String(doc._id),
+        tableName,
         data: JSON.stringify(doc),
       }));
 
@@ -196,7 +201,6 @@ function _buildAdapter(worker: Worker): StorageAdapter {
         deletes: batch.deletes,
         meta: {
           timestamp: batch.meta.timestamp,
-          nextDocId: batch.meta.nextDocId,
           lastCreationTime: batch.meta.lastCreationTime,
         },
       });

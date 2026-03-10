@@ -30,6 +30,8 @@ export interface TransactionDatabase {
   rollbackWrites(): void;
   getDocumentTimestamp(id: DocumentId): Timestamp | null;
   getTableLastWriteTimestamp(tableName: string): Timestamp | null;
+  /** Look up the table name for a document ID (from the ID→table map). */
+  getTableForId(id: string): string | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -313,13 +315,10 @@ export class OccTransaction {
   }
 
   /**
-   * Check whether a document ID belongs to the given table.
-   *
-   * Our ID format is `"<counter>;<tableName>"`, so we split on `";"` and
-   * compare the second segment.
+   * Check whether a document ID belongs to the given table via the
+   * database's ID→table map.
    */
   private _belongsToTable(id: DocumentId, tableName: string): boolean {
-    const parts = (id as string).split(";");
-    return parts.length === 2 && parts[1] === tableName;
+    return this._db.getTableForId(id as string) === tableName;
   }
 }

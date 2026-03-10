@@ -218,14 +218,18 @@ describe("validateValidator", () => {
   describe("id validator", () => {
     const validator: ValidatorJSON = { type: "id", tableName: "messages" };
 
-    it('accepts a valid id string like "10000;messages"', () => {
+    it("accepts a valid id when lookup resolves to the correct table", () => {
+      const lookup = (id: string) =>
+        id === "test-uuid" ? "messages" : undefined;
       expect(() =>
-        validateValidator(validator, "10000;messages"),
+        validateValidator(validator, "test-uuid", lookup),
       ).not.toThrow();
     });
 
     it("rejects an id for the wrong table", () => {
-      expect(() => validateValidator(validator, "10000;users")).toThrow(
+      const lookup = (id: string) =>
+        id === "test-uuid" ? "users" : undefined;
+      expect(() => validateValidator(validator, "test-uuid", lookup)).toThrow(
         /Expected ID for table/,
       );
     });
@@ -234,8 +238,9 @@ describe("validateValidator", () => {
       expect(() => validateValidator(validator, 10000)).toThrow(/string/);
     });
 
-    it("rejects a string without semicolon", () => {
-      expect(() => validateValidator(validator, "abc")).toThrow(
+    it("rejects a string with no lookup match", () => {
+      const lookup = () => undefined;
+      expect(() => validateValidator(validator, "abc", lookup)).toThrow(
         /Expected ID for table/,
       );
     });
@@ -415,24 +420,28 @@ describe("isValidIdentifier", () => {
 // ---------------------------------------------------------------------------
 
 describe("tableNameFromId", () => {
-  it('"10000;messages" → "messages"', () => {
-    expect(tableNameFromId("10000;messages")).toBe("messages");
+  const lookup = (id: string) => {
+    const map: Record<string, string> = {
+      "uuid-1": "messages",
+      "uuid-2": "users",
+    };
+    return map[id];
+  };
+
+  it("returns table name when lookup matches", () => {
+    expect(tableNameFromId("uuid-1", lookup)).toBe("messages");
   });
 
-  it('"abc" → null (no semicolon)', () => {
-    expect(tableNameFromId("abc")).toBe(null);
+  it("returns null when no lookup provided", () => {
+    expect(tableNameFromId("anything")).toBe(null);
   });
 
-  it('";" → "" (empty table name)', () => {
-    expect(tableNameFromId(";")).toBe("");
+  it("returns null when lookup returns undefined", () => {
+    expect(tableNameFromId("unknown-id", lookup)).toBe(null);
   });
 
-  it('"99;users" → "users"', () => {
-    expect(tableNameFromId("99;users")).toBe("users");
-  });
-
-  it('"a;b;c" → null (multiple semicolons)', () => {
-    expect(tableNameFromId("a;b;c")).toBe(null);
+  it("returns correct table for different IDs", () => {
+    expect(tableNameFromId("uuid-2", lookup)).toBe("users");
   });
 });
 

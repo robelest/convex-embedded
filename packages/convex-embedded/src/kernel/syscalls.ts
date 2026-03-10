@@ -68,11 +68,8 @@ export function createSyncSyscall(
         return JSON.stringify({});
       }
       case "1.0/db/normalizeId": {
-        const idString: string = args.idString;
-        const isInTable = idString.endsWith(`;${args.table}`);
-        return JSON.stringify({
-          id: isInTable ? idString : null,
-        });
+        const normalized = db.normalizeId(args.table, args.idString);
+        return JSON.stringify({ id: normalized });
       }
       default: {
         throw new Error(

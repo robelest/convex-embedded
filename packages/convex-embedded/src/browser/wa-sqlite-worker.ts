@@ -31,9 +31,9 @@ export type StorageRequest =
   | {
       id: number;
       method: "commit";
-      puts: Array<{ _id: string; data: string }>;
+      puts: Array<{ _id: string; tableName: string; data: string }>;
       deletes: string[];
-      meta: { timestamp: number; nextDocId: number; lastCreationTime: number };
+      meta: { timestamp: number; lastCreationTime: number };
     }
   | { id: number; method: "storeBlob"; blobId: string; data: ArrayBuffer }
   | { id: number; method: "deleteBlob"; blobId: string }
@@ -135,13 +135,13 @@ async function initSqlite(
 const SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS documents (
     id TEXT PRIMARY KEY,
+    table_name TEXT NOT NULL DEFAULT '',
     data TEXT NOT NULL
   );
 
   CREATE TABLE IF NOT EXISTS meta (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     timestamp REAL NOT NULL,
-    next_doc_id INTEGER NOT NULL,
     last_creation_time REAL NOT NULL
   );
 
@@ -188,22 +188,28 @@ async function handleInit(
   await execute(sqlite3, db, SCHEMA_SQL);
 }
 
-async function handleGetDocuments(): Promise<string[]> {
-  const rows = await serializedExecute("SELECT data FROM documents");
-  return rows.map((row) => row.data as string);
+async function handleGetDocuments(): Promise<
+  Array<{ data: string; tableName: string }>
+> {
+  const rows = await serializedExecute(
+    "SELECT data, table_name FROM documents",
+  );
+  return rows.map((row) => ({
+    data: row.data as string,
+    tableName: (row.table_name as string) ?? "",
+  }));
 }
 
 async function handleGetDocumentsByTable(tableName: string): Promise<string[]> {
   const rows = await serializedExecute(
-    "SELECT data FROM documents WHERE id LIKE ?",
-    [`%;${tableName}`],
+    "SELECT data FROM documents WHERE table_name = ?",
+    [tableName],
   );
   return rows.map((row) => row.data as string);
 }
 
 async function handleGetMeta(): Promise<{
   timestamp: number;
-  nextDocId: number;
   lastCreationTime: number;
 } | null> {
   const rows = await serializedExecute("SELECT * FROM meta WHERE id = 1");
@@ -211,7 +217,6 @@ async function handleGetMeta(): Promise<{
   const row = rows[0];
   return {
     timestamp: row.timestamp as number,
-    nextDocId: row.next_doc_id as number,
     lastCreationTime: row.last_creation_time as number,
   };
 }
@@ -234,9 +239,9 @@ async function handleGetBlobs(): Promise<
 }
 
 async function handleCommit(
-  puts: Array<{ _id: string; data: string }>,
+  puts: Array<{ _id: string; tableName: string; data: string }>,
   deletes: string[],
-  meta: { timestamp: number; nextDocId: number; lastCreationTime: number },
+  meta: { timestamp: number; lastCreationTime: number },
 ): Promise<void> {
   const op = mutex
     .catch(() => {})
@@ -248,8 +253,8 @@ async function handleCommit(
           await execute(
             sqlite3,
             db,
-            "INSERT OR REPLACE INTO documents (id, data) VALUES (?, ?)",
-            [doc._id, doc.data],
+            "INSERT OR REPLACE INTO documents (id, table_name, data) VALUES (?, ?, ?)",
+            [doc._id, doc.tableName, doc.data],
           );
         }
 
@@ -262,8 +267,8 @@ async function handleCommit(
         await execute(
           sqlite3,
           db,
-          "INSERT OR REPLACE INTO meta (id, timestamp, next_doc_id, last_creation_time) VALUES (1, ?, ?, ?)",
-          [meta.timestamp, meta.nextDocId, meta.lastCreationTime],
+          "INSERT OR REPLACE INTO meta (id, timestamp, last_creation_time) VALUES (1, ?, ?)",
+          [meta.timestamp, meta.lastCreationTime],
         );
 
         await execute(sqlite3, db, "COMMIT;");

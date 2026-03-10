@@ -10,20 +10,27 @@ import { memoryStorage } from "#embedded/storage/memory";
 
 function doc(
   id: string,
-  table: string,
+  _table: string,
   fields: Record<string, unknown> = {},
 ): StoredDocument {
   return {
-    _id: `${id};${table}` as any,
+    _id: id as any,
     _creationTime: Date.now(),
     ...fields,
   };
 }
 
+function batchPut(
+  docObj: StoredDocument,
+  tableName: string,
+): { doc: StoredDocument; tableName: string } {
+  return { doc: docObj, tableName };
+}
+
 function batch(
-  puts: StoredDocument[] = [],
+  puts: Array<{ doc: StoredDocument; tableName: string }> = [],
   deletes: string[] = [],
-  meta = { timestamp: 1, nextDocId: 10001, lastCreationTime: 1000 },
+  meta = { timestamp: 1, lastCreationTime: 1000 },
 ): CommitBatch {
   return { puts, deletes, meta };
 }
@@ -60,15 +67,15 @@ describe("memoryStorage", () => {
   describe("commit", () => {
     it("persists put documents", async () => {
       const d = doc("1", "tasks", { text: "hello" });
-      await storage.commit(batch([d]));
+      await storage.commit(batch([batchPut(d, "tasks")]));
 
       const docs = await storage.getDocuments();
       expect(docs).toHaveLength(1);
-      expect(docs[0]).toEqual(d);
+      expect(docs[0]).toEqual({ doc: d, tableName: "tasks" });
     });
 
     it("persists meta", async () => {
-      const meta = { timestamp: 5, nextDocId: 20000, lastCreationTime: 9999 };
+      const meta = { timestamp: 5, lastCreationTime: 9999 };
       await storage.commit(batch([], [], meta));
 
       expect(await storage.getMeta()).toEqual(meta);
@@ -77,54 +84,52 @@ describe("memoryStorage", () => {
     it("deletes documents by ID", async () => {
       const d1 = doc("1", "tasks", { text: "a" });
       const d2 = doc("2", "tasks", { text: "b" });
-      await storage.commit(batch([d1, d2]));
+      await storage.commit(batch([batchPut(d1, "tasks"), batchPut(d2, "tasks")]));
 
       await storage.commit(batch([], [d1._id as string]));
 
       const docs = await storage.getDocuments();
       expect(docs).toHaveLength(1);
-      expect(docs[0]._id).toBe(d2._id);
+      expect(docs[0].doc._id).toBe(d2._id);
     });
 
     it("handles puts and deletes in the same batch", async () => {
       const d1 = doc("1", "tasks");
       const d2 = doc("2", "tasks");
-      await storage.commit(batch([d1, d2]));
+      await storage.commit(batch([batchPut(d1, "tasks"), batchPut(d2, "tasks")]));
 
       const d3 = doc("3", "tasks");
-      await storage.commit(batch([d3], [d1._id as string]));
+      await storage.commit(batch([batchPut(d3, "tasks")], [d1._id as string]));
 
       const docs = await storage.getDocuments();
       expect(docs).toHaveLength(2);
-      const ids = docs.map((d) => d._id);
+      const ids = docs.map((d) => d.doc._id);
       expect(ids).toContain(d2._id);
       expect(ids).toContain(d3._id);
     });
 
     it("replaces document with same ID on put", async () => {
       const d = doc("1", "tasks", { text: "v1" });
-      await storage.commit(batch([d]));
+      await storage.commit(batch([batchPut(d, "tasks")]));
 
       const updated = { ...d, text: "v2" };
-      await storage.commit(batch([updated]));
+      await storage.commit(batch([batchPut(updated, "tasks")]));
 
       const docs = await storage.getDocuments();
       expect(docs).toHaveLength(1);
-      expect(docs[0].text).toBe("v2");
+      expect(docs[0].doc.text).toBe("v2");
     });
 
     it("updates meta on each commit", async () => {
       await storage.commit(
         batch([], [], {
           timestamp: 1,
-          nextDocId: 10001,
           lastCreationTime: 100,
         }),
       );
       await storage.commit(
         batch([], [], {
           timestamp: 2,
-          nextDocId: 10002,
           lastCreationTime: 200,
         }),
       );
@@ -132,7 +137,6 @@ describe("memoryStorage", () => {
       const meta = await storage.getMeta();
       expect(meta).toEqual({
         timestamp: 2,
-        nextDocId: 10002,
         lastCreationTime: 200,
       });
     });
@@ -171,7 +175,7 @@ describe("memoryStorage", () => {
 
   describe("clear", () => {
     it("wipes all documents, meta, and blobs", async () => {
-      await storage.commit(batch([doc("1", "tasks")]));
+      await storage.commit(batch([batchPut(doc("1", "tasks"), "tasks")]));
       await storage.storeBlob("blob-1", new Blob(["data"]));
 
       await storage.clear();

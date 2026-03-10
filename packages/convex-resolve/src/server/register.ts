@@ -58,7 +58,14 @@ export interface RegisterConfig {
   /** Versioned schema definition from schema.define() */
   schema: Definition;
 
-  /** Convex component reference — required on remote, absent on local */
+  /**
+   * Convex component reference — required on remote, absent on local.
+   *
+   * Note: `componentsGeneric()` returns a Proxy where every property
+   * access is truthy, so `!!component` is always true even on the
+   * embedded runtime. Use `detectRuntime()` at handler execution time
+   * to distinguish local from remote.
+   */
   component?: ResolveComponentApi;
 
   /** Per-version migration functions (keyed by target version number) */
@@ -114,10 +121,80 @@ export interface RegisterResult {
 
 export function register(config: RegisterConfig): RegisterResult {
   const { table, schema: schemaDef, component } = config;
-  const isRemote = !!component;
+
+  // Runtime detection: `componentsGeneric()` returns a Proxy that is truthy
+  // for every property access, so `!!component` is always true — even on
+  // the embedded runtime where no component is installed. We lazily detect
+  // the actual runtime on the first handler invocation by probing whether
+  // the component's function can be resolved.
+  let _runtimeKnown = false;
+  let _isRemote = false;
+
+  /**
+   * Probe whether the resolve component is available at runtime.
+   * - Query context: uses ctx.runQuery(component.public.getLatestDeltas)
+   * - Mutation context: uses ctx.runMutation(component.public.insertDelta)
+   *
+   * On remote Convex the call succeeds → cache isRemote = true.
+   * On embedded the call throws "Could not find module" → isRemote = false.
+   */
+  async function detectRuntime(
+    ctx: any,
+    mode: "query" | "mutation",
+  ): Promise<boolean> {
+    if (_runtimeKnown) return _isRemote;
+
+    if (!component) {
+      _runtimeKnown = true;
+      _isRemote = false;
+      log.info(`detectRuntime(${table}): component is falsy → local`);
+      return false;
+    }
+
+    const probe =
+      mode === "query"
+        ? Fx.from({
+            ok: () =>
+              ctx.runQuery(component.public.getLatestDeltas, {
+                collection: table,
+                docIds: [],
+              }),
+            err: (e) => e,
+          })
+        : Fx.from({
+            ok: () =>
+              ctx.runMutation(component.public.insertDelta, {
+                collection: "__probe__",
+                docId: "__probe__",
+                update: toArrayBuffer(new Uint8Array(0)),
+              }),
+            err: (e) => e,
+          });
+
+    await Fx.run(
+      probe.pipe(
+        Fx.fold({
+          ok: () => {
+            _runtimeKnown = true;
+            _isRemote = true;
+            log.info(`detectRuntime(${table}): component resolved → remote`);
+          },
+          err: () => {
+            _runtimeKnown = true;
+            _isRemote = false;
+            log.info(
+              `detectRuntime(${table}): component unavailable → local`,
+            );
+          },
+        }),
+      ),
+    );
+
+    return _isRemote;
+  }
 
   log.info(
-    `register() table="${table}" isRemote=${isRemote} version=${schemaDef.version}`,
+    `register() table="${table}" version=${schemaDef.version} (runtime detection deferred)`,
   );
 
   // -------------------------------------------------------------------------
@@ -130,8 +207,7 @@ export function register(config: RegisterConfig): RegisterResult {
     },
     returns: v.null(),
     handler: async (ctx: any, args: { docId: string }): Promise<null> => {
-      if (!isRemote || !component) {
-        // On local embedded runtime — no-op
+      if (!(await detectRuntime(ctx, "mutation"))) {
         return null;
       }
 
@@ -148,7 +224,7 @@ export function register(config: RegisterConfig): RegisterResult {
 
             const update = encodeDocumentState(schemaDef, doc);
 
-            await ctx.runMutation(component.public.insertDelta, {
+            await ctx.runMutation(component!.public.insertDelta, {
               collection: table,
               docId: args.docId,
               update: toArrayBuffer(update),
@@ -190,7 +266,7 @@ export function register(config: RegisterConfig): RegisterResult {
       ctx: any,
       args: { documents: Array<{ docId: string; vector: ArrayBuffer }> },
     ): Promise<Array<{ docId: string; diff?: ArrayBuffer }>> => {
-      if (!isRemote || !component) {
+      if (!(await detectRuntime(ctx, "query"))) {
         // On local embedded runtime — return empty diffs (no-op)
         return args.documents.map((d) => ({ docId: d.docId }));
       }
@@ -199,7 +275,7 @@ export function register(config: RegisterConfig): RegisterResult {
 
       // Batch fetch latest deltas from the component
       const latestDeltas = await ctx.runQuery(
-        component.public.getLatestDeltas,
+        component!.public.getLatestDeltas,
         {
           collection: table,
           docIds,
@@ -262,6 +338,14 @@ export function register(config: RegisterConfig): RegisterResult {
       handler: async (ctx: any, fnArgs: any) => {
         // 1. Run the handler
         const result = await handler(ctx, fnArgs);
+
+        // Runtime detection is deferred — if we haven't probed yet and
+        // there's no `remote` block or `recordDeltaRef`, skip detection
+        // entirely to avoid the overhead on local-only mutations.
+        const needsRemote = remote || recordDeltaRef;
+        const isRemote = needsRemote
+          ? await detectRuntime(ctx, "mutation")
+          : false;
 
         // 2. On remote, run the remote: block in the same transaction
         if (isRemote && remote) {

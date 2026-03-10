@@ -165,7 +165,7 @@ describe("monitor.create()", () => {
     m.stop();
   });
 
-  it("on() returns unsubscribe function", () => {
+  it("on() returns unsubscribe function", async () => {
     const remoteClient = { query: vi.fn().mockResolvedValue([]) };
 
     const m = monitor.create({
@@ -177,7 +177,8 @@ describe("monitor.create()", () => {
     const unsub = m.on("change", listener);
 
     m.start();
-    // Force an emit
+    // Give async resolve cycle time to emit status changes
+    await new Promise((r) => setTimeout(r, 50));
     expect(listener).toHaveBeenCalled();
 
     const _callCount = listener.mock.calls.length;

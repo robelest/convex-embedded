@@ -291,6 +291,7 @@ describe("wrapMutation()", () => {
     });
 
     const scheduler = { runAfter: vi.fn() };
+    const runMutation = vi.fn().mockResolvedValue(undefined);
     const recordDeltaRef = { _name: "_recordDelta" };
 
     const wrapped = wrapMutation(recordDeltaRef, {
@@ -299,7 +300,7 @@ describe("wrapMutation()", () => {
       remote,
     });
 
-    const result = await wrapped.handler({ scheduler }, {});
+    const result = await wrapped.handler({ scheduler, runMutation }, {});
 
     expect(callOrder).toEqual(["handler", "remote"]);
     expect(result).toBe("doc123");
@@ -314,6 +315,7 @@ describe("wrapMutation()", () => {
     });
 
     const scheduler = { runAfter: vi.fn() };
+    const runMutation = vi.fn().mockResolvedValue(undefined);
     const recordDeltaRef = { _name: "_recordDelta" };
 
     const wrapped = wrapMutation(recordDeltaRef, {
@@ -321,7 +323,7 @@ describe("wrapMutation()", () => {
       handler: async () => "docId123",
     });
 
-    await wrapped.handler({ scheduler }, {});
+    await wrapped.handler({ scheduler, runMutation }, {});
 
     expect(scheduler.runAfter).toHaveBeenCalledWith(0, recordDeltaRef, {
       docId: "docId123",
@@ -337,6 +339,7 @@ describe("wrapMutation()", () => {
     });
 
     const scheduler = { runAfter: vi.fn() };
+    const runMutation = vi.fn().mockResolvedValue(undefined);
     const recordDeltaRef = { _name: "_recordDelta" };
 
     const wrapped = wrapMutation(recordDeltaRef, {
@@ -344,7 +347,7 @@ describe("wrapMutation()", () => {
       handler: async () => undefined,
     });
 
-    await wrapped.handler({ scheduler }, { id: "fromArgs" });
+    await wrapped.handler({ scheduler, runMutation }, { id: "fromArgs" });
 
     expect(scheduler.runAfter).toHaveBeenCalledWith(0, recordDeltaRef, {
       docId: "fromArgs",
@@ -382,6 +385,7 @@ describe("wrapMutation()", () => {
     const scheduler = {
       runAfter: vi.fn().mockRejectedValue(new Error("scheduler error")),
     };
+    const runMutation = vi.fn().mockResolvedValue(undefined);
     const recordDeltaRef = { _name: "_recordDelta" };
 
     const wrapped = wrapMutation(recordDeltaRef, {
@@ -390,7 +394,7 @@ describe("wrapMutation()", () => {
     });
 
     // Should not throw
-    const result = await wrapped.handler({ scheduler }, {});
+    const result = await wrapped.handler({ scheduler, runMutation }, {});
     expect(result).toBe("docId");
   });
 });

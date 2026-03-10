@@ -73,7 +73,7 @@ describe("convex-resolve integration", () => {
     const emptyDoc = new Y.Doc();
     const emptyVector = Y.encodeStateVector(emptyDoc);
 
-    const resolveResults = await t.query(api.tasks.resolveTask, {
+    const resolveResults = await t.query(api.tasks.resolve, {
       documents: [
         {
           docId: taskId as string,
@@ -101,7 +101,7 @@ describe("convex-resolve integration", () => {
 
     // 5. Resolve again with the client's current state vector — should be up to date
     const clientVector = Y.encodeStateVector(clientDoc);
-    const resolveResults2 = await t.query(api.tasks.resolveTask, {
+    const resolveResults2 = await t.query(api.tasks.resolve, {
       documents: [
         {
           docId: taskId as string,
@@ -141,7 +141,7 @@ describe("convex-resolve integration", () => {
     // reflects the updated values.
     const freshDoc = new Y.Doc();
     const freshVector = Y.encodeStateVector(freshDoc);
-    const results = await t.query(api.tasks.resolveTask, {
+    const results = await t.query(api.tasks.resolve, {
       documents: [
         {
           docId: taskId as string,
@@ -162,13 +162,11 @@ describe("convex-resolve integration", () => {
     // Verify updated values
     const fields = clientDoc.getMap("fields");
     expect(readRegister(fields, "title")).toBe("Updated title");
-    // body is a prose() field → stored as Y.XmlFragment, not in the "fields" map
-    const bodyXml = clientDoc.getXmlFragment("body");
-    expect(bodyXml.toString()).toBe("Updated body");
+    expect(readRegister(fields, "body")).toBe("Updated body");
 
     // Resolve again — client should now be up to date
     const clientVector = Y.encodeStateVector(clientDoc);
-    const results2 = await t.query(api.tasks.resolveTask, {
+    const results2 = await t.query(api.tasks.resolve, {
       documents: [
         {
           docId: taskId as string,
@@ -188,7 +186,7 @@ describe("convex-resolve integration", () => {
     const emptyDoc = new Y.Doc();
     const emptyVector = Y.encodeStateVector(emptyDoc);
 
-    const results = await t.query(api.tasks.resolveTask, {
+    const results = await t.query(api.tasks.resolve, {
       documents: [
         {
           docId: "nonexistent-id",

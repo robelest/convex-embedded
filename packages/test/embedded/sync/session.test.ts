@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+
 import { Session, SessionManager } from "#embedded/sync/session";
 
 // ---------------------------------------------------------------------------
@@ -39,8 +40,14 @@ describe("Session", () => {
       const unsub1 = vi.fn();
       const unsub2 = vi.fn();
 
-      session.activeQueries.set("q1", { tableName: "users", unsubscribe: unsub1 });
-      session.activeQueries.set("q2", { tableName: "posts", unsubscribe: unsub2 });
+      session.activeQueries.set("q1", {
+        tableName: "users",
+        unsubscribe: unsub1,
+      });
+      session.activeQueries.set("q2", {
+        tableName: "posts",
+        unsubscribe: unsub2,
+      });
 
       session.cleanup();
 
@@ -50,7 +57,10 @@ describe("Session", () => {
 
     it("clears the activeQueries map", () => {
       const session = new Session("s1");
-      session.activeQueries.set("q1", { tableName: "users", unsubscribe: vi.fn() });
+      session.activeQueries.set("q1", {
+        tableName: "users",
+        unsubscribe: vi.fn(),
+      });
 
       session.cleanup();
 
@@ -132,7 +142,9 @@ describe("SessionManager", () => {
     it("throws for an unknown session ID", () => {
       const manager = new SessionManager();
 
-      expect(() => manager.getSession("nonexistent")).toThrow("Session not found");
+      expect(() => manager.getSession("nonexistent")).toThrow(
+        "Session not found",
+      );
     });
 
     it("throws with the missing session ID in the message", () => {
@@ -153,7 +165,10 @@ describe("SessionManager", () => {
       const session = manager.getSession(id);
 
       const unsub = vi.fn();
-      session.activeQueries.set("q1", { tableName: "users", unsubscribe: unsub });
+      session.activeQueries.set("q1", {
+        tableName: "users",
+        unsubscribe: unsub,
+      });
       session.identity = { subject: "user1" };
 
       manager.removeSession(id);
@@ -188,7 +203,10 @@ describe("SessionManager", () => {
 
       // Mutate session1
       session1.identity = { subject: "alice" };
-      session1.activeQueries.set("q1", { tableName: "users", unsubscribe: vi.fn() });
+      session1.activeQueries.set("q1", {
+        tableName: "users",
+        unsubscribe: vi.fn(),
+      });
 
       // session2 should be unaffected
       expect(session2.identity).toBeNull();

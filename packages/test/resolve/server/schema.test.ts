@@ -1,6 +1,7 @@
+import { v } from "convex/values";
 import { describe, it, expect } from "vitest";
 import * as Y from "yjs";
-import { v } from "convex/values";
+
 import {
   prose,
   register,
@@ -127,7 +128,9 @@ describe("define()", () => {
       shape: { title: register(v.string()) },
     });
 
-    expect(() => def.getShape(99)).toThrow("No schema shape found for version 99");
+    expect(() => def.getShape(99)).toThrow(
+      "No schema shape found for version 99",
+    );
   });
 
   it("getCrdtFields() returns only CRDT fields", () => {

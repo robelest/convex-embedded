@@ -119,7 +119,11 @@ export class LoopbackWebSocket {
     }
 
     const msgType = (() => {
-      try { return JSON.parse(data).type; } catch { return "?"; }
+      try {
+        return JSON.parse(data).type;
+      } catch {
+        return "?";
+      }
     })();
     console.debug("[convex-embedded:ws] send", msgType);
 
@@ -130,7 +134,11 @@ export class LoopbackWebSocket {
         for (const response of responses) {
           if (this.readyState !== OPEN) break;
           const respType = (() => {
-            try { return JSON.parse(response).type; } catch { return "?"; }
+            try {
+              return JSON.parse(response).type;
+            } catch {
+              return "?";
+            }
           })();
           console.debug("[convex-embedded:ws] recv", respType);
           const event = { type: "message" as const, data: response };
@@ -153,7 +161,11 @@ export class LoopbackWebSocket {
     this.readyState = CLOSED;
     this._stopPingInterval();
     console.debug("[convex-embedded:ws] close", _code, _reason);
-    const event = { type: "close" as const, code: _code ?? 1000, reason: _reason ?? "" };
+    const event = {
+      type: "close" as const,
+      code: _code ?? 1000,
+      reason: _reason ?? "",
+    };
     this.onclose?.(event);
     this._emit("close", event);
   }
@@ -181,7 +193,10 @@ export class LoopbackWebSocket {
     set.add(listener);
   }
 
-  removeEventListener(type: string, listener: (ev: LoopbackEvent) => void): void {
+  removeEventListener(
+    type: string,
+    listener: (ev: LoopbackEvent) => void,
+  ): void {
     this._listeners.get(type)?.delete(listener);
   }
 
@@ -192,7 +207,10 @@ export class LoopbackWebSocket {
         this._stopPingInterval();
         return;
       }
-      const pingEvent = { type: "message" as const, data: JSON.stringify({ type: "Ping" }) };
+      const pingEvent = {
+        type: "message" as const,
+        data: JSON.stringify({ type: "Ping" }),
+      };
       this.onmessage?.(pingEvent);
       this._emit("message", pingEvent);
     }, PING_INTERVAL_MS);

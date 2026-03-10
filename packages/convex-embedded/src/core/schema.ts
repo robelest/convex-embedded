@@ -91,7 +91,10 @@ export function isValidIdentifier(name: string): boolean {
 // ---------------------------------------------------------------------------
 
 /** Validate a document value against a ValidatorJSON tree. */
-export function validateValidator(validator: ValidatorJSON, value: Value): void {
+export function validateValidator(
+  validator: ValidatorJSON,
+  value: Value,
+): void {
   switch (validator.type) {
     case "null":
       if (value !== null) {
@@ -264,10 +267,12 @@ export function parseSchema(schema: SchemaExport): ParsedSchema {
   return {
     schemaValidation: schema.schemaValidation,
     tables: new Map(
-      Object.entries(schema.tables).map(([name, tableSchema]: [string, { export(): TableSchema }]) => [
-        name,
-        tableSchema.export(),
-      ]),
+      Object.entries(schema.tables).map(
+        ([name, tableSchema]: [string, { export(): TableSchema }]) => [
+          name,
+          tableSchema.export(),
+        ],
+      ),
     ),
   };
 }

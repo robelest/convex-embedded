@@ -102,7 +102,9 @@ export function createTransport(runtime: ProtocolHandler): EmbeddedTransport {
       // explicit close() or runtime shutdown).
       // Listen via addEventListener so we don't clobber the SDK's onclose.
       const self = this;
-      this.addEventListener("close", () => { activeSockets.delete(self); });
+      this.addEventListener("close", () => {
+        activeSockets.delete(self);
+      });
     }
   };
 

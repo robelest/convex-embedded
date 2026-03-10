@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+
 import { createLogger } from "#resolve/shared/logger";
 
 describe("createLogger", () => {
@@ -17,9 +18,7 @@ describe("createLogger", () => {
     const log = createLogger("test");
     log.info("hello");
 
-    expect(console.info).toHaveBeenCalledWith(
-      "[convex-resolve:test] hello",
-    );
+    expect(console.info).toHaveBeenCalledWith("[convex-resolve:test] hello");
   });
 
   it("passes extra args through", () => {

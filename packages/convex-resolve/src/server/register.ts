@@ -1,3 +1,6 @@
+import { Fx } from "@robelest/fx";
+import type { FunctionReference } from "convex/server";
+import { v } from "convex/values";
 /**
  * register() — server-side entry point for convex-resolve.
  *
@@ -16,13 +19,11 @@
  *   });
  */
 import * as Y from "yjs";
-import type { FunctionReference } from "convex/server";
-import { v } from "convex/values";
+
 import type { Definition } from "@/server/schema";
 import { encodeDocumentState, computeDiff, isDiffEmpty } from "@/server/schema";
-import type { MigrationErrorHandler } from "@/shared/types";
 import { createLogger } from "@/shared/logger";
-import { Fx } from "@robelest/fx";
+import type { MigrationErrorHandler } from "@/shared/types";
 
 const log = createLogger("register");
 
@@ -100,7 +101,11 @@ export interface RegisterResult {
    */
   wrapMutation: (
     recordDeltaRef: any,
-    mutationDef: { args: Record<string, any>; handler: (ctx: any, args: any) => any; remote?: (ctx: any, args: any, result: any) => any },
+    mutationDef: {
+      args: Record<string, any>;
+      handler: (ctx: any, args: any) => any;
+      remote?: (ctx: any, args: any, result: any) => any;
+    },
   ) => { args: Record<string, any>; handler: (ctx: any, args: any) => any };
 }
 
@@ -112,7 +117,9 @@ export function register(config: RegisterConfig): RegisterResult {
   const { table, schema: schemaDef, component } = config;
   const isRemote = !!component;
 
-  log.info(`register() table="${table}" isRemote=${isRemote} version=${schemaDef.version}`);
+  log.info(
+    `register() table="${table}" isRemote=${isRemote} version=${schemaDef.version}`,
+  );
 
   // -------------------------------------------------------------------------
   // _recordDelta — records a Yjs state snapshot to the component
@@ -134,7 +141,9 @@ export function register(config: RegisterConfig): RegisterResult {
           ok: async () => {
             const doc = await ctx.db.get(args.docId);
             if (!doc) {
-              log.warn(`_recordDelta: document ${args.docId} not found in table "${table}"`);
+              log.warn(
+                `_recordDelta: document ${args.docId} not found in table "${table}"`,
+              );
               return;
             }
 
@@ -146,12 +155,16 @@ export function register(config: RegisterConfig): RegisterResult {
               update: toArrayBuffer(update),
             });
 
-            log.debug(`_recordDelta: recorded delta for ${table}/${args.docId} (${update.byteLength} bytes)`);
+            log.debug(
+              `_recordDelta: recorded delta for ${table}/${args.docId} (${update.byteLength} bytes)`,
+            );
           },
           err: (err) => err,
         }).pipe(
           Fx.inspect((err) =>
-            Fx.sync(() => log.error(`_recordDelta: failed for ${table}/${args.docId}`, err)),
+            Fx.sync(() =>
+              log.error(`_recordDelta: failed for ${table}/${args.docId}`, err),
+            ),
           ),
           Fx.recover(() => Fx.unit),
         ),
@@ -186,10 +199,13 @@ export function register(config: RegisterConfig): RegisterResult {
       const docIds = args.documents.map((d) => d.docId);
 
       // Batch fetch latest deltas from the component
-      const latestDeltas = await ctx.runQuery(component.public.getLatestDeltas, {
-        collection: table,
-        docIds,
-      });
+      const latestDeltas = await ctx.runQuery(
+        component.public.getLatestDeltas,
+        {
+          collection: table,
+          docIds,
+        },
+      );
 
       const results: Array<{ docId: string; diff?: ArrayBuffer }> = [];
 
@@ -216,7 +232,10 @@ export function register(config: RegisterConfig): RegisterResult {
             results.push({ docId, diff: toArrayBuffer(diff) });
           }
         } catch (err) {
-          log.error(`resolve: failed to compute diff for ${table}/${docId}`, err);
+          log.error(
+            `resolve: failed to compute diff for ${table}/${docId}`,
+            err,
+          );
           results.push({ docId });
         }
       }
@@ -262,7 +281,12 @@ export function register(config: RegisterConfig): RegisterResult {
                 err: (err) => err,
               }).pipe(
                 Fx.inspect((err) =>
-                  Fx.sync(() => log.warn(`wrapMutation: failed to schedule delta recording for ${table}`, err)),
+                  Fx.sync(() =>
+                    log.warn(
+                      `wrapMutation: failed to schedule delta recording for ${table}`,
+                      err,
+                    ),
+                  ),
                 ),
                 Fx.recover(() => Fx.unit),
               ),
@@ -302,5 +326,3 @@ function extractDocId(result: any, args: any): string | null {
 
   return null;
 }
-
-

@@ -1,5 +1,6 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
 import { ConvexError } from "convex/values";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+
 import { SyncProtocolHandler } from "#embedded/sync/protocol";
 import type {
   ClientMessage,
@@ -683,9 +684,7 @@ describe("SyncProtocolHandler", () => {
 
     it("mutation failure includes errorData when UDF throws ConvexError", async () => {
       const { handler, executor } = createHandler();
-      executor.runMutation.mockRejectedValue(
-        new ConvexError("access denied"),
-      );
+      executor.runMutation.mockRejectedValue(new ConvexError("access denied"));
 
       const messages = await handler.handleMessage("s1", {
         type: "Mutation",

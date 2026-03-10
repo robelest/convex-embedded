@@ -24,7 +24,11 @@ export {
   mergeUpdate,
   isDiffEmpty,
 } from "@/server/schema";
-export type { DefineOptions, Definition, RegisterOptions } from "@/server/schema";
+export type {
+  DefineOptions,
+  Definition,
+  RegisterOptions,
+} from "@/server/schema";
 
 // Builders — mutation/query wrappers with remote: key
 export { builders } from "@/server/builders";

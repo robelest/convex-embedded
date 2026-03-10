@@ -1,3 +1,5 @@
+import { register as registerResolveComponent } from "@robelest/convex-resolve/test";
+import { convexTest } from "convex-test";
 /**
  * Integration test for convex-resolve using convex-test.
  *
@@ -10,11 +12,10 @@
  *   → resolve returns empty (up to date)
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { convexTest } from "convex-test";
-import { register as registerResolveComponent } from "@robelest/convex-resolve/test";
 import * as Y from "yjs";
-import schema from "../../../convex/schema.js";
+
 import { api } from "../../../convex/_generated/api.js";
+import schema from "../../../convex/schema.js";
 
 /** Safely convert a Uint8Array to a proper ArrayBuffer for Convex v.bytes() */
 function toArrayBuffer(data: Uint8Array): ArrayBuffer {
@@ -156,10 +157,7 @@ describe("convex-resolve integration", () => {
 
     // Apply the diff to a fresh client doc
     const clientDoc = new Y.Doc();
-    Y.applyUpdateV2(
-      clientDoc,
-      new Uint8Array(result.diff as ArrayBuffer),
-    );
+    Y.applyUpdateV2(clientDoc, new Uint8Array(result.diff as ArrayBuffer));
 
     // Verify updated values
     const fields = clientDoc.getMap("fields");

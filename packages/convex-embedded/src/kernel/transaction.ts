@@ -12,8 +12,9 @@
  *    backoff + jitter.
  */
 
-import type { DocumentId, Timestamp } from "@/core/types";
 import { Fx } from "@robelest/fx";
+
+import type { DocumentId, Timestamp } from "@/core/types";
 
 // ---------------------------------------------------------------------------
 // TransactionDatabase — the interface OccTransaction expects
@@ -226,13 +227,11 @@ export class OccTransaction {
               return result;
             },
             err: (e) => e,
-          })
+          }),
         ),
         Fx.recover((err) => {
           this._db.rollbackWrites();
-          return err instanceof OccConflictError
-            ? Fx.fail(err)
-            : Fx.fatal(err);
+          return err instanceof OccConflictError ? Fx.fail(err) : Fx.fatal(err);
         }),
       );
     });
@@ -324,5 +323,3 @@ export class OccTransaction {
     return parts.length === 2 && parts[1] === tableName;
   }
 }
-
-

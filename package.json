@@ -2,7 +2,10 @@
   "name": "@robelest/convex-edge",
   "private": true,
   "workspaces": {
-    "packages": ["packages/*", "demos/*"],
+    "packages": [
+      "packages/*",
+      "demos/*"
+    ],
     "catalog": {
       "convex": "^1.17.0",
       "vitest": "^4.0.18",
@@ -11,7 +14,10 @@
   },
   "scripts": {
     "test": "bun --filter @robelest/convex-edge-tests test:once",
-    "build": "bun --filter @robelest/convex-resolve --filter @robelest/convex-embedded build",
+    "build": "bun --filter @robelest/fx --filter @robelest/convex-resolve --filter @robelest/convex-embedded build",
+    "build:fx": "bun --filter @robelest/fx build",
+    "build:embedded": "bun --filter @robelest/convex-embedded build",
+    "build:resolve": "bun --filter @robelest/convex-resolve build",
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
     "fmt": "oxfmt .",

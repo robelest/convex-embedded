@@ -43,7 +43,10 @@ export interface RuntimeInstance {
    * hard dependency on convex/react.
    */
   createClient<T>(
-    ClientConstructor: new (url: string, options?: Record<string, unknown>) => T,
+    ClientConstructor: new (
+      url: string,
+      options?: Record<string, unknown>,
+    ) => T,
     options?: Record<string, unknown>,
   ): T;
 }
@@ -66,7 +69,10 @@ function create(transport: EmbeddedTransport): RuntimeInstance {
     transport,
 
     createClient<T>(
-      ClientConstructor: new (url: string, options?: Record<string, unknown>) => T,
+      ClientConstructor: new (
+        url: string,
+        options?: Record<string, unknown>,
+      ) => T,
       options?: Record<string, unknown>,
     ): T {
       const clientOptions: Record<string, unknown> = { ...options };

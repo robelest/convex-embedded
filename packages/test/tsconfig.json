@@ -14,8 +14,6 @@
       "#resolve/*": ["../convex-resolve/src/*"]
     }
   },
-  "include": [
-    "**/*.ts"
-  ],
+  "include": ["**/*.ts"],
   "exclude": ["node_modules"]
 }

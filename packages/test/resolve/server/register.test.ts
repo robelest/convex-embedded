@@ -1,8 +1,13 @@
+import { v } from "convex/values";
 import { describe, it, expect, vi } from "vitest";
 import * as Y from "yjs";
-import { v } from "convex/values";
+
 import { register } from "#resolve/server/register";
-import { define, register as registerField, prose } from "#resolve/server/schema";
+import {
+  define,
+  register as registerField,
+  prose,
+} from "#resolve/server/schema";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -158,12 +163,15 @@ describe("resolve handler", () => {
       schema: makeSchema(),
     });
 
-    const result = await resolve.handler({}, {
-      documents: [
-        { docId: "a", vector: new ArrayBuffer(0) },
-        { docId: "b", vector: new ArrayBuffer(0) },
-      ],
-    });
+    const result = await resolve.handler(
+      {},
+      {
+        documents: [
+          { docId: "a", vector: new ArrayBuffer(0) },
+          { docId: "b", vector: new ArrayBuffer(0) },
+        ],
+      },
+    );
 
     expect(result).toHaveLength(2);
     expect(result[0].docId).toBe("a");
@@ -182,9 +190,9 @@ describe("resolve handler", () => {
     fields.set("title", titleMap);
     const serverUpdate = Y.encodeStateAsUpdateV2(serverDoc);
 
-    const runQuery = vi.fn().mockResolvedValue([
-      { update: serverUpdate.buffer, seq: 0 },
-    ]);
+    const runQuery = vi
+      .fn()
+      .mockResolvedValue([{ update: serverUpdate.buffer, seq: 0 }]);
 
     const { resolve } = register({
       table: "tasks",
@@ -199,9 +207,7 @@ describe("resolve handler", () => {
     const result = await resolve.handler(
       { runQuery },
       {
-        documents: [
-          { docId: "doc1", vector: clientVector.buffer },
-        ],
+        documents: [{ docId: "doc1", vector: clientVector.buffer }],
       },
     );
 
@@ -223,9 +229,9 @@ describe("resolve handler", () => {
     const fullUpdate = Y.encodeStateAsUpdateV2(doc);
     const stateVector = Y.encodeStateVector(doc);
 
-    const runQuery = vi.fn().mockResolvedValue([
-      { update: fullUpdate.buffer, seq: 0 },
-    ]);
+    const runQuery = vi
+      .fn()
+      .mockResolvedValue([{ update: fullUpdate.buffer, seq: 0 }]);
 
     const { resolve } = register({
       table: "tasks",
@@ -236,9 +242,7 @@ describe("resolve handler", () => {
     const result = await resolve.handler(
       { runQuery },
       {
-        documents: [
-          { docId: "doc1", vector: stateVector.buffer },
-        ],
+        documents: [{ docId: "doc1", vector: stateVector.buffer }],
       },
     );
 
@@ -259,9 +263,7 @@ describe("resolve handler", () => {
     const result = await resolve.handler(
       { runQuery },
       {
-        documents: [
-          { docId: "missing", vector: new ArrayBuffer(0) },
-        ],
+        documents: [{ docId: "missing", vector: new ArrayBuffer(0) }],
       },
     );
 
@@ -321,11 +323,9 @@ describe("wrapMutation()", () => {
 
     await wrapped.handler({ scheduler }, {});
 
-    expect(scheduler.runAfter).toHaveBeenCalledWith(
-      0,
-      recordDeltaRef,
-      { docId: "docId123" },
-    );
+    expect(scheduler.runAfter).toHaveBeenCalledWith(0, recordDeltaRef, {
+      docId: "docId123",
+    });
   });
 
   it("extracts docId from args.id when result is not a string", async () => {
@@ -346,11 +346,9 @@ describe("wrapMutation()", () => {
 
     await wrapped.handler({ scheduler }, { id: "fromArgs" });
 
-    expect(scheduler.runAfter).toHaveBeenCalledWith(
-      0,
-      recordDeltaRef,
-      { docId: "fromArgs" },
-    );
+    expect(scheduler.runAfter).toHaveBeenCalledWith(0, recordDeltaRef, {
+      docId: "fromArgs",
+    });
   });
 
   it("does not schedule on local embedded runtime", async () => {

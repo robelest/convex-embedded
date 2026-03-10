@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach } from "vitest";
+
 import {
   ModuleLoader,
   createFunctionHandle,
@@ -157,7 +158,10 @@ describe("resolveFunctionPath", () => {
   });
 
   it("resolves { name } using the provided currentComponentPath", () => {
-    const result = resolveFunctionPath({ name: "messages:list" }, "myComponent");
+    const result = resolveFunctionPath(
+      { name: "messages:list" },
+      "myComponent",
+    );
 
     expect(result).toEqual({
       componentPath: "myComponent",

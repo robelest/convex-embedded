@@ -1,3 +1,4 @@
+import { Fx } from "@robelest/fx";
 /**
  * UDF execution engine following the convex-test invocation pattern.
  *
@@ -17,8 +18,8 @@
  */
 import type { Value } from "convex/values";
 import { convexToJson, jsonToConvex } from "convex/values";
-import { Fx } from "@robelest/fx";
 
+import type { Database } from "@/core/database";
 import type { FunctionPath, ModuleLoader } from "@/kernel/module-loader";
 import { OpsContext, createOpsContext } from "@/kernel/ops";
 import {
@@ -28,19 +29,22 @@ import {
 } from "@/kernel/syscalls";
 import type { RunUdfFn } from "@/kernel/syscalls";
 
-import type { Database } from "@/core/database";
-
 // ---------------------------------------------------------------------------
 // Global type augmentation for the Convex runtime
 // ---------------------------------------------------------------------------
 
 declare global {
   // eslint-disable-next-line no-var
-  var Convex: {
-    syscall: (op: string, args: string) => string;
-    asyncSyscall: (op: string, args: string) => Promise<string>;
-    jsSyscall: (op: string, args: Record<string, unknown>) => Promise<unknown>;
-  } | undefined;
+  var Convex:
+    | {
+        syscall: (op: string, args: string) => string;
+        asyncSyscall: (op: string, args: string) => Promise<string>;
+        jsSyscall: (
+          op: string,
+          args: Record<string, unknown>,
+        ) => Promise<unknown>;
+      }
+    | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -50,7 +54,9 @@ declare global {
 interface SavedGlobals {
   mathRandom: typeof Math.random;
   dateNow: typeof Date.now;
-  cryptoRandomUUID: (() => `${string}-${string}-${string}-${string}-${string}`) | undefined;
+  cryptoRandomUUID:
+    | (() => `${string}-${string}-${string}-${string}-${string}`)
+    | undefined;
 }
 
 /**
@@ -98,12 +104,17 @@ function restoreGlobals(saved: SavedGlobals): void {
  * Used only for the test-wrapper path. When the function has `invokeQuery`
  * or `invokeMutation`, we prefer those (see _resolveFunc).
  */
-type HandlerFn = (ctx: Record<string, unknown>, args: Record<string, unknown>) => unknown;
+type HandlerFn = (
+  ctx: Record<string, unknown>,
+  args: Record<string, unknown>,
+) => unknown;
 
 function getHandler(func: Record<string, unknown>): HandlerFn | null {
   if (typeof func === "function") return func as unknown as HandlerFn;
-  if (func && typeof func._handler === "function") return func._handler as HandlerFn;
-  if (func && typeof func.handler === "function") return func.handler as HandlerFn;
+  if (func && typeof func._handler === "function")
+    return func._handler as HandlerFn;
+  if (func && typeof func.handler === "function")
+    return func.handler as HandlerFn;
   return null;
 }
 
@@ -155,7 +166,13 @@ export class UdfExecutor {
   private _getIdentity?: () => Promise<unknown>;
   private _activeTimers?: Set<ReturnType<typeof setTimeout>>;
 
-  constructor({ db, moduleLoader, runUdf, getIdentity, activeTimers }: UdfExecutorOptions) {
+  constructor({
+    db,
+    moduleLoader,
+    runUdf,
+    getIdentity,
+    activeTimers,
+  }: UdfExecutorOptions) {
     this._db = db;
     this._moduleLoader = moduleLoader;
     this._runUdf = runUdf;
@@ -171,7 +188,10 @@ export class UdfExecutor {
    * Execute a query function. Read-only — starts a transaction for
    * snapshot isolation but always rolls back (no writes persisted).
    */
-  async executeQuery(functionPath: FunctionPath, args: Record<string, unknown>): Promise<unknown> {
+  async executeQuery(
+    functionPath: FunctionPath,
+    args: Record<string, unknown>,
+  ): Promise<unknown> {
     return this._runWithGlobals(async () => {
       this._db.startTransaction();
       try {
@@ -205,7 +225,10 @@ export class UdfExecutor {
    * - Use: run mutation body + commit()
    * - Release (failure only): rollbackWrites()
    */
-  async executeMutation(functionPath: FunctionPath, args: Record<string, unknown>): Promise<MutationResult> {
+  async executeMutation(
+    functionPath: FunctionPath,
+    args: Record<string, unknown>,
+  ): Promise<MutationResult> {
     const self = this;
     return this._runWithGlobals(() =>
       Fx.run(
@@ -218,17 +241,19 @@ export class UdfExecutor {
           () =>
             Fx.gen(function* () {
               const func: Record<string, unknown> = yield* Fx.promise(() =>
-                self._resolveFunc(functionPath, "mutation")
+                self._resolveFunc(functionPath, "mutation"),
               );
 
               let result: unknown;
               if (typeof func.invokeMutation === "function") {
-                const invokeMutation = func.invokeMutation as (argsStr: string) => Promise<string>;
+                const invokeMutation = func.invokeMutation as (
+                  argsStr: string,
+                ) => Promise<string>;
                 const argsStr = JSON.stringify(
-                  convexToJson([(args ?? {}) as Value])
+                  convexToJson([(args ?? {}) as Value]),
                 );
                 const rawResult: string = yield* Fx.promise(() =>
-                  invokeMutation(argsStr)
+                  invokeMutation(argsStr),
                 );
                 result = jsonToConvex(JSON.parse(rawResult));
               } else {
@@ -237,7 +262,7 @@ export class UdfExecutor {
                   return yield* Fx.fail(self._noHandlerError(functionPath));
                 }
                 result = yield* Fx.promise(() =>
-                  Promise.resolve(handler({}, args ?? {}))
+                  Promise.resolve(handler({}, args ?? {})),
                 );
               }
 
@@ -260,7 +285,10 @@ export class UdfExecutor {
    * Execute an action function. Actions do not run inside a transaction
    * but can invoke queries and mutations via the syscall layer.
    */
-  async executeAction(functionPath: FunctionPath, args: Record<string, unknown>): Promise<unknown> {
+  async executeAction(
+    functionPath: FunctionPath,
+    args: Record<string, unknown>,
+  ): Promise<unknown> {
     return this._runWithGlobals(async () => {
       const func = await this._resolveFunc(functionPath, "action");
 

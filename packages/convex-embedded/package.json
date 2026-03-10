@@ -2,6 +2,18 @@
   "name": "@robelest/convex-embedded",
   "version": "0.0.1",
   "description": "Lightweight embedded Convex runtime for local-first applications.",
+  "keywords": [
+    "convex",
+    "embedded",
+    "local-first",
+    "offline-first",
+    "runtime"
+  ],
+  "license": "MIT",
+  "files": [
+    "dist",
+    "src"
+  ],
   "type": "module",
   "exports": {
     ".": {
@@ -18,10 +30,6 @@
     },
     "./package.json": "./package.json"
   },
-  "files": [
-    "dist",
-    "src"
-  ],
   "scripts": {
     "build": "tsdown",
     "typecheck": "tsc --noEmit",
@@ -32,21 +40,13 @@
   "dependencies": {
     "@robelest/fx": "workspace:*"
   },
-  "peerDependencies": {
-    "convex": "^1.17.0"
-  },
   "devDependencies": {
     "convex": "catalog:",
     "tsdown": "^0.12.0",
     "typescript": "catalog:",
     "vitest": "catalog:"
   },
-  "keywords": [
-    "convex",
-    "embedded",
-    "local-first",
-    "offline-first",
-    "runtime"
-  ],
-  "license": "MIT"
+  "peerDependencies": {
+    "convex": "^1.17.0"
+  }
 }

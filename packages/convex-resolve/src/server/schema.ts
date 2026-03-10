@@ -1,3 +1,5 @@
+import type { Validator } from "convex/values";
+import { v } from "convex/values";
 /**
  * Schema utilities for convex-resolve.
  *
@@ -12,12 +14,8 @@
  * with migration history.
  */
 import * as Y from "yjs";
-import type { Validator } from "convex/values";
-import { v } from "convex/values";
-import type {
-  Conflict,
-  CrdtFieldDescriptor,
-} from "@/shared/types";
+
+import type { Conflict, CrdtFieldDescriptor } from "@/shared/types";
 import { CrdtType } from "@/shared/types";
 
 // ---------------------------------------------------------------------------
@@ -27,7 +25,9 @@ import { CrdtType } from "@/shared/types";
 const CRDT_FIELD = Symbol.for("convex-resolve:crdt-field");
 
 /** Check if a value is a CRDT field descriptor. */
-export function isCrdtField(value: unknown): value is CrdtFieldDescriptor & { [CRDT_FIELD]: true } {
+export function isCrdtField(
+  value: unknown,
+): value is CrdtFieldDescriptor & { [CRDT_FIELD]: true } {
   return (
     typeof value === "object" &&
     value !== null &&
@@ -75,7 +75,9 @@ export function register<T>(
     [CRDT_FIELD]: true as const,
     type: CrdtType.Register,
     validator,
-    resolve: options?.resolve as ((conflict: Conflict<unknown>) => unknown) | undefined,
+    resolve: options?.resolve as
+      | ((conflict: Conflict<unknown>) => unknown)
+      | undefined,
   };
 }
 
@@ -256,7 +258,8 @@ export function initYjsDoc(
       const setMap = new Y.Map<{ addedBy: string; addedAt: number }>();
       if (Array.isArray(value)) {
         for (const item of value) {
-          const serialized = typeof item === "string" ? item : JSON.stringify(item);
+          const serialized =
+            typeof item === "string" ? item : JSON.stringify(item);
           setMap.set(serialized, { addedBy: "_init", addedAt: Date.now() });
         }
       }

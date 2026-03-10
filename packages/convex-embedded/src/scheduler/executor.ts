@@ -7,6 +7,7 @@
  */
 
 import { detach } from "@robelest/fx";
+
 import type { Database } from "@/core/database";
 
 // ---------------------------------------------------------------------------
@@ -39,7 +40,10 @@ interface PendingJob {
  */
 export class SchedulerExecutor {
   private _db: Database;
-  private _runFunction: (path: string, args: Record<string, unknown>) => Promise<void>;
+  private _runFunction: (
+    path: string,
+    args: Record<string, unknown>,
+  ) => Promise<void>;
   private _pending: Map<string, PendingJob> = new Map();
   private _nextId = 1;
 
@@ -56,7 +60,11 @@ export class SchedulerExecutor {
    * @param delayMs       Delay in milliseconds (0 = next tick).
    * @returns A unique job ID that can be passed to {@link cancelJob}.
    */
-  schedule(functionPath: string, args: Record<string, unknown>, delayMs: number): string {
+  schedule(
+    functionPath: string,
+    args: Record<string, unknown>,
+    delayMs: number,
+  ): string {
     const jobId = `job_${this._nextId++}`;
 
     const timerId = setTimeout(() => {

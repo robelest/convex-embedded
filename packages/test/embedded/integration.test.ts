@@ -54,9 +54,7 @@ function messagesSchema(): ParsedSchema {
       [
         "messages",
         {
-          indexes: [
-            { indexDescriptor: "by_author", fields: ["author"] },
-          ],
+          indexes: [{ indexDescriptor: "by_author", fields: ["author"] }],
           vectorIndexes: [],
           searchIndexes: [
             {
@@ -98,7 +96,11 @@ describe("Integration: Database CRUD", () => {
 
   it("patch merges fields without touching others", () => {
     const db = freshDb();
-    const id = db.insert("tasks", { title: "original", priority: 1, done: false });
+    const id = db.insert("tasks", {
+      title: "original",
+      priority: 1,
+      done: false,
+    });
     db.patch("tasks", id, { title: "updated" });
 
     const doc = db.get("tasks", id)!;
@@ -630,9 +632,7 @@ describe("Integration: Search Queries", () => {
       source: {
         type: "Search",
         indexName: "messages.search_body",
-        filters: [
-          { type: "Search", fieldPath: "body", value: "zzzzzzzzz" },
-        ],
+        filters: [{ type: "Search", fieldPath: "body", value: "zzzzzzzzz" }],
       },
       operators: [],
     });
@@ -988,36 +988,28 @@ describe("Integration: Complex Filters", () => {
     // $gt 3 → 4, 5
     const gt = collectQuery(db, {
       source: { type: "FullTableScan", tableName: "items", order: "asc" },
-      operators: [
-        { filter: { $gt: [{ $field: "n" }, { $literal: 3 }] } },
-      ],
+      operators: [{ filter: { $gt: [{ $field: "n" }, { $literal: 3 }] } }],
     });
     expect(gt).toHaveLength(2);
 
     // $gte 3 → 3, 4, 5
     const gte = collectQuery(db, {
       source: { type: "FullTableScan", tableName: "items", order: "asc" },
-      operators: [
-        { filter: { $gte: [{ $field: "n" }, { $literal: 3 }] } },
-      ],
+      operators: [{ filter: { $gte: [{ $field: "n" }, { $literal: 3 }] } }],
     });
     expect(gte).toHaveLength(3);
 
     // $lt 3 → 1, 2
     const lt = collectQuery(db, {
       source: { type: "FullTableScan", tableName: "items", order: "asc" },
-      operators: [
-        { filter: { $lt: [{ $field: "n" }, { $literal: 3 }] } },
-      ],
+      operators: [{ filter: { $lt: [{ $field: "n" }, { $literal: 3 }] } }],
     });
     expect(lt).toHaveLength(2);
 
     // $lte 3 → 1, 2, 3
     const lte = collectQuery(db, {
       source: { type: "FullTableScan", tableName: "items", order: "asc" },
-      operators: [
-        { filter: { $lte: [{ $field: "n" }, { $literal: 3 }] } },
-      ],
+      operators: [{ filter: { $lte: [{ $field: "n" }, { $literal: 3 }] } }],
     });
     expect(lte).toHaveLength(3);
 
@@ -1098,9 +1090,9 @@ describe("Integration: Error Cases", () => {
 
   it("patch on non-existent document throws", () => {
     const db = freshDb();
-    expect(() =>
-      db.patch("tasks", "99999;tasks" as any, { x: 1 }),
-    ).toThrow(/non-existent/);
+    expect(() => db.patch("tasks", "99999;tasks" as any, { x: 1 })).toThrow(
+      /non-existent/,
+    );
     db.rollbackWrites();
   });
 
@@ -1123,9 +1115,9 @@ describe("Integration: Error Cases", () => {
   it("patch with mismatched _id throws", () => {
     const db = freshDb();
     const id = db.insert("tasks", { title: "a" });
-    expect(() =>
-      db.patch("tasks", id, { _id: "99999;tasks" }),
-    ).toThrow(/does not match/);
+    expect(() => db.patch("tasks", id, { _id: "99999;tasks" })).toThrow(
+      /does not match/,
+    );
     db.rollbackWrites();
   });
 

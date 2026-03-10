@@ -1,7 +1,8 @@
+import { v } from "convex/values";
 import { describe, it, expect, vi, beforeEach } from "vitest";
+
 import { runMigrations, migration } from "#resolve/server/migration";
 import { define, register as registerField } from "#resolve/server/schema";
-import { v } from "convex/values";
 
 // ---------------------------------------------------------------------------
 // Mock Convex context
@@ -172,9 +173,7 @@ describe("runMigrations()", () => {
       { _id: "v1", table: "tasks", version: 1 },
     ];
 
-    ctx._tables["tasks"] = [
-      { _id: "t1", title: "Task 1", priority: "high" },
-    ];
+    ctx._tables["tasks"] = [{ _id: "t1", title: "Task 1", priority: "high" }];
 
     await runMigrations(ctx as any, {
       table: "tasks",

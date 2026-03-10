@@ -30,14 +30,15 @@
  * @packageDocumentation
  */
 
+import { Fx } from "@robelest/fx";
 import { ConvexClient } from "convex/browser";
 import type { BaseConvexClientOptions } from "convex/browser";
-import { Fx } from "@robelest/fx";
+
+import { compileWasmModule } from "@/browser/preload";
+import { createWaSqliteStorage } from "@/browser/wa-sqlite";
+import type { ConvexModule } from "@/kernel/module-loader";
 import { EmbeddedRuntime } from "@/runtime/embedded";
 import type { EmbeddedRuntimeOptions } from "@/runtime/embedded";
-import type { ConvexModule } from "@/kernel/module-loader";
-import { createWaSqliteStorage } from "@/browser/wa-sqlite";
-import { compileWasmModule } from "@/browser/preload";
 
 // Re-export storage types so consumers can implement custom adapters.
 export type {
@@ -210,7 +211,9 @@ function initStorage(
 
     if (!wasmModule) {
       // SSR or non-browser environment — skip persistence.
-      console.debug("[convex-embedded] WASM not available, skipping persistence");
+      console.debug(
+        "[convex-embedded] WASM not available, skipping persistence",
+      );
       return;
     }
 

@@ -12,7 +12,11 @@ export type { EmbeddedTransport, RuntimeInstance } from "@/client/runtime";
 
 // Monitor — orchestrates resolve on connect/reconnect
 export { monitor } from "@/client/monitor";
-export type { MonitorConfig, MonitorInstance, TableConfig } from "@/client/monitor";
+export type {
+  MonitorConfig,
+  MonitorInstance,
+  TableConfig,
+} from "@/client/monitor";
 
 // Schema — client-side CRDT field helpers
 export { clientSchema } from "@/client/schema";

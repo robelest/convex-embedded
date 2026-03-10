@@ -1,6 +1,7 @@
-import { defineConfig } from "vitest/config";
 import path from "path";
+
 import type { Plugin } from "vite";
+import { defineConfig } from "vitest/config";
 
 const embeddedSrc = path.resolve(__dirname, "../convex-embedded/src");
 const resolveSrc = path.resolve(__dirname, "../convex-resolve/src");
@@ -17,11 +18,9 @@ export default defineConfig({
         if (importer.includes("/convex-embedded/")) base = embeddedSrc;
         else if (importer.includes("/convex-resolve/")) base = resolveSrc;
         else return null;
-        const resolved = await this.resolve(
-          path.join(base, rest),
-          importer,
-          { skipSelf: true },
-        );
+        const resolved = await this.resolve(path.join(base, rest), importer, {
+          skipSelf: true,
+        });
         return resolved ?? null;
       },
     }))(),

@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+
 import { OpsContext, createOpsContext } from "#embedded/kernel/ops";
 
 describe("OpsContext", () => {
@@ -116,10 +117,26 @@ describe("OpsContext", () => {
 
       expect(ctx.logs).toHaveLength(5);
 
-      expect(ctx.logs[0]).toEqual({ level: "log", args: ["hello"], timestamp: 5000 });
-      expect(ctx.logs[1]).toEqual({ level: "warn", args: ["warning!"], timestamp: 5000 });
-      expect(ctx.logs[2]).toEqual({ level: "error", args: ["err", 42], timestamp: 5000 });
-      expect(ctx.logs[3]).toEqual({ level: "info", args: ["info"], timestamp: 5000 });
+      expect(ctx.logs[0]).toEqual({
+        level: "log",
+        args: ["hello"],
+        timestamp: 5000,
+      });
+      expect(ctx.logs[1]).toEqual({
+        level: "warn",
+        args: ["warning!"],
+        timestamp: 5000,
+      });
+      expect(ctx.logs[2]).toEqual({
+        level: "error",
+        args: ["err", 42],
+        timestamp: 5000,
+      });
+      expect(ctx.logs[3]).toEqual({
+        level: "info",
+        args: ["info"],
+        timestamp: 5000,
+      });
       expect(ctx.logs[4]).toEqual({
         level: "debug",
         args: ["dbg", { a: 1 }],

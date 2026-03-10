@@ -68,21 +68,36 @@ export interface TestFunctionDescriptor {
 export function testQuery(
   handler: (ctx: any, args: any) => any,
 ): TestFunctionDescriptor {
-  return { _handler: handler, isQuery: true, isMutation: false, isAction: false };
+  return {
+    _handler: handler,
+    isQuery: true,
+    isMutation: false,
+    isAction: false,
+  };
 }
 
 /** Wrap a handler as a mutation-typed function descriptor. */
 export function testMutation(
   handler: (ctx: any, args: any) => any,
 ): TestFunctionDescriptor {
-  return { _handler: handler, isQuery: false, isMutation: true, isAction: false };
+  return {
+    _handler: handler,
+    isQuery: false,
+    isMutation: true,
+    isAction: false,
+  };
 }
 
 /** Wrap a handler as an action-typed function descriptor. */
 export function testAction(
   handler: (ctx: any, args: any) => any,
 ): TestFunctionDescriptor {
-  return { _handler: handler, isQuery: false, isMutation: false, isAction: true };
+  return {
+    _handler: handler,
+    isQuery: false,
+    isMutation: false,
+    isAction: true,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -130,7 +145,9 @@ export interface EmbeddedTestContext {
  * including global patching, syscall installation, and transaction
  * management.
  */
-export function embeddedTest(options: EmbeddedTestOptions): EmbeddedTestContext {
+export function embeddedTest(
+  options: EmbeddedTestOptions,
+): EmbeddedTestContext {
   const schema = options.schema ?? null;
   const db = new Database(schema);
 
@@ -205,7 +222,10 @@ export function embeddedTest(options: EmbeddedTestOptions): EmbeddedTestContext 
 
     async mutation(path: string, args?: any): Promise<any> {
       const functionPath = resolveFunctionPath({ name: path });
-      const { result } = await executor.executeMutation(functionPath, args ?? {});
+      const { result } = await executor.executeMutation(
+        functionPath,
+        args ?? {},
+      );
       return result;
     },
 

@@ -10,6 +10,7 @@ import type { JSONValue, Value } from "convex/values";
 import { jsonToConvex } from "convex/values";
 
 import { compareValues } from "@/core/compare";
+import type { ParsedSchema } from "@/core/schema";
 import type {
   FilterJson,
   IndexInfo,
@@ -21,7 +22,6 @@ import type {
   StoredDocument,
   VectorIndexInfo,
 } from "@/core/types";
-import type { ParsedSchema } from "@/core/schema";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -47,7 +47,9 @@ export function evaluateFieldPath(
   for (const p of pathParts) {
     result =
       result !== undefined && result !== null && isSimpleObject(result)
-        ? ((result as Record<string, Value | undefined>)[p] as Value | undefined)
+        ? ((result as Record<string, Value | undefined>)[p] as
+            | Value
+            | undefined)
         : undefined;
   }
   return result;
@@ -102,8 +104,7 @@ export function evaluateFilter(
   }
   if (f.$gt !== undefined) {
     return (
-      evaluateFilter(document, f.$gt[0])! >
-      evaluateFilter(document, f.$gt[1])!
+      evaluateFilter(document, f.$gt[0])! > evaluateFilter(document, f.$gt[1])!
     );
   }
   if (f.$gte !== undefined) {
@@ -114,8 +115,7 @@ export function evaluateFilter(
   }
   if (f.$lt !== undefined) {
     return (
-      evaluateFilter(document, f.$lt[0])! <
-      evaluateFilter(document, f.$lt[1])!
+      evaluateFilter(document, f.$lt[0])! < evaluateFilter(document, f.$lt[1])!
     );
   }
   if (f.$lte !== undefined) {
@@ -337,7 +337,10 @@ export class QueryEngine {
     return id;
   }
 
-  queryNext(queryId: QueryId): { value: GenericDocument | null; done: boolean } {
+  queryNext(queryId: QueryId): {
+    value: GenericDocument | null;
+    done: boolean;
+  } {
     const results = this._queryResults[queryId];
     if (results === undefined) {
       throw new Error("Bad queryId");
@@ -508,9 +511,7 @@ export class QueryEngine {
         const [tableName] = source.indexName.split(".");
         this._iterateDocs(tableName, (doc) => {
           if (
-            source.filters.every((filter) =>
-              evaluateSearchFilter(doc, filter),
-            )
+            source.filters.every((filter) => evaluateSearchFilter(doc, filter))
           ) {
             results.push(doc);
           }
@@ -533,9 +534,7 @@ export class QueryEngine {
         (operator): operator is { limit: number } => "limit" in operator,
       )[0] ?? null;
 
-    results = results.filter((v) =>
-      filters.every((f) => evaluateFilter(v, f)),
-    );
+    results = results.filter((v) => filters.every((f) => evaluateFilter(v, f)));
 
     // Sort.
     results.sort((a, b) => {

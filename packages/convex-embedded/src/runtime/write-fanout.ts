@@ -65,9 +65,7 @@ export class WriteFanout {
    *
    * @returns An unsubscribe function.
    */
-  onNotification(
-    callback: (tablesWritten: Set<string>) => void,
-  ): () => void {
+  onNotification(callback: (tablesWritten: Set<string>) => void): () => void {
     this._callbacks.add(callback);
     return () => {
       this._callbacks.delete(callback);

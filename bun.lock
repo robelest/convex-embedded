@@ -69,6 +69,10 @@
     "packages/fx": {
       "name": "@robelest/fx",
       "version": "0.0.1",
+      "devDependencies": {
+        "tsdown": "^0.12.0",
+        "typescript": "catalog:",
+      },
     },
     "packages/test": {
       "name": "@robelest/convex-edge-tests",

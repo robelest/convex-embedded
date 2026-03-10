@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+
 import { Database } from "#embedded/core/database";
 import { evaluateFieldPath, evaluateFilter } from "#embedded/core/query-engine";
 import type { ParsedSchema } from "#embedded/core/schema";
@@ -53,9 +54,7 @@ const schemaWithIndex: ParsedSchema = {
     [
       "tasks",
       {
-        indexes: [
-          { indexDescriptor: "by_status", fields: ["status"] },
-        ],
+        indexes: [{ indexDescriptor: "by_status", fields: ["status"] }],
         vectorIndexes: [],
         searchIndexes: [
           {
@@ -254,9 +253,7 @@ describe("QueryEngine — index range scan", () => {
       source: {
         type: "IndexRange",
         indexName: "tasks.by_status",
-        range: [
-          { type: "Eq", fieldPath: "status", value: "active" },
-        ],
+        range: [{ type: "Eq", fieldPath: "status", value: "active" }],
         order: "asc",
       },
       operators: [],
@@ -283,9 +280,7 @@ describe("QueryEngine — index range scan", () => {
       source: {
         type: "IndexRange",
         indexName: "tasks.by_status",
-        range: [
-          { type: "Gt", fieldPath: "status", value: "beta" },
-        ],
+        range: [{ type: "Gt", fieldPath: "status", value: "beta" }],
         order: "asc",
       },
       operators: [],
@@ -318,9 +313,7 @@ describe("QueryEngine — search", () => {
       source: {
         type: "Search",
         indexName: "tasks.search_body",
-        filters: [
-          { type: "Search", fieldPath: "body", value: "hel" },
-        ],
+        filters: [{ type: "Search", fieldPath: "body", value: "hel" }],
       },
       operators: [],
     });

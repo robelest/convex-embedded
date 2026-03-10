@@ -1,3 +1,4 @@
+import { Fx } from "@robelest/fx";
 /**
  * Migration runner for local schema versioning.
  *
@@ -9,14 +10,14 @@
  * remote data backfills. This runner handles local device migrations.
  */
 import type { FunctionReference } from "convex/server";
+
+import type { Definition } from "@/server/schema";
+import { createLogger } from "@/shared/logger";
 import type {
   MigrationErrorHandler,
   RecoveryAction,
   RecoveryContext,
 } from "@/shared/types";
-import type { Definition } from "@/server/schema";
-import { createLogger } from "@/shared/logger";
-import { Fx } from "@robelest/fx";
 
 const log = createLogger("migration");
 
@@ -66,19 +67,32 @@ const VERSION_TABLE = "_resolve_schema_versions";
 /** Minimal structural type for a Convex mutation context used by the migration runner. */
 interface MigrationCtx {
   db: {
-    query(table: string): { filter(predicate: (q: unknown) => unknown): { collect(): Promise<Array<Record<string, unknown>>> }; collect(): Promise<Array<Record<string, unknown>>> };
+    query(table: string): {
+      filter(predicate: (q: unknown) => unknown): {
+        collect(): Promise<Array<Record<string, unknown>>>;
+      };
+      collect(): Promise<Array<Record<string, unknown>>>;
+    };
     patch(id: unknown, fields: Record<string, unknown>): Promise<void>;
     insert(table: string, doc: Record<string, unknown>): Promise<unknown>;
     delete(id: unknown): Promise<void>;
   };
-  runMutation(fn: FunctionReference<"mutation">, args: Record<string, unknown>): Promise<unknown>;
+  runMutation(
+    fn: FunctionReference<"mutation">,
+    args: Record<string, unknown>,
+  ): Promise<unknown>;
 }
 
 export async function runMigrations(
   ctx: MigrationCtx,
   config: MigrationConfig,
 ): Promise<boolean> {
-  const { table, schema: schemaDef, migrations = {}, onMigrationError } = config;
+  const {
+    table,
+    schema: schemaDef,
+    migrations = {},
+    onMigrationError,
+  } = config;
   const targetVersion = schemaDef.version;
 
   log.info(`runMigrations: checking ${table}, target version=${targetVersion}`);
@@ -157,11 +171,21 @@ export async function runMigrations(
 // Version storage helpers
 // ---------------------------------------------------------------------------
 
-async function getStoredVersion(ctx: MigrationCtx, table: string): Promise<number | null> {
+async function getStoredVersion(
+  ctx: MigrationCtx,
+  table: string,
+): Promise<number | null> {
   try {
     const records = await ctx.db
       .query(VERSION_TABLE)
-      .filter((q: unknown) => (q as { eq(a: unknown, b: unknown): unknown; field(name: string): unknown }).eq((q as { field(name: string): unknown }).field("table"), table))
+      .filter((q: unknown) =>
+        (
+          q as {
+            eq(a: unknown, b: unknown): unknown;
+            field(name: string): unknown;
+          }
+        ).eq((q as { field(name: string): unknown }).field("table"), table),
+      )
       .collect();
 
     if (records.length === 0) return null;
@@ -172,13 +196,24 @@ async function getStoredVersion(ctx: MigrationCtx, table: string): Promise<numbe
   }
 }
 
-async function setStoredVersion(ctx: MigrationCtx, table: string, version: number): Promise<void> {
+async function setStoredVersion(
+  ctx: MigrationCtx,
+  table: string,
+  version: number,
+): Promise<void> {
   await Fx.run(
     Fx.from({
       ok: async () => {
         const existing = await ctx.db
           .query(VERSION_TABLE)
-          .filter((q: unknown) => (q as { eq(a: unknown, b: unknown): unknown; field(name: string): unknown }).eq((q as { field(name: string): unknown }).field("table"), table))
+          .filter((q: unknown) =>
+            (
+              q as {
+                eq(a: unknown, b: unknown): unknown;
+                field(name: string): unknown;
+              }
+            ).eq((q as { field(name: string): unknown }).field("table"), table),
+          )
           .collect();
 
         if (existing.length > 0) {
@@ -194,11 +229,16 @@ async function setStoredVersion(ctx: MigrationCtx, table: string, version: numbe
         Fx.from({
           ok: () => ctx.db.insert(VERSION_TABLE, { table, version }),
           err: (err) => err as Error,
-        })
+        }),
       ),
       // If even the fallback failed, log and swallow
       Fx.inspect((err) =>
-        Fx.sync(() => log.warn(`setStoredVersion: could not store version for ${table}`, err))
+        Fx.sync(() =>
+          log.warn(
+            `setStoredVersion: could not store version for ${table}`,
+            err,
+          ),
+        ),
       ),
       Fx.recover(() => Fx.unit),
     ),

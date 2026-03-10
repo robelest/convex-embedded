@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+
 import {
   LoopbackWebSocket,
   LoopbackWebSocketConstructor,
@@ -37,7 +38,10 @@ describe("LoopbackWebSocket", () => {
     });
 
     it("has the correct url", () => {
-      const ws = new LoopbackWebSocket("ws://localhost:8080/sync", echoHandler());
+      const ws = new LoopbackWebSocket(
+        "ws://localhost:8080/sync",
+        echoHandler(),
+      );
       expect(ws.url).toBe("ws://localhost:8080/sync");
     });
   });
@@ -65,7 +69,9 @@ describe("LoopbackWebSocket", () => {
       await flushMicrotasks();
 
       expect(onopen).toHaveBeenCalledOnce();
-      expect(onopen).toHaveBeenCalledWith(expect.objectContaining({ type: "open" }));
+      expect(onopen).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "open" }),
+      );
     });
 
     it("fires 'open' event listeners", async () => {
@@ -76,7 +82,9 @@ describe("LoopbackWebSocket", () => {
       await flushMicrotasks();
 
       expect(listener).toHaveBeenCalledOnce();
-      expect(listener).toHaveBeenCalledWith(expect.objectContaining({ type: "open" }));
+      expect(listener).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "open" }),
+      );
     });
 
     it("does not open if close() was called before microtask fires", async () => {
@@ -274,7 +282,9 @@ describe("LoopbackWebSocket", () => {
       expect(listener).toHaveBeenCalledOnce();
 
       // Both receive the same event
-      expect(listener.mock.calls[0][0].data).toBe(onmessage.mock.calls[0][0].data);
+      expect(listener.mock.calls[0][0].data).toBe(
+        onmessage.mock.calls[0][0].data,
+      );
     });
 
     it("multiple listeners of the same type all fire", async () => {

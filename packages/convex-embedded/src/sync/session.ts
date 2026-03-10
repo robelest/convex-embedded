@@ -59,7 +59,10 @@ export class SessionManager {
   createSession(): string {
     let id: string;
     // Prefer crypto.randomUUID when available (Node 19+, most modern runtimes).
-    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    if (
+      typeof crypto !== "undefined" &&
+      typeof crypto.randomUUID === "function"
+    ) {
       id = crypto.randomUUID();
     } else {
       this._counter += 1;

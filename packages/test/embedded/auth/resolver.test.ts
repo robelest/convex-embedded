@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+
 import { AuthResolver, createTestIdentity } from "#embedded/auth/resolver";
 
 describe("AuthResolver", () => {
@@ -37,9 +38,7 @@ describe("createTestIdentity", () => {
 
     expect(identity.subject).toBe("test-user-1");
     expect(identity.issuer).toBe("https://embedded.local");
-    expect(identity.tokenIdentifier).toBe(
-      "https://embedded.local|test-user-1",
-    );
+    expect(identity.tokenIdentifier).toBe("https://embedded.local|test-user-1");
     expect(identity.name).toBe("Test User");
     expect(identity.email).toBe("test@embedded.local");
   });

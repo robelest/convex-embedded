@@ -1,3 +1,4 @@
+import { detach } from "@robelest/fx";
 /**
  * Core in-memory database engine with MVCC timestamps.
  *
@@ -12,9 +13,14 @@ import type { GenericDocument } from "convex/server";
 import type { JSONValue, Value } from "convex/values";
 import { jsonToConvex } from "convex/values";
 
-import { detach } from "@robelest/fx";
+import { QueryEngine } from "@/core/query-engine";
+import type { DocumentIterator } from "@/core/query-engine";
 import type { ParsedSchema } from "@/core/schema";
-import { tableNameFromId, validateValidator, validateSchemaDefinition } from "@/core/schema";
+import {
+  tableNameFromId,
+  validateValidator,
+  validateSchemaDefinition,
+} from "@/core/schema";
 import type {
   DocumentId,
   QueryId,
@@ -24,8 +30,6 @@ import type {
   TableName,
   Timestamp,
 } from "@/core/types";
-import { QueryEngine } from "@/core/query-engine";
-import type { DocumentIterator } from "@/core/query-engine";
 import type { StorageAdapter } from "@/storage/adapter";
 
 // ---------------------------------------------------------------------------
@@ -291,15 +295,16 @@ export class Database {
       if (this._storage !== null && (puts.length > 0 || deletes.length > 0)) {
         const storage = this._storage;
         detach(
-          () => storage.commit({
-            puts,
-            deletes,
-            meta: {
-              timestamp: this._timestamp,
-              nextDocId: this._nextDocId,
-              lastCreationTime: this._lastCreationTime,
-            },
-          }),
+          () =>
+            storage.commit({
+              puts,
+              deletes,
+              meta: {
+                timestamp: this._timestamp,
+                nextDocId: this._nextDocId,
+                lastCreationTime: this._lastCreationTime,
+              },
+            }),
           "[convex-embedded] storage commit failed:",
         );
       }
@@ -314,7 +319,10 @@ export class Database {
 
     // Return the *current* (not yet bumped) timestamp; the outermost
     // commit is what actually increments it.
-    return { timestamp: this._timestamp, tablesWritten: new Set(this._tablesWritten) };
+    return {
+      timestamp: this._timestamp,
+      tablesWritten: new Set(this._tablesWritten),
+    };
   }
 
   /** Discard the deepest pending write level. */
@@ -469,7 +477,10 @@ export class Database {
       convexValue[key] = evaluateValue(v as JSONValue);
     }
 
-    this._validate(tableNameFromId(document._id as string)!, convexValue as GenericDocument);
+    this._validate(
+      tableNameFromId(document._id as string)!,
+      convexValue as GenericDocument,
+    );
     this._addWrite(id, {
       ...convexValue,
       _id: document._id,
@@ -547,7 +558,10 @@ export class Database {
     return this.queryEngine.startQuery(query);
   }
 
-  queryNext(queryId: QueryId): { value: GenericDocument | null; done: boolean } {
+  queryNext(queryId: QueryId): {
+    value: GenericDocument | null;
+    done: boolean;
+  } {
     return this.queryEngine.queryNext(queryId);
   }
 

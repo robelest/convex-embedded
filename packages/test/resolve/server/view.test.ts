@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+
 import { view } from "#resolve/server/view";
 
 describe("view.public()", () => {
@@ -33,17 +34,17 @@ describe("view.authenticated()", () => {
       },
     };
 
-    await expect(
-      view.authenticated().apply(ctx, q),
-    ).rejects.toThrow("requires a logged-in user");
+    await expect(view.authenticated().apply(ctx, q)).rejects.toThrow(
+      "requires a logged-in user",
+    );
   });
 
   it("throws when auth is missing entirely", async () => {
     const q = { collect: vi.fn() };
     // ctx.auth is undefined
-    await expect(
-      view.authenticated().apply({}, q),
-    ).rejects.toThrow("requires a logged-in user");
+    await expect(view.authenticated().apply({}, q)).rejects.toThrow(
+      "requires a logged-in user",
+    );
   });
 });
 

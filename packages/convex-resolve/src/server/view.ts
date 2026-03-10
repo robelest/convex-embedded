@@ -25,7 +25,10 @@ export interface ViewFilter<Ctx = unknown, Q = unknown> {
   apply(ctx: Ctx, query: Q): Q | Promise<Q>;
 }
 
-type FilterFn<Ctx = unknown, Q = unknown> = (ctx: Ctx, query: Q) => Q | Promise<Q>;
+type FilterFn<Ctx = unknown, Q = unknown> = (
+  ctx: Ctx,
+  query: Q,
+) => Q | Promise<Q>;
 
 // ---------------------------------------------------------------------------
 // Presets
@@ -47,10 +50,19 @@ function publicView(): ViewFilter {
  */
 function authenticated(): ViewFilter {
   return {
-    async apply(ctx: { auth?: { getUserIdentity(): Promise<{ tokenIdentifier?: string } | null> } }, query: unknown) {
+    async apply(
+      ctx: {
+        auth?: {
+          getUserIdentity(): Promise<{ tokenIdentifier?: string } | null>;
+        };
+      },
+      query: unknown,
+    ) {
       const identity = await ctx.auth?.getUserIdentity();
       if (!identity) {
-        throw new Error("convex-resolve: view.authenticated() requires a logged-in user");
+        throw new Error(
+          "convex-resolve: view.authenticated() requires a logged-in user",
+        );
       }
       return query;
     },
@@ -66,20 +78,32 @@ function ownership(options: { owner: string }): ViewFilter {
 
   return {
     async apply(
-      ctx: { auth: { getUserIdentity(): Promise<{ subject?: string; tokenIdentifier?: string } | null> } },
+      ctx: {
+        auth: {
+          getUserIdentity(): Promise<{
+            subject?: string;
+            tokenIdentifier?: string;
+          } | null>;
+        };
+      },
       query: { filter(predicate: (q: unknown) => unknown): unknown },
     ) {
       const identity = await ctx.auth.getUserIdentity();
       if (!identity) {
         // Return a query that will produce no results
         // by filtering on an impossible condition
-        return query.filter((q: unknown) => (q as { eq(a: unknown, b: unknown): unknown }).eq(true, false));
+        return query.filter((q: unknown) =>
+          (q as { eq(a: unknown, b: unknown): unknown }).eq(true, false),
+        );
       }
 
       const userId = identity.subject ?? identity.tokenIdentifier;
 
       return query.filter((q: unknown) => {
-        const qb = q as { eq(a: unknown, b: unknown): unknown; field(name: string): unknown };
+        const qb = q as {
+          eq(a: unknown, b: unknown): unknown;
+          field(name: string): unknown;
+        };
         return qb.eq(qb.field(owner), userId);
       });
     },
@@ -89,7 +113,9 @@ function ownership(options: { owner: string }): ViewFilter {
 /**
  * Custom filter view. Accepts a function (ctx, query) => filteredQuery.
  */
-function filter<Ctx = unknown, Q = unknown>(fn: FilterFn<Ctx, Q>): ViewFilter<Ctx, Q> {
+function filter<Ctx = unknown, Q = unknown>(
+  fn: FilterFn<Ctx, Q>,
+): ViewFilter<Ctx, Q> {
   return {
     apply(ctx: Ctx, query: Q): Q | Promise<Q> {
       return fn(ctx, query);

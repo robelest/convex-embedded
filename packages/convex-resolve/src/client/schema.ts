@@ -9,8 +9,9 @@
  * Re-exports Conflict<T> for convenience.
  */
 import * as Y from "yjs";
-import type { Conflict, ConflictEntry } from "@/shared/types";
+
 import { createConflict } from "@/shared/conflict";
+import type { Conflict, ConflictEntry } from "@/shared/types";
 
 // ---------------------------------------------------------------------------
 // Prose helpers
@@ -139,10 +140,7 @@ export function getCounterValue(doc: Y.Doc, fieldName: string): number {
 /**
  * Get all members of an add-wins set field.
  */
-export function getSetMembers<T = string>(
-  doc: Y.Doc,
-  fieldName: string,
-): T[] {
+export function getSetMembers<T = string>(doc: Y.Doc, fieldName: string): T[] {
   const fields = doc.getMap("fields");
   const setMap = fields.get(fieldName);
 

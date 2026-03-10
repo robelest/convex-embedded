@@ -2,6 +2,20 @@
   "name": "@robelest/convex-resolve",
   "version": "0.0.1",
   "description": "Offline-first sync library for Yjs documents between local and remote Convex.",
+  "keywords": [
+    "component",
+    "convex",
+    "crdt",
+    "local-first",
+    "offline-first",
+    "sync",
+    "yjs"
+  ],
+  "license": "MIT",
+  "files": [
+    "dist",
+    "src"
+  ],
   "type": "module",
   "exports": {
     "./package.json": "./package.json",
@@ -28,10 +42,6 @@
       "import": "./src/test.ts"
     }
   },
-  "files": [
-    "dist",
-    "src"
-  ],
   "scripts": {
     "build": "tsdown",
     "codegen": "convex codegen --component-dir ./src/component",
@@ -42,11 +52,8 @@
   },
   "dependencies": {
     "@robelest/fx": "workspace:*",
-    "yjs": "^13.6.0",
-    "convex-helpers": "^0.1.0"
-  },
-  "peerDependencies": {
-    "convex": "^1.17.0"
+    "convex-helpers": "^0.1.0",
+    "yjs": "^13.6.0"
   },
   "devDependencies": {
     "convex": "catalog:",
@@ -54,14 +61,7 @@
     "typescript": "catalog:",
     "vitest": "catalog:"
   },
-  "keywords": [
-    "convex",
-    "yjs",
-    "crdt",
-    "offline-first",
-    "sync",
-    "local-first",
-    "component"
-  ],
-  "license": "MIT"
+  "peerDependencies": {
+    "convex": "^1.17.0"
+  }
 }

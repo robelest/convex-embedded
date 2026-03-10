@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+
 import { compareValues } from "#embedded/core/compare";
 
 // ---------------------------------------------------------------------------
@@ -33,7 +34,9 @@ describe("compareValues", () => {
     for (let i = 0; i < ordered.length; i++) {
       for (let j = i + 1; j < ordered.length; j++) {
         it(`${ordered[i].label} < ${ordered[j].label}`, () => {
-          expect(compareValues(ordered[i].value, ordered[j].value)).toBeLessThan(0);
+          expect(
+            compareValues(ordered[i].value, ordered[j].value),
+          ).toBeLessThan(0);
         });
       }
     }

@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+
 import { Database } from "#embedded/core/database";
 import type { ParsedSchema } from "#embedded/core/schema";
 
@@ -316,7 +317,9 @@ describe("Database — schema validation", () => {
   it("inserting an invalid document throws (wrong type)", () => {
     const db = createSchemaDb();
     db.startTransaction();
-    expect(() => db.insert("messages", { body: 123, author: "alice" })).toThrow();
+    expect(() =>
+      db.insert("messages", { body: 123, author: "alice" }),
+    ).toThrow();
   });
 
   it("inserting into an unschema'd table (not in schema) succeeds", () => {

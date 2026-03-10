@@ -148,8 +148,10 @@ export class ModuleLoader {
     );
     this.prefix = findModulesRoot(Object.keys(modules));
     console.debug(
-      "[convex-embedded:loader] prefix:", this.prefix,
-      "modules:", Object.keys(this.modules).map((k) => k.slice(this.prefix.length)),
+      "[convex-embedded:loader] prefix:",
+      this.prefix,
+      "modules:",
+      Object.keys(this.modules).map((k) => k.slice(this.prefix.length)),
     );
   }
 

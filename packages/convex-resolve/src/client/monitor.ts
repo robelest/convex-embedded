@@ -1,3 +1,4 @@
+import { Fx } from "@robelest/fx";
 /**
  * monitor — orchestrates resolve on connect/reconnect.
  *
@@ -26,12 +27,9 @@
  *   m.stop();
  */
 import * as Y from "yjs";
-import { Fx } from "@robelest/fx";
-import type {
-  MonitorStatus,
-  ResolveProgress,
-} from "@/shared/types";
+
 import { createLogger } from "@/shared/logger";
+import type { MonitorStatus, ResolveProgress } from "@/shared/types";
 
 const log = createLogger("monitor");
 
@@ -50,7 +48,9 @@ export interface TableConfig {
 
 export interface MonitorConfig {
   /** A ConvexClient pointed at the remote Convex backend. */
-  remoteClient: { query(name: unknown, args: Record<string, unknown>): Promise<unknown> };
+  remoteClient: {
+    query(name: unknown, args: Record<string, unknown>): Promise<unknown>;
+  };
 
   /** Table configurations keyed by table name. */
   tables: Record<string, TableConfig>;
@@ -181,7 +181,8 @@ function createMonitor(config: MonitorConfig): MonitorInstance {
         // Stop retrying if the signal has been aborted
         if (signal?.aborted) return false;
         const err = meta.input as Error;
-        if (err instanceof DOMException && err.name === "AbortError") return false;
+        if (err instanceof DOMException && err.name === "AbortError")
+          return false;
         return true;
       },
     );
@@ -212,9 +213,7 @@ function createMonitor(config: MonitorConfig): MonitorInstance {
       attempt.pipe(
         Fx.retry(retrySchedule),
         Fx.tap(() =>
-          Fx.sync(() =>
-            log.debug(`monitor: resolved table "${tableName}"`),
-          ),
+          Fx.sync(() => log.debug(`monitor: resolved table "${tableName}"`)),
         ),
       ),
     );
@@ -248,7 +247,8 @@ function createMonitor(config: MonitorConfig): MonitorInstance {
 
       // Check initial network state
       if (typeof globalThis !== "undefined" && "navigator" in globalThis) {
-        const nav = (globalThis as { navigator?: { onLine?: boolean } }).navigator;
+        const nav = (globalThis as { navigator?: { onLine?: boolean } })
+          .navigator;
         if (nav?.onLine === false) {
           emit({ status: "offline" });
         } else {

@@ -15,16 +15,16 @@
 
 import { Fx } from "@robelest/fx";
 
+import type {
+  StorageRequest,
+  StorageResponse,
+} from "@/browser/wa-sqlite-worker";
 import type { StoredDocument } from "@/core/types";
 import type {
   CommitBatch,
   DatabaseMeta,
   StorageAdapter,
 } from "@/storage/adapter";
-import type {
-  StorageRequest,
-  StorageResponse,
-} from "@/browser/wa-sqlite-worker";
 
 // ---------------------------------------------------------------------------
 // Options
@@ -157,9 +157,7 @@ function _buildAdapter(worker: Worker): StorageAdapter {
       const jsonStrings = (await rpc(worker, {
         method: "getDocuments",
       })) as string[];
-      return jsonStrings.map(
-        (s) => JSON.parse(s) as StoredDocument,
-      );
+      return jsonStrings.map((s) => JSON.parse(s) as StoredDocument);
     },
 
     async getDocumentsByTable(tableName: string): Promise<StoredDocument[]> {
@@ -167,9 +165,7 @@ function _buildAdapter(worker: Worker): StorageAdapter {
         method: "getDocumentsByTable",
         tableName,
       })) as string[];
-      return jsonStrings.map(
-        (s) => JSON.parse(s) as StoredDocument,
-      );
+      return jsonStrings.map((s) => JSON.parse(s) as StoredDocument);
     },
 
     async getMeta(): Promise<DatabaseMeta | null> {
@@ -208,11 +204,9 @@ function _buildAdapter(worker: Worker): StorageAdapter {
 
     async storeBlob(id: string, blob: Blob): Promise<void> {
       const buffer = await blob.arrayBuffer();
-      await rpc(
-        worker,
-        { method: "storeBlob", blobId: id, data: buffer },
-        [buffer],
-      );
+      await rpc(worker, { method: "storeBlob", blobId: id, data: buffer }, [
+        buffer,
+      ]);
     },
 
     async deleteBlob(id: string): Promise<void> {

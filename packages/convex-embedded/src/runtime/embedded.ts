@@ -9,25 +9,30 @@
 
 import { Fx, detach } from "@robelest/fx";
 import type { JSONValue } from "convex/values";
+
+import { AuthResolver } from "@/auth/resolver";
+import type { UserIdentity } from "@/auth/resolver";
 import { Database } from "@/core/database";
 import { parseSchema } from "@/core/schema";
 import type { ParsedSchema, SchemaExport } from "@/core/schema";
 import { ModuleLoader } from "@/kernel/module-loader";
 import type { ConvexModule, FunctionPath } from "@/kernel/module-loader";
 import { resolveFunctionPath } from "@/kernel/module-loader";
-import { UdfExecutor } from "@/kernel/udf-executor";
 import { TransactionManager } from "@/kernel/transaction";
-import { SubscriptionManager } from "@/sync/subscriptions";
-import { SyncProtocolHandler } from "@/sync/protocol";
-import type { ClientMessage, ProtocolExecutor, ServerMessage } from "@/sync/protocol";
-import { SessionManager } from "@/sync/session";
-import { WriteFanout } from "@/runtime/write-fanout";
+import { UdfExecutor } from "@/kernel/udf-executor";
 import { createTransport } from "@/runtime/transport";
 import type { EmbeddedTransport } from "@/runtime/transport";
-import { AuthResolver } from "@/auth/resolver";
-import type { UserIdentity } from "@/auth/resolver";
+import { WriteFanout } from "@/runtime/write-fanout";
 import { SchedulerExecutor } from "@/scheduler/executor";
 import type { StorageAdapter } from "@/storage/adapter";
+import { SyncProtocolHandler } from "@/sync/protocol";
+import type {
+  ClientMessage,
+  ProtocolExecutor,
+  ServerMessage,
+} from "@/sync/protocol";
+import { SessionManager } from "@/sync/session";
+import { SubscriptionManager } from "@/sync/subscriptions";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -177,7 +182,9 @@ export class EmbeddedRuntime {
         err: (err) => err as Error,
       }).pipe(
         Fx.inspect((err) =>
-          Fx.sync(() => console.error("[convex-embedded] hydration failed:", err)),
+          Fx.sync(() =>
+            console.error("[convex-embedded] hydration failed:", err),
+          ),
         ),
         Fx.recover(() => Fx.unit),
       ),
@@ -271,19 +278,29 @@ export class EmbeddedRuntime {
 
     // Extract or synthesize a session ID.
     const sessionId =
-      (parsed as unknown as Record<string, unknown>).sessionId as string ?? "default";
+      ((parsed as unknown as Record<string, unknown>).sessionId as string) ??
+      "default";
 
     try {
-      const responses: ServerMessage[] =
-        await this.syncProtocol.handleMessage(sessionId, parsed);
+      const responses: ServerMessage[] = await this.syncProtocol.handleMessage(
+        sessionId,
+        parsed,
+      );
 
       return responses.map((r) => JSON.stringify(r));
     } catch (err) {
-      console.error("[convex-embedded] protocol error on", parsed.type, ":", err);
-      return [JSON.stringify({
-        type: "FatalError",
-        error: err instanceof Error ? err.message : String(err),
-      })];
+      console.error(
+        "[convex-embedded] protocol error on",
+        parsed.type,
+        ":",
+        err,
+      );
+      return [
+        JSON.stringify({
+          type: "FatalError",
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      ];
     }
   }
 
@@ -400,7 +417,10 @@ export class EmbeddedRuntime {
         return this.executor.executeQuery(path, args);
 
       case "mutation": {
-        const { result, tablesWritten } = await this.executor.executeMutation(path, args);
+        const { result, tablesWritten } = await this.executor.executeMutation(
+          path,
+          args,
+        );
         this.onMutationCommit(tablesWritten);
         return result;
       }
@@ -449,7 +469,7 @@ export class EmbeddedRuntime {
         // args[0] is the convexToJson'd args object from the client
         const convexArgs = (args[0] ?? {}) as Record<string, unknown>;
         // _runUdf always returns JSON-serialisable values for queries
-        return await this._runUdf("query", path, convexArgs) as JSONValue;
+        return (await this._runUdf("query", path, convexArgs)) as JSONValue;
       },
 
       runMutation: async (udfPath: string, ...args: unknown[]) => {
@@ -462,7 +482,7 @@ export class EmbeddedRuntime {
       runAction: async (udfPath: string, ...args: unknown[]) => {
         const path = resolveFunctionPath({ name: udfPath });
         const convexArgs = (args[0] ?? {}) as Record<string, unknown>;
-        return await this._runUdf("action", path, convexArgs) as JSONValue;
+        return (await this._runUdf("action", path, convexArgs)) as JSONValue;
       },
     };
   }

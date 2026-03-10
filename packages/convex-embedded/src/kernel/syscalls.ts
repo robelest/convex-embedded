@@ -12,14 +12,13 @@
 import type { Value } from "convex/values";
 import { convexToJson, jsonToConvex } from "convex/values";
 
+import type { Database } from "@/core/database";
+import type { DocumentId } from "@/core/types";
 import type { FunctionPath } from "@/kernel/module-loader";
 import {
   resolveFunctionPath,
   createFunctionHandle,
 } from "@/kernel/module-loader";
-
-import type { Database } from "@/core/database";
-import type { DocumentId } from "@/core/types";
 
 // ---------------------------------------------------------------------------
 // RunUdfFn — the callback used to invoke nested queries/mutations/actions
@@ -140,7 +139,10 @@ export function createAsyncSyscall(
       // ----- Document writes -----
 
       case "1.0/insert": {
-        const _id = db.insert(args.table, jsonToConvex(args.value) as Record<string, unknown>);
+        const _id = db.insert(
+          args.table,
+          jsonToConvex(args.value) as Record<string, unknown>,
+        );
         return JSON.stringify({ _id });
       }
       case "1.0/shallowMerge": {
@@ -255,10 +257,7 @@ export function createAsyncSyscall(
 
             const finishedJob = db.get("_scheduled_functions", jobId);
             const finishedState = finishedJob?.state as { kind: string } | null;
-            if (
-              finishedJob !== null &&
-              finishedState?.kind === "inProgress"
-            ) {
+            if (finishedJob !== null && finishedState?.kind === "inProgress") {
               db.patch("_scheduled_functions", jobId, {
                 state: { kind: "success" },
               });
@@ -287,19 +286,31 @@ export function createAsyncSyscall(
       case "1.0/actions/query": {
         const { name, args: queryArgs } = args;
         const functionPath = resolveFunctionPath({ name });
-        const result = await runUdf("query", functionPath, queryArgs as Record<string, unknown>);
+        const result = await runUdf(
+          "query",
+          functionPath,
+          queryArgs as Record<string, unknown>,
+        );
         return JSON.stringify(convexToJson(result as Value));
       }
       case "1.0/actions/mutation": {
         const { name, args: mutationArgs } = args;
         const functionPath = resolveFunctionPath({ name });
-        const result = await runUdf("mutation", functionPath, mutationArgs as Record<string, unknown>);
+        const result = await runUdf(
+          "mutation",
+          functionPath,
+          mutationArgs as Record<string, unknown>,
+        );
         return JSON.stringify(convexToJson(result as Value));
       }
       case "1.0/actions/action": {
         const { name, args: actionArgs } = args;
         const functionPath = resolveFunctionPath({ name });
-        const result = await runUdf("action", functionPath, actionArgs as Record<string, unknown>);
+        const result = await runUdf(
+          "action",
+          functionPath,
+          actionArgs as Record<string, unknown>,
+        );
         return JSON.stringify(convexToJson(result as Value));
       }
 
@@ -429,7 +440,10 @@ export function createAsyncSyscall(
 export function createJsSyscall(
   db: Database,
 ): (op: string, args: Record<string, unknown>) => Promise<unknown> {
-  return async (op: string, args: Record<string, unknown>): Promise<unknown> => {
+  return async (
+    op: string,
+    args: Record<string, unknown>,
+  ): Promise<unknown> => {
     switch (op) {
       case "storage/storeBlob": {
         const { blob } = args as { blob: Blob };

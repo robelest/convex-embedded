@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+
 import { WriteFanout } from "#embedded/runtime/write-fanout";
 
 // ---------------------------------------------------------------------------
@@ -21,7 +22,12 @@ class MockBroadcastChannel {
     if (this._closed) return;
     // BroadcastChannel delivers to OTHER instances with the same name
     for (const inst of MockBroadcastChannel.instances) {
-      if (inst !== this && inst.name === this.name && !inst._closed && inst.onmessage) {
+      if (
+        inst !== this &&
+        inst.name === this.name &&
+        !inst._closed &&
+        inst.onmessage
+      ) {
         inst.onmessage(new MessageEvent("message", { data }));
       }
     }

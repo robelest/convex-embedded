@@ -1,7 +1,8 @@
 import { describe, it, expect, vi } from "vitest";
+
 import { Database } from "#embedded/core/database";
-import { memoryStorage } from "#embedded/storage/memory";
 import type { StorageAdapter } from "#embedded/storage/adapter";
+import { memoryStorage } from "#embedded/storage/memory";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -130,7 +131,10 @@ describe("Database persistence", () => {
       const storage = memoryStorage();
 
       const { db: db1 } = await createPersistedDb(storage);
-      const { id } = insertAndCommit(db1, "tasks", { text: "original", done: false });
+      const { id } = insertAndCommit(db1, "tasks", {
+        text: "original",
+        done: false,
+      });
 
       db1.startTransaction();
       db1.patch("tasks", id, { done: true });
@@ -195,7 +199,10 @@ describe("Database persistence", () => {
 
       // In-memory state should still be correct
       db.startTransaction();
-      const doc = db.get(undefined, db.normalizeId("tasks", Object.keys((db as any)._documents)[0])!);
+      const doc = db.get(
+        undefined,
+        db.normalizeId("tasks", Object.keys((db as any)._documents)[0])!,
+      );
       db.rollbackWrites();
 
       expect(doc).not.toBeNull();

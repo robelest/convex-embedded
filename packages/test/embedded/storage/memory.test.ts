@@ -1,13 +1,18 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { memoryStorage } from "#embedded/storage/memory";
-import type { StorageAdapter, CommitBatch } from "#embedded/storage/adapter";
+
 import type { StoredDocument } from "#embedded/core/types";
+import type { StorageAdapter, CommitBatch } from "#embedded/storage/adapter";
+import { memoryStorage } from "#embedded/storage/memory";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-function doc(id: string, table: string, fields: Record<string, unknown> = {}): StoredDocument {
+function doc(
+  id: string,
+  table: string,
+  fields: Record<string, unknown> = {},
+): StoredDocument {
   return {
     _id: `${id};${table}` as any,
     _creationTime: Date.now(),
@@ -109,11 +114,27 @@ describe("memoryStorage", () => {
     });
 
     it("updates meta on each commit", async () => {
-      await storage.commit(batch([], [], { timestamp: 1, nextDocId: 10001, lastCreationTime: 100 }));
-      await storage.commit(batch([], [], { timestamp: 2, nextDocId: 10002, lastCreationTime: 200 }));
+      await storage.commit(
+        batch([], [], {
+          timestamp: 1,
+          nextDocId: 10001,
+          lastCreationTime: 100,
+        }),
+      );
+      await storage.commit(
+        batch([], [], {
+          timestamp: 2,
+          nextDocId: 10002,
+          lastCreationTime: 200,
+        }),
+      );
 
       const meta = await storage.getMeta();
-      expect(meta).toEqual({ timestamp: 2, nextDocId: 10002, lastCreationTime: 200 });
+      expect(meta).toEqual({
+        timestamp: 2,
+        nextDocId: 10002,
+        lastCreationTime: 200,
+      });
     });
   });
 

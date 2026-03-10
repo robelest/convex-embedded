@@ -6,11 +6,16 @@ Local-first development for Convex applications.
 
 ### @robelest/convex-embedded
 
-In-memory Convex runtime in pure TypeScript. Point a standard `ConvexClient` at it — existing queries, mutations, and actions execute locally with zero code changes. Runs in any JS environment: browser, Tauri, Electron, Electrobun, React Native, or server-side runtimes.
+In-memory Convex runtime in pure TypeScript. Point a standard `ConvexClient` at
+it — existing queries, mutations, and actions execute locally with zero code
+changes. Runs in any JS environment: browser, Tauri, Electron, Electrobun, React
+Native, or server-side runtimes.
 
 ### @robelest/convex-resolve
 
-Offline-first sync between a local embedded runtime and a remote Convex backend. Uses Yjs CRDTs for automatic conflict resolution on reconnect. Handles schema versioning, delta recording, and reconnect orchestration.
+Offline-first sync between a local embedded runtime and a remote Convex backend.
+Uses Yjs CRDTs for automatic conflict resolution on reconnect. Handles schema
+versioning, delta recording, and reconnect orchestration.
 
 ## Quick start
 
@@ -87,7 +92,7 @@ export const complete = wrapMutation(
     remote: async (ctx, { id }) => {
       await ctx.scheduler.runAfter(0, internal.webhooks.notify, { id });
     },
-  })
+  }),
 );
 
 export const list = query({

@@ -6,7 +6,11 @@
  */
 
 import type { StoredDocument } from "@/core/types";
-import type { CommitBatch, DatabaseMeta, StorageAdapter } from "@/storage/adapter";
+import type {
+  CommitBatch,
+  DatabaseMeta,
+  StorageAdapter,
+} from "@/storage/adapter";
 
 // ---------------------------------------------------------------------------
 // memoryStorage
@@ -30,8 +34,8 @@ export function memoryStorage(): StorageAdapter {
 
     async getDocumentsByTable(tableName: string): Promise<StoredDocument[]> {
       const suffix = `;${tableName}`;
-      return Array.from(documents.values()).filter(
-        (doc) => (doc._id as string).endsWith(suffix),
+      return Array.from(documents.values()).filter((doc) =>
+        (doc._id as string).endsWith(suffix),
       );
     },
 

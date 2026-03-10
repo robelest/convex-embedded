@@ -348,7 +348,9 @@ export class SyncProtocolHandler {
       const startVersion = { ...session.version };
 
       const modifications = await Fx.run(
-        Fx.each([...session.activeQueries.values()], (q) => this._evaluateQuery(q)),
+        Fx.each([...session.activeQueries.values()], (q) =>
+          this._evaluateQuery(q),
+        ),
       );
 
       session.version = {
@@ -499,10 +501,7 @@ export class SyncProtocolHandler {
     const mutationResponse: ServerMessage = await Fx.run(
       Fx.attempt(
         () =>
-          this._executor.runMutation(
-            message.udfPath,
-            ...(message.args ?? []),
-          ),
+          this._executor.runMutation(message.udfPath, ...(message.args ?? [])),
         (result): ServerMessage => ({
           type: "MutationResponse",
           requestId: message.requestId,
@@ -532,7 +531,9 @@ export class SyncProtocolHandler {
       const startVersion = { ...session.version };
 
       const modifications = await Fx.run(
-        Fx.each([...session.activeQueries.values()], (q) => this._evaluateQuery(q)),
+        Fx.each([...session.activeQueries.values()], (q) =>
+          this._evaluateQuery(q),
+        ),
       );
 
       session.version = {
@@ -559,10 +560,7 @@ export class SyncProtocolHandler {
     const response: ServerMessage = await Fx.run(
       Fx.attempt(
         () =>
-          this._executor.runAction(
-            message.udfPath,
-            ...(message.args ?? []),
-          ),
+          this._executor.runAction(message.udfPath, ...(message.args ?? [])),
         (result): ServerMessage => ({
           type: "ActionResponse",
           requestId: message.requestId,

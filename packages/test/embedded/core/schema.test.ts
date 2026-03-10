@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+
 import {
   validateValidator,
   isValidIdentifier,
@@ -138,7 +139,9 @@ describe("validateValidator", () => {
     });
 
     it("rejects a string", () => {
-      expect(() => validateValidator(validator, "bytes")).toThrow(/ArrayBuffer/);
+      expect(() => validateValidator(validator, "bytes")).toThrow(
+        /ArrayBuffer/,
+      );
     });
   });
 

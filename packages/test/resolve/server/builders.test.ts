@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+
 import { builders } from "#resolve/server/builders";
 
 describe("builders()", () => {
@@ -81,8 +82,8 @@ describe("builders()", () => {
 
       expect(remote).toHaveBeenCalledWith(
         expect.anything(), // ctx
-        { title: "test" },  // args
-        { id: "123" },      // result
+        { title: "test" }, // args
+        { id: "123" }, // result
       );
     });
 

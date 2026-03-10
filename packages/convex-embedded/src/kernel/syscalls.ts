@@ -232,9 +232,13 @@ export function createAsyncSyscall(
                 `\`convex-embedded\` invariant error: Unexpected scheduled function state when starting it: ${jobState?.kind}`,
               );
             }
+            // Wrap bookkeeping writes in transactions — this callback
+            // runs outside any UDF transaction (via setTimeout).
+            db.startTransaction();
             db.patch("_scheduled_functions", jobId, {
               state: { kind: "inProgress" },
             });
+            db.commit();
 
             try {
               await runUdf("mutation", functionPath, parsedArgs);
@@ -243,10 +247,12 @@ export function createAsyncSyscall(
                 `Error when running scheduled function ${functionPath.udfPath}`,
                 error,
               );
+              db.startTransaction();
               db.patch("_scheduled_functions", jobId, {
                 state: { kind: "failed" },
                 completedTime: Date.now(),
               });
+              db.commit();
               // Notify if the db supports job completion callbacks
               const dbExt1 = db as unknown as Record<string, unknown>;
               if (typeof dbExt1.jobFinished === "function") {
@@ -258,9 +264,11 @@ export function createAsyncSyscall(
             const finishedJob = db.get("_scheduled_functions", jobId);
             const finishedState = finishedJob?.state as { kind: string } | null;
             if (finishedJob !== null && finishedState?.kind === "inProgress") {
+              db.startTransaction();
               db.patch("_scheduled_functions", jobId, {
                 state: { kind: "success" },
               });
+              db.commit();
             }
             // Notify if the db supports job completion callbacks
             const dbExt2 = db as unknown as Record<string, unknown>;

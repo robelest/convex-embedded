@@ -712,9 +712,9 @@ is unwrapped — the promise rejects with the original defect, not the wrapper.
 const name = await Fx.run(getNameFx);
 ```
 
-### Standalone Utilities
+### Utilities
 
-#### `pipe(value, ...fns)`
+#### `Fx.pipe(value, ...fns)`
 
 ```ts
 function pipe<A>(a: A): A;
@@ -728,15 +728,15 @@ when you need to compose transformations on plain values outside an `Fx`
 pipeline.
 
 ```ts
-import { pipe } from "@robelest/fx";
+import { Fx } from "@robelest/fx";
 
-const result = pipe(rawData, parseInput, validate, transform);
+const result = Fx.pipe(rawData, parseInput, validate, transform);
 ```
 
-#### `detach(fn, label)`
+#### `Fx.detach(fn, label)`
 
 ```ts
-function detach(fn: () => Promise<unknown>, label: string): void;
+function detach(fn: () => Promise<unknown>, label?: string): void;
 ```
 
 Fire-and-forget an async function. Executes `fn()` immediately and swallows
@@ -744,9 +744,9 @@ errors, logging them via `console.error(label, err)`. Returns `void`
 synchronously. Does not participate in the `Fx` type system.
 
 ```ts
-import { detach } from "@robelest/fx";
+import { Fx } from "@robelest/fx";
 
-detach(
+Fx.detach(
   () => storage.commit({ puts, deletes, meta }),
   "[myModule] storage commit failed:",
 );
@@ -945,10 +945,10 @@ Background work that must not block the caller.
 From `database.ts` — persist to durable storage after in-memory commit:
 
 ```ts
-import { detach } from "@robelest/fx";
+import { Fx } from "@robelest/fx";
 
 if (this._storage !== null && (puts.length > 0 || deletes.length > 0)) {
-  detach(
+  Fx.detach(
     () =>
       storage.commit({
         puts,
@@ -967,10 +967,10 @@ if (this._storage !== null && (puts.length > 0 || deletes.length > 0)) {
 From `executor.ts` — scheduled function execution:
 
 ```ts
-import { detach } from "@robelest/fx";
+import { Fx } from "@robelest/fx";
 
 const timerId = setTimeout(() => {
-  detach(
+  Fx.detach(
     () => this._runFunction(functionPath, args),
     `[SchedulerExecutor] Scheduled function "${functionPath}" failed:`,
   );

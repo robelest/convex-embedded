@@ -7,7 +7,7 @@
  * ConvexClient can talk to via an in-memory transport.
  */
 
-import { Fx, detach } from "@robelest/fx";
+import { Fx } from "@robelest/fx";
 import type { JSONValue } from "convex/values";
 
 import { AuthResolver } from "@/auth/resolver";
@@ -383,7 +383,7 @@ export class EmbeddedRuntime {
     this.subscriptions.clear();
     this.writeFanout.close();
     if (this._storageAdapter?.close) {
-      detach(
+      Fx.detach(
         () => this._storageAdapter!.close!(),
         "[convex-embedded] storage close failed:",
       );

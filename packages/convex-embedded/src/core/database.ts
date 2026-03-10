@@ -1,4 +1,4 @@
-import { detach } from "@robelest/fx";
+import { Fx } from "@robelest/fx";
 /**
  * Core in-memory database engine with MVCC timestamps.
  *
@@ -294,7 +294,7 @@ export class Database {
       // Persist to durable storage (fire-and-forget).
       if (this._storage !== null && (puts.length > 0 || deletes.length > 0)) {
         const storage = this._storage;
-        detach(
+        Fx.detach(
           () =>
             storage.commit({
               puts,
@@ -523,7 +523,7 @@ export class Database {
     // Persist to durable storage (fire-and-forget).
     if (this._storage) {
       const storage = this._storage;
-      detach(
+      Fx.detach(
         () => storage.storeBlob(storageId as string, blob),
         "[convex-embedded] blob persist failed:",
       );
@@ -536,7 +536,7 @@ export class Database {
     // Remove from durable storage (fire-and-forget).
     if (this._storage) {
       const storage = this._storage;
-      detach(
+      Fx.detach(
         () => storage.deleteBlob(storageId),
         "[convex-embedded] blob delete failed:",
       );

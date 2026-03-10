@@ -6,7 +6,7 @@
  * in the embedded runtime.
  */
 
-import { detach } from "@robelest/fx";
+import { Fx } from "@robelest/fx";
 
 import type { Database } from "@/core/database";
 
@@ -71,7 +71,7 @@ export class SchedulerExecutor {
       this._pending.delete(jobId);
       // Fire-and-forget; errors are swallowed to match Convex's
       // scheduled function semantics (failures are logged, not thrown).
-      detach(
+      Fx.detach(
         () => this._runFunction(functionPath, args),
         `[SchedulerExecutor] Scheduled function "${functionPath}" failed:`,
       );

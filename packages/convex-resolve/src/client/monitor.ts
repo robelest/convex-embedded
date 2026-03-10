@@ -3,10 +3,10 @@
  *
  * The monitor bridges local embedded runtime and remote Convex:
  *   1. Monitors network state (online/offline)
- *   2. On connect: flushes queued mutations, then calls resolve() for every
- *      registered table
- *   3. Proxies mutations: writes locally first (instant), then pushes to
- *      remote (fire-and-forget when online, queued when offline)
+ *   2. On connect: hydrates ID map + pending queue, flushes queued mutations
+ *      with ID translation, then calls resolve() for every registered table
+ *   3. Proxies mutations: writes locally first (instant), persists to pending
+ *      queue, then pushes to remote with translated IDs (serial queue)
  *   4. Tracks resolve progress and exposes status to the app
  *   5. Handles errors and retries
  *
@@ -36,7 +36,10 @@
 
 import { Fx } from "@robelest/fx";
 import type { ConvexClient } from "convex/browser";
+import { makeFunctionReference } from "convex/server";
 
+import { IdMap } from "@/client/id-map";
+import { PendingQueue } from "@/client/pending-queue";
 import { createLogger } from "@/shared/logger";
 import type { MonitorStatus, ResolveProgress } from "@/shared/types";
 
@@ -80,12 +83,6 @@ export interface MonitorConfig {
 
 type ChangeListener = (status: MonitorStatus) => void;
 
-/** A queued mutation waiting to be pushed to the remote backend. */
-interface QueuedMutation {
-  ref: unknown;
-  args: Record<string, unknown>;
-}
-
 export interface MonitorInstance {
   /** Start monitoring network state and triggering resolves. */
   start(): void;
@@ -103,9 +100,9 @@ export interface MonitorInstance {
    * Proxy a mutation through the monitor.
    *
    * 1. Writes to the local embedded client (instant, always awaited).
-   * 2. When online: pushes to remote via detach (fire-and-forget). On
-   *    failure the mutation is queued for replay on reconnect.
-   * 3. When offline: queues the mutation for later push.
+   * 2. Persists to the pending queue for durability.
+   * 3. When online: processes queue serially with ID translation.
+   * 4. When offline: queue waits until reconnect.
    *
    * Returns the local mutation result immediately.
    */
@@ -116,6 +113,12 @@ export interface MonitorInstance {
 
   /** Number of mutations waiting to be pushed to remote. */
   pendingCount(): number;
+
+  /** Access the ID map (for testing / advanced use). */
+  readonly idMap: IdMap;
+
+  /** Access the pending queue (for testing / advanced use). */
+  readonly pendingQueue: PendingQueue;
 
   /** Async dispose — delegates to stop(). */
   [Symbol.asyncDispose](): Promise<void>;
@@ -139,6 +142,41 @@ export interface MonitorInstance {
  */
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Infer the table name from a mutation function reference.
+ *
+ * Convex function references have an internal structure with the UDF path.
+ * The convention is `"tableName:functionName"` — we extract the table part.
+ * Falls back to empty string if the ref doesn't match expected patterns.
+ */
+function inferTableFromRef(
+  ref: unknown,
+  tables: Record<string, TableConfig>,
+): string {
+  // Try to extract the UDF path from a function reference object.
+  // Convex SDK function references have a `name` property like "tasks:create".
+  const name =
+    typeof ref === "string"
+      ? ref
+      : typeof ref === "object" && ref !== null && "name" in ref
+        ? String((ref as Record<string, unknown>).name)
+        : "";
+
+  // Extract module name (before the colon) and check if it's a known table.
+  const moduleName = name.split(":")[0] ?? "";
+  if (moduleName in tables) {
+    return moduleName;
+  }
+
+  // Fallback: return first registered table (common case: single table app)
+  const tableNames = Object.keys(tables);
+  return tableNames[0] ?? "";
+}
+
+// ---------------------------------------------------------------------------
 // monitor.create()
 // ---------------------------------------------------------------------------
 
@@ -157,11 +195,15 @@ function createMonitor(config: MonitorConfig): MonitorInstance {
   let started = false;
   let abortController: AbortController | null = null;
 
-  // In-memory queue of mutations that need to be pushed to remote
-  const mutationQueue: QueuedMutation[] = [];
+  // ID map and persistent pending queue
+  const idMap = new IdMap(localClient);
+  const pendingQueue = new PendingQueue(localClient);
 
   // Track whether we believe we're online (based on network events)
   let isOnline = false;
+
+  // Serial queue processor state
+  let processingQueue = false;
 
   // Network event handlers
   let onOnline: (() => void) | null = null;
@@ -179,55 +221,88 @@ function createMonitor(config: MonitorConfig): MonitorInstance {
   }
 
   // -------------------------------------------------------------------------
-  // Queue flush — replays queued mutations to remote sequentially
+  // Serial queue processor — processes pending mutations one at a time
   // -------------------------------------------------------------------------
 
-  function flushQueue(signal?: AbortSignal): Promise<void> {
-    if (mutationQueue.length === 0) return Promise.resolve();
+  /**
+   * Process the pending queue serially.
+   *
+   * Each mutation is awaited before the next starts. This ensures:
+   * 1. `create` completes and populates the ID map before a subsequent
+   *    `update`/`remove` that references the same document.
+   * 2. Ordering is preserved — mutations replay in the exact order they
+   *    were issued locally.
+   *
+   * On failure, the entry stays in the queue for retry on next cycle.
+   */
+  async function processQueue(): Promise<void> {
+    if (processingQueue) return;
+    if (pendingQueue.isEmpty) return;
 
-    const count = mutationQueue.length;
-    log.info(`monitor: flushing ${count} queued mutation(s) to remote`);
-
-    // Snapshot the queue and clear it — if new mutations arrive during
-    // flush they'll go directly to remote (we're online now).
-    const batch = mutationQueue.splice(0);
-
-    return Fx.run(
-      Fx.each(batch, (entry) =>
-        Fx.defer(() => {
-          if (signal?.aborted) {
-            return Fx.fail(new DOMException("Aborted", "AbortError"));
-          }
-          return Fx.from({
-            ok: () =>
-              (remoteClient as any).mutation(
-                entry.ref,
-                entry.args,
-              ) as Promise<unknown>,
-            err: (e) => e as Error,
-          }).pipe(
-            Fx.inspect((err) =>
-              Fx.sync(() =>
-                log.warn(
-                  "monitor: queued mutation push failed (continuing)",
-                  err,
-                ),
-              ),
-            ),
-            // Recover so one failure doesn't abort the rest of the queue
-            Fx.recover(() => Fx.unit),
-            Fx.map(() => undefined as void),
-          );
-        }),
-      ).pipe(
-        Fx.tap(() =>
-          Fx.sync(() =>
-            log.info(`monitor: flush complete (${count} mutation(s))`),
-          ),
-        ),
-        Fx.map(() => undefined as void),
-      ),
+    processingQueue = true;
+    log.info(
+      `monitor: processing ${pendingQueue.length} queued mutation(s)`,
     );
+
+    try {
+      while (!pendingQueue.isEmpty && isOnline) {
+        const entry = pendingQueue.peek();
+        if (entry === undefined) break;
+
+        try {
+          // Deserialize the entry.
+          // entry.ref is a function name string (e.g. "tasks:create"),
+          // reconstruct a proper FunctionReference for the Convex SDK.
+          const ref = makeFunctionReference<"mutation">(entry.ref);
+          const originalArgs = JSON.parse(entry.args) as Record<
+            string,
+            unknown
+          >;
+          const localResult = JSON.parse(entry.localResult);
+
+          // Translate local IDs → remote IDs in the args
+          const translatedArgs = idMap.translateArgs(originalArgs);
+
+          // Push to remote
+          const remoteResult = await (remoteClient as any).mutation(
+            ref,
+            translatedArgs,
+          );
+
+          // If the local result was a string (likely a new document ID from
+          // a create mutation) and the remote result is also a string,
+          // record the ID mapping.
+          if (
+            typeof localResult === "string" &&
+            typeof remoteResult === "string" &&
+            localResult !== remoteResult
+          ) {
+            await idMap.set(localResult, remoteResult, entry.table);
+          }
+
+          // Successfully processed — remove from queue
+          await pendingQueue.shift();
+
+          log.debug(
+            `monitor: pushed mutation to remote (table: ${entry.table}, remaining: ${pendingQueue.length})`,
+          );
+        } catch (err) {
+          // Failed — stop processing. The entry stays in the queue for
+          // retry on the next online cycle.
+          log.warn(
+            "monitor: remote push failed, stopping queue processing",
+            err,
+          );
+          break;
+        }
+      }
+    } finally {
+      processingQueue = false;
+    }
+
+    if (pendingQueue.isEmpty) {
+      log.info("monitor: queue fully processed");
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -343,35 +418,6 @@ function createMonitor(config: MonitorConfig): MonitorInstance {
   }
 
   // -------------------------------------------------------------------------
-  // Push a single mutation to remote (fire-and-forget via detach)
-  // -------------------------------------------------------------------------
-
-  function pushToRemote(ref: unknown, args: Record<string, unknown>): void {
-    Fx.detach(
-      () =>
-        Fx.run(
-          Fx.from({
-            ok: () =>
-              (remoteClient as any).mutation(ref, args) as Promise<unknown>,
-            err: (e) => e as Error,
-          }).pipe(
-            Fx.inspect((err) =>
-              Fx.sync(() => {
-                log.warn(
-                  "monitor: remote push failed, queueing for retry",
-                  err,
-                );
-                mutationQueue.push({ ref, args });
-              }),
-            ),
-            Fx.recover(() => Fx.unit),
-          ),
-        ),
-      "[monitor] pushToRemote:",
-    );
-  }
-
-  // -------------------------------------------------------------------------
   // Network event handlers
   // -------------------------------------------------------------------------
 
@@ -382,14 +428,13 @@ function createMonitor(config: MonitorConfig): MonitorInstance {
     abortController = new AbortController();
     const signal = abortController.signal;
 
-    // Flush queued mutations first, then pull remote state.
-    // The entire online cycle is wrapped in an Fx pipeline.
+    // Process the serial queue, then pull remote state.
     Fx.detach(
       () =>
         Fx.run(
           Fx.gen(function* () {
             yield* Fx.from({
-              ok: () => flushQueue(signal),
+              ok: () => processQueue(),
               err: (e) => e as Error,
             });
 
@@ -435,6 +480,16 @@ function createMonitor(config: MonitorConfig): MonitorInstance {
 
       log.info("monitor: started");
 
+      // Hydrate ID map and pending queue from embedded DB.
+      // This is fire-and-forget — the queue processor will wait
+      // for hydration to complete before accessing the data.
+      const hydrationPromise = Promise.all([
+        idMap.hydrate(),
+        pendingQueue.hydrate(),
+      ]).catch((err) => {
+        log.warn("monitor: hydration failed", err);
+      });
+
       if (typeof globalThis !== "undefined" && "navigator" in globalThis) {
         const nav = (globalThis as { navigator?: { onLine?: boolean } })
           .navigator;
@@ -442,15 +497,24 @@ function createMonitor(config: MonitorConfig): MonitorInstance {
           isOnline = false;
           emit({ status: "offline" });
         } else {
-          handleOnline();
+          // Wait for hydration before the first online cycle
+          void hydrationPromise.then(() => {
+            if (started) handleOnline();
+          });
         }
 
-        onOnline = handleOnline;
+        onOnline = () => {
+          void hydrationPromise.then(() => {
+            if (started) handleOnline();
+          });
+        };
         onOffline = handleOffline;
         globalThis.addEventListener("online", onOnline);
         globalThis.addEventListener("offline", onOffline);
       } else {
-        handleOnline();
+        void hydrationPromise.then(() => {
+          if (started) handleOnline();
+        });
       }
     },
 
@@ -486,25 +550,39 @@ function createMonitor(config: MonitorConfig): MonitorInstance {
       args: Record<string, unknown>,
     ): Promise<unknown> {
       // 1. Write to local embedded client first (instant).
-      // 2. Push to remote: fire-and-forget (detach) when online, queue offline.
+      // 2. Persist to pending queue for durability.
+      // 3. When online: kick the serial queue processor.
       return Fx.run(
         Fx.from({
           ok: () =>
             (localClient as any).mutation(ref, args) as Promise<unknown>,
           err: (e) => e as Error,
         }).pipe(
-          Fx.tap((result) =>
-            Fx.sync(() => {
-              if (isOnline) {
-                pushToRemote(ref, args);
-              } else {
-                log.debug(
-                  "monitor: offline — queueing mutation for later push",
-                );
-                mutationQueue.push({ ref, args });
-              }
-              return result;
-            }),
+          Fx.tap((localResult) =>
+            Fx.from({
+              ok: async () => {
+                const table = inferTableFromRef(ref, tables);
+                await pendingQueue.push(ref, args, localResult, table);
+
+                if (isOnline) {
+                  // Kick the serial queue processor (fire-and-forget).
+                  // It will pick up this entry and process it.
+                  void processQueue();
+                } else {
+                  log.debug(
+                    "monitor: offline — mutation queued for later push",
+                  );
+                }
+              },
+              err: (e) => e as Error,
+            }).pipe(
+              Fx.inspect((err) =>
+                Fx.sync(() =>
+                  log.warn("monitor: failed to queue mutation", err),
+                ),
+              ),
+              Fx.recover(() => Fx.unit),
+            ),
           ),
         ),
       );
@@ -518,7 +596,7 @@ function createMonitor(config: MonitorConfig): MonitorInstance {
       return Fx.run(
         Fx.gen(function* () {
           yield* Fx.from({
-            ok: () => flushQueue(signal),
+            ok: () => processQueue(),
             err: (e) => e as Error,
           });
           yield* Fx.from({
@@ -530,7 +608,15 @@ function createMonitor(config: MonitorConfig): MonitorInstance {
     },
 
     pendingCount(): number {
-      return mutationQueue.length;
+      return pendingQueue.length;
+    },
+
+    get idMap() {
+      return idMap;
+    },
+
+    get pendingQueue() {
+      return pendingQueue;
     },
 
     async [Symbol.asyncDispose](): Promise<void> {

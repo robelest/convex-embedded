@@ -1,7 +1,192 @@
 import type { RetryPolicy } from "./schedule.js";
 import * as schedule from "./schedule.js";
-import type { Fx, Result, Exit } from "./types.js";
+import type { Result, Exit } from "./types.js";
 import { FxFatal } from "./types.js";
+
+// ---------------------------------------------------------------------------
+// Core type
+// ---------------------------------------------------------------------------
+
+/**
+ * A lazy, composable computation that produces a success value `A` or fails
+ * with a typed error `E`.
+ *
+ * `Fx` is the core type of the `@robelest/fx` library. It represents a
+ * **deferred** computation — nothing executes until {@link Fx.run} is called.
+ * This allows building complex pipelines by composing small, focused
+ * computations.
+ *
+ * @remarks
+ * **Laziness**: An `Fx` value is a description of a computation, not its
+ * result. The same `Fx` can be run multiple times, producing fresh results
+ * each time. This is critical for {@link Fx.retry}, which re-executes the
+ * computation on each attempt.
+ *
+ * **Error typing**: The `E` type parameter tracks all possible error types
+ * through the pipeline. When `E` is `never`, the computation cannot fail
+ * with a typed error (though it can still throw unrecoverable defects via
+ * {@link Fx.fatal}).
+ *
+ * **Two composition styles**:
+ *
+ * 1. **`.pipe()` chaining** — fluent, data-last combinators:
+ *    ```ts
+ *    const result = Fx.from({ ok: () => fetchUser(id), err: toAppError })
+ *      .pipe(
+ *        Fx.map(user => user.name),
+ *        Fx.recover(() => Fx.succeed("anonymous")),
+ *      );
+ *    ```
+ *
+ * 2. **`Fx.gen` generators** — imperative-looking, sequential:
+ *    ```ts
+ *    const result = Fx.gen(function* () {
+ *      const user = yield* Fx.from({ ok: () => fetchUser(id), err: toAppError });
+ *      return user.name;
+ *    });
+ *    ```
+ *
+ * **No environment type**: Unlike Effect's `R` parameter, `Fx` has no
+ * built-in dependency injection. Pass dependencies explicitly via function
+ * arguments or closures.
+ *
+ * @typeParam A - The success value type produced when the computation succeeds.
+ * @typeParam E - The typed error type produced when the computation fails.
+ *              Defaults to `never` (computation cannot fail).
+ *
+ * @example
+ * ```ts
+ * // Create an Fx that fetches a user, map the result, run it
+ * const getName: Fx<string, FetchError> = Fx.from({
+ *   ok: () => fetch("/api/user").then(r => r.json()),
+ *   err: (e) => new FetchError(e),
+ * }).pipe(
+ *   Fx.map(user => user.name),
+ * );
+ *
+ * const name: string = await Fx.run(getName);
+ * ```
+ *
+ * @example
+ * ```ts
+ * // Using generators for sequential composition
+ * const pipeline = Fx.gen(function* () {
+ *   const user = yield* fetchUserFx(id);
+ *   const posts = yield* fetchPostsFx(user.id);
+ *   return { user, posts };
+ * });
+ * ```
+ *
+ * @see {@link Fx.run} — Execute the computation and get a `Promise<A>`.
+ * @see {@link Fx.gen} — Generator-based sequential composition.
+ * @see {@link Fx.from} — The primary constructor for fallible operations.
+ *
+ * @category Type
+ */
+export interface Fx<A, E = never> {
+  /**
+   * Execute the computation and return its {@link Result}.
+   *
+   * @remarks
+   * **Internal API** — This is the low-level execution mechanism used by
+   * combinators and the runtime. Application code should use {@link Fx.run}
+   * instead, which provides proper error handling and `FxFatal` unwrapping.
+   *
+   * Each call to `_run()` produces a fresh execution. For retry scenarios,
+   * this means the computation runs from scratch on each attempt.
+   *
+   * @returns A Promise resolving to `Result<A, E>` — either `{ _tag: "Success", value: A }`
+   *          or `{ _tag: "Failure", error: E }`. May also throw `FxFatal` for
+   *          unrecoverable defects.
+   *
+   * @see {@link Fx.run} — The public execution API.
+   */
+  readonly _run: () => Promise<Result<A, E>>;
+
+  /**
+   * Chain combinators fluently using data-last function composition.
+   *
+   * Each overload accepts 1–4 functions that are applied left-to-right.
+   * The first function receives `this` (the `Fx` instance), and each
+   * subsequent function receives the return value of the previous one.
+   *
+   * @remarks
+   * `.pipe()` is the primary way to compose Fx operations. All combinators
+   * in the `Fx` namespace (`Fx.map`, `Fx.chain`, `Fx.recover`, etc.) are
+   * designed as data-last functions that return a function, making them
+   * directly usable with `.pipe()`.
+   *
+   * @example
+   * ```ts
+   * // Single combinator
+   * const doubled = Fx.succeed(21).pipe(Fx.map(x => x * 2));
+   *
+   * // Multiple combinators chained
+   * const result = Fx.from({ ok: () => fetchData(), err: toAppError }).pipe(
+   *   Fx.map(data => data.items),
+   *   Fx.tap(items => Fx.sync(() => console.log(`Got ${items.length} items`))),
+   *   Fx.recover(() => Fx.succeed([])),
+   * );
+   * ```
+   *
+   * @example
+   * ```ts
+   * // Combining with retry and timeout
+   * const robust = fetchFx.pipe(
+   *   Fx.timeout(5000),
+   *   Fx.retry(Fx.retry.compose(
+   *     Fx.retry.jittered(Fx.retry.exponential(100)),
+   *     Fx.retry.recurs(3),
+   *   )),
+   * );
+   * ```
+   *
+   * @see {@link Fx.map} — Transform the success value.
+   * @see {@link Fx.chain} — Chain to another `Fx`.
+   * @see {@link Fx.recover} — Handle errors.
+   */
+  pipe<B>(ab: (self: Fx<A, E>) => B): B;
+  pipe<B, C>(ab: (self: Fx<A, E>) => B, bc: (b: B) => C): C;
+  pipe<B, C, D>(
+    ab: (self: Fx<A, E>) => B,
+    bc: (b: B) => C,
+    cd: (c: C) => D,
+  ): D;
+  pipe<B, C, D, F>(
+    ab: (self: Fx<A, E>) => B,
+    bc: (b: B) => C,
+    cd: (c: C) => D,
+    de: (d: D) => F,
+  ): F;
+
+  /**
+   * Enable `yield*` syntax inside {@link Fx.gen} generator functions.
+   *
+   * When you write `yield* someFx` inside an `Fx.gen` block, TypeScript
+   * calls this iterator. The generator runner intercepts the yielded `Fx`,
+   * executes it, and resumes the generator with the success value (or
+   * short-circuits on failure).
+   *
+   * @remarks
+   * You never call this method directly. It exists solely to make `yield*`
+   * work with `Fx` values inside generator functions.
+   *
+   * @returns A generator that yields `this` and returns the unwrapped value `A`.
+   *
+   * @example
+   * ```ts
+   * const pipeline = Fx.gen(function* () {
+   *   // yield* uses [Symbol.iterator] under the hood
+   *   const a = yield* Fx.succeed(1);
+   *   const b = yield* Fx.succeed(2);
+   *   return a + b; // 3
+   * });
+   * ```
+   *
+   * @see {@link Fx.gen} — The generator runner that consumes this iterator.
+   */
+  [Symbol.iterator](): Generator<Fx<A, E>, A, A>;
+}
 
 // ---------------------------------------------------------------------------
 // Internal implementation
@@ -11,11 +196,26 @@ import { FxFatal } from "./types.js";
 class FxImpl<A, E = never> implements Fx<A, E> {
   constructor(readonly _run: () => Promise<Result<A, E>>) {}
 
-  pipe(...fns: Array<(x: unknown) => unknown>): unknown {
-    // eslint-disable-next-line @typescript-eslint/no-this-alias
-    let result: unknown = this;
-    for (const fn of fns) result = fn(result);
-    return result;
+  /** Construct with widened types — avoids casts at every combinator site. */
+  static of<A, E>(run: () => Promise<Result<any, any>>): Fx<A, E> {
+    return new FxImpl(run) as unknown as Fx<A, E>;
+  }
+
+  pipe<B>(ab: (self: Fx<A, E>) => B): B;
+  pipe<B, C>(ab: (self: Fx<A, E>) => B, bc: (b: B) => C): C;
+  pipe<B, C, D>(
+    ab: (self: Fx<A, E>) => B,
+    bc: (b: B) => C,
+    cd: (c: C) => D,
+  ): D;
+  pipe<B, C, D, F>(
+    ab: (self: Fx<A, E>) => B,
+    bc: (b: B) => C,
+    cd: (c: C) => D,
+    de: (d: D) => F,
+  ): F;
+  pipe(...fns: Array<(x: any) => any>): any {
+    return fns.reduce((result, fn) => fn(result), this as unknown);
   }
 
   *[Symbol.iterator](): Generator<Fx<A, E>, A, A> {
@@ -564,7 +764,7 @@ function map<A, B>(f: (a: A) => B) {
  */
 function chain<A, B, E2>(f: (a: A) => Fx<B, E2>) {
   return <E>(self: Fx<A, E>): Fx<B, E | E2> =>
-    new FxImpl(async () => {
+    FxImpl.of<B, E | E2>(async () => {
       const r = await self._run();
       if (r._tag === "Failure") return r;
       return f(r.value)._run();
@@ -612,7 +812,7 @@ function chain<A, B, E2>(f: (a: A) => Fx<B, E2>) {
  */
 function tap<A, E2>(f: (a: A) => Fx<unknown, E2>) {
   return <E>(self: Fx<A, E>): Fx<A, E | E2> =>
-    new FxImpl(async () => {
+    FxImpl.of<A, E | E2>(async () => {
       const r = await self._run();
       if (r._tag === "Failure") return r;
       const r2 = await f(r.value)._run();
@@ -678,7 +878,7 @@ function tap<A, E2>(f: (a: A) => Fx<unknown, E2>) {
  */
 function inspect<E, E2>(f: (e: E) => Fx<unknown, E2>) {
   return <A>(self: Fx<A, E>): Fx<A, E | E2> =>
-    new FxImpl(async () => {
+    FxImpl.of<A, E | E2>(async () => {
       const r = await self._run();
       if (r._tag === "Success") return r;
       const r2 = await f(r.error)._run();
@@ -740,7 +940,7 @@ function inspect<E, E2>(f: (e: E) => Fx<unknown, E2>) {
  */
 function recover<E, B, E2>(f: (e: E) => Fx<B, E2>) {
   return <A>(self: Fx<A, E>): Fx<A | B, E2> =>
-    new FxImpl(async () => {
+    FxImpl.of<A | B, E2>(async () => {
       const r = await self._run();
       if (r._tag === "Success") return r;
       return f(r.error)._run();
@@ -885,7 +1085,7 @@ function delay(ms: number) {
  */
 function timeout(ms: number) {
   return <A, E>(self: Fx<A, E>): Fx<A, E | TimeoutError> =>
-    new FxImpl(() => {
+    FxImpl.of<A, E | TimeoutError>(() => {
       return Promise.race([
         self._run(),
         new Promise<Result<never, TimeoutError>>((resolve) =>
@@ -984,7 +1184,6 @@ function _retry<E>(policy: RetryPolicy<E>) {
   return <A>(self: Fx<A, E>): Fx<A, E> =>
     new FxImpl(async () => {
       let attempt = 0;
-      // eslint-disable-next-line no-constant-condition
       while (true) {
         const r = await self._run();
         if (r._tag === "Success") return r;
@@ -1089,7 +1288,7 @@ function bracket<R, A, E>(
   use: (resource: R) => Fx<A, E>,
   release: (resource: R, exit: Exit<A, E>) => Fx<void, never>,
 ): Fx<A, E> {
-  return new FxImpl(async () => {
+  return FxImpl.of<A, E>(async () => {
     const acq = await acquire._run();
     if (acq._tag === "Failure") return acq;
 
@@ -1636,6 +1835,145 @@ export class TimeoutError extends Error {
 }
 
 // ---------------------------------------------------------------------------
+// Standalone pipe
+// ---------------------------------------------------------------------------
+
+/**
+ * Left-to-right function composition for non-Fx values.
+ *
+ * @remarks
+ * Takes an initial value and up to five transformation functions, applying them
+ * sequentially from left to right. Each function receives the return value of
+ * the previous one, producing a fully type-safe transformation pipeline.
+ *
+ * `pipe` is a **general-purpose** data transformation utility. It is **not**
+ * intended for composing `Fx` effects — use the `fx.pipe()` instance method
+ * for that.
+ *
+ * @param a - The initial value to transform.
+ * @returns The result of applying all transformation functions left to right.
+ *
+ * @example
+ * ```ts
+ * import { Fx } from "@robelest/fx";
+ *
+ * const result = Fx.pipe(
+ *   "  Hello, World!  ",
+ *   (s) => s.trim(),
+ *   (s) => s.toLowerCase(),
+ * );
+ * // result: "hello, world!"
+ * ```
+ *
+ * @category Helper
+ */
+function pipe<A>(a: A): A;
+function pipe<A, B>(a: A, ab: (a: A) => B): B;
+function pipe<A, B, C>(a: A, ab: (a: A) => B, bc: (b: B) => C): C;
+function pipe<A, B, C, D>(
+  a: A,
+  ab: (a: A) => B,
+  bc: (b: B) => C,
+  cd: (c: C) => D,
+): D;
+function pipe<A, B, C, D, E>(
+  a: A,
+  ab: (a: A) => B,
+  bc: (b: B) => C,
+  cd: (c: C) => D,
+  de: (d: D) => E,
+): E;
+function pipe<A, B, C, D, E, F>(
+  a: A,
+  ab: (a: A) => B,
+  bc: (b: B) => C,
+  cd: (c: C) => D,
+  de: (d: D) => E,
+  ef: (e: E) => F,
+): F;
+function pipe(
+  a: unknown,
+  ...fns: Array<(x: unknown) => unknown>
+): unknown {
+  let result = a;
+  for (const fn of fns) result = fn(result);
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Fire-and-forget
+// ---------------------------------------------------------------------------
+
+/**
+ * Fire-and-forget an async function, logging any errors instead of rejecting.
+ *
+ * @remarks
+ * `detach` executes `fn()` immediately, catches any thrown or rejected error,
+ * and logs it via `console.error(label, err)`. It returns `void` synchronously
+ * — the caller never awaits the result and never sees the error.
+ *
+ * Use `detach` for background tasks where the caller does not need the result
+ * and must not be blocked by the outcome. It prevents unhandled promise
+ * rejections by unconditionally catching all errors and routing them to
+ * `console.error`.
+ *
+ * The `label` string is prepended to every error log, making it easy to
+ * identify which fire-and-forget call failed when scanning logs.
+ *
+ * Common use cases include cache invalidation, background persistence,
+ * fire-and-forget notifications, deferred scheduling, and graceful cleanup
+ * during shutdown.
+ *
+ * @param fn - A zero-argument async function to execute. Its return value is
+ *   discarded; only errors are observed (and logged).
+ * @param label - A descriptive string prepended to `console.error` when `fn`
+ *   rejects. Use it to identify the call site.
+ * @returns `void` — returns synchronously before `fn` settles.
+ *
+ * @example
+ * ```ts
+ * import { Fx } from "@robelest/fx";
+ *
+ * // Background persistence after an in-memory commit
+ * if (storage !== null && (puts.length > 0 || deletes.length > 0)) {
+ *   Fx.detach(
+ *     () => storage.commit({ puts, deletes, meta }),
+ *     "[convex-embedded] storage commit failed:",
+ *   );
+ * }
+ * ```
+ *
+ * @example
+ * ```ts
+ * import { Fx } from "@robelest/fx";
+ *
+ * // Fire-and-forget a remote mutation push
+ * Fx.detach(
+ *   () => Fx.run(
+ *     Fx.from({
+ *       ok: () => remoteClient.mutation(ref, args),
+ *       err: (e) => e as Error,
+ *     }).pipe(
+ *       Fx.recover(() => Fx.unit),
+ *     ),
+ *   ),
+ *   "[monitor] pushToRemote:",
+ * );
+ * ```
+ *
+ * @see {@link from} — For wrapping async operations with typed error tracking.
+ * @see {@link inspect} — For composable error observation within the Fx pipeline.
+ * @see {@link run} — Execute an Fx and return a Promise (use inside detach's fn).
+ *
+ * @category Execution
+ */
+function detach(fn: () => Promise<unknown>, label: string): void {
+  fn().catch((err) => {
+    console.error(label, err);
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Namespace export
 // ---------------------------------------------------------------------------
 
@@ -1685,6 +2023,10 @@ export class TimeoutError extends Error {
  * **Execution**:
  * - {@link gen} — Generator runner with `yield*`.
  * - {@link run} — Execute and return a Promise.
+ * - {@link detach} — Fire-and-forget an async function.
+ *
+ * **Utilities**:
+ * - {@link pipe} — Left-to-right function composition for plain values.
  *
  * @example
  * ```ts
@@ -1747,4 +2089,8 @@ export const Fx = {
 
   // Execution
   run,
+
+  // Utilities
+  pipe,
+  detach,
 } as const;

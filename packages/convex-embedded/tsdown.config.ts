@@ -12,8 +12,10 @@ export default defineConfig({
   platform: "browser",
   dts: true,
   clean: true,
-  external: ["convex", "convex/*"],
-  noExternal: ["@robelest/fx"],
+  deps: {
+    neverBundle: ["convex", "convex/*"],
+    alwaysBundle: ["@robelest/fx"],
+  },
   alias: {
     "@": resolve(import.meta.dirname, "src"),
   },

@@ -13,8 +13,10 @@ export default defineConfig([
     dts: true,
     clean: true,
     platform: "node",
-    external: [/^convex/, "yjs", "convex-helpers"],
-    noExternal: ["@robelest/fx"],
+    deps: {
+      neverBundle: [/^convex/, "yjs", "convex-helpers"],
+      alwaysBundle: ["@robelest/fx"],
+    },
     outExtensions: jsExtensions,
     alias: srcAlias,
   },
@@ -25,8 +27,10 @@ export default defineConfig([
     dts: true,
     clean: false,
     platform: "browser",
-    external: [/^convex/, "yjs", "convex-helpers"],
-    noExternal: ["@robelest/fx"],
+    deps: {
+      neverBundle: [/^convex/, "yjs", "convex-helpers"],
+      alwaysBundle: ["@robelest/fx"],
+    },
     outExtensions: jsExtensions,
     alias: srcAlias,
   },
@@ -38,7 +42,9 @@ export default defineConfig([
     clean: false,
     unbundle: true,
     platform: "node",
-    external: [/^convex/, "yjs", "convex-helpers"],
+    deps: {
+      neverBundle: [/^convex/, "yjs", "convex-helpers"],
+    },
     outExtensions: jsExtensions,
   },
 ]);

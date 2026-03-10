@@ -1,6 +1,6 @@
 {
   "name": "@robelest/fx",
-  "version": "0.0.1",
+  "version": "0.0.1-preview.0",
   "description": "Minimal functional effect system for TypeScript. Lazy Fx<A, E> computations with composable retry, resource management, and zero dependencies.",
   "keywords": [
     "composition",
@@ -13,6 +13,9 @@
     "zero-dependency"
   ],
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "repository": {
     "type": "git",
     "url": "https://github.com/robelest/convex-edge.git",
@@ -25,8 +28,8 @@
   "type": "module",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs"
     }
   },
   "scripts": {
@@ -35,7 +38,7 @@
     "prepublishOnly": "bun run build"
   },
   "devDependencies": {
-    "tsdown": "^0.12.0",
+    "tsdown": "catalog:",
     "typescript": "catalog:"
   }
 }

@@ -8,8 +8,9 @@
     ],
     "catalog": {
       "convex": "^1.17.0",
-      "vitest": "^4.0.18",
-      "typescript": "^5.9.0"
+      "tsdown": "^0.21.1",
+      "typescript": "^5.9.0",
+      "vitest": "^4.0.18"
     }
   },
   "scripts": {
@@ -18,10 +19,12 @@
     "build:fx": "bun --filter @robelest/fx build",
     "build:embedded": "bun --filter @robelest/convex-embedded build",
     "build:resolve": "bun --filter @robelest/convex-resolve build",
-    "lint": "oxlint",
-    "lint:fix": "oxlint --fix",
+    "publish:fx": "npm publish --workspace packages/fx",
+    "publish:embedded": "npm publish --workspace packages/convex-embedded",
+    "publish:resolve": "npm publish --workspace packages/convex-resolve",
+    "lint": "oxlint --fix",
     "fmt": "oxfmt .",
-    "fmt:check": "oxfmt --check .",
+    "check": "oxlint && oxfmt --check .",
     "dev:convex": "bunx convex dev",
     "dev:svelte": "bun --filter demo-svelte dev"
   },

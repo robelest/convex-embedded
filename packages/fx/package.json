@@ -1,6 +1,6 @@
 {
   "name": "@robelest/fx",
-  "version": "0.0.1-preview.1",
+  "version": "0.0.1-preview.2",
   "description": "Minimal functional effect system for TypeScript. Lazy Fx<A, E> computations with composable retry, resource management, and zero dependencies.",
   "keywords": [
     "composition",

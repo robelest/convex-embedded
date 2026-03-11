@@ -47,6 +47,6 @@
     "vitest": "catalog:"
   },
   "peerDependencies": {
-    "convex": "^1.17.0"
+    "convex": "^1.32.0"
   }
 }

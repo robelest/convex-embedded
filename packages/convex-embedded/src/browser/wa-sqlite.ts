@@ -19,6 +19,11 @@ import type {
   StorageRequest,
   StorageResponse,
 } from "@/browser/wa-sqlite-worker";
+
+/** Distributive Omit that works correctly over discriminated unions. */
+type DistributiveOmit<T, K extends keyof any> = T extends unknown
+  ? Omit<T, K>
+  : never;
 import type { StoredDocument } from "@/core/types";
 import type {
   CommitBatch,
@@ -80,7 +85,7 @@ const RPC_TIMEOUT_MS = 15_000;
  */
 function rpc(
   worker: Worker,
-  request: Omit<StorageRequest, "id">,
+  request: DistributiveOmit<StorageRequest, "id">,
   transfer?: Transferable[],
   timeoutMs: number = RPC_TIMEOUT_MS,
 ): Promise<unknown> {

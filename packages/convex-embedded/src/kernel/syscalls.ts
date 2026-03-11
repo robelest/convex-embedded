@@ -244,7 +244,10 @@ export function createAsyncSyscall(
                             state: { kind: "inProgress" },
                           });
                         }),
-                      () => Fx.sync(() => db.commit()),
+                      () =>
+                        Fx.sync(() => {
+                          db.commit();
+                        }),
                     );
 
                     // Run the mutation, fold success/failure into a final state
@@ -286,7 +289,10 @@ export function createAsyncSyscall(
                                 : {}),
                             });
                           }),
-                        () => Fx.sync(() => db.commit()),
+                        () =>
+                          Fx.sync(() => {
+                            db.commit();
+                          }),
                       );
                     }
 

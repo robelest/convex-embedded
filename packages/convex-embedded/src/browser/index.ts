@@ -459,7 +459,7 @@ export function createConvexClient(options: ClientOptions): ConvexClient {
     const originalClose = client.close.bind(client);
     (client as any).close = function patchedClose(): void {
       runtime.shutdown();
-      return originalClose();
+      void originalClose();
     };
   }
 

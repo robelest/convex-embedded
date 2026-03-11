@@ -15,6 +15,34 @@
 import { Fx } from "@robelest/fx";
 
 // ---------------------------------------------------------------------------
+// Worker protocol types
+// ---------------------------------------------------------------------------
+
+/** Discriminated union of all requests the main thread can send. */
+export type StorageRequest =
+  | { id: number; method: "init"; name: string; wasmModule: WebAssembly.Module }
+  | { id: number; method: "getDocuments" }
+  | { id: number; method: "getDocumentsByTable"; tableName: string }
+  | { id: number; method: "getMeta" }
+  | { id: number; method: "getBlobs" }
+  | {
+      id: number;
+      method: "commit";
+      puts: Array<{ _id: string; tableName: string; data: string }>;
+      deletes: string[];
+      meta: { timestamp: number; lastCreationTime: number };
+    }
+  | { id: number; method: "storeBlob"; blobId: string; data: ArrayBuffer }
+  | { id: number; method: "deleteBlob"; blobId: string }
+  | { id: number; method: "clear" }
+  | { id: number; method: "close" };
+
+/** Response envelope sent back to the main thread. */
+export type StorageResponse =
+  | { id: number; ok: true; result: unknown }
+  | { id: number; ok: false; error: string };
+
+// ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
@@ -199,7 +227,7 @@ async function handleGetBlobs(): Promise<
     // wa-sqlite returns Uint8Array for BLOB columns — extract the buffer.
     data:
       row.data instanceof Uint8Array
-        ? row.data.buffer.slice(
+        ? (row.data.buffer as ArrayBuffer).slice(
             row.data.byteOffset,
             row.data.byteOffset + row.data.byteLength,
           )

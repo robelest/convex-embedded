@@ -610,14 +610,18 @@ export class SyncProtocolHandler {
     }
 
     const authResult = await Fx.run(
-      Fx.attempt(
-        () => this._auth.verifyToken(message.value ?? ""),
-        (identity) => ({ success: true as const, identity }),
-        (err) => ({ success: false as const, error: errorMessage(err) }),
+      Fx.from({
+        ok: () => this._auth.verifyToken(message.value ?? ""),
+        err: errorMessage,
+      }).pipe(
+        Fx.fold({
+          ok: (identity) => ({ ok: true as const, identity }),
+          err: (error) => ({ ok: false as const, error }),
+        }),
       ),
     );
 
-    if (authResult.success) {
+    if (authResult.ok) {
       session.identity = authResult.identity;
       const startVersion = { ...session.version };
       session.version = {

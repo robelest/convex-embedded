@@ -1,0 +1,9 @@
+# DO NOT use `bun test` — use `bun run test` (which invokes vitest).
+#
+# Bun's built-in test runner lacks Vite transforms (import.meta.glob),
+# Vite plugins, custom environments (edge-runtime), and full vi.* API
+# parity that our test suite depends on.
+#
+# This config ensures `bun test` finds zero files if run by mistake.
+[test]
+root = ".bun-test-disabled"

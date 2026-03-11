@@ -48,6 +48,21 @@ export interface PendingEntry {
 // PendingQueue
 // ---------------------------------------------------------------------------
 
+/**
+ * Optional direct query function that bypasses the ConvexClient
+ * subscription machinery. See {@link IdMap} for details on why
+ * hydration reads must not go through ConvexClient.query().
+ */
+export type DirectQueryFn = (
+  path: string,
+  args: Record<string, unknown>,
+) => Promise<unknown>;
+
+export type DirectMutationFn = (
+  path: string,
+  args: Record<string, unknown>,
+) => Promise<unknown>;
+
 export class PendingQueue {
   /** In-memory queue — kept in sync with the DB. */
   private _entries: PendingEntry[] = [];
@@ -55,8 +70,16 @@ export class PendingQueue {
   /** The local embedded client. */
   private _localClient: ConvexClient;
 
-  constructor(localClient: ConvexClient) {
+  /** Direct query bypass (avoids subscription version conflicts). */
+  private _queryFn: DirectQueryFn | null;
+
+  /** Direct mutation bypass (avoids patched ConvexClient.mutation()). */
+  private _mutationFn: DirectMutationFn | null;
+
+  constructor(localClient: ConvexClient, queryFn?: DirectQueryFn, mutationFn?: DirectMutationFn) {
     this._localClient = localClient;
+    this._queryFn = queryFn ?? null;
+    this._mutationFn = mutationFn ?? null;
   }
 
   // -----------------------------------------------------------------------
@@ -70,11 +93,17 @@ export class PendingQueue {
   hydrate(): Promise<void> {
     return Fx.run(
       Fx.from({
-        ok: () =>
-          (this._localClient as any).query(
+        ok: () => {
+          if (this._queryFn) {
+            return this._queryFn(SYS_PENDING_GET_ALL, {}) as Promise<
+              Array<Record<string, unknown>>
+            >;
+          }
+          return (this._localClient as any).query(
             SYS_PENDING_GET_ALL,
             {},
-          ) as Promise<Array<Record<string, unknown>>>,
+          ) as Promise<Array<Record<string, unknown>>>;
+        },
         err: (e) => e as Error,
       }).pipe(
         Fx.tap((entries) =>
@@ -136,10 +165,12 @@ export class PendingQueue {
     return Fx.run(
       Fx.from({
         ok: () =>
-          (this._localClient as any).mutation(
-            SYS_PENDING_PUSH,
-            serialized,
-          ) as Promise<string>,
+          (this._mutationFn
+            ? this._mutationFn(SYS_PENDING_PUSH, serialized)
+            : (this._localClient as any).mutation(
+                SYS_PENDING_PUSH,
+                serialized,
+              )) as Promise<string>,
         err: (e) => e as Error,
       }).pipe(
         Fx.tap((id) =>
@@ -187,9 +218,11 @@ export class PendingQueue {
     return Fx.run(
       Fx.from({
         ok: () =>
-          (this._localClient as any).mutation(SYS_PENDING_REMOVE, {
-            id: entry._id,
-          }) as Promise<unknown>,
+          this._mutationFn
+            ? this._mutationFn(SYS_PENDING_REMOVE, { id: entry._id })
+            : (this._localClient as any).mutation(SYS_PENDING_REMOVE, {
+                id: entry._id,
+              }) as Promise<unknown>,
         err: (e) => e as Error,
       }).pipe(
         Fx.inspect((err) =>
@@ -212,10 +245,12 @@ export class PendingQueue {
     return Fx.run(
       Fx.from({
         ok: () =>
-          (this._localClient as any).mutation(
-            SYS_PENDING_CLEAR,
-            {},
-          ) as Promise<unknown>,
+          this._mutationFn
+            ? this._mutationFn(SYS_PENDING_CLEAR, {})
+            : (this._localClient as any).mutation(
+                SYS_PENDING_CLEAR,
+                {},
+              ) as Promise<unknown>,
         err: (e) => e as Error,
       }).pipe(
         Fx.inspect((err) =>

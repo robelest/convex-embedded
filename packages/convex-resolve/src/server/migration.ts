@@ -121,40 +121,64 @@ export async function runMigrations(
 
     const migrationFn = migrations[v];
 
-    try {
-      if (migrationFn) {
-        // Run the user-supplied migration function
-        await ctx.runMutation(migrationFn, {});
-        log.info(`runMigrations: ${table} v${v} migration completed`);
-      } else {
-        // No explicit migration — apply defaults for added fields
-        await applyDefaults(ctx, table, schemaDef, v);
-        log.info(`runMigrations: ${table} v${v} defaults applied`);
-      }
+    const stepResult = await Fx.run(
+      Fx.gen(function* () {
+        if (migrationFn) {
+          yield* Fx.from({
+            ok: () => ctx.runMutation(migrationFn, {}),
+            err: (e) => e as Error,
+          });
+          log.info(`runMigrations: ${table} v${v} migration completed`);
+        } else {
+          yield* Fx.from({
+            ok: () => applyDefaults(ctx, table, schemaDef, v),
+            err: (e) => e as Error,
+          });
+          log.info(`runMigrations: ${table} v${v} defaults applied`);
+        }
 
-      // Update stored version after each successful step
-      await setStoredVersion(ctx, table, v);
-    } catch (err) {
-      log.error(`runMigrations: ${table} v${v} migration failed`, err);
+        yield* Fx.from({
+          ok: () => setStoredVersion(ctx, table, v),
+          err: (e) => e as Error,
+        });
 
-      if (onMigrationError) {
-        const recoveryCtx: RecoveryContext = {
-          canResetSafely: true, // Assume we can always reset local data
-          currentVersion: v - 1,
-          targetVersion,
-        };
+        return "ok" as const;
+      }).pipe(
+        Fx.recover((err) =>
+          Fx.gen(function* () {
+            log.error(`runMigrations: ${table} v${v} migration failed`, err);
 
-        const recovery = await onMigrationError(
-          err instanceof Error ? err : new Error(String(err)),
-          recoveryCtx,
-        );
+            if (onMigrationError) {
+              const recoveryCtx: RecoveryContext = {
+                canResetSafely: true,
+                currentVersion: v - 1,
+                targetVersion,
+              };
 
-        await handleRecovery(ctx, table, recovery, targetVersion);
-      } else {
-        // No error handler — throw
-        throw err;
-      }
+              const recovery = yield* Fx.from({
+                ok: () =>
+                  onMigrationError(
+                    err instanceof Error ? err : new Error(String(err)),
+                    recoveryCtx,
+                  ),
+                err: (e) => e as Error,
+              });
 
+              yield* Fx.from({
+                ok: () => handleRecovery(ctx, table, recovery, targetVersion),
+                err: (e) => e as Error,
+              });
+            } else {
+              return yield* Fx.fail(err);
+            }
+
+            return "recovered" as const;
+          }),
+        ),
+      ),
+    );
+
+    if (stepResult === "recovered") {
       return true;
     }
   }
@@ -170,25 +194,29 @@ async function getStoredVersion(
   ctx: MigrationCtx,
   table: string,
 ): Promise<number | null> {
-  try {
-    const records = await ctx.db
-      .query(VERSION_TABLE)
-      .filter((q: unknown) =>
-        (
-          q as {
-            eq(a: unknown, b: unknown): unknown;
-            field(name: string): unknown;
-          }
-        ).eq((q as { field(name: string): unknown }).field("table"), table),
-      )
-      .collect();
+  return Fx.run(
+    Fx.from({
+      ok: async () => {
+        const records = await ctx.db
+          .query(VERSION_TABLE)
+          .filter((q: unknown) =>
+            (
+              q as {
+                eq(a: unknown, b: unknown): unknown;
+                field(name: string): unknown;
+              }
+            ).eq((q as { field(name: string): unknown }).field("table"), table),
+          )
+          .collect();
 
-    if (records.length === 0) return null;
-    return records[0].version as number;
-  } catch {
-    // Table might not exist yet on local embedded runtime
-    return null;
-  }
+        if (records.length === 0) return null;
+        return records[0].version as number;
+      },
+      err: (e) => e as Error,
+    }).pipe(
+      Fx.recover(() => Fx.succeed(null)),
+    ),
+  );
 }
 
 async function setStoredVersion(

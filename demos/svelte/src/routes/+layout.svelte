@@ -1,53 +1,43 @@
 <script lang="ts">
-	import { setContext } from "svelte";
+	import { onDestroy, setContext } from "svelte";
 	import { setConvexClientContext } from "convex-svelte";
-	import { getClient } from "@robelest/convex-embedded/browser";
-	import { monitor } from "@robelest/convex-resolve/client";
-	import type { MonitorStatus, MonitorInstance } from "@robelest/convex-resolve/client";
-	import { ConvexClient } from "convex/browser";
-	import { api } from "$convex/_generated/api";
+	import { createConvexClient, subscribeResolveState } from "@robelest/convex-embedded/browser";
+	import type { ResolveState } from "@robelest/convex-embedded/browser";
 
 	let { children } = $props();
 
-	// ── Local embedded client (instant, offline-capable) ──────────────
 	const modules = import.meta.glob(
 		["$convex/**/*.{ts,tsx,js,jsx}", "!$convex/convex.config.ts"],
 	);
 
-	const localClient = getClient({
-		modules,
-		workerUrl: new URL("@robelest/convex-embedded/worker", import.meta.url),
-	});
-
-	// Queries use the embedded client directly via convex-svelte context
-	setConvexClientContext(localClient);
-
-	// ── Remote client + sync monitor ─────────────────────────────────
 	const convexUrl = import.meta.env.CONVEX_URL as string | undefined;
 
+	const client = createConvexClient({
+		modules,
+		...(convexUrl ? { sync: { url: convexUrl } } : {}),
+	});
+
+	setConvexClientContext(client);
+
 	// Reactive sync status shared via context
-	let syncStatus: MonitorStatus = $state({ status: "idle" });
+	let syncStatus: ResolveState = $state({ status: "idle" });
 	setContext("syncStatus", () => syncStatus);
 
-	if (convexUrl) {
-		const remoteClient = new ConvexClient(convexUrl);
+	const unsubResolve = subscribeResolveState(client, (s: ResolveState) => {
+		syncStatus = s;
+	});
 
-		const m = monitor.create({
-			localClient,
-			remoteClient,
-			tables: {
-				tasks: { resolve: api.tasks.resolve },
-			},
+	// Cleanup on component destroy (navigation) and HMR replacement
+	onDestroy(() => {
+		unsubResolve();
+		client.close();
+	});
+
+	if (import.meta.hot) {
+		import.meta.hot.dispose(() => {
+			unsubResolve();
+			client.close();
 		});
-
-		m.on("change", (s) => {
-			syncStatus = s;
-		});
-
-		// Expose monitor via context so pages can call m.mutation()
-		setContext("monitor", m);
-
-		m.start();
 	}
 </script>
 

@@ -192,28 +192,49 @@ export class UdfExecutor {
     functionPath: FunctionPath,
     args: Record<string, unknown>,
   ): Promise<unknown> {
-    return this._runWithGlobals(async () => {
-      this._db.startTransaction();
-      try {
-        const func = await this._resolveFunc(functionPath, "query");
+    const db = this._db;
+    const resolveFunc = this._resolveFunc.bind(this);
+    const noHandlerError = this._noHandlerError.bind(this);
+    return this._runWithGlobals(() =>
+      Fx.run(
+        Fx.bracket(
+          // Acquire: start transaction
+          Fx.sync(() => {
+            db.startTransaction();
+          }),
+          // Use: run the query
+          () =>
+            Fx.gen(function* () {
+              const func: Record<string, unknown> = yield* Fx.promise(() =>
+                resolveFunc(functionPath, "query"),
+              );
 
-        // Prefer SDK's invokeQuery if available (real registered functions).
-        if (typeof func.invokeQuery === "function") {
-          const argsStr = JSON.stringify(convexToJson([(args ?? {}) as Value]));
-          const rawResult = await func.invokeQuery(argsStr);
-          return jsonToConvex(JSON.parse(rawResult));
-        }
+              if (typeof func.invokeQuery === "function") {
+                const argsStr = JSON.stringify(
+                  convexToJson([(args ?? {}) as Value]),
+                );
+                const rawResult: string = yield* Fx.promise(() =>
+                  (func.invokeQuery as (s: string) => Promise<string>)(argsStr),
+                );
+                return jsonToConvex(JSON.parse(rawResult));
+              }
 
-        // Fallback for test wrappers: call handler directly.
-        const handler = getHandler(func);
-        if (handler === null) {
-          throw this._noHandlerError(functionPath);
-        }
-        return await handler({}, args ?? {});
-      } finally {
-        this._db.rollbackWrites();
-      }
-    });
+              const handler = getHandler(func);
+              if (handler === null) {
+                return yield* Fx.fail(noHandlerError(functionPath));
+              }
+              return yield* Fx.promise(() =>
+                Promise.resolve(handler({}, args ?? {})),
+              );
+            }),
+          // Release: always rollback (queries are read-only)
+          () =>
+            Fx.sync(() => {
+              db.rollbackWrites();
+            }),
+        ),
+      ),
+    );
   }
 
   /**
@@ -325,26 +346,37 @@ export class UdfExecutor {
    * Everything is restored after the callback completes (or throws).
    */
   private async _runWithGlobals<T>(fn: () => Promise<T>): Promise<T> {
-    const ops = createOpsContext();
-    const savedGlobals = patchGlobals(ops);
-
-    // Install syscalls on the global Convex object
-    const previousConvex = globalThis.Convex;
-    globalThis.Convex = {
-      syscall: createSyncSyscall(this._db),
-      asyncSyscall: createAsyncSyscall(this._db, this._runUdf, {
-        getIdentity: this._getIdentity,
-        activeTimers: this._activeTimers,
-      }),
-      jsSyscall: createJsSyscall(this._db),
-    };
-
-    try {
-      return await fn();
-    } finally {
-      globalThis.Convex = previousConvex;
-      restoreGlobals(savedGlobals);
-    }
+    const db = this._db;
+    const runUdf = this._runUdf;
+    const getIdentity = this._getIdentity;
+    const activeTimers = this._activeTimers;
+    return Fx.run(
+      Fx.bracket(
+        // Acquire: patch globals and install syscalls
+        Fx.sync(() => {
+          const ops = createOpsContext();
+          const savedGlobals = patchGlobals(ops);
+          const previousConvex = globalThis.Convex;
+          globalThis.Convex = {
+            syscall: createSyncSyscall(db),
+            asyncSyscall: createAsyncSyscall(db, runUdf, {
+              getIdentity,
+              activeTimers,
+            }),
+            jsSyscall: createJsSyscall(db),
+          };
+          return { savedGlobals, previousConvex };
+        }),
+        // Use: run the callback
+        () => Fx.promise(fn),
+        // Release: restore globals unconditionally
+        ({ savedGlobals, previousConvex }) =>
+          Fx.sync(() => {
+            globalThis.Convex = previousConvex;
+            restoreGlobals(savedGlobals);
+          }),
+      ),
+    );
   }
 
   // -----------------------------------------------------------------------

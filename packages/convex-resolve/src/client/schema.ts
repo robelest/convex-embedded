@@ -11,6 +11,9 @@
 import * as Y from "yjs";
 
 import { createConflict } from "@/shared/conflict";
+import type { Definition } from "@/server/schema";
+import { getCrdtType } from "@/server/schema";
+import { CrdtType } from "@/shared/types";
 import type { Conflict, ConflictEntry } from "@/shared/types";
 
 // ---------------------------------------------------------------------------
@@ -186,6 +189,64 @@ export function encodeState(doc: Y.Doc): Uint8Array {
 }
 
 // ---------------------------------------------------------------------------
+// Yjs ↔ document materialization
+// ---------------------------------------------------------------------------
+
+/**
+ * Materialize a Y.Doc back into a plain document record.
+ *
+ * This is the inverse of `initYjsDoc` (from `@/server/schema`). Given a
+ * schema {@link Definition} and a Yjs document that was initialized /
+ * updated via the CRDT pipeline, it reads each field's Yjs structure and
+ * produces the corresponding plain-JavaScript value.
+ *
+ * CRDT types are resolved as follows:
+ * - **Prose**    → extracted as plain text via `extractProseText`
+ * - **Register** → latest-timestamp-wins (or custom resolver) via `resolveRegister`
+ * - **Counter**  → sum of all deltas via `getCounterValue`
+ * - **Set**      → array of member keys via `getSetMembers`
+ * - **Omitted**  → skipped (not included in output)
+ * - **Plain**    → read directly from the Y.Map
+ *
+ * Internal fields (`_id`, `_creationTime`) are **not** included in the
+ * output — the caller must supply them separately.
+ */
+export function materializeYjsDoc(
+  schemaDef: Definition,
+  doc: Y.Doc,
+): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  const fields = doc.getMap("fields");
+
+  for (const [key, fieldDef] of Object.entries(schemaDef.shape)) {
+    const crdtType = getCrdtType(fieldDef);
+
+    if (crdtType === CrdtType.Omitted) {
+      // Omitted fields are remote-only — don't materialize.
+      continue;
+    }
+
+    if (crdtType === CrdtType.Prose) {
+      result[key] = extractProseText(doc, key);
+    } else if (crdtType === CrdtType.Register) {
+      const resolver = (fieldDef as any)?.resolve as
+        | ((c: Conflict<unknown>) => unknown)
+        | undefined;
+      result[key] = resolveRegister(doc, key, resolver);
+    } else if (crdtType === CrdtType.Counter) {
+      result[key] = getCounterValue(doc, key);
+    } else if (crdtType === CrdtType.Set) {
+      result[key] = getSetMembers(doc, key);
+    } else {
+      // Plain field — read directly from the Y.Map.
+      result[key] = fields.get(key);
+    }
+  }
+
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // Export as namespace
 // ---------------------------------------------------------------------------
 
@@ -199,4 +260,5 @@ export const clientSchema = {
   encodeStateVector,
   applyUpdate,
   encodeState,
+  materializeYjsDoc,
 };

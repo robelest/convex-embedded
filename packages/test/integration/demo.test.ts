@@ -4,9 +4,8 @@ import { convexTest } from "convex-test";
  * Integration test for convex-resolve using convex-test.
  *
  * Tests the full server-side pipeline:
- *   create task (wrapped mutation)
- *   → scheduler fires _recordDelta
- *   → delta stored in component
+ *   create task (wrapped mutation with inline delta recording)
+ *   → delta stored in component (same transaction)
  *   → resolve returns diff
  *   → client applies diff
  *   → resolve returns empty (up to date)
@@ -50,12 +49,12 @@ describe("convex-resolve integration", () => {
     vi.useFakeTimers();
   });
 
-  it("creates a task, records a delta, and resolves a diff", async () => {
+  it("creates a task, records a delta inline, and resolves a diff", async () => {
     const t = convexTest(schema, modules);
     registerResolveComponent(t);
 
     // 1. Create a task via the wrapped mutation.
-    //    This should insert the row AND schedule _recordDelta via runAfter(0, ...)
+    //    Delta recording happens inline (same transaction) — no scheduler needed.
     const taskId = await t.mutation(api.tasks.create, {
       title: "Write tests",
       body: "Integration test for convex-resolve",
@@ -64,12 +63,8 @@ describe("convex-resolve integration", () => {
     expect(taskId).toBeDefined();
     expect(typeof taskId).toBe("string");
 
-    // 2. Advance timers so the scheduled _recordDelta fires
-    await t.finishAllScheduledFunctions(vi.runAllTimers);
-
-    // 3. Resolve with an empty state vector — should get a non-empty diff
-    //    An empty Y.Doc's state vector (V2) is what we send to represent
-    //    "I have nothing"
+    // 2. Resolve with an empty state vector — should get a non-empty diff.
+    //    No need to advance timers; delta was recorded in the same transaction.
     const emptyDoc = new Y.Doc();
     const emptyVector = Y.encodeStateVector(emptyDoc);
 
@@ -90,7 +85,7 @@ describe("convex-resolve integration", () => {
     expect(result.diff).toBeInstanceOf(ArrayBuffer);
     expect((result.diff as ArrayBuffer).byteLength).toBeGreaterThan(0);
 
-    // 4. Apply the diff to a client Y.Doc
+    // 3. Apply the diff to a client Y.Doc
     const clientDoc = new Y.Doc();
     Y.applyUpdateV2(clientDoc, new Uint8Array(result.diff as ArrayBuffer));
 
@@ -99,7 +94,7 @@ describe("convex-resolve integration", () => {
     const fields = clientDoc.getMap("fields");
     expect(readRegister(fields, "title")).toBe("Write tests");
 
-    // 5. Resolve again with the client's current state vector — should be up to date
+    // 4. Resolve again with the client's current state vector — should be up to date
     const clientVector = Y.encodeStateVector(clientDoc);
     const resolveResults2 = await t.query(api.tasks.resolve, {
       documents: [
@@ -121,23 +116,21 @@ describe("convex-resolve integration", () => {
     const t = convexTest(schema, modules);
     registerResolveComponent(t);
 
-    // Create a task
+    // Create a task — delta recorded inline
     const taskId = await t.mutation(api.tasks.create, {
       title: "Original title",
       body: "Original body",
     });
-    await t.finishAllScheduledFunctions(vi.runAllTimers);
 
-    // Update the task
+    // Update the task — delta recorded inline
     await t.mutation(api.tasks.update, {
       id: taskId,
       title: "Updated title",
       body: "Updated body",
     });
-    await t.finishAllScheduledFunctions(vi.runAllTimers);
 
     // Resolve from scratch (empty vector) to get the latest full state.
-    // Each _recordDelta stores a complete snapshot, so the latest delta
+    // Each inline delta records a complete snapshot, so the latest delta
     // reflects the updated values.
     const freshDoc = new Y.Doc();
     const freshVector = Y.encodeStateVector(freshDoc);

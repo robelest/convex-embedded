@@ -12,38 +12,7 @@
  * @packageDocumentation
  */
 
-// ---------------------------------------------------------------------------
-// Message protocol
-// ---------------------------------------------------------------------------
-
-/**
- * Request messages sent from the main thread to this worker.
- *
- * Every request carries a unique `id` so the main thread can match
- * responses to pending promises.
- */
-export type StorageRequest =
-  | { id: number; method: "init"; name: string; wasmModule: WebAssembly.Module }
-  | { id: number; method: "getDocuments" }
-  | { id: number; method: "getDocumentsByTable"; tableName: string }
-  | { id: number; method: "getMeta" }
-  | { id: number; method: "getBlobs" }
-  | {
-      id: number;
-      method: "commit";
-      puts: Array<{ _id: string; tableName: string; data: string }>;
-      deletes: string[];
-      meta: { timestamp: number; lastCreationTime: number };
-    }
-  | { id: number; method: "storeBlob"; blobId: string; data: ArrayBuffer }
-  | { id: number; method: "deleteBlob"; blobId: string }
-  | { id: number; method: "clear" }
-  | { id: number; method: "close" };
-
-/** Response messages sent from this worker to the main thread. */
-export type StorageResponse =
-  | { id: number; ok: true; result: unknown }
-  | { id: number; ok: false; error: string };
+import { Fx } from "@robelest/fx";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -245,38 +214,69 @@ async function handleCommit(
 ): Promise<void> {
   const op = mutex
     .catch(() => {})
-    .then(async () => {
-      await execute(sqlite3, db, "BEGIN;");
+    .then(() =>
+      Fx.run(
+        Fx.bracket(
+          // Acquire: begin transaction
+          Fx.from({
+            ok: () => execute(sqlite3, db, "BEGIN;"),
+            err: (e) => e as Error,
+          }),
+          // Use: run DML statements and commit
+          () =>
+            Fx.gen(function* () {
+              for (const doc of puts) {
+                yield* Fx.from({
+                  ok: () =>
+                    execute(
+                      sqlite3,
+                      db,
+                      "INSERT OR REPLACE INTO documents (id, table_name, data) VALUES (?, ?, ?)",
+                      [doc._id, doc.tableName, doc.data],
+                    ),
+                  err: (e) => e as Error,
+                });
+              }
 
-      try {
-        for (const doc of puts) {
-          await execute(
-            sqlite3,
-            db,
-            "INSERT OR REPLACE INTO documents (id, table_name, data) VALUES (?, ?, ?)",
-            [doc._id, doc.tableName, doc.data],
-          );
-        }
+              for (const id of deletes) {
+                yield* Fx.from({
+                  ok: () =>
+                    execute(
+                      sqlite3,
+                      db,
+                      "DELETE FROM documents WHERE id = ?",
+                      [id],
+                    ),
+                  err: (e) => e as Error,
+                });
+              }
 
-        for (const id of deletes) {
-          await execute(sqlite3, db, "DELETE FROM documents WHERE id = ?", [
-            id,
-          ]);
-        }
+              yield* Fx.from({
+                ok: () =>
+                  execute(
+                    sqlite3,
+                    db,
+                    "INSERT OR REPLACE INTO meta (id, timestamp, last_creation_time) VALUES (1, ?, ?)",
+                    [meta.timestamp, meta.lastCreationTime],
+                  ),
+                err: (e) => e as Error,
+              });
 
-        await execute(
-          sqlite3,
-          db,
-          "INSERT OR REPLACE INTO meta (id, timestamp, last_creation_time) VALUES (1, ?, ?)",
-          [meta.timestamp, meta.lastCreationTime],
-        );
-
-        await execute(sqlite3, db, "COMMIT;");
-      } catch (err) {
-        await execute(sqlite3, db, "ROLLBACK;").catch(() => {});
-        throw err;
-      }
-    });
+              yield* Fx.from({
+                ok: () => execute(sqlite3, db, "COMMIT;"),
+                err: (e) => e as Error,
+              });
+            }),
+          // Release: rollback on failure only
+          (_tx, exit) =>
+            Fx.sync(() => {
+              if (exit._tag === "Failure") {
+                execute(sqlite3, db, "ROLLBACK;").catch(() => {});
+              }
+            }),
+        ),
+      ),
+    );
 
   mutex = op;
   await op;

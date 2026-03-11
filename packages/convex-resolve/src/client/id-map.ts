@@ -28,6 +28,23 @@ const SYS_ID_MAP_DELETE = "_system:idMapDelete";
 // IdMap
 // ---------------------------------------------------------------------------
 
+/**
+ * Optional direct query function that bypasses the ConvexClient
+ * subscription machinery. When provided, hydration reads use this
+ * instead of `localClient.query()` — avoiding the `Invalid start
+ * version` bug caused by engine hydration subscriptions colliding
+ * with the app's `useQuery` version counter.
+ */
+export type DirectQueryFn = (
+  path: string,
+  args: Record<string, unknown>,
+) => Promise<unknown>;
+
+export type DirectMutationFn = (
+  path: string,
+  args: Record<string, unknown>,
+) => Promise<unknown>;
+
 export class IdMap {
   /** In-memory cache: localId → remoteId */
   private _cache = new Map<string, string>();
@@ -38,8 +55,16 @@ export class IdMap {
   /** The local embedded client for persisting to _resolve_id_map. */
   private _localClient: ConvexClient;
 
-  constructor(localClient: ConvexClient) {
+  /** Direct query bypass (avoids subscription version conflicts). */
+  private _queryFn: DirectQueryFn | null;
+
+  /** Direct mutation bypass (avoids patched ConvexClient.mutation). */
+  private _mutationFn: DirectMutationFn | null;
+
+  constructor(localClient: ConvexClient, queryFn?: DirectQueryFn, mutationFn?: DirectMutationFn) {
     this._localClient = localClient;
+    this._queryFn = queryFn ?? null;
+    this._mutationFn = mutationFn ?? null;
   }
 
   // -----------------------------------------------------------------------
@@ -54,10 +79,16 @@ export class IdMap {
   hydrate(): Promise<void> {
     return Fx.run(
       Fx.from({
-        ok: () =>
-          (this._localClient as any).query(SYS_ID_MAP_GET_ALL, {}) as Promise<
+        ok: () => {
+          if (this._queryFn) {
+            return this._queryFn(SYS_ID_MAP_GET_ALL, {}) as Promise<
+              Array<{ localId: string; remoteId: string; table: string }>
+            >;
+          }
+          return (this._localClient as any).query(SYS_ID_MAP_GET_ALL, {}) as Promise<
             Array<{ localId: string; remoteId: string; table: string }>
-          >,
+          >;
+        },
         err: (e) => e as Error,
       }).pipe(
         Fx.tap((entries) =>
@@ -128,11 +159,13 @@ export class IdMap {
     return Fx.run(
       Fx.from({
         ok: () =>
-          (this._localClient as any).mutation(SYS_ID_MAP_SET, {
-            localId,
-            remoteId,
-            table,
-          }) as Promise<unknown>,
+          this._mutationFn
+            ? this._mutationFn(SYS_ID_MAP_SET, { localId, remoteId, table })
+            : (this._localClient as any).mutation(SYS_ID_MAP_SET, {
+                localId,
+                remoteId,
+                table,
+              }) as Promise<unknown>,
         err: (e) => e as Error,
       }).pipe(
         Fx.tap(() =>
@@ -163,9 +196,11 @@ export class IdMap {
     return Fx.run(
       Fx.from({
         ok: () =>
-          (this._localClient as any).mutation(SYS_ID_MAP_DELETE, {
-            localId,
-          }) as Promise<unknown>,
+          this._mutationFn
+            ? this._mutationFn(SYS_ID_MAP_DELETE, { localId })
+            : (this._localClient as any).mutation(SYS_ID_MAP_DELETE, {
+                localId,
+              }) as Promise<unknown>,
         err: (e) => e as Error,
       }).pipe(
         Fx.inspect((err) =>

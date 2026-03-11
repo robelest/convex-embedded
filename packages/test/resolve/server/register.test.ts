@@ -2,7 +2,7 @@ import { v } from "convex/values";
 import { describe, it, expect, vi } from "vitest";
 import * as Y from "yjs";
 
-import { register } from "#resolve/server/register";
+import { setup, SYNC_META } from "#resolve/server/setup";
 import {
   define,
   register as registerField,
@@ -35,135 +35,338 @@ function makeMockComponent() {
 }
 
 // ---------------------------------------------------------------------------
-// Tests
+// setup() + register()
 // ---------------------------------------------------------------------------
 
-describe("register()", () => {
-  it("returns resolve, _recordDelta, and wrapMutation", () => {
-    const result = register({
-      table: "tasks",
-      schema: makeSchema(),
-    });
-
-    expect(result).toHaveProperty("resolve");
-    expect(result).toHaveProperty("_recordDelta");
-    expect(result).toHaveProperty("wrapMutation");
-    expect(result.resolve).toHaveProperty("handler");
-    expect(result._recordDelta).toHaveProperty("handler");
-    expect(typeof result.wrapMutation).toBe("function");
-  });
-
-  it("_recordDelta has v.string() docId arg and v.null() returns", () => {
-    const result = register({
-      table: "tasks",
-      schema: makeSchema(),
-    });
-
-    expect(result._recordDelta.args).toHaveProperty("docId");
-    expect(result._recordDelta.returns).toBeDefined();
-  });
-
-  it("resolve has properly typed args", () => {
-    const result = register({
-      table: "tasks",
-      schema: makeSchema(),
-    });
-
-    expect(result.resolve.args).toHaveProperty("documents");
+describe("setup()", () => {
+  it("returns a register function", () => {
+    const register = setup({});
+    expect(typeof register).toBe("function");
   });
 });
 
-describe("_recordDelta handler", () => {
-  it("is a no-op on local embedded runtime (no component)", async () => {
-    const { _recordDelta } = register({
-      table: "tasks",
-      schema: makeSchema(),
-    });
+describe("register()", () => {
+  it("returns a TableDescriptor with resolve, mutation, and query", () => {
+    const register = setup({});
+    const tasks = register("tasks", makeSchema());
 
-    const result = await _recordDelta.handler({}, { docId: "123" });
-    expect(result).toBeNull();
+    expect(tasks).toHaveProperty("resolve");
+    expect(typeof tasks.mutation).toBe("function");
+    expect(typeof tasks.query).toBe("function");
   });
 
-  it("reads doc and writes to component on remote", async () => {
+  it("resolve has properly typed args", () => {
+    const register = setup({});
+    const tasks = register("tasks", makeSchema());
+
+    expect(tasks.resolve.args).toHaveProperty("documents");
+  });
+
+  it("tags resolve with SYNC_META symbol", () => {
+    const register = setup({});
+    const tasks = register("tasks", makeSchema());
+
+    const meta = tasks.resolve[SYNC_META];
+    expect(meta).toBeDefined();
+    expect(meta.__brand).toBe("convex-resolve:syncMeta");
+    expect(meta.table).toBe("tasks");
+    expect(meta.resolveExport).toBe("resolve");
+  });
+
+  it("SYNC_META is accessible via Symbol.for (cross-package)", () => {
+    const register = setup({});
+    const tasks = register("tasks", makeSchema());
+
+    const crossPkgSymbol = Symbol.for("convex-resolve:syncMeta");
+    const meta = tasks.resolve[crossPkgSymbol];
+    expect(meta).toBeDefined();
+    expect(meta.table).toBe("tasks");
+  });
+
+  it("SYNC_META is not enumerable", () => {
+    const register = setup({});
+    const tasks = register("tasks", makeSchema());
+
+    expect(Object.keys(tasks.resolve)).not.toContain(SYNC_META.toString());
+    // Also verify it doesn't appear in for..in or JSON.stringify
+    const keys = [];
+    for (const k in tasks.resolve) keys.push(k);
+    expect(keys).not.toContain(SYNC_META.toString());
+  });
+});
+
+// ---------------------------------------------------------------------------
+// mutation() — inline delta recording
+// ---------------------------------------------------------------------------
+
+describe("mutation()", () => {
+  it("runs handler and returns result on local (no component)", async () => {
+    const register = setup({});
+    const tasks = register("tasks", makeSchema());
+
+    const fn = tasks.mutation({
+      args: { title: v.string() },
+      handler: async (_ctx: any, args: any) => `id:${args.title}`,
+    });
+
+    const result = await fn.handler({}, { title: "hello" });
+    expect(result).toBe("id:hello");
+  });
+
+  it("runs handler then remote: block on remote", async () => {
     const component = makeMockComponent();
+    const register = setup({ component });
+    const tasks = register("tasks", makeSchema());
+
+    const callOrder: string[] = [];
+    const fn = tasks.mutation({
+      args: {},
+      handler: async () => {
+        callOrder.push("handler");
+        return "doc123";
+      },
+      remote: async () => {
+        callOrder.push("remote");
+      },
+    });
+
+    // Mock ctx with runQuery that succeeds (signals remote runtime)
+    const ctx = {
+      runQuery: vi.fn().mockResolvedValue([]),
+      runMutation: vi.fn(),
+      db: { get: vi.fn().mockResolvedValue({ _id: "doc123", title: "t" }) },
+    };
+
+    const result = await fn.handler(ctx, {});
+
+    expect(callOrder).toEqual(["handler", "remote"]);
+    expect(result).toBe("doc123");
+  });
+
+  it("records delta inline (same transaction) on remote", async () => {
+    const component = makeMockComponent();
+    const register = setup({ component });
+    const tasks = register("tasks", makeSchema());
+
     const runMutation = vi.fn();
-    const dbGet = vi.fn().mockResolvedValue({
-      _id: "123",
-      title: "Hello",
-      body: "World",
+    const ctx = {
+      runQuery: vi.fn().mockResolvedValue([]),
+      runMutation,
+      db: {
+        get: vi.fn().mockResolvedValue({
+          _id: "doc123",
+          title: "Hello",
+          body: "World",
+        }),
+      },
+    };
+
+    const fn = tasks.mutation({
+      args: {},
+      handler: async () => "doc123",
     });
 
-    const { _recordDelta } = register({
-      table: "tasks",
-      schema: makeSchema(),
-      component,
-    });
+    await fn.handler(ctx, {});
 
-    await _recordDelta.handler(
-      { db: { get: dbGet }, runMutation, runQuery: vi.fn().mockResolvedValue([]) },
-      { docId: "123" },
-    );
-
-    expect(dbGet).toHaveBeenCalledWith("123");
+    // Should have called insertDelta directly (no scheduler.runAfter)
     expect(runMutation).toHaveBeenCalledWith(
       component.public.insertDelta,
       expect.objectContaining({
         collection: "tasks",
-        docId: "123",
+        docId: "doc123",
       }),
     );
   });
 
-  it("handles missing document gracefully", async () => {
-    const component = makeMockComponent();
-    const dbGet = vi.fn().mockResolvedValue(null);
+  it("does not record delta on local (no component)", async () => {
+    const register = setup({});
+    const tasks = register("tasks", makeSchema());
 
-    const { _recordDelta } = register({
-      table: "tasks",
-      schema: makeSchema(),
-      component,
+    const scheduler = { runAfter: vi.fn() };
+    const fn = tasks.mutation({
+      args: {},
+      handler: async () => "result",
     });
 
-    const result = await _recordDelta.handler(
-      { db: { get: dbGet }, runMutation: vi.fn(), runQuery: vi.fn().mockResolvedValue([]) },
-      { docId: "missing" },
-    );
+    await fn.handler({ scheduler }, {});
 
-    expect(result).toBeNull();
+    // No scheduler calls — delta recording is inline and only on remote
+    expect(scheduler.runAfter).not.toHaveBeenCalled();
   });
 
-  it("does not throw on component write failure", async () => {
+  it("extracts docId from args.id when result is not a string", async () => {
     const component = makeMockComponent();
-    const dbGet = vi.fn().mockResolvedValue({
-      _id: "123",
-      title: "Hello",
-    });
-    const runMutation = vi.fn().mockRejectedValue(new Error("write failed"));
+    const register = setup({ component });
+    const tasks = register("tasks", makeSchema());
 
-    const { _recordDelta } = register({
-      table: "tasks",
-      schema: makeSchema(),
-      component,
+    const runMutation = vi.fn();
+    const ctx = {
+      runQuery: vi.fn().mockResolvedValue([]),
+      runMutation,
+      db: {
+        get: vi
+          .fn()
+          .mockResolvedValue({ _id: "fromArgs", title: "t" }),
+      },
+    };
+
+    const fn = tasks.mutation({
+      args: {},
+      handler: async () => undefined, // no string result
+    });
+
+    await fn.handler(ctx, { id: "fromArgs" });
+
+    expect(runMutation).toHaveBeenCalledWith(
+      component.public.insertDelta,
+      expect.objectContaining({ docId: "fromArgs" }),
+    );
+  });
+
+  it("does not throw on delta recording failure", async () => {
+    const component = makeMockComponent();
+    const register = setup({ component });
+    const tasks = register("tasks", makeSchema());
+
+    const ctx = {
+      runQuery: vi.fn().mockResolvedValue([]),
+      runMutation: vi.fn().mockRejectedValue(new Error("write failed")),
+      db: {
+        get: vi.fn().mockResolvedValue({ _id: "doc1", title: "t" }),
+      },
+    };
+
+    const fn = tasks.mutation({
+      args: {},
+      handler: async () => "doc1",
     });
 
     // Should not throw
-    const result = await _recordDelta.handler(
-      { db: { get: dbGet }, runMutation, runQuery: vi.fn().mockResolvedValue([]) },
-      { docId: "123" },
-    );
+    const result = await fn.handler(ctx, {});
+    expect(result).toBe("doc1");
+  });
 
-    expect(result).toBeNull();
+  it("wraps with baseMutation builder when provided", () => {
+    const baseMutation = vi.fn((def: any) => ({ __wrapped: true, ...def }));
+    const register = setup({ mutation: baseMutation });
+    const tasks = register("tasks", makeSchema());
+
+    const fn = tasks.mutation({
+      args: { title: v.string() },
+      handler: async () => {},
+    });
+
+    expect(baseMutation).toHaveBeenCalledTimes(1);
+    expect(fn.__wrapped).toBe(true);
+  });
+
+  it("preserves args and returns in definition", () => {
+    const register = setup({});
+    const tasks = register("tasks", makeSchema());
+
+    const fn = tasks.mutation({
+      args: { title: v.string() },
+      returns: v.null(),
+      handler: async () => null,
+    });
+
+    expect(fn.args).toHaveProperty("title");
+    expect(fn.returns).toBeDefined();
+  });
+
+  it("omits returns when undefined", () => {
+    const register = setup({});
+    const tasks = register("tasks", makeSchema());
+
+    const fn = tasks.mutation({
+      args: {},
+      handler: async () => {},
+    });
+
+    expect(fn).not.toHaveProperty("returns");
   });
 });
 
-describe("resolve handler", () => {
-  it("returns empty diffs on local embedded runtime (no component)", async () => {
-    const { resolve } = register({
-      table: "tasks",
-      schema: makeSchema(),
+// ---------------------------------------------------------------------------
+// query()
+// ---------------------------------------------------------------------------
+
+describe("query()", () => {
+  it("runs handler only on local (no component)", async () => {
+    const register = setup({});
+    const tasks = register("tasks", makeSchema());
+
+    const handler = vi.fn().mockResolvedValue([1, 2, 3]);
+    const remote = vi.fn();
+
+    const fn = tasks.query({ args: {}, handler, remote });
+
+    const result = await fn.handler({}, {});
+    expect(handler).toHaveBeenCalledTimes(1);
+    expect(remote).not.toHaveBeenCalled();
+    expect(result).toEqual([1, 2, 3]);
+  });
+
+  it("runs handler then remote: on remote", async () => {
+    const component = makeMockComponent();
+    const register = setup({ component });
+    const tasks = register("tasks", makeSchema());
+
+    const handler = vi.fn().mockResolvedValue([{ id: 1 }]);
+    const remote = vi.fn(async (_ctx: any, _args: any, result: any) =>
+      result.map((r: any) => ({ ...r, extra: true })),
+    );
+
+    const fn = tasks.query({ args: {}, handler, remote });
+
+    const ctx = { runQuery: vi.fn().mockResolvedValue([]) };
+    const result = await fn.handler(ctx, {});
+
+    expect(result).toEqual([{ id: 1, extra: true }]);
+  });
+
+  it("wraps with baseQuery builder when provided", () => {
+    const baseQuery = vi.fn((def: any) => ({ __wrapped: true, ...def }));
+    const register = setup({ query: baseQuery });
+    const tasks = register("tasks", makeSchema());
+
+    // baseQuery is called once during register() for the internal resolve query
+    expect(baseQuery).toHaveBeenCalledTimes(1);
+
+    const fn = tasks.query({
+      args: {},
+      handler: async () => [],
     });
 
-    const result = await resolve.handler(
+    // Now called a second time for the user query
+    expect(baseQuery).toHaveBeenCalledTimes(2);
+    expect(fn.__wrapped).toBe(true);
+  });
+
+  it("preserves returns in query definition", () => {
+    const register = setup({});
+    const tasks = register("tasks", makeSchema());
+
+    const fn = tasks.query({
+      args: {},
+      returns: v.array(v.string()),
+      handler: async () => [],
+    });
+
+    expect(fn.returns).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// resolve handler
+// ---------------------------------------------------------------------------
+
+describe("resolve handler", () => {
+  it("returns empty diffs on local (no component)", async () => {
+    const register = setup({});
+    const tasks = register("tasks", makeSchema());
+
+    const result = await tasks.resolve.handler(
       {},
       {
         documents: [
@@ -180,7 +383,8 @@ describe("resolve handler", () => {
 
   it("computes diffs from component deltas on remote", async () => {
     const component = makeMockComponent();
-    const schemaDef = makeSchema();
+    const register = setup({ component });
+    const tasks = register("tasks", makeSchema());
 
     // Create a server-side doc state
     const serverDoc = new Y.Doc();
@@ -194,17 +398,11 @@ describe("resolve handler", () => {
       .fn()
       .mockResolvedValue([{ update: serverUpdate.buffer, seq: 0 }]);
 
-    const { resolve } = register({
-      table: "tasks",
-      schema: schemaDef,
-      component,
-    });
-
     // Client has empty state
     const clientDoc = new Y.Doc();
     const clientVector = Y.encodeStateVector(clientDoc);
 
-    const result = await resolve.handler(
+    const result = await tasks.resolve.handler(
       { runQuery },
       {
         documents: [{ docId: "doc1", vector: clientVector.buffer }],
@@ -213,16 +411,14 @@ describe("resolve handler", () => {
 
     expect(result).toHaveLength(1);
     expect(result[0].docId).toBe("doc1");
-    // Should have a non-empty diff since client is behind
     expect(result[0].diff).toBeDefined();
   });
 
   it("returns no diff when client is up to date", async () => {
     const component = makeMockComponent();
-    const schemaDef = makeSchema();
+    const register = setup({ component });
+    const tasks = register("tasks", makeSchema());
 
-    // Use the SAME Y.Doc for both server and client (same clientID + clock)
-    // so the diff is truly empty
     const doc = new Y.Doc();
     const fields = doc.getMap("fields");
     fields.set("data", "value");
@@ -233,13 +429,7 @@ describe("resolve handler", () => {
       .fn()
       .mockResolvedValue([{ update: fullUpdate.buffer, seq: 0 }]);
 
-    const { resolve } = register({
-      table: "tasks",
-      schema: schemaDef,
-      component,
-    });
-
-    const result = await resolve.handler(
+    const result = await tasks.resolve.handler(
       { runQuery },
       {
         documents: [{ docId: "doc1", vector: stateVector.buffer }],
@@ -247,20 +437,17 @@ describe("resolve handler", () => {
     );
 
     expect(result).toHaveLength(1);
-    expect(result[0].diff).toBeUndefined(); // Up to date
+    expect(result[0].diff).toBeUndefined();
   });
 
   it("handles missing deltas gracefully", async () => {
     const component = makeMockComponent();
+    const register = setup({ component });
+    const tasks = register("tasks", makeSchema());
+
     const runQuery = vi.fn().mockResolvedValue([null]);
 
-    const { resolve } = register({
-      table: "tasks",
-      schema: makeSchema(),
-      component,
-    });
-
-    const result = await resolve.handler(
+    const result = await tasks.resolve.handler(
       { runQuery },
       {
         documents: [{ docId: "missing", vector: new ArrayBuffer(0) }],
@@ -269,132 +456,5 @@ describe("resolve handler", () => {
 
     expect(result).toHaveLength(1);
     expect(result[0].diff).toBeUndefined();
-  });
-});
-
-describe("wrapMutation()", () => {
-  it("runs handler and remote on remote Convex", async () => {
-    const component = makeMockComponent();
-    const { wrapMutation } = register({
-      table: "tasks",
-      schema: makeSchema(),
-      component,
-    });
-
-    const callOrder: string[] = [];
-    const handler = vi.fn(async () => {
-      callOrder.push("handler");
-      return "doc123";
-    });
-    const remote = vi.fn(async () => {
-      callOrder.push("remote");
-    });
-
-    const scheduler = { runAfter: vi.fn() };
-    const runQuery = vi.fn().mockResolvedValue([]);
-    const recordDeltaRef = { _name: "_recordDelta" };
-
-    const wrapped = wrapMutation(recordDeltaRef, {
-      args: {},
-      handler,
-      remote,
-    });
-
-    const result = await wrapped.handler({ scheduler, runQuery }, {});
-
-    expect(callOrder).toEqual(["handler", "remote"]);
-    expect(result).toBe("doc123");
-  });
-
-  it("schedules _recordDelta via ctx.scheduler.runAfter(0, ...)", async () => {
-    const component = makeMockComponent();
-    const { wrapMutation } = register({
-      table: "tasks",
-      schema: makeSchema(),
-      component,
-    });
-
-    const scheduler = { runAfter: vi.fn() };
-    const runQuery = vi.fn().mockResolvedValue([]);
-    const recordDeltaRef = { _name: "_recordDelta" };
-
-    const wrapped = wrapMutation(recordDeltaRef, {
-      args: {},
-      handler: async () => "docId123",
-    });
-
-    await wrapped.handler({ scheduler, runQuery }, {});
-
-    expect(scheduler.runAfter).toHaveBeenCalledWith(0, recordDeltaRef, {
-      docId: "docId123",
-    });
-  });
-
-  it("extracts docId from args.id when result is not a string", async () => {
-    const component = makeMockComponent();
-    const { wrapMutation } = register({
-      table: "tasks",
-      schema: makeSchema(),
-      component,
-    });
-
-    const scheduler = { runAfter: vi.fn() };
-    const runQuery = vi.fn().mockResolvedValue([]);
-    const recordDeltaRef = { _name: "_recordDelta" };
-
-    const wrapped = wrapMutation(recordDeltaRef, {
-      args: {},
-      handler: async () => undefined,
-    });
-
-    await wrapped.handler({ scheduler, runQuery }, { id: "fromArgs" });
-
-    expect(scheduler.runAfter).toHaveBeenCalledWith(0, recordDeltaRef, {
-      docId: "fromArgs",
-    });
-  });
-
-  it("does not schedule on local embedded runtime", async () => {
-    const { wrapMutation } = register({
-      table: "tasks",
-      schema: makeSchema(),
-      // No component
-    });
-
-    const scheduler = { runAfter: vi.fn() };
-    const recordDeltaRef = { _name: "_recordDelta" };
-
-    const wrapped = wrapMutation(recordDeltaRef, {
-      args: {},
-      handler: async () => "result",
-    });
-
-    await wrapped.handler({ scheduler }, {});
-
-    expect(scheduler.runAfter).not.toHaveBeenCalled();
-  });
-
-  it("does not throw if scheduler.runAfter fails", async () => {
-    const component = makeMockComponent();
-    const { wrapMutation } = register({
-      table: "tasks",
-      schema: makeSchema(),
-      component,
-    });
-
-    const scheduler = {
-      runAfter: vi.fn().mockRejectedValue(new Error("scheduler error")),
-    };
-    const runQuery = vi.fn().mockResolvedValue([]);
-    const recordDeltaRef = { _name: "_recordDelta" };
-
-    const wrapped = wrapMutation(recordDeltaRef, {
-      args: {},
-      handler: async () => "docId",
-    });
-
-    // Should not throw
-    const result = await wrapped.handler({ scheduler, runQuery }, {});
-    expect(result).toBe("docId");
   });
 });

@@ -11,6 +11,7 @@
  */
 import type { Value } from "convex/values";
 import { convexToJson, jsonToConvex } from "convex/values";
+import { Fx } from "@robelest/fx";
 
 import type { Database } from "@/core/database";
 import type { DocumentId } from "@/core/types";
@@ -215,64 +216,90 @@ export function createAsyncSyscall(
         // Register the timer in activeTimers (if provided) so the runtime
         // can clear it on shutdown, preventing leaked timers.
         const timerId = setTimeout(
-          (async () => {
+          () => {
             options?.activeTimers?.delete(timerId);
 
-            // Check if canceled before running
-            const job = db.get("_scheduled_functions", jobId);
-            const jobState = job?.state as { kind: string } | null;
-            if (job === null || jobState?.kind === "canceled") {
-              return;
-            }
-            if (jobState?.kind !== "pending") {
-              throw new Error(
-                `\`convex-embedded\` invariant error: Unexpected scheduled function state when starting it: ${jobState?.kind}`,
-              );
-            }
-            // Wrap bookkeeping writes in transactions — this callback
-            // runs outside any UDF transaction (via setTimeout).
-            db.startTransaction();
-            db.patch("_scheduled_functions", jobId, {
-              state: { kind: "inProgress" },
-            });
-            db.commit();
+            Fx.detach(
+              () =>
+                Fx.run(
+                  Fx.gen(function* () {
+                    // Check if canceled before running
+                    const job = db.get("_scheduled_functions", jobId);
+                    const jobState = job?.state as { kind: string } | null;
+                    if (job === null || jobState?.kind === "canceled") {
+                      return;
+                    }
+                    if (jobState?.kind !== "pending") {
+                      throw new Error(
+                        `\`convex-embedded\` invariant error: Unexpected scheduled function state when starting it: ${jobState?.kind}`,
+                      );
+                    }
 
-            try {
-              await runUdf("mutation", functionPath, parsedArgs);
-            } catch (error) {
-              console.error(
-                `Error when running scheduled function ${functionPath.udfPath}`,
-                error,
-              );
-              db.startTransaction();
-              db.patch("_scheduled_functions", jobId, {
-                state: { kind: "failed" },
-                completedTime: Date.now(),
-              });
-              db.commit();
-              // Notify if the db supports job completion callbacks
-              const dbExt1 = db as unknown as Record<string, unknown>;
-              if (typeof dbExt1.jobFinished === "function") {
-                (dbExt1.jobFinished as (id: string) => void)(jobId);
-              }
-              return;
-            }
+                    // Transition to inProgress inside a transaction
+                    yield* Fx.bracket(
+                      Fx.sync(() => db.startTransaction()),
+                      () =>
+                        Fx.sync(() => {
+                          db.patch("_scheduled_functions", jobId, {
+                            state: { kind: "inProgress" },
+                          });
+                        }),
+                      () => Fx.sync(() => db.commit()),
+                    );
 
-            const finishedJob = db.get("_scheduled_functions", jobId);
-            const finishedState = finishedJob?.state as { kind: string } | null;
-            if (finishedJob !== null && finishedState?.kind === "inProgress") {
-              db.startTransaction();
-              db.patch("_scheduled_functions", jobId, {
-                state: { kind: "success" },
-              });
-              db.commit();
-            }
-            // Notify if the db supports job completion callbacks
-            const dbExt2 = db as unknown as Record<string, unknown>;
-            if (typeof dbExt2.jobFinished === "function") {
-              (dbExt2.jobFinished as (id: string) => void)(jobId);
-            }
-          }) as () => void,
+                    // Run the mutation, fold success/failure into a final state
+                    const finalState: string = yield* Fx.from({
+                      ok: () => runUdf("mutation", functionPath, parsedArgs),
+                      err: (e) => e,
+                    }).pipe(
+                      Fx.fold({
+                        ok: () => "success" as string,
+                        err: (error) => {
+                          console.error(
+                            `Error when running scheduled function ${functionPath.udfPath}`,
+                            error,
+                          );
+                          return "failed" as string;
+                        },
+                      }),
+                    );
+
+                    // Write final state inside a transaction
+                    const finishedJob = db.get("_scheduled_functions", jobId);
+                    const finishedState = finishedJob?.state as {
+                      kind: string;
+                    } | null;
+
+                    if (
+                      finalState === "failed" ||
+                      (finishedJob !== null &&
+                        finishedState?.kind === "inProgress")
+                    ) {
+                      yield* Fx.bracket(
+                        Fx.sync(() => db.startTransaction()),
+                        () =>
+                          Fx.sync(() => {
+                            db.patch("_scheduled_functions", jobId, {
+                              state: { kind: finalState },
+                              ...(finalState === "failed"
+                                ? { completedTime: Date.now() }
+                                : {}),
+                            });
+                          }),
+                        () => Fx.sync(() => db.commit()),
+                      );
+                    }
+
+                    // Notify if the db supports job completion callbacks
+                    const dbExt = db as unknown as Record<string, unknown>;
+                    if (typeof dbExt.jobFinished === "function") {
+                      (dbExt.jobFinished as (id: string) => void)(jobId);
+                    }
+                  }),
+                ),
+              `[convex-embedded] scheduled function ${functionPath.udfPath}:`,
+            );
+          },
           Math.max(0, tsInSecs * 1000 - Date.now()),
         );
         options?.activeTimers?.add(timerId);

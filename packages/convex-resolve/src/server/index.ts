@@ -3,8 +3,12 @@
  *
  * Server-side entry point. Import in your convex/ functions:
  *
- *   import { register, builders, schema, view, migration } from 'convex-resolve/server';
+ *   import { setup, schema, view, migration } from 'convex-resolve/server';
  */
+
+// Setup — unified entry point for synced tables
+export { setup, SYNC_META } from "@/server/setup";
+export type { SetupConfig, TableDescriptor, SyncMeta } from "@/server/setup";
 
 // Schema system — CRDT field types + versioning
 export {
@@ -29,14 +33,6 @@ export type {
   Definition,
   RegisterOptions,
 } from "@/server/schema";
-
-// Builders — mutation/query wrappers with remote: key
-export { builders } from "@/server/builders";
-export type { BuildersResult } from "@/server/builders";
-
-// Register — generates resolve query + delta recording
-export { register } from "@/server/register";
-export type { RegisterConfig, RegisterResult } from "@/server/register";
 
 // Views — query scoping utilities
 export { view } from "@/server/view";

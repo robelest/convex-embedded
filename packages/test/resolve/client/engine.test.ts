@@ -1,10 +1,31 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-import { monitor } from "#resolve/client/monitor";
+import { engine } from "#resolve/client/engine";
+import type { Definition } from "#resolve/server/schema";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Minimal mock schema Definition for testing.
+ * Uses plain (LWW) fields for title and body — no CRDT types,
+ * no omitted fields.
+ */
+function createMockSchema(
+  overrides?: Partial<Definition>,
+): Definition {
+  return {
+    version: 1,
+    shape: { title: "string", body: "string" },
+    history: {},
+    defaults: {},
+    getShape: () => ({ title: "string", body: "string" }),
+    getCrdtFields: () => new Map(),
+    getOmittedFields: () => [],
+    ...overrides,
+  } as Definition;
+}
 
 function createMockLocalClient() {
   return {
@@ -20,10 +41,23 @@ function createMockLocalClient() {
   };
 }
 
+function createMockEmbedded() {
+  const localClient = createMockLocalClient();
+  return {
+    embedded: {
+      client: localClient,
+      ingestDocuments: vi.fn().mockResolvedValue(undefined),
+      getDocumentsForTable: vi.fn().mockResolvedValue([]),
+    },
+    localClient, // keep reference for assertions
+  };
+}
+
 function createMockRemoteClient() {
   return {
     query: vi.fn().mockResolvedValue([]),
     mutation: vi.fn().mockResolvedValue(null),
+    onUpdate: vi.fn().mockReturnValue(vi.fn()), // returns unsubscribe fn
   };
 }
 
@@ -31,11 +65,20 @@ function settle(ms = 50) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+/** Shorthand for a table config with both resolve and query refs. */
+function tableConfig(
+  resolve: string,
+  query: string = `${resolve.split(".")[0]}_list`,
+  schema: Definition = createMockSchema(),
+) {
+  return { resolve, query, schema };
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
-describe("monitor.create()", () => {
+describe("engine.create()", () => {
   let originalAddEventListener: typeof globalThis.addEventListener | undefined;
   let originalRemoveEventListener:
     | typeof globalThis.removeEventListener
@@ -76,13 +119,13 @@ describe("monitor.create()", () => {
   // -------------------------------------------------------------------------
 
   it("returns a MonitorInstance with expected methods", () => {
-    const localClient = createMockLocalClient();
+    const { embedded } = createMockEmbedded();
     const remoteClient = createMockRemoteClient();
 
-    const m = monitor.create({
-      localClient,
+    const m = engine.create({
+      embedded,
       remoteClient,
-      tables: { tasks: { resolve: "resolve_ref" } },
+      tables: { tasks: tableConfig("resolve_ref") },
     });
 
     expect(m).toHaveProperty("start");
@@ -97,13 +140,13 @@ describe("monitor.create()", () => {
   });
 
   it("starts with idle status before start()", () => {
-    const localClient = createMockLocalClient();
+    const { embedded } = createMockEmbedded();
     const remoteClient = createMockRemoteClient();
 
-    const m = monitor.create({
-      localClient,
+    const m = engine.create({
+      embedded,
       remoteClient,
-      tables: { tasks: { resolve: "resolve_ref" } },
+      tables: { tasks: tableConfig("resolve_ref") },
     });
 
     expect(m.getStatus()).toEqual({ status: "idle" });
@@ -114,13 +157,13 @@ describe("monitor.create()", () => {
   // -------------------------------------------------------------------------
 
   it("transitions through resolving to resolved on start() when online", async () => {
-    const localClient = createMockLocalClient();
+    const { embedded, localClient } = createMockEmbedded();
     const remoteClient = createMockRemoteClient();
 
-    const m = monitor.create({
-      localClient,
+    const m = engine.create({
+      embedded,
       remoteClient,
-      tables: { tasks: { resolve: "resolve_ref" } },
+      tables: { tasks: tableConfig("resolve_ref") },
     });
 
     const statuses: string[] = [];
@@ -146,13 +189,13 @@ describe("monitor.create()", () => {
       configurable: true,
     });
 
-    const localClient = createMockLocalClient();
+    const { embedded } = createMockEmbedded();
     const remoteClient = createMockRemoteClient();
 
-    const m = monitor.create({
-      localClient,
+    const m = engine.create({
+      embedded,
       remoteClient,
-      tables: { tasks: { resolve: "resolve_ref" } },
+      tables: { tasks: tableConfig("resolve_ref") },
     });
 
     const statuses: string[] = [];
@@ -167,13 +210,13 @@ describe("monitor.create()", () => {
   });
 
   it("start() is idempotent", async () => {
-    const localClient = createMockLocalClient();
+    const { embedded } = createMockEmbedded();
     const remoteClient = createMockRemoteClient();
 
-    const m = monitor.create({
-      localClient,
+    const m = engine.create({
+      embedded,
       remoteClient,
-      tables: { tasks: { resolve: "resolve_ref" } },
+      tables: { tasks: tableConfig("resolve_ref") },
     });
 
     m.start();
@@ -189,13 +232,13 @@ describe("monitor.create()", () => {
   });
 
   it("stop() cleans up and sets status to idle", async () => {
-    const localClient = createMockLocalClient();
+    const { embedded } = createMockEmbedded();
     const remoteClient = createMockRemoteClient();
 
-    const m = monitor.create({
-      localClient,
+    const m = engine.create({
+      embedded,
       remoteClient,
-      tables: { tasks: { resolve: "resolve_ref" } },
+      tables: { tasks: tableConfig("resolve_ref") },
     });
 
     m.start();
@@ -206,13 +249,13 @@ describe("monitor.create()", () => {
   });
 
   it("stop() removes event listeners", async () => {
-    const localClient = createMockLocalClient();
+    const { embedded } = createMockEmbedded();
     const remoteClient = createMockRemoteClient();
 
-    const m = monitor.create({
-      localClient,
+    const m = engine.create({
+      embedded,
       remoteClient,
-      tables: { tasks: { resolve: "resolve_ref" } },
+      tables: { tasks: tableConfig("resolve_ref") },
     });
 
     m.start();
@@ -235,15 +278,15 @@ describe("monitor.create()", () => {
   // -------------------------------------------------------------------------
 
   it("calls resolve query for each registered table", async () => {
-    const localClient = createMockLocalClient();
+    const { embedded } = createMockEmbedded();
     const remoteClient = createMockRemoteClient();
 
-    const m = monitor.create({
-      localClient,
+    const m = engine.create({
+      embedded,
       remoteClient,
       tables: {
-        tasks: { resolve: "tasks.resolve" },
-        comments: { resolve: "comments.resolve" },
+        tasks: tableConfig("tasks.resolve"),
+        comments: tableConfig("comments.resolve"),
       },
     });
 
@@ -262,16 +305,17 @@ describe("monitor.create()", () => {
   });
 
   it("transitions to error when resolve fails after retries", async () => {
-    const localClient = createMockLocalClient();
+    const { embedded } = createMockEmbedded();
     const remoteClient = {
       query: vi.fn().mockRejectedValue(new Error("network error")),
       mutation: vi.fn().mockResolvedValue(null),
+      onUpdate: vi.fn().mockReturnValue(vi.fn()),
     };
 
-    const m = monitor.create({
-      localClient,
+    const m = engine.create({
+      embedded,
       remoteClient,
-      tables: { tasks: { resolve: "resolve_ref" } },
+      tables: { tasks: tableConfig("resolve_ref") },
       maxRetries: 2,
       retryDelayMs: 10,
     });
@@ -288,17 +332,67 @@ describe("monitor.create()", () => {
   });
 
   // -------------------------------------------------------------------------
+  // Remote subscriptions
+  // -------------------------------------------------------------------------
+
+  it("starts remote subscriptions after resolve completes", async () => {
+    const { embedded } = createMockEmbedded();
+    const remoteClient = createMockRemoteClient();
+
+    const m = engine.create({
+      embedded,
+      remoteClient,
+      tables: { tasks: tableConfig("resolve_ref", "tasks_list") },
+    });
+
+    m.start();
+    await settle();
+
+    // onUpdate should have been called for each table
+    expect(remoteClient.onUpdate).toHaveBeenCalledTimes(1);
+    expect(remoteClient.onUpdate).toHaveBeenCalledWith(
+      "tasks_list",
+      {},
+      expect.any(Function),
+      expect.any(Function),
+    );
+
+    m.stop();
+  });
+
+  it("stop() unsubscribes from remote subscriptions", async () => {
+    const unsubscribe = vi.fn();
+    const { embedded } = createMockEmbedded();
+    const remoteClient = {
+      ...createMockRemoteClient(),
+      onUpdate: vi.fn().mockReturnValue(unsubscribe),
+    };
+
+    const m = engine.create({
+      embedded,
+      remoteClient,
+      tables: { tasks: tableConfig("resolve_ref", "tasks_list") },
+    });
+
+    m.start();
+    await settle();
+    m.stop();
+
+    expect(unsubscribe).toHaveBeenCalled();
+  });
+
+  // -------------------------------------------------------------------------
   // Event subscription
   // -------------------------------------------------------------------------
 
   it("on('change', ...) returns an unsubscribe function", async () => {
-    const localClient = createMockLocalClient();
+    const { embedded } = createMockEmbedded();
     const remoteClient = createMockRemoteClient();
 
-    const m = monitor.create({
-      localClient,
+    const m = engine.create({
+      embedded,
       remoteClient,
-      tables: { tasks: { resolve: "resolve_ref" } },
+      tables: { tasks: tableConfig("resolve_ref") },
     });
 
     const listener = vi.fn();
@@ -315,13 +409,13 @@ describe("monitor.create()", () => {
   });
 
   it("listener receives status changes", async () => {
-    const localClient = createMockLocalClient();
+    const { embedded } = createMockEmbedded();
     const remoteClient = createMockRemoteClient();
 
-    const m = monitor.create({
-      localClient,
+    const m = engine.create({
+      embedded,
       remoteClient,
-      tables: { tasks: { resolve: "resolve_ref" } },
+      tables: { tasks: tableConfig("resolve_ref") },
     });
 
     const statuses: string[] = [];
@@ -340,13 +434,13 @@ describe("monitor.create()", () => {
   });
 
   it("after unsubscribe, listener receives no more calls", async () => {
-    const localClient = createMockLocalClient();
+    const { embedded } = createMockEmbedded();
     const remoteClient = createMockRemoteClient();
 
-    const m = monitor.create({
-      localClient,
+    const m = engine.create({
+      embedded,
       remoteClient,
-      tables: { tasks: { resolve: "resolve_ref" } },
+      tables: { tasks: tableConfig("resolve_ref") },
     });
 
     const listener = vi.fn();
@@ -370,13 +464,13 @@ describe("monitor.create()", () => {
   // -------------------------------------------------------------------------
 
   it("mutation() writes to localClient first", async () => {
-    const localClient = createMockLocalClient();
+    const { embedded, localClient } = createMockEmbedded();
     const remoteClient = createMockRemoteClient();
 
-    const m = monitor.create({
-      localClient,
+    const m = engine.create({
+      embedded,
       remoteClient,
-      tables: { tasks: { resolve: "resolve_ref" } },
+      tables: { tasks: tableConfig("resolve_ref") },
     });
 
     await m.mutation("tasks:create", { title: "Buy milk" });
@@ -387,17 +481,17 @@ describe("monitor.create()", () => {
   });
 
   it("mutation() returns the local result", async () => {
-    const localClient = createMockLocalClient();
+    const { embedded, localClient } = createMockEmbedded();
     localClient.mutation.mockImplementation((path: string) => {
       if (path === "_system:pendingPush") return Promise.resolve("pending-doc-1");
       return Promise.resolve({ _id: "local-123" });
     });
     const remoteClient = createMockRemoteClient();
 
-    const m = monitor.create({
-      localClient,
+    const m = engine.create({
+      embedded,
       remoteClient,
-      tables: { tasks: { resolve: "resolve_ref" } },
+      tables: { tasks: tableConfig("resolve_ref") },
     });
 
     const result = await m.mutation("tasks:create", { title: "Buy milk" });
@@ -406,13 +500,13 @@ describe("monitor.create()", () => {
   });
 
   it("mutation() persists to pending queue via localClient", async () => {
-    const localClient = createMockLocalClient();
+    const { embedded, localClient } = createMockEmbedded();
     const remoteClient = createMockRemoteClient();
 
-    const m = monitor.create({
-      localClient,
+    const m = engine.create({
+      embedded,
       remoteClient,
-      tables: { tasks: { resolve: "resolve_ref" } },
+      tables: { tasks: tableConfig("resolve_ref") },
     });
 
     await m.mutation("tasks:create", { title: "Buy milk" });
@@ -435,13 +529,13 @@ describe("monitor.create()", () => {
   // -------------------------------------------------------------------------
 
   it("resolveNow() triggers a resolve cycle", async () => {
-    const localClient = createMockLocalClient();
+    const { embedded } = createMockEmbedded();
     const remoteClient = createMockRemoteClient();
 
-    const m = monitor.create({
-      localClient,
+    const m = engine.create({
+      embedded,
       remoteClient,
-      tables: { tasks: { resolve: "resolve_ref" } },
+      tables: { tasks: tableConfig("resolve_ref") },
     });
 
     await m.resolveNow();
@@ -455,13 +549,13 @@ describe("monitor.create()", () => {
   // -------------------------------------------------------------------------
 
   it("pendingCount() reflects queue size", async () => {
-    const localClient = createMockLocalClient();
+    const { embedded } = createMockEmbedded();
     const remoteClient = createMockRemoteClient();
 
-    const m = monitor.create({
-      localClient,
+    const m = engine.create({
+      embedded,
       remoteClient,
-      tables: { tasks: { resolve: "resolve_ref" } },
+      tables: { tasks: tableConfig("resolve_ref") },
     });
 
     expect(m.pendingCount()).toBe(0);
@@ -480,6 +574,163 @@ describe("monitor.create()", () => {
     await settle();
 
     expect(m.pendingCount()).toBeGreaterThanOrEqual(1);
+
+    m.stop();
+  });
+
+  // -------------------------------------------------------------------------
+  // Resolve — local docs gathered
+  // -------------------------------------------------------------------------
+
+  it("resolve reads local docs via getDocumentsForTable", async () => {
+    const { embedded } = createMockEmbedded();
+    const remoteClient = createMockRemoteClient();
+
+    const m = engine.create({
+      embedded,
+      remoteClient,
+      tables: { tasks: tableConfig("resolve_ref") },
+    });
+
+    m.start();
+    await settle();
+
+    expect(embedded.getDocumentsForTable).toHaveBeenCalledWith("tasks");
+
+    m.stop();
+  });
+
+  it("resolve sends state vectors for local docs to remote query", async () => {
+    const { embedded } = createMockEmbedded();
+    // Return a local doc so the resolve encodes its state vector.
+    embedded.getDocumentsForTable.mockResolvedValue([
+      { _id: "doc-1", _creationTime: 100, title: "Hello", body: "World" },
+    ]);
+
+    const remoteClient = createMockRemoteClient();
+    // The resolve query should return results per-document.
+    remoteClient.query.mockResolvedValue([
+      { docId: "doc-1" }, // no diff — client is up-to-date
+    ]);
+
+    const m = engine.create({
+      embedded,
+      remoteClient,
+      tables: { tasks: tableConfig("resolve_ref") },
+    });
+
+    m.start();
+    await settle();
+
+    // The resolve query should have been called with documents
+    // containing state vectors (ArrayBuffer).
+    expect(remoteClient.query).toHaveBeenCalledTimes(1);
+    const [, resolveArgs] = remoteClient.query.mock.calls[0]!;
+    expect(resolveArgs.documents).toHaveLength(1);
+    expect(resolveArgs.documents[0].docId).toBe("doc-1");
+    expect(resolveArgs.documents[0].vector).toBeInstanceOf(ArrayBuffer);
+
+    m.stop();
+  });
+
+  // -------------------------------------------------------------------------
+  // Resolve — diff application + ingest
+  // -------------------------------------------------------------------------
+
+  it("resolve ingests materialized docs after applying diffs", async () => {
+    const { embedded } = createMockEmbedded();
+    embedded.getDocumentsForTable.mockResolvedValue([
+      { _id: "doc-1", _creationTime: 100, title: "Old", body: "Text" },
+    ]);
+
+    const remoteClient = createMockRemoteClient();
+    // Return no diff — client is up-to-date.
+    remoteClient.query.mockResolvedValue([
+      { docId: "doc-1" }, // no diff field
+    ]);
+
+    const m = engine.create({
+      embedded,
+      remoteClient,
+      tables: { tasks: tableConfig("resolve_ref") },
+    });
+
+    m.start();
+    await settle();
+
+    // ingestDocuments should have been called with the materialized doc.
+    expect(embedded.ingestDocuments).toHaveBeenCalledWith(
+      "tasks",
+      expect.arrayContaining([
+        expect.objectContaining({ _id: "doc-1", _creationTime: 100 }),
+      ]),
+    );
+
+    m.stop();
+  });
+
+  // -------------------------------------------------------------------------
+  // schema.omit() stripping in reactive subscriptions
+  // -------------------------------------------------------------------------
+
+  it("strips omitted fields from remote subscription data before ingesting", async () => {
+    const { embedded } = createMockEmbedded();
+    const remoteClient = createMockRemoteClient();
+
+    const schemaWithOmit = createMockSchema({
+      getOmittedFields: () => ["secretField", "internalData"],
+    });
+
+    const m = engine.create({
+      embedded,
+      remoteClient,
+      tables: {
+        tasks: tableConfig("resolve_ref", "tasks_list", schemaWithOmit),
+      },
+    });
+
+    m.start();
+    await settle();
+
+    // Get the onUpdate callback that was registered.
+    expect(remoteClient.onUpdate).toHaveBeenCalledTimes(1);
+    const onUpdateCallback = remoteClient.onUpdate.mock.calls[0]![2];
+
+    // Simulate a remote update with omitted fields.
+    onUpdateCallback([
+      {
+        _id: "doc-1",
+        _creationTime: 100,
+        title: "Task",
+        body: "Body",
+        secretField: "should-be-stripped",
+        internalData: { nested: true },
+      },
+    ]);
+
+    await settle();
+
+    // ingestDocuments should have been called with the omitted fields removed.
+    expect(embedded.ingestDocuments).toHaveBeenCalledWith(
+      "tasks",
+      [
+        expect.objectContaining({
+          _id: "doc-1",
+          _creationTime: 100,
+          title: "Task",
+          body: "Body",
+        }),
+      ],
+    );
+
+    // Verify the omitted fields are NOT present.
+    const ingestCall = embedded.ingestDocuments.mock.calls.find(
+      (call: any[]) => call[0] === "tasks",
+    );
+    expect(ingestCall).toBeDefined();
+    const ingestedDoc = ingestCall![1][0];
+    expect(ingestedDoc).not.toHaveProperty("secretField");
+    expect(ingestedDoc).not.toHaveProperty("internalData");
 
     m.stop();
   });

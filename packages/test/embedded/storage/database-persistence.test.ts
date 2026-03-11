@@ -2,18 +2,18 @@ import { describe, it, expect, vi } from "vitest";
 
 import { Database } from "#embedded/core/database";
 import type { StorageAdapter } from "#embedded/storage/adapter";
-import { memoryStorage } from "#embedded/storage/memory";
+import { ephemeralStorage } from "#embedded/storage/memory";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 /**
- * Create a Database backed by a memoryStorage adapter, hydrate it,
+ * Create a Database backed by a ephemeralStorage adapter, hydrate it,
  * and return both.
  */
 async function createPersistedDb(storage?: StorageAdapter) {
-  const s = storage ?? memoryStorage();
+  const s = storage ?? ephemeralStorage();
   const db = new Database(null, s);
   await db.hydrate();
   return { db, storage: s };
@@ -40,7 +40,7 @@ describe("Database persistence", () => {
 
   describe("round-trip", () => {
     it("documents survive a simulated restart", async () => {
-      const storage = memoryStorage();
+      const storage = ephemeralStorage();
 
       // Session 1: insert documents
       const { db: db1 } = await createPersistedDb(storage);
@@ -74,7 +74,7 @@ describe("Database persistence", () => {
     });
 
     it("metadata counters survive a restart", async () => {
-      const storage = memoryStorage();
+      const storage = ephemeralStorage();
 
       const { db: db1 } = await createPersistedDb(storage);
       insertAndCommit(db1, "tasks", { text: "a" });
@@ -101,7 +101,7 @@ describe("Database persistence", () => {
 
   describe("deletes", () => {
     it("deleted documents are not restored on hydration", async () => {
-      const storage = memoryStorage();
+      const storage = ephemeralStorage();
 
       const { db: db1 } = await createPersistedDb(storage);
       const { id } = insertAndCommit(db1, "tasks", { text: "temp" });
@@ -127,7 +127,7 @@ describe("Database persistence", () => {
 
   describe("mutations", () => {
     it("patched documents persist the updated values", async () => {
-      const storage = memoryStorage();
+      const storage = ephemeralStorage();
 
       const { db: db1 } = await createPersistedDb(storage);
       const { id } = insertAndCommit(db1, "tasks", {
@@ -183,7 +183,7 @@ describe("Database persistence", () => {
 
   describe("error handling", () => {
     it("storage commit failure does not break in-memory state", async () => {
-      const storage = memoryStorage();
+      const storage = ephemeralStorage();
       const failingStorage: StorageAdapter = {
         ...storage,
         commit: vi.fn().mockRejectedValue(new Error("disk full")),
@@ -215,7 +215,7 @@ describe("Database persistence", () => {
 
   describe("clear via storage", () => {
     it("clears storage when adapter.clear() is called directly", async () => {
-      const storage = memoryStorage();
+      const storage = ephemeralStorage();
 
       const { db: db1 } = await createPersistedDb(storage);
       insertAndCommit(db1, "tasks", { text: "hello" });

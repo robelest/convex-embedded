@@ -15,6 +15,7 @@ import type { UserIdentity } from "@/auth/resolver";
 import { Database } from "@/core/database";
 import { parseSchema } from "@/core/schema";
 import type { ParsedSchema, SchemaExport } from "@/core/schema";
+import type { DocumentId, StoredDocument } from "@/core/types";
 import { ModuleLoader } from "@/kernel/module-loader";
 import type { ConvexModule, FunctionPath } from "@/kernel/module-loader";
 import { resolveFunctionPath } from "@/kernel/module-loader";
@@ -35,6 +36,45 @@ import type {
 } from "@/sync/protocol";
 import { SessionManager } from "@/sync/session";
 import { SubscriptionManager } from "@/sync/subscriptions";
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Shallow-compare two documents, ignoring `_id` and `_creationTime`.
+ *
+ * Used by {@link EmbeddedRuntime.ingestDocuments} to determine whether
+ * a remote document has actually changed relative to the local copy.
+ * Returns `true` when all user-facing fields are identical.
+ */
+function docsEqual(
+  a: StoredDocument,
+  b: Record<string, unknown>,
+): boolean {
+  const skipKeys = new Set(["_id", "_creationTime"]);
+
+  const aKeys = Object.keys(a)
+    .filter((k) => !skipKeys.has(k))
+    .sort();
+  const bKeys = Object.keys(b)
+    .filter((k) => !skipKeys.has(k))
+    .sort();
+
+  if (aKeys.length !== bKeys.length) return false;
+
+  for (let i = 0; i < aKeys.length; i++) {
+    if (aKeys[i] !== bKeys[i]) return false;
+    if (
+      JSON.stringify(a[aKeys[i]! as keyof StoredDocument]) !==
+      JSON.stringify(b[bKeys[i]!])
+    ) {
+      return false;
+    }
+  }
+
+  return true;
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -159,7 +199,10 @@ export class EmbeddedRuntime {
     // the affected tables from IndexedDB, re-evaluate active queries,
     // and push updated results to the ConvexClient.
     this.writeFanout.onNotification((tablesWritten) => {
-      void this._handleCrossTabSync(tablesWritten);
+      Fx.detach(
+        () => this._handleCrossTabSync(tablesWritten),
+        "[convex-embedded] cross-tab sync:",
+      );
     });
 
     // 11. Scheduler --------------------------------------------------------
@@ -335,27 +378,265 @@ export class EmbeddedRuntime {
    *    ConvexClient sees the updated query results instantly.
    */
   private async _handleCrossTabSync(tablesWritten: Set<string>): Promise<void> {
-    try {
-      // 1. Re-read affected tables from IndexedDB into memory.
-      await Promise.all(
-        Array.from(tablesWritten).map((table) => this.db.syncTable(table)),
-      );
+    await Fx.run(
+      Fx.from({
+        ok: async () => {
+          // 1. Re-read affected tables from IndexedDB into memory.
+          await Promise.all(
+            Array.from(tablesWritten).map((table) => this.db.syncTable(table)),
+          );
 
-      // 2. Re-evaluate all active queries.
-      const updates = await this.syncProtocol.reEvaluateQueries();
+          // 2. Re-evaluate all active queries.
+          const updates = await this.syncProtocol.reEvaluateQueries();
 
-      // 3. Push Transition messages to all connected loopback sockets.
-      for (const [, messages] of updates) {
-        for (const msg of messages) {
-          const data = JSON.stringify(msg);
-          for (const transport of this._transports) {
-            transport.pushMessage(data);
+          // 3. Push Transition messages to all connected loopback sockets.
+          for (const [, messages] of updates) {
+            for (const msg of messages) {
+              const data = JSON.stringify(msg);
+              for (const transport of this._transports) {
+                transport.pushMessage(data);
+              }
+            }
+          }
+        },
+        err: (e) => e as Error,
+      }).pipe(
+        Fx.inspect((err) =>
+          Fx.sync(() =>
+            console.error("[convex-embedded] cross-tab sync failed:", err),
+          ),
+        ),
+        Fx.recover(() => Fx.unit),
+      ),
+    );
+  }
+
+  // -----------------------------------------------------------------------
+  // Remote → local ingestion
+  // -----------------------------------------------------------------------
+
+  /**
+   * Ingest authoritative documents from a remote source into the local
+   * embedded database.
+   *
+   * This is the primary mechanism for receiving reactive query results
+   * from a remote Convex backend. The method:
+   *
+   *  1. Diffs the incoming documents against the current local state.
+   *  2. Applies only the actual changes (inserts, updates, deletes)
+   *     within a single transaction.
+   *  3. Persists to IndexedDB (via the storage adapter).
+   *  4. Invalidates local subscriptions and notifies other tabs.
+   *  5. Re-evaluates all active queries and pushes `Transition`
+   *     messages to every connected `ConvexClient`.
+   *
+   * If the incoming data is identical to the local state the method
+   * is a no-op — no transaction is opened and no notifications fire.
+   *
+   * @param table       The table name to ingest into.
+   * @param remoteDocs  Authoritative documents from the remote backend.
+   *                    Each must have `_id` (string) and `_creationTime`
+   *                    (number) fields.
+   */
+  ingestDocuments(
+    table: string,
+    remoteDocs: Array<Record<string, unknown>>,
+  ): Promise<void> {
+    const db = this.db;
+    const runtime = this;
+
+    return Fx.run(
+      Fx.gen(function* () {
+        // Wait for storage hydration before touching the database.
+        yield* Fx.from({
+          ok: () => runtime._hydrated,
+          err: (e) => e as Error,
+        });
+
+        // --- 1. Build lookup maps -------------------------------------------
+
+        const localDocs = db.getDocumentsForTable(table);
+
+        const localMap = new Map<string, StoredDocument>();
+        for (const doc of localDocs) {
+          localMap.set(doc._id as string, doc);
+        }
+
+        const remoteMap = new Map<string, Record<string, unknown>>();
+        for (const doc of remoteDocs) {
+          const id = doc._id as string | undefined;
+          if (id != null) {
+            remoteMap.set(id, doc);
           }
         }
-      }
-    } catch (err) {
-      console.error("[convex-embedded] cross-tab sync failed:", err);
-    }
+
+        // --- 2. Compute diff ------------------------------------------------
+
+        type UpsertDoc = Record<string, unknown> & {
+          _id: string;
+          _creationTime: number;
+        };
+
+        const toUpsert: UpsertDoc[] = [];
+        const toDelete: string[] = [];
+
+        // Docs in remote that are new or changed locally.
+        for (const [id, remoteDoc] of remoteMap) {
+          const localDoc = localMap.get(id);
+          if (localDoc === undefined) {
+            // New document — needs insert.
+            toUpsert.push(remoteDoc as UpsertDoc);
+          } else if (!docsEqual(localDoc, remoteDoc)) {
+            // Existing document with changed fields — needs update.
+            toUpsert.push(remoteDoc as UpsertDoc);
+          }
+        }
+
+        // Docs in local that are missing from remote — needs delete.
+        for (const id of localMap.keys()) {
+          if (!remoteMap.has(id)) {
+            toDelete.push(id);
+          }
+        }
+
+        // --- 3. Early exit if nothing changed --------------------------------
+
+        if (toUpsert.length === 0 && toDelete.length === 0) {
+          return;
+        }
+
+        console.debug(
+          `[convex-embedded] ingestDocuments("${table}"): ` +
+            `${toUpsert.length} upsert(s), ${toDelete.length} delete(s)`,
+        );
+
+        // --- 4. Apply within a transaction -----------------------------------
+
+        yield* Fx.bracket(
+          Fx.sync(() => {
+            db.startTransaction();
+          }),
+          () =>
+            Fx.sync(() => {
+              for (const doc of toUpsert) {
+                db.putDocument(table, doc);
+              }
+              for (const id of toDelete) {
+                db.removeDocument(table, id as unknown as DocumentId);
+              }
+              return db.commit();
+            }),
+          (_tx, exit) =>
+            Fx.sync(() => {
+              if (exit._tag === "Failure") {
+                db.rollbackWrites();
+              }
+            }),
+        );
+
+        // --- 5. Propagate changes -------------------------------------------
+
+        const tablesWritten = new Set([table]);
+        runtime.onMutationCommit(tablesWritten);
+
+        // Re-evaluate all active queries and push Transition messages.
+        yield* Fx.from({
+          ok: async () => {
+            const updates = await runtime.syncProtocol.reEvaluateQueries();
+            for (const [, messages] of updates) {
+              for (const msg of messages) {
+                const data = JSON.stringify(msg);
+                for (const transport of runtime._transports) {
+                  transport.pushMessage(data);
+                }
+              }
+            }
+          },
+          err: (e) => e as Error,
+        });
+      }).pipe(
+        Fx.inspect((err) =>
+          Fx.sync(() => {
+            console.error(
+              `[convex-embedded] ingestDocuments("${table}") failed:`,
+              err,
+            );
+          }),
+        ),
+        Fx.recover(() => Fx.unit),
+        Fx.map(() => undefined as void),
+      ),
+    );
+  }
+
+  /**
+   * Return all documents for a given table from the local embedded database.
+   *
+   * Waits for storage hydration before reading so the result includes
+   * persisted data (not just the empty in-memory state).
+   *
+   * @param table  The table name to read.
+   */
+  async getDocumentsForTable(
+    table: string,
+  ): Promise<Array<Record<string, unknown>>> {
+    await this._hydrated;
+    return this.db.getDocumentsForTable(table) as Array<
+      Record<string, unknown>
+    >;
+  }
+
+  /**
+   * Execute a query directly against the embedded database, bypassing
+   * the ConvexClient subscription machinery.
+   *
+   * This avoids the `Invalid start version` bug caused by engine
+   * hydration queries (IdMap, PendingQueue) going through the same
+   * `ConvexClient` as the app's `useQuery` subscriptions. Direct
+   * queries run inside a transaction with no WebSocket, no version
+   * counter, and no subscription bookkeeping.
+   *
+   * @param path  UDF path string, e.g. `"_system:idMapGetAll"`.
+   * @param args  Arguments passed to the function handler.
+   * @returns The query result.
+   *
+   * @internal
+   */
+  async queryDirect(
+    path: string,
+    args: Record<string, unknown>,
+  ): Promise<unknown> {
+    await this._hydrated;
+    return this._runUdf("query", resolveFunctionPath({ name: path }), args);
+  }
+
+  /**
+   * Execute a mutation directly against the embedded database, bypassing
+   * the ConvexClient session, version counter, and loopback WebSocket.
+   *
+   * Used by the resolve engine's internal bookkeeping (IdMap, PendingQueue)
+   * so that `_system:idMapSet`, `_system:pendingPush`, etc. never touch
+   * the shared ConvexClient. Without this, internal mutations produce
+   * extra Transition messages that race with app-query Transitions,
+   * causing `Invalid start version` errors.
+   *
+   * The mutation still runs inside a proper transaction (via
+   * `_runSystemFunction` or `_runUdf`), commits to the database, and
+   * triggers subscription invalidation + persistence. It just skips the
+   * WebSocket round-trip that `ConvexClient.mutation()` would do.
+   *
+   * @param path  UDF path string, e.g. `"_system:idMapSet"`.
+   * @param args  Arguments passed to the function handler.
+   * @returns The mutation result.
+   *
+   * @internal
+   */
+  async mutationDirect(
+    path: string,
+    args: Record<string, unknown>,
+  ): Promise<unknown> {
+    await this._hydrated;
+    return this._runUdf("mutation", resolveFunctionPath({ name: path }), args);
   }
 
   // -----------------------------------------------------------------------

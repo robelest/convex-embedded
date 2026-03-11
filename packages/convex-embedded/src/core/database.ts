@@ -513,6 +513,104 @@ export class Database {
   }
 
   // -------------------------------------------------------------------------
+  // Authoritative ingestion (for remote → local sync)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Upsert a document with a caller-supplied `_id` and `_creationTime`.
+   *
+   * Used when ingesting authoritative documents from a remote source
+   * (e.g. a remote Convex backend). Unlike {@link insert}, this method
+   * does **not** generate a new UUID — it uses the provided `_id` as-is.
+   *
+   * - If the `_id` already exists in the database and belongs to the
+   *   same table, the document is **replaced** with the incoming values.
+   * - If the `_id` is new, it is registered in the ID table map and
+   *   inserted as a new document.
+   * - Throws if the `_id` belongs to a **different** table.
+   *
+   * Must be called within an active transaction.
+   */
+  putDocument(
+    table: TableName,
+    doc: Record<string, unknown> & { _id: string; _creationTime: number },
+  ): void {
+    const { _id, _creationTime, ...userFields } = doc;
+    const docId = _id as unknown as DocumentId;
+
+    this._validate(table, userFields as GenericDocument);
+
+    const existingTable = this._idTableMap.get(_id);
+
+    if (existingTable !== undefined) {
+      // ID exists — verify it belongs to the same table.
+      if (existingTable !== table) {
+        throw new Error(
+          `putDocument: ID "${_id}" belongs to table "${existingTable}", ` +
+            `not "${table}"`,
+        );
+      }
+      // Replace in-place — keep the incoming _id and _creationTime.
+      this._addWrite(docId, { _id: docId, _creationTime, ...userFields });
+    } else {
+      // New document — register in the ID table map.
+      this._idTableMap.set(_id, table);
+
+      // Track creation time for monotonicity.
+      if (_creationTime > this._lastCreationTime) {
+        this._lastCreationTime = _creationTime;
+      }
+
+      this._addWrite(docId, { _id: docId, _creationTime, ...userFields });
+    }
+  }
+
+  /**
+   * Remove a document by ID if it exists. Returns `true` if the document
+   * was found and deleted, `false` if it was not present (no-op).
+   *
+   * Unlike {@link delete}, this method does **not** throw when the
+   * document is missing — it silently returns `false`. This is useful
+   * when syncing deletions from a remote source where the local state
+   * may already be out of sync.
+   *
+   * Must be called within an active transaction.
+   */
+  removeDocument(table: TableName, id: DocumentId): boolean {
+    const existingTable = this._idTableMap.get(id as string);
+    if (existingTable === undefined) {
+      return false;
+    }
+
+    if (existingTable !== table) {
+      throw new Error(
+        `removeDocument: ID "${id}" belongs to table "${existingTable}", ` +
+          `not "${table}"`,
+      );
+    }
+
+    const document = this.get(table, id);
+    if (document === null) {
+      return false;
+    }
+
+    this._addWrite(id, null);
+    return true;
+  }
+
+  /**
+   * Return all committed + pending documents for a given table.
+   *
+   * Reads through the write stack so in-transaction changes are visible.
+   * Deleted documents (write === null) are excluded.
+   */
+  getDocumentsForTable(tableName: string): StoredDocument[] {
+    const results: StoredDocument[] = [];
+    this._iterateDocs(tableName, (doc) => results.push(doc));
+    return results;
+  }
+
+  // -------------------------------------------------------------------------
   // normalizeId
   // -------------------------------------------------------------------------
 

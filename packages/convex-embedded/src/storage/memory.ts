@@ -14,16 +14,18 @@ import type {
 } from "@/storage/adapter";
 
 // ---------------------------------------------------------------------------
-// memoryStorage
+// ephemeralStorage
 // ---------------------------------------------------------------------------
 
 /**
- * Create an in-memory {@link StorageAdapter}.
+ * Create a non-durable in-memory {@link StorageAdapter}.
  *
- * All data is held in plain Maps and lost on page reload. This is the
- * default storage backend when no adapter is provided.
+ * Data lives only for the lifetime of the runtime. Used internally
+ * as the test/fallback storage when no durable backend is available.
+ *
+ * @internal
  */
-export function memoryStorage(): StorageAdapter {
+export function ephemeralStorage(): StorageAdapter {
   const documents = new Map<string, StoredDocument>();
   const tableMap = new Map<string, string>(); // id → tableName
   const blobs = new Map<string, Blob>();

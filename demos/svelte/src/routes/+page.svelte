@@ -1,13 +1,13 @@
 <script lang="ts">
 	import { getContext } from "svelte";
-	import { useQuery } from "convex-svelte";
+	import { useQuery, useConvexClient } from "convex-svelte";
 	import { api } from "$convex/_generated/api";
-	import type { MonitorStatus, MonitorInstance } from "@robelest/convex-resolve/client";
+	import type { ResolveState } from "@robelest/convex-embedded/browser";
 
+	const client = useConvexClient();
 	const tasks = useQuery(api.tasks.list, {});
 
-	const getSyncStatus = getContext<() => MonitorStatus>("syncStatus");
-	const m = getContext<MonitorInstance>("monitor");
+	const getSyncStatus = getContext<() => ResolveState>("syncStatus");
 
 	let title = $state("");
 	let body = $state("");
@@ -19,9 +19,11 @@
 				return { text: "Local only", color: "#9ca3af", bg: "#f3f4f6" };
 			case "offline":
 				return { text: "Offline", color: "#f59e0b", bg: "#fffbeb" };
-			case "resolving":
+			case "connecting":
+				return { text: "Connecting\u2026", color: "#3b82f6", bg: "#eff6ff" };
+			case "syncing":
 				return { text: "Syncing\u2026", color: "#3b82f6", bg: "#eff6ff" };
-			case "resolved":
+			case "synced":
 				return { text: "Synced", color: "#10b981", bg: "#ecfdf5" };
 			case "error":
 				return { text: "Sync error", color: "#ef4444", bg: "#fef2f2" };
@@ -31,13 +33,13 @@
 	async function handleAdd() {
 		const t = title.trim();
 		if (!t) return;
-		await m.mutation(api.tasks.create, { title: t, body: body.trim() });
+		await client.mutation(api.tasks.create, { title: t, body: body.trim() });
 		title = "";
 		body = "";
 	}
 
 	async function handleRemove(id: string) {
-		await m.mutation(api.tasks.remove, { id: id as any });
+		await client.mutation(api.tasks.remove, { id: id as any });
 	}
 </script>
 

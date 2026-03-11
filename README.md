@@ -2,6 +2,8 @@
 
 Local-first development for Convex applications.
 
+> **[Design doc & architecture (Notion)](https://www.notion.so/convex-edge-31e26eeb0e7e81549026e8dc5cc18191)**
+
 ## Packages
 
 ### @robelest/convex-embedded
@@ -17,85 +19,84 @@ Offline-first sync between a local embedded runtime and a remote Convex backend.
 Uses Yjs CRDTs for automatic conflict resolution on reconnect. Handles schema
 versioning, delta recording, and reconnect orchestration.
 
+### @robelest/fx
+
+Lightweight functional effect library for composable async error handling. Lazy
+`Fx<A, E>` computations with `pipe()` chaining and generator-based `Fx.gen`
+composition. Used pervasively across both `convex-embedded` and `convex-resolve`
+for all async/error-handling code:
+
+- **`Fx.bracket`** — Resource lifecycle (transactions, global patching, queue flags)
+- **`Fx.gen`** — Sequential composition (migration steps, scheduled function state machines)
+- **`Fx.from` + `Fx.recover`** — Fallible operations with typed error recovery
+- **`Fx.detach`** — Fire-and-forget (scheduled functions, background persistence)
+- **`Fx.zip`** — Parallel hydration (ID map + pending queue)
+- **`Fx.fold`** — Outcome mapping (mutation success/failure → final state)
+- **`Fx.retry`** — Exponential backoff with jitter (OCC transactions, CRDT resolve)
+
 ## Quick start
 
-### Embedded runtime (standalone)
+### Local-only (no sync)
 
 ```typescript
-import { createEmbeddedConvex } from "@robelest/convex-embedded";
-import { ConvexReactClient } from "convex/react";
+import { createConvexClient } from "@robelest/convex-embedded/browser";
 
-// 1. Load your convex modules
-const modules = import.meta.glob("./convex/**/*.ts", { eager: true });
-
-// 2. Create the runtime
-const runtime = createEmbeddedConvex({ modules });
-
-// 3. Create a standard Convex client over the loopback transport
-const transport = runtime.createTransport();
-const client = new ConvexReactClient(transport.url, {
-  webSocketConstructor: transport.webSocketConstructor,
+const client = createConvexClient({
+  modules: import.meta.glob("./convex/*.ts"),
 });
 
-// 4. Use as normal — useQuery, useMutation, etc.
+// Use with any Convex framework integration — useQuery, ConvexProvider, etc.
 ```
 
-Or use the browser convenience wrapper:
+### Local-first with remote sync
 
 ```typescript
-import { getEmbeddedClient } from "@robelest/convex-embedded/browser";
+import { createConvexClient } from "@robelest/convex-embedded/browser";
 
-const modules = import.meta.glob("./convex/**/*.ts", { eager: true });
-const client = getEmbeddedClient({ modules });
+const client = createConvexClient({
+  modules: import.meta.glob("./convex/*.ts"),
+  sync: { url: "https://happy-otter-123.convex.cloud" },
+});
+
+// Queries read from local database (instant, offline-capable).
+// Mutations write locally first, then replay to remote.
+// Reactive subscriptions keep local state fresh with remote changes.
 ```
 
-### With sync (embedded + resolve)
+### Server-side functions with resolve
 
 ```typescript
-// convex/functions.ts — shared mutation/query builders
-import { builders } from "@robelest/convex-resolve/server";
+// convex/sync.ts — one-time setup per app
+import { setup } from "@robelest/convex-resolve/server";
 import { components } from "./_generated/api";
+import { mutation, query } from "./_generated/server";
 
-export const { mutation, query } = builders(components);
+export const register = setup({
+  component: components.resolve,
+  mutation,
+  query,
+});
 ```
 
 ```typescript
-// convex/tasks.ts — functions that work locally and remotely
-import { register, schema } from "@robelest/convex-resolve/server";
-import { mutation, query } from "./functions";
+// convex/tasks.ts — per synced table
+import { register } from "./sync";
+import { taskSchema } from "./schema";
 import { v } from "convex/values";
 
-const taskSchema = schema.define({
-  version: 1,
-  shape: v.object({
-    title: schema.register(v.string()),
-    body: schema.prose(),
-    done: v.boolean(),
-  }),
+const tasks = register("tasks", taskSchema);
+
+export const resolve = tasks.resolve;
+
+export const complete = tasks.mutation({
+  args: { id: v.id("tasks") },
+  handler: async (ctx, { id }) => {
+    await ctx.db.patch(id, { done: true });
+    return id;
+  },
 });
 
-const { resolve, _recordDelta, wrapMutation } = register({
-  table: "tasks",
-  schema: taskSchema,
-  component: components.resolve,
-});
-
-export { resolve, _recordDelta };
-
-export const complete = wrapMutation(
-  _recordDelta,
-  mutation({
-    args: { id: v.id("tasks") },
-    handler: async (ctx, { id }) => {
-      await ctx.db.patch(id, { done: true });
-    },
-    remote: async (ctx, { id }) => {
-      await ctx.scheduler.runAfter(0, internal.webhooks.notify, { id });
-    },
-  }),
-);
-
-export const list = query({
+export const list = tasks.query({
   args: {},
   handler: async (ctx) => {
     return await ctx.db.query("tasks").collect();
@@ -103,22 +104,63 @@ export const list = query({
 });
 ```
 
-```typescript
-// Client — monitor for online/offline sync
-import { monitor } from "@robelest/convex-resolve/client";
-import { ConvexClient } from "convex/browser";
-import { api } from "../convex/_generated/api";
+### Observing sync state
 
-const remoteClient = new ConvexClient(CONVEX_URL);
-const m = monitor.create({
-  remoteClient,
-  tables: {
-    tasks: { resolve: api.tasks.resolve },
-  },
+```typescript
+import {
+  createConvexClient,
+  subscribeResolveState,
+} from "@robelest/convex-embedded/browser";
+
+const client = createConvexClient({
+  modules: import.meta.glob("./convex/*.ts"),
+  sync: { url: import.meta.env.CONVEX_URL },
 });
 
-m.start();
-m.on("change", (status) => console.log(status.status));
+const unsub = subscribeResolveState(client, (state) => {
+  console.log("Sync:", state.status);
+  // "idle" | "connecting" | "syncing" | "synced" | "offline" | "error"
+});
+```
+
+### SvelteKit integration
+
+```svelte
+<!-- +layout.svelte -->
+<script lang="ts">
+  import { createConvexClient } from "@robelest/convex-embedded/browser";
+  import { setConvexClientContext } from "convex-svelte";
+  import { onDestroy } from "svelte";
+
+  const modules = import.meta.glob("../../convex/*.ts");
+  const client = createConvexClient({
+    modules,
+    sync: { url: import.meta.env.CONVEX_URL },
+  });
+
+  setConvexClientContext(client);
+  onDestroy(() => client.close());
+
+  // HMR cleanup
+  if (import.meta.hot) {
+    import.meta.hot.dispose(() => client.close());
+  }
+</script>
+```
+
+```svelte
+<!-- +page.svelte -->
+<script lang="ts">
+  import { useQuery, useConvexClient } from "convex-svelte";
+  import { api } from "../../convex/_generated/api";
+
+  const tasks = useQuery(api.tasks.list, {});
+  const client = useConvexClient();
+
+  async function addTask(title: string) {
+    await client.mutation(api.tasks.create, { title });
+  }
+</script>
 ```
 
 ## Project structure
@@ -130,6 +172,7 @@ convex-edge/
   packages/
     convex-embedded/        # @robelest/convex-embedded
     convex-resolve/         # @robelest/convex-resolve
+    fx/                     # @robelest/fx
     test/                   # @robelest/convex-edge-tests (private)
   demos/
     svelte/                 # SvelteKit demo using convex-embedded
@@ -159,6 +202,9 @@ bun run build
 ```sh
 bun run test
 ```
+
+**Important**: Always use `bun run test`, never `bun test` (bun's built-in
+runner is incompatible with the vitest-based test suite).
 
 Run a specific test suite:
 

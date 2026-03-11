@@ -12,6 +12,7 @@
  *  4. Store and retrieve blobs (file storage).
  *  5. Wipe all data (for resets / migrations).
  *
+ * @internal
  * @packageDocumentation
  */
 
@@ -26,6 +27,7 @@ import type { StoredDocument } from "@/core/types";
  *
  * These counters are updated on every committed write and must survive
  * restarts so timestamps and creation times remain monotonic.
+ * @internal
  */
 export interface DatabaseMeta {
   /** MVCC timestamp — monotonically increasing on each write-commit. */
@@ -38,6 +40,7 @@ export interface DatabaseMeta {
  * A document paired with its table name, used during persistence.
  * The table name is stored alongside the document so that
  * `getDocumentsByTable` can filter without parsing the ID.
+ * @internal
  */
 export interface StoredDocumentWithTable {
   doc: StoredDocument;
@@ -49,6 +52,7 @@ export interface StoredDocumentWithTable {
  *
  * Passed to {@link StorageAdapter.commit} so the adapter can persist an
  * entire transaction atomically.
+ * @internal
  */
 export interface CommitBatch {
   /** Documents with their table names, inserted or replaced in this commit. */
@@ -75,6 +79,7 @@ export interface CommitBatch {
  * **Persistence** — after each successful {@link Database.commit} the
  * runtime calls {@link commit} with the delta. Blob mutations go through
  * {@link storeBlob} and {@link deleteBlob}.
+ * @internal
  */
 export interface StorageAdapter {
   // -- Hydration (called once on startup) ----------------------------------

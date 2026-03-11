@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 
 import type { StoredDocument } from "#embedded/core/types";
 import type { StorageAdapter, CommitBatch } from "#embedded/storage/adapter";
-import { memoryStorage } from "#embedded/storage/memory";
+import { ephemeralStorage } from "#embedded/storage/memory";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -39,11 +39,11 @@ function batch(
 // Tests
 // ---------------------------------------------------------------------------
 
-describe("memoryStorage", () => {
+describe("ephemeralStorage", () => {
   let storage: StorageAdapter;
 
   beforeEach(() => {
-    storage = memoryStorage();
+    storage = ephemeralStorage();
   });
 
   // -- Hydration (empty state) --------------------------------------------

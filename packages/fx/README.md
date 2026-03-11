@@ -11,7 +11,7 @@ Gleam-inspired naming.
   separate from unrecoverable defects (`Fx.fatal`).
 - **Zero dependencies**, under 10 KB.
 - **Gleam-inspired one-word names**: `map`, `chain`, `tap`, `inspect`,
-  `recover`, `fold`. Everything lives under the `Fx.*` namespace.
+  `recover`, `fold`, `match`. Everything lives under the `Fx.*` namespace.
 - **Two composition styles**: `.pipe()` chaining with data-last combinators, or
   `Fx.gen` generators for imperative-looking sequential code.
 
@@ -119,7 +119,7 @@ interface Fx<A, E = never> {
     cd: (c: C) => D,
     de: (d: D) => F,
   ): F;
-  [Symbol.iterator](): Generator<Fx<A, E>, A, A>;
+  [Symbol.iterator](): Generator<Fx<A, E>, A, unknown>;
 }
 ```
 
@@ -656,6 +656,81 @@ const fx = Fx.gen(function* () {
 });
 ```
 
+#### `Fx.match(value, tag, handlers)`
+
+```ts
+function match<
+  T extends Record<K, string>,
+  K extends keyof T & string,
+  Tag extends T[K] & string,
+  Handlers extends {
+    [V in T[K] & string]: (value: Extract<T, Record<K, V>>) => Fx<any, any>;
+  },
+>(value: T, tag: Tag, handlers: Handlers): Fx<SuccessUnion, ErrorUnion>;
+```
+
+Type-safe, exhaustive pattern matching on discriminated unions, lifted into `Fx`.
+The functional replacement for `switch` statements and `if/else` chains. Every
+variant gets a dedicated handler that receives the **narrowed** type, and
+TypeScript enforces **exhaustiveness** — a missing variant is a compile error.
+
+The second argument is the discriminant **value** (e.g. `msg.type`), not a key
+string. This is type-safe because the discriminant is accessed via property
+access.
+
+```ts
+type ServerMessage =
+  | { type: "QueryUpdated"; queryId: string; value: unknown }
+  | { type: "QueryFailed"; queryId: string; errorMessage: string }
+  | { type: "Ping" };
+
+const handle = (msg: ServerMessage) =>
+  Fx.match(msg, msg.type, {
+    QueryUpdated: (m) => applyUpdate(m.queryId, m.value),
+    QueryFailed: (m) => logFailure(m.queryId, m.errorMessage),
+    Ping: () => sendPong(),
+    // Adding a new variant to ServerMessage is a compile error here
+    // until you add the handler — no `default` escape hatch.
+  });
+```
+
+Works with any discriminant field name (`_tag`, `type`, `kind`, etc.):
+
+```ts
+type Shape =
+  | { kind: "circle"; radius: number }
+  | { kind: "rect"; width: number; height: number };
+
+const area = (shape: Shape) =>
+  Fx.match(shape, shape.kind, {
+    circle: (s) => Fx.succeed(Math.PI * s.radius ** 2),
+    rect: (s) => Fx.succeed(s.width * s.height),
+  });
+```
+
+Handlers can fail with typed errors — the resulting `Fx` error type is the union
+of all handler error types:
+
+```ts
+type Action =
+  | { type: "withdraw"; amount: number }
+  | { type: "deposit"; amount: number };
+
+class InsufficientFunds {
+  constructor(readonly shortfall: number) {}
+}
+
+const execute = (balance: number, action: Action) =>
+  Fx.match(action, action.type, {
+    deposit: (a) => Fx.succeed(balance + a.amount),
+    withdraw: (a) =>
+      a.amount > balance
+        ? Fx.fail(new InsufficientFunds(a.amount - balance))
+        : Fx.succeed(balance - a.amount),
+  });
+// Inferred type: Fx<number, InsufficientFunds>
+```
+
 #### `Fx.attempt(fn, onOk, onErr)`
 
 ```ts
@@ -975,6 +1050,51 @@ const timerId = setTimeout(() => {
     `[SchedulerExecutor] Scheduled function "${functionPath}" failed:`,
   );
 }, delayMs);
+```
+
+### 7. Exhaustive pattern matching
+
+Replace `switch`/`if-else` dispatch with `Fx.match` for type-safe, exhaustive
+branching.
+
+From `resource.test.ts` — matching on `Exit._tag` to handle success and failure:
+
+```ts
+import { Fx } from "@robelest/fx";
+
+const describe = (exit: Exit<number, Error>) =>
+  Fx.match(exit, exit._tag, {
+    Success: (e) => Fx.succeed(`value: ${e.value}`),
+    Failure: (e) => Fx.succeed(`error: ${e.error.message}`),
+  });
+```
+
+From protocol dispatch — routing server messages without a `default` escape
+hatch:
+
+```ts
+import { Fx } from "@robelest/fx";
+
+const handle = (msg: ServerMessage) =>
+  Fx.match(msg, msg.type, {
+    QueryUpdated: (m) => applyUpdate(m.queryId, m.value),
+    QueryFailed: (m) => logFailure(m.queryId, m.errorMessage),
+    Ping: () => sendPong(),
+  });
+```
+
+Composes naturally inside `Fx.gen`:
+
+```ts
+const pipeline = Fx.gen(function* () {
+  const msg = yield* receiveMessage();
+  const result = yield* Fx.match(msg, msg.type, {
+    QueryUpdated: (m) => applyUpdate(m.queryId, m.value),
+    QueryFailed: (m) => Fx.fail(new QueryError(m.errorMessage)),
+    Ping: () => sendPong(),
+  });
+  return result;
+});
 ```
 
 ## License

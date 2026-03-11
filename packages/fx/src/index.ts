@@ -24,7 +24,7 @@
  *
  * **Resources**: `Fx.bracket`
  *
- * **Control flow**: `Fx.guard`, `Fx.attempt`
+ * **Control flow**: `Fx.guard`, `Fx.match`, `Fx.attempt`
  *
  * **Execution**: `Fx.gen`, `Fx.run`, `Fx.detach`
  *

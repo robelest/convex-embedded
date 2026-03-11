@@ -185,7 +185,7 @@ export interface Fx<A, E = never> {
    *
    * @see {@link Fx.gen} — The generator runner that consumes this iterator.
    */
-  [Symbol.iterator](): Generator<Fx<A, E>, A, A>;
+  [Symbol.iterator](): Generator<Fx<A, E>, A, unknown>;
 }
 
 // ---------------------------------------------------------------------------
@@ -218,8 +218,8 @@ class FxImpl<A, E = never> implements Fx<A, E> {
     return fns.reduce((result, fn) => fn(result), this as unknown);
   }
 
-  *[Symbol.iterator](): Generator<Fx<A, E>, A, A> {
-    return yield this;
+  *[Symbol.iterator](): Generator<Fx<A, E>, A, unknown> {
+    return (yield this) as A;
   }
 }
 
@@ -959,10 +959,10 @@ function recover<E, B, E2>(f: (e: E) => Fx<B, E2>) {
  * Like {@link recover}, `fold` does **not** catch {@link FxFatal} defects.
  *
  * @param opts - An object with two mapping functions:
- * @param opts.ok - Maps the success value `A` to `B`.
- * @param opts.err - Maps the typed error `E` to `B`.
+ * @param opts.ok - Maps the success value `A` to `B1`.
+ * @param opts.err - Maps the typed error `E` to `B2` (defaults to `B1`).
  *
- * @returns A function that takes `Fx<A, E>` and returns `Fx<B, never>`.
+ * @returns A function that takes `Fx<A, E>` and returns `Fx<B1 | B2, never>`.
  *
  * @example
  * ```ts
@@ -992,13 +992,16 @@ function recover<E, B, E2>(f: (e: E) => Fx<B, E2>) {
  *
  * @category Combinator
  */
-function fold<A, E, B>(opts: { ok: (a: A) => B; err: (e: E) => B }) {
-  return (self: Fx<A, E>): Fx<B, never> =>
+function fold<A, E, B1, B2 = B1>(opts: {
+  ok: (a: A) => B1;
+  err: (e: E) => B2;
+}) {
+  return (self: Fx<A, E>): Fx<B1 | B2, never> =>
     new FxImpl(async () => {
       const r = await self._run();
       return r._tag === "Success"
-        ? ok(opts.ok(r.value))
-        : ok(opts.err(r.error));
+        ? ok(opts.ok(r.value) as B1 | B2)
+        : ok(opts.err(r.error) as B1 | B2);
     });
 }
 
@@ -1552,6 +1555,190 @@ function guard<A, E>(condition: boolean, fallback: Fx<A, E>): Fx<A | void, E> {
 }
 
 // ---------------------------------------------------------------------------
+// Pattern matching
+// ---------------------------------------------------------------------------
+
+/**
+ * Type-safe, exhaustive pattern matching on discriminated unions, lifted
+ * into `Fx`.
+ *
+ * @remarks
+ * `match` is the functional replacement for `switch` statements and
+ * `if/else` chains. Anywhere you would branch on a discriminant field
+ * (`_tag`, `type`, `kind`, etc.), use `match` instead. Every variant gets
+ * a dedicated handler that receives the **narrowed** type, and TypeScript
+ * enforces **exhaustiveness** — a missing variant is a compile error.
+ *
+ * The result is an `Fx` whose success type is the union of all handler
+ * success types, and whose error type is the union of all handler error
+ * types.
+ *
+ * ## Replacing a `switch` statement
+ *
+ * **Before** (imperative):
+ * ```ts
+ * // Dispatching on a protocol message — fragile, no exhaustiveness check
+ * function handle(msg: ServerMessage): Promise<void> {
+ *   switch (msg.type) {
+ *     case "QueryUpdated":
+ *       return applyUpdate(msg.queryId, msg.value);
+ *     case "QueryFailed":
+ *       return logFailure(msg.queryId, msg.errorMessage);
+ *     case "Ping":
+ *       return sendPong();
+ *     default:
+ *       throw new Error(`Unknown message type: ${msg.type}`);
+ *   }
+ * }
+ * ```
+ *
+ * **After** (functional, exhaustive):
+ * ```ts
+ * const handle = (msg: ServerMessage) =>
+ *   Fx.match(msg, msg.type, {
+ *     QueryUpdated: (m) => applyUpdate(m.queryId, m.value),
+ *     QueryFailed: (m) => logFailure(m.queryId, m.errorMessage),
+ *     Ping: () => sendPong(),
+ *     // Adding a new variant to ServerMessage is a compile error here
+ *     // until you add the handler — no `default` escape hatch.
+ *   });
+ * ```
+ *
+ * ## Replacing an `if/else` chain
+ *
+ * **Before** (imperative):
+ * ```ts
+ * function processExit(exit: Exit<number, AppError>): string {
+ *   if (exit._tag === "Success") {
+ *     return `Got ${exit.value}`;
+ *   } else if (exit._tag === "Failure" && exit.error instanceof FxFatal) {
+ *     return `Defect: ${exit.error.defect}`;
+ *   } else {
+ *     return `Error: ${exit.error.message}`;
+ *   }
+ * }
+ * ```
+ *
+ * **After** (functional):
+ * ```ts
+ * const processExit = (exit: Exit<number, AppError>) =>
+ *   Fx.match(exit, exit._tag, {
+ *     Success: (e) => Fx.succeed(`Got ${e.value}`),
+ *     Failure: (e) =>
+ *       Fx.succeed(
+ *         e.error instanceof FxFatal
+ *           ? `Defect: ${e.error.defect}`
+ *           : `Error: ${e.error.message}`,
+ *       ),
+ *   });
+ * ```
+ *
+ * ## Works with any discriminant field
+ *
+ * ```ts
+ * type Shape =
+ *   | { kind: "circle"; radius: number }
+ *   | { kind: "rect"; width: number; height: number };
+ *
+ * const area = (shape: Shape) =>
+ *   Fx.match(shape, shape.kind, {
+ *     circle: (s) => Fx.succeed(Math.PI * s.radius ** 2),
+ *     rect: (s) => Fx.succeed(s.width * s.height),
+ *   });
+ * ```
+ *
+ * ## Handlers can fail with typed errors
+ *
+ * ```ts
+ * type Action =
+ *   | { type: "withdraw"; amount: number }
+ *   | { type: "deposit"; amount: number };
+ *
+ * class InsufficientFunds { constructor(readonly shortfall: number) {} }
+ *
+ * const execute = (balance: number, action: Action) =>
+ *   Fx.match(action, action.type, {
+ *     deposit: (a) => Fx.succeed(balance + a.amount),
+ *     withdraw: (a) =>
+ *       a.amount > balance
+ *         ? Fx.fail(new InsufficientFunds(a.amount - balance))
+ *         : Fx.succeed(balance - a.amount),
+ *   });
+ * // Inferred type: Fx<number, InsufficientFunds>
+ * ```
+ *
+ * ## Composes with `Fx.gen`
+ *
+ * ```ts
+ * const pipeline = Fx.gen(function* () {
+ *   const msg = yield* receiveMessage();
+ *   const result = yield* Fx.match(msg, msg.type, {
+ *     QueryUpdated: (m) => applyUpdate(m.queryId, m.value),
+ *     QueryFailed: (m) => Fx.fail(new QueryError(m.errorMessage)),
+ *     Ping: () => sendPong(),
+ *   });
+ *   return result;
+ * });
+ * ```
+ *
+ * @typeParam T - The discriminated union type.
+ * @typeParam K - The discriminant key (e.g. `"type"`, `"_tag"`, `"kind"`).
+ * @typeParam Tag - The discriminant value, inferred from the property access.
+ * @typeParam Handlers - A record mapping each variant's discriminant value
+ *   to a handler function.
+ *
+ * @param value - The discriminated union value to match on.
+ * @param tag - The discriminant value (e.g. `msg.type`, `exit._tag`).
+ *   Pass the actual property access — this is type-safe because the
+ *   discriminant is accessed via property access, not a magic string.
+ * @param handlers - An exhaustive record of handlers, one per variant.
+ *   Each handler receives the narrowed type for that variant and returns
+ *   an `Fx`.
+ *
+ * @returns An `Fx` that executes the matched handler. The success and
+ *   error types are the union of all handlers' return types.
+ *
+ * @see {@link fold} — Pattern match on an Fx's own success/failure channels.
+ * @see {@link guard} — Gleam-inspired early return on a boolean condition.
+ *
+ * @category Control Flow
+ */
+function match<
+  T extends Record<K, string>,
+  K extends keyof T & string,
+  Tag extends T[K] & string,
+  Handlers extends {
+    [V in T[K] & string]: (
+      value: Extract<T, Record<K, V>>,
+    ) => Fx<any, any>;
+  },
+>(
+  value: T,
+  tag: Tag,
+  handlers: Handlers,
+): Fx<
+  {
+    [V in keyof Handlers]: Handlers[V] extends (
+      ...args: any[]
+    ) => Fx<infer A, any>
+      ? A
+      : never;
+  }[keyof Handlers],
+  {
+    [V in keyof Handlers]: Handlers[V] extends (
+      ...args: any[]
+    ) => Fx<any, infer E>
+      ? E
+      : never;
+  }[keyof Handlers]
+> {
+  const handler = (handlers as Record<string, (value: any) => Fx<any, any>>)[
+    tag
+  ];
+  return handler(value);
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -1626,14 +1813,14 @@ function guard<A, E>(condition: boolean, fallback: Fx<A, E>): Fx<A | void, E> {
  *
  * @category Control Flow
  */
-function attempt<A, B>(
+function attempt<A, B1, B2 = B1>(
   fn: () => Promise<A>,
-  onOk: (a: A) => B,
-  onErr: (e: unknown) => B,
-): Fx<B, never> {
+  onOk: (a: A) => B1,
+  onErr: (e: unknown) => B2,
+): Fx<B1 | B2, never> {
   return from({ ok: fn, err: (e) => e }).pipe(
     fold({ ok: onOk, err: onErr }),
-  ) as Fx<B, never>;
+  ) as Fx<B1 | B2, never>;
 }
 
 // ---------------------------------------------------------------------------
@@ -2018,6 +2205,7 @@ function detach(fn: () => Promise<unknown>, label: string): void {
  *
  * **Control flow**:
  * - {@link guard} — Gleam-inspired early return.
+ * - {@link match} — Type-safe pattern matching on discriminated unions.
  * - {@link attempt} — Run async fn, fold both outcomes.
  *
  * **Execution**:
@@ -2080,6 +2268,7 @@ export const Fx = {
 
   // Control flow
   guard,
+  match,
 
   // Helpers
   attempt,

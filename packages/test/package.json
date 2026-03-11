@@ -6,6 +6,7 @@
   "scripts": {
     "test": "vitest",
     "test:once": "vitest run",
+    "test:fx": "vitest run --project fx",
     "test:embedded": "vitest run --project embedded",
     "test:resolve": "vitest run --project resolve",
     "test:integration": "vitest run --project integration"

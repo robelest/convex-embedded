@@ -24,16 +24,18 @@ function seedDb(
   return db;
 }
 
-/** Drain all results from a streaming query. */
-function drainQuery(db: Database, queryId: number): any[] {
-  const results: any[] = [];
-  while (true) {
-    const { value, done } = db.queryNext(queryId);
-    if (done) break;
-    results.push(value);
+/** Yield all results from a streaming query. */
+function* iterateQuery(db: Database, queryId: number) {
+  let next = db.queryNext(queryId);
+  while (!next.done) {
+    yield next.value;
+    next = db.queryNext(queryId);
   }
-  return results;
 }
+
+/** Drain all results from a streaming query. */
+const drainQuery = (db: Database, queryId: number): any[] =>
+  Array.from(iterateQuery(db, queryId));
 
 /** Build a FullTableScan query. */
 function fullScan(

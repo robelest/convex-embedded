@@ -29,6 +29,7 @@ export default defineConfig({
     alias: {
       "#embedded": embeddedSrc,
       "#resolve": resolveSrc,
+      "#fx": fxSrc,
       "@robelest/fx": path.join(fxSrc, "index.ts"),
       // Integration tests: resolve workspace package exports to source
       "@robelest/convex-resolve/server": path.join(
@@ -48,6 +49,13 @@ export default defineConfig({
   },
   test: {
     projects: [
+      {
+        extends: true,
+        test: {
+          name: "fx",
+          include: ["fx/**/*.test.ts"],
+        },
+      },
       {
         extends: true,
         test: {

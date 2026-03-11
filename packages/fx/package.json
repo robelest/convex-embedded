@@ -35,10 +35,13 @@
   "scripts": {
     "build": "tsdown",
     "typecheck": "tsgo --noEmit",
+    "test": "bun --filter @robelest/convex-edge-tests test -- --project fx",
+    "test:once": "bun --filter @robelest/convex-edge-tests test:once -- --project fx",
     "prepublishOnly": "bun run build"
   },
   "devDependencies": {
     "tsdown": "catalog:",
-    "typescript": "catalog:"
+    "typescript": "catalog:",
+    "vitest": "catalog:"
   }
 }

@@ -281,29 +281,22 @@ describe("OccTransaction", () => {
     // Always conflict so we can observe reads being reset each attempt
     db.getDocumentTimestamp.mockReturnValue(999);
 
-    // Catch immediately to prevent unhandled rejection warnings
-    let caughtError: Error | undefined;
-    const executePromise = tx
-      .execute(async () => {
-        attempt++;
-        readTimestampsPerAttempt.push([attempt]);
-        tx.addRead(`aaaaaaaa-0000-4000-8000-00000000000${attempt}` as any, 5);
-        return "ok";
-      })
-      .catch((err: Error) => {
-        caughtError = err;
-      });
+    const executePromise = tx.execute(async () => {
+      attempt++;
+      readTimestampsPerAttempt.push([attempt]);
+      tx.addRead(`aaaaaaaa-0000-4000-8000-00000000000${attempt}` as any, 5);
+      return "ok";
+    });
+    // Prevent unhandled rejection warning while timers advance
+    executePromise.catch(() => {});
 
     // Advance timers for backoff between retries
     for (let i = 0; i < 10; i++) {
       await vi.advanceTimersByTimeAsync(10_000);
     }
 
-    await executePromise;
-
     // maxRetries=2, so 3 attempts total, all conflict → fails
-    expect(caughtError).toBeDefined();
-    expect(caughtError!.message).toMatch(/OCC conflict/);
+    await expect(executePromise).rejects.toThrow(/OCC conflict/);
 
     // All 3 attempts ran
     expect(attempt).toBe(3);

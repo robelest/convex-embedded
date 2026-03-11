@@ -30,15 +30,17 @@ function toArrayBuffer(data: Uint8Array): ArrayBuffer {
  */
 function readRegister(fields: Y.Map<unknown>, key: string): unknown {
   const registerMap = fields.get(key) as Y.Map<unknown>;
-  if (!registerMap || !(registerMap instanceof Y.Map)) return undefined;
-  // Find the entry with the highest timestamp (last-write-wins)
-  let winner: { value: unknown; timestamp: number } | undefined;
-  registerMap.forEach((entry: any) => {
-    if (!winner || (entry.timestamp && entry.timestamp > winner.timestamp)) {
-      winner = entry;
-    }
-  });
-  return winner?.value;
+  // Early return via ternary — no Y.Map means no register
+  return registerMap instanceof Y.Map
+    ? Array.from(registerMap.values())
+        .reduce<{ value: unknown; timestamp: number } | undefined>(
+          (winner, entry: any) =>
+            !winner || (entry.timestamp && entry.timestamp > winner.timestamp)
+              ? entry
+              : winner,
+          undefined,
+        )?.value
+    : undefined;
 }
 
 // Glob all app modules for convex-test

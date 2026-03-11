@@ -19,6 +19,15 @@ async function createPersistedDb(storage?: StorageAdapter) {
   return { db, storage: s };
 }
 
+/** Drain a query iterator into yielded values. */
+function* iterateQuery(db: any, queryId: number) {
+  let next = db.queryNext(queryId);
+  while (!next.done) {
+    yield next.value;
+    next = db.queryNext(queryId);
+  }
+}
+
 /** Insert a document inside a transaction and commit. */
 function insertAndCommit(
   db: Database,
@@ -55,16 +64,11 @@ describe("Database persistence", () => {
 
       // Query documents from the hydrated database
       db2.startTransaction();
-      const results: unknown[] = [];
       const qid = db2.startQuery({
         source: { type: "FullTableScan", tableName: "tasks", order: null },
         operators: [],
       });
-      let next = db2.queryNext(qid);
-      while (!next.done) {
-        if (next.value) results.push(next.value);
-        next = db2.queryNext(qid);
-      }
+      const results = Array.from(iterateQuery(db2, qid)).filter(Boolean);
       db2.queryCleanup(qid);
       db2.rollbackWrites();
 

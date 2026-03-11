@@ -26,16 +26,16 @@ function createMockCtx() {
         };
       },
       insert: async (tableName: string, row: any) => {
-        if (!tables[tableName]) tables[tableName] = [];
+        tables[tableName] ??= [];
         const id = `id_${Date.now()}_${Math.random()}`;
         tables[tableName].push({ ...row, _id: id });
         return id;
       },
       patch: async (id: string, patches: any) => {
-        for (const rows of Object.values(tables)) {
-          const row = (rows as any[]).find((r) => r._id === id);
-          if (row) Object.assign(row, patches);
-        }
+        Object.values(tables)
+          .flatMap((rows) => rows as any[])
+          .filter((row) => row._id === id)
+          .forEach((row) => Object.assign(row, patches));
       },
       delete: async (id: string) => {
         for (const [name, rows] of Object.entries(tables)) {

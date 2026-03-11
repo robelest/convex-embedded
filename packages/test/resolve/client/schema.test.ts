@@ -1,3 +1,4 @@
+import { v } from "convex/values";
 import { describe, it, expect } from "vitest";
 import * as Y from "yjs";
 
@@ -11,7 +12,17 @@ import {
   encodeStateVector,
   applyUpdate,
   encodeState,
+  materializeYjsDoc,
 } from "#resolve/client/schema";
+import {
+  define,
+  register,
+  counter,
+  set,
+  omit,
+  prose,
+  initYjsDoc,
+} from "#resolve/server/schema";
 
 // ---------------------------------------------------------------------------
 // Prose helpers
@@ -249,5 +260,176 @@ describe("encodeState()", () => {
     const doc2 = new Y.Doc();
     Y.applyUpdateV2(doc2, encoded);
     expect(doc2.getMap("test").get("key")).toBe("value");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// materializeYjsDoc()
+// ---------------------------------------------------------------------------
+
+describe("materializeYjsDoc()", () => {
+  it("materializes plain fields from a Y.Doc", () => {
+    const def = define({
+      version: 1,
+      shape: { name: v.string(), age: v.number() },
+    });
+
+    const doc = initYjsDoc(def, { name: "Alice", age: 30 });
+    const result = materializeYjsDoc(def, doc);
+
+    expect(result.name).toBe("Alice");
+    expect(result.age).toBe(30);
+  });
+
+  it("materializes register fields (single value)", () => {
+    const def = define({
+      version: 1,
+      shape: { title: register(v.string()) },
+    });
+
+    const doc = initYjsDoc(def, { title: "Hello" });
+    const result = materializeYjsDoc(def, doc);
+
+    expect(result.title).toBe("Hello");
+  });
+
+  it("materializes register fields (resolves conflict via latest timestamp)", () => {
+    const def = define({
+      version: 1,
+      shape: { title: register(v.string()) },
+    });
+
+    const doc = new Y.Doc();
+    const fields = doc.getMap("fields");
+    const registerMap = new Y.Map();
+    registerMap.set("c1", { value: "old", timestamp: 100 });
+    registerMap.set("c2", { value: "new", timestamp: 200 });
+    fields.set("title", registerMap);
+
+    const result = materializeYjsDoc(def, doc);
+
+    expect(result.title).toBe("new");
+  });
+
+  it("materializes counter fields", () => {
+    const def = define({
+      version: 1,
+      shape: { votes: counter() },
+    });
+
+    const doc = new Y.Doc();
+    const fields = doc.getMap("fields");
+    const arr = new Y.Array();
+    arr.push([
+      { client: "a", delta: 10, timestamp: 100 },
+      { client: "b", delta: 3, timestamp: 200 },
+      { client: "a", delta: -1, timestamp: 300 },
+    ]);
+    fields.set("votes", arr);
+
+    const result = materializeYjsDoc(def, doc);
+
+    expect(result.votes).toBe(12);
+  });
+
+  it("materializes set fields", () => {
+    const def = define({
+      version: 1,
+      shape: { tags: set(v.string()) },
+    });
+
+    const doc = initYjsDoc(def, { tags: ["alpha", "beta"] });
+    const result = materializeYjsDoc(def, doc);
+
+    expect(result.tags).toEqual(expect.arrayContaining(["alpha", "beta"]));
+    expect(result.tags).toHaveLength(2);
+  });
+
+  it("skips omitted fields", () => {
+    const def = define({
+      version: 1,
+      shape: {
+        name: v.string(),
+        secret: omit(v.string()),
+      },
+    });
+
+    const doc = initYjsDoc(def, { name: "Alice", secret: "hidden" });
+    const result = materializeYjsDoc(def, doc);
+
+    expect(result.name).toBe("Alice");
+    expect(result).not.toHaveProperty("secret");
+  });
+
+  it("does not include _id or _creationTime", () => {
+    const def = define({
+      version: 1,
+      shape: { name: v.string() },
+    });
+
+    // initYjsDoc already skips _id/_creationTime, but even if the Y.Doc
+    // somehow has them in the fields map, materializeYjsDoc iterates only
+    // over schemaDef.shape — so they never appear.
+    const doc = initYjsDoc(def, {
+      _id: "abc123",
+      _creationTime: 1234567890,
+      name: "Alice",
+    });
+    const result = materializeYjsDoc(def, doc);
+
+    expect(result).not.toHaveProperty("_id");
+    expect(result).not.toHaveProperty("_creationTime");
+    expect(result.name).toBe("Alice");
+  });
+
+  it("round-trips initYjsDoc -> materializeYjsDoc", () => {
+    const def = define({
+      version: 1,
+      shape: {
+        title: register(v.string()),
+        body: prose(),
+        votes: counter(),
+        tags: set(v.string()),
+        plain: v.number(),
+      },
+    });
+
+    const original = {
+      title: "My Post",
+      body: "Hello world",
+      votes: 7,
+      tags: ["a", "b"],
+      plain: 42,
+    };
+
+    const doc = initYjsDoc(def, original);
+    const result = materializeYjsDoc(def, doc);
+
+    expect(result.title).toBe("My Post");
+    expect(result.body).toBe("Hello world");
+    expect(result.votes).toBe(7);
+    expect(result.tags).toEqual(expect.arrayContaining(["a", "b"]));
+    expect((result.tags as string[]).length).toBe(2);
+    expect(result.plain).toBe(42);
+  });
+
+  it("handles empty Y.Doc (all fields return defaults/empty)", () => {
+    const def = define({
+      version: 1,
+      shape: {
+        title: register(v.string()),
+        body: prose(),
+        votes: counter(),
+        tags: set(v.string()),
+      },
+    });
+
+    const doc = createEmptyDoc();
+    const result = materializeYjsDoc(def, doc);
+
+    expect(result.title).toBeUndefined();
+    expect(result.body).toBe("");
+    expect(result.votes).toBe(0);
+    expect(result.tags).toEqual([]);
   });
 });

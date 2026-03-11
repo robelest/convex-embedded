@@ -30,13 +30,17 @@ function createMockSchema(
 function createMockLocalClient() {
   return {
     query: vi.fn().mockImplementation((path: string) => {
-      if (path === "_system:idMapGetAll") return Promise.resolve([]);
-      if (path === "_system:pendingGetAll") return Promise.resolve([]);
-      return Promise.resolve(null);
+      const routes: Record<string, unknown> = {
+        "_system:idMapGetAll": [],
+        "_system:pendingGetAll": [],
+      };
+      return Promise.resolve(routes[path] ?? null);
     }),
     mutation: vi.fn().mockImplementation((path: string) => {
-      if (path === "_system:pendingPush") return Promise.resolve("pending-doc-1");
-      return Promise.resolve(null);
+      const routes: Record<string, unknown> = {
+        "_system:pendingPush": "pending-doc-1",
+      };
+      return Promise.resolve(routes[path] ?? null);
     }),
   };
 }
@@ -101,12 +105,10 @@ describe("engine.create()", () => {
   });
 
   afterEach(() => {
-    if (originalAddEventListener) {
-      globalThis.addEventListener = originalAddEventListener;
-    }
-    if (originalRemoveEventListener) {
-      globalThis.removeEventListener = originalRemoveEventListener;
-    }
+    originalAddEventListener &&
+      (globalThis.addEventListener = originalAddEventListener);
+    originalRemoveEventListener &&
+      (globalThis.removeEventListener = originalRemoveEventListener);
     Object.defineProperty(globalThis, "navigator", {
       value: originalNavigator,
       writable: true,
@@ -483,8 +485,10 @@ describe("engine.create()", () => {
   it("mutation() returns the local result", async () => {
     const { embedded, localClient } = createMockEmbedded();
     localClient.mutation.mockImplementation((path: string) => {
-      if (path === "_system:pendingPush") return Promise.resolve("pending-doc-1");
-      return Promise.resolve({ _id: "local-123" });
+      const routes: Record<string, unknown> = {
+        "_system:pendingPush": "pending-doc-1",
+      };
+      return Promise.resolve(routes[path] ?? { _id: "local-123" });
     });
     const remoteClient = createMockRemoteClient();
 
@@ -733,5 +737,261 @@ describe("engine.create()", () => {
     expect(ingestedDoc).not.toHaveProperty("internalData");
 
     m.stop();
+  });
+
+  // -------------------------------------------------------------------------
+  // processQueue()
+  // -------------------------------------------------------------------------
+
+  describe("processQueue()", () => {
+    it("forwards a queued mutation to remoteClient.mutation", async () => {
+      const { embedded, localClient } = createMockEmbedded();
+      localClient.mutation.mockImplementation((path: string) => {
+        const routes: Record<string, unknown> = {
+          "_system:pendingPush": "pending-doc-1",
+          "_system:pendingRemove": null,
+        };
+        return Promise.resolve(routes[path] ?? { _id: "local-1" });
+      });
+
+      const remoteClient = createMockRemoteClient();
+      remoteClient.mutation.mockResolvedValue("remote-1");
+
+      const m = engine.create({
+        embedded,
+        remoteClient,
+        tables: { tasks: tableConfig("resolve_ref") },
+      });
+
+      m.start();
+      await settle();
+
+      await m.mutation("tasks:create", { title: "Buy milk" });
+      await settle();
+
+      expect(remoteClient.mutation).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ title: "Buy milk" }),
+      );
+      m.stop();
+    });
+
+    it("records local→remote ID mapping when results differ", async () => {
+      const { embedded, localClient } = createMockEmbedded();
+      localClient.mutation.mockImplementation((path: string) => {
+        const routes: Record<string, unknown> = {
+          "_system:pendingPush": "pending-doc-1",
+          "_system:pendingRemove": null,
+          "_system:idMapSet": null,
+        };
+        return Promise.resolve(routes[path] ?? "local-uuid-1");
+      });
+
+      const remoteClient = createMockRemoteClient();
+      remoteClient.mutation.mockResolvedValue("remote-id-99");
+
+      const m = engine.create({
+        embedded,
+        remoteClient,
+        tables: { tasks: tableConfig("resolve_ref") },
+      });
+
+      m.start();
+      await settle();
+
+      await m.mutation("tasks:create", { title: "Test" });
+      await settle(100);
+
+      expect(m.idMap.getRemoteId("local-uuid-1")).toBe("remote-id-99");
+      m.stop();
+    });
+
+    it("dequeues entries after successful remote push", async () => {
+      const { embedded, localClient } = createMockEmbedded();
+      localClient.mutation.mockImplementation((path: string) => {
+        const routes: Record<string, unknown> = {
+          "_system:pendingPush": "pending-doc-1",
+          "_system:pendingRemove": null,
+        };
+        return Promise.resolve(routes[path] ?? { _id: "local-1" });
+      });
+
+      const remoteClient = createMockRemoteClient();
+      remoteClient.mutation.mockResolvedValue({ _id: "local-1" });
+
+      const m = engine.create({
+        embedded,
+        remoteClient,
+        tables: { tasks: tableConfig("resolve_ref") },
+      });
+
+      m.start();
+      await settle();
+
+      await m.mutation("tasks:create", { title: "A" });
+      await settle(100);
+
+      expect(m.pendingCount()).toBe(0);
+      m.stop();
+    });
+
+    it("retains entry in queue on remote push failure", async () => {
+      const { embedded, localClient } = createMockEmbedded();
+      localClient.mutation.mockImplementation((path: string) => {
+        const routes: Record<string, unknown> = {
+          "_system:pendingPush": "pending-doc-1",
+        };
+        return Promise.resolve(routes[path] ?? { _id: "local-1" });
+      });
+
+      const remoteClient = createMockRemoteClient();
+      remoteClient.mutation.mockRejectedValue(new Error("network failure"));
+
+      const m = engine.create({
+        embedded,
+        remoteClient,
+        tables: { tasks: tableConfig("resolve_ref") },
+      });
+
+      m.start();
+      await settle();
+
+      await m.mutation("tasks:create", { title: "Fail" });
+      await settle(100);
+
+      expect(m.pendingCount()).toBeGreaterThanOrEqual(1);
+      m.stop();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // offline → online cycle
+  // -------------------------------------------------------------------------
+
+  describe("offline → online cycle", () => {
+    it("queues mutations while offline and flushes when online event fires", async () => {
+      Object.defineProperty(globalThis, "navigator", {
+        value: { onLine: false },
+        writable: true,
+        configurable: true,
+      });
+
+      const { embedded, localClient } = createMockEmbedded();
+      localClient.mutation.mockImplementation((path: string) => {
+        const routes: Record<string, unknown> = {
+          "_system:pendingPush": "pending-doc-1",
+          "_system:pendingRemove": null,
+        };
+        return Promise.resolve(routes[path] ?? { _id: "local-1" });
+      });
+
+      const remoteClient = createMockRemoteClient();
+      remoteClient.mutation.mockResolvedValue({ _id: "local-1" });
+
+      const m = engine.create({
+        embedded,
+        remoteClient,
+        tables: { tasks: tableConfig("resolve_ref") },
+      });
+
+      m.start();
+      await settle();
+
+      await m.mutation("tasks:create", { title: "Offline 1" });
+      await m.mutation("tasks:create", { title: "Offline 2" });
+      await settle();
+
+      expect(remoteClient.mutation).not.toHaveBeenCalled();
+      expect(m.pendingCount()).toBe(2);
+
+      // Find the registered "online" handler from mocked addEventListener
+      const addCalls = (globalThis.addEventListener as ReturnType<typeof vi.fn>)
+        .mock.calls;
+      const onlineEntry = addCalls.find(
+        (call: unknown[]) => call[0] === "online",
+      );
+      expect(onlineEntry).toBeDefined();
+      const onlineHandler = onlineEntry![1] as () => void;
+
+      // Go online
+      Object.defineProperty(globalThis, "navigator", {
+        value: { onLine: true },
+        writable: true,
+        configurable: true,
+      });
+      onlineHandler();
+      await settle(200);
+
+      expect(remoteClient.mutation).toHaveBeenCalledTimes(2);
+      m.stop();
+    });
+
+    it("emits offline status on offline event", async () => {
+      const { embedded } = createMockEmbedded();
+      const remoteClient = createMockRemoteClient();
+
+      const m = engine.create({
+        embedded,
+        remoteClient,
+        tables: { tasks: tableConfig("resolve_ref") },
+      });
+
+      const statuses: string[] = [];
+      m.on("change", (s) => statuses.push(s.status));
+
+      m.start();
+      await settle();
+
+      // Find the registered "offline" handler
+      const addCalls = (globalThis.addEventListener as ReturnType<typeof vi.fn>)
+        .mock.calls;
+      const offlineEntry = addCalls.find(
+        (call: unknown[]) => call[0] === "offline",
+      );
+      expect(offlineEntry).toBeDefined();
+      const offlineHandler = offlineEntry![1] as () => void;
+
+      offlineHandler();
+      await settle();
+
+      expect(statuses).toContain("offline");
+      m.stop();
+    });
+
+    it("stops remote subscriptions on offline event", async () => {
+      const unsubscribe = vi.fn();
+      const { embedded } = createMockEmbedded();
+      const remoteClient = {
+        ...createMockRemoteClient(),
+        onUpdate: vi.fn().mockReturnValue(unsubscribe),
+      };
+
+      const m = engine.create({
+        embedded,
+        remoteClient,
+        tables: { tasks: tableConfig("resolve_ref", "tasks_list") },
+      });
+
+      m.start();
+      await settle();
+
+      // Subscriptions should be active
+      expect(remoteClient.onUpdate).toHaveBeenCalledTimes(1);
+
+      // Find the registered "offline" handler
+      const addCalls = (globalThis.addEventListener as ReturnType<typeof vi.fn>)
+        .mock.calls;
+      const offlineEntry = addCalls.find(
+        (call: unknown[]) => call[0] === "offline",
+      );
+      expect(offlineEntry).toBeDefined();
+      const offlineHandler = offlineEntry![1] as () => void;
+
+      offlineHandler();
+      await settle();
+
+      expect(unsubscribe).toHaveBeenCalled();
+      m.stop();
+    });
   });
 });

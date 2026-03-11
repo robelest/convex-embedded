@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 
 import {
   LoopbackWebSocket,
@@ -489,6 +489,8 @@ describe("createTransport", () => {
   }
 
   describe("closeAll", () => {
+    afterEach(() => vi.useRealTimers());
+
     it("closes all active WebSocket connections", async () => {
       const transport = createTransport(stubRuntime());
 
@@ -524,27 +526,23 @@ describe("createTransport", () => {
 
     it("clears ping intervals so they don't leak", async () => {
       vi.useFakeTimers();
-      try {
-        const transport = createTransport(stubRuntime());
+      const transport = createTransport(stubRuntime());
 
-        const ws = new transport.webSocketConstructor("ws://a");
-        await flushMicrotasks();
+      const ws = new transport.webSocketConstructor("ws://a");
+      await flushMicrotasks();
 
-        const onmessage = vi.fn();
-        ws.onmessage = onmessage;
+      const onmessage = vi.fn();
+      ws.onmessage = onmessage;
 
-        // closeAll should clear the interval
-        transport.closeAll();
-        expect(ws.readyState).toBe(LoopbackWebSocket.CLOSED);
+      // closeAll should clear the interval
+      transport.closeAll();
+      expect(ws.readyState).toBe(LoopbackWebSocket.CLOSED);
 
-        // Advance time past the ping interval — no ping should fire.
-        vi.advanceTimersByTime(60_000);
+      // Advance time past the ping interval — no ping should fire.
+      vi.advanceTimersByTime(60_000);
 
-        // onmessage should not have been called (no Ping after close).
-        expect(onmessage).not.toHaveBeenCalled();
-      } finally {
-        vi.useRealTimers();
-      }
+      // onmessage should not have been called (no Ping after close).
+      expect(onmessage).not.toHaveBeenCalled();
     });
 
     it("is idempotent", async () => {

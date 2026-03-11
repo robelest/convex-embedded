@@ -19,18 +19,19 @@ class MockBroadcastChannel {
   }
 
   postMessage(data: any): void {
-    if (this._closed) return;
-    // BroadcastChannel delivers to OTHER instances with the same name
-    for (const inst of MockBroadcastChannel.instances) {
-      if (
-        inst !== this &&
-        inst.name === this.name &&
-        !inst._closed &&
-        inst.onmessage
-      ) {
-        inst.onmessage(new MessageEvent("message", { data }));
-      }
-    }
+    // Closed channels are silent
+    this._closed ||
+      MockBroadcastChannel.instances
+        .filter(
+          (inst) =>
+            inst !== this &&
+            inst.name === this.name &&
+            !inst._closed &&
+            inst.onmessage,
+        )
+        .forEach((inst) =>
+          inst.onmessage!(new MessageEvent("message", { data })),
+        );
   }
 
   close(): void {

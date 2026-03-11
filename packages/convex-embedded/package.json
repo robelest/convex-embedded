@@ -32,7 +32,7 @@
   },
   "scripts": {
     "build": "tsdown",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsgo --noEmit",
     "test": "bun --filter @robelest/convex-edge-tests test -- --project embedded",
     "test:once": "bun --filter @robelest/convex-edge-tests test:once -- --project embedded",
     "prepublishOnly": "bun run build"

@@ -45,7 +45,7 @@
   "scripts": {
     "build": "tsdown",
     "codegen": "convex codegen --component-dir ./src/component",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsgo --noEmit -p tsconfig.lib.json",
     "test": "bun --filter @robelest/convex-edge-tests test -- --project resolve",
     "test:once": "bun --filter @robelest/convex-edge-tests test:once -- --project resolve",
     "prepublishOnly": "bun run build"

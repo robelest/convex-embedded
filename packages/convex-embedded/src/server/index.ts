@@ -1,14 +1,27 @@
 /**
- * convex-resolve/server
+ * Server-side entry point for `@robelest/convex-embedded/server`.
  *
- * Server-side entry point. Import in your convex/ functions:
+ * Import in your `convex/` functions:
  *
- *   import { setup, schema, view, migration } from 'convex-resolve/server';
+ *   import { embeddedTable, setup } from "@robelest/convex-embedded/server";
+ *
+ * @packageDocumentation
  */
 
-// Setup — unified entry point for synced tables
-export { setup, SYNC_META } from "@/server/setup";
-export type { SetupConfig, TableDescriptor, SyncMeta } from "@/server/setup";
+// Core API — embeddedTable + setup
+export {
+  embeddedTable,
+  setup,
+  getTableRegistry,
+  _resetRegistry,
+  SYNC_META,
+} from "@/server/setup";
+export type {
+  SetupConfig,
+  EmbeddedTableHandle,
+  TableDescriptor,
+  SyncMeta,
+} from "@/server/setup";
 
 // Schema system — CRDT field types + versioning
 export {

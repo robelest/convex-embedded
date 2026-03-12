@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
 import { Fx } from "@robelest/fx";
+import { describe, expect, it } from "vitest";
 
 // ---------------------------------------------------------------------------
 // Test union types
@@ -18,11 +18,6 @@ type Event =
 class ParseError {
   readonly _tag = "ParseError" as const;
   constructor(readonly message: string) {}
-}
-
-class NetworkError {
-  readonly _tag = "NetworkError" as const;
-  constructor(readonly status: number) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -59,9 +54,7 @@ describe("Fx.match", () => {
   });
 
   it("works with _tag as the discriminant field", async () => {
-    type Tagged =
-      | { _tag: "A"; value: number }
-      | { _tag: "B"; label: string };
+    type Tagged = { _tag: "A"; value: number } | { _tag: "B"; label: string };
 
     const tagged: Tagged = { _tag: "B", label: "hello" };
 

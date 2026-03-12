@@ -1099,24 +1099,28 @@ describe("Integration: Error Cases", () => {
 
   it("patch on non-existent document throws", () => {
     const db = freshDb();
-    expect(() => db.patch("tasks", "00000000-0000-4000-8000-000000000000" as any, { x: 1 })).toThrow(
-      /non-existent/,
-    );
+    expect(() =>
+      db.patch("tasks", "00000000-0000-4000-8000-000000000000" as any, {
+        x: 1,
+      }),
+    ).toThrow(/non-existent/);
     db.rollbackWrites();
   });
 
   it("delete on non-existent document throws", () => {
     const db = freshDb();
-    expect(() => db.delete("tasks", "00000000-0000-4000-8000-000000000000" as any)).toThrow(
-      /non-existent/,
-    );
+    expect(() =>
+      db.delete("tasks", "00000000-0000-4000-8000-000000000000" as any),
+    ).toThrow(/non-existent/);
     db.rollbackWrites();
   });
 
   it("replace on non-existent document throws", () => {
     const db = freshDb();
     expect(() =>
-      db.replace("tasks", "00000000-0000-4000-8000-000000000000" as any, { title: "new" }),
+      db.replace("tasks", "00000000-0000-4000-8000-000000000000" as any, {
+        title: "new",
+      }),
     ).toThrow(/non-existent/);
     db.rollbackWrites();
   });
@@ -1124,9 +1128,9 @@ describe("Integration: Error Cases", () => {
   it("patch with mismatched _id throws", () => {
     const db = freshDb();
     const id = db.insert("tasks", { title: "a" });
-    expect(() => db.patch("tasks", id, { _id: "00000000-0000-4000-8000-000000000000" })).toThrow(
-      /does not match/,
-    );
+    expect(() =>
+      db.patch("tasks", id, { _id: "00000000-0000-4000-8000-000000000000" }),
+    ).toThrow(/does not match/);
     db.rollbackWrites();
   });
 
@@ -1134,7 +1138,10 @@ describe("Integration: Error Cases", () => {
     const db = freshDb();
     const id = db.insert("tasks", { title: "a" });
     expect(() =>
-      db.replace("tasks", id, { _id: "00000000-0000-4000-8000-000000000000", title: "b" }),
+      db.replace("tasks", id, {
+        _id: "00000000-0000-4000-8000-000000000000",
+        title: "b",
+      }),
     ).toThrow(/does not match/);
     db.rollbackWrites();
   });
@@ -1183,8 +1190,12 @@ describe("Integration: ID Format", () => {
     const id1 = db.insert("tasks", { title: "a" });
     const id2 = db.insert("users", { name: "b" });
 
-    expect(id1).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
-    expect(id2).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+    expect(id1).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
+    expect(id2).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+    );
     db.commit();
   });
 

@@ -227,8 +227,7 @@ describe("validateValidator", () => {
     });
 
     it("rejects an id for the wrong table", () => {
-      const lookup = (id: string) =>
-        id === "test-uuid" ? "users" : undefined;
+      const lookup = (id: string) => (id === "test-uuid" ? "users" : undefined);
       expect(() => validateValidator(validator, "test-uuid", lookup)).toThrow(
         /Expected ID for table/,
       );

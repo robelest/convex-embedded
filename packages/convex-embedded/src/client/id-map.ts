@@ -61,7 +61,11 @@ export class IdMap {
   /** Direct mutation bypass (avoids patched ConvexClient.mutation). */
   private _mutationFn: DirectMutationFn | null;
 
-  constructor(localClient: ConvexClient, queryFn?: DirectQueryFn, mutationFn?: DirectMutationFn) {
+  constructor(
+    localClient: ConvexClient,
+    queryFn?: DirectQueryFn,
+    mutationFn?: DirectMutationFn,
+  ) {
     this._localClient = localClient;
     this._queryFn = queryFn ?? null;
     this._mutationFn = mutationFn ?? null;
@@ -85,7 +89,10 @@ export class IdMap {
               Array<{ localId: string; remoteId: string; table: string }>
             >;
           }
-          return (this._localClient as any).query(SYS_ID_MAP_GET_ALL, {}) as Promise<
+          return (this._localClient as any).query(
+            SYS_ID_MAP_GET_ALL,
+            {},
+          ) as Promise<
             Array<{ localId: string; remoteId: string; table: string }>
           >;
         },
@@ -161,11 +168,11 @@ export class IdMap {
         ok: () =>
           this._mutationFn
             ? this._mutationFn(SYS_ID_MAP_SET, { localId, remoteId, table })
-            : (this._localClient as any).mutation(SYS_ID_MAP_SET, {
+            : ((this._localClient as any).mutation(SYS_ID_MAP_SET, {
                 localId,
                 remoteId,
                 table,
-              }) as Promise<unknown>,
+              }) as Promise<unknown>),
         err: (e) => e as Error,
       }).pipe(
         Fx.tap(() =>
@@ -198,9 +205,9 @@ export class IdMap {
         ok: () =>
           this._mutationFn
             ? this._mutationFn(SYS_ID_MAP_DELETE, { localId })
-            : (this._localClient as any).mutation(SYS_ID_MAP_DELETE, {
+            : ((this._localClient as any).mutation(SYS_ID_MAP_DELETE, {
                 localId,
-              }) as Promise<unknown>,
+              }) as Promise<unknown>),
         err: (e) => e as Error,
       }).pipe(
         Fx.inspect((err) =>

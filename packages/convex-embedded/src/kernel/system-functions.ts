@@ -29,10 +29,7 @@ import type { DocumentId, StoredDocument } from "@/core/types";
 // ---------------------------------------------------------------------------
 
 /** A system function receives the database and args, returns a result. */
-export type SystemFn = (
-  db: Database,
-  args: Record<string, unknown>,
-) => unknown;
+export type SystemFn = (db: Database, args: Record<string, unknown>) => unknown;
 
 /** System function descriptor with type and handler. */
 export interface SystemFunctionDef {
@@ -210,7 +207,12 @@ const idMapDelete: SystemFunctionDef = {
 const pendingPush: SystemFunctionDef = {
   type: "mutation",
   handler: (db, args) => {
-    const { ref, args: mutArgs, localResult, table } = args as {
+    const {
+      ref,
+      args: mutArgs,
+      localResult,
+      table,
+    } = args as {
       ref: string;
       args: string;
       localResult: string;
@@ -265,8 +267,7 @@ const pendingGetAll: SystemFunctionDef = {
     // Sort by _creationTime to preserve insertion order.
     results.sort(
       (a, b) =>
-        ((a._creationTime as number) ?? 0) -
-        ((b._creationTime as number) ?? 0),
+        ((a._creationTime as number) ?? 0) - ((b._creationTime as number) ?? 0),
     );
 
     return results;

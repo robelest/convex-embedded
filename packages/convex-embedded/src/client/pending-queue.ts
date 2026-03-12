@@ -76,7 +76,11 @@ export class PendingQueue {
   /** Direct mutation bypass (avoids patched ConvexClient.mutation()). */
   private _mutationFn: DirectMutationFn | null;
 
-  constructor(localClient: ConvexClient, queryFn?: DirectQueryFn, mutationFn?: DirectMutationFn) {
+  constructor(
+    localClient: ConvexClient,
+    queryFn?: DirectQueryFn,
+    mutationFn?: DirectMutationFn,
+  ) {
     this._localClient = localClient;
     this._queryFn = queryFn ?? null;
     this._mutationFn = mutationFn ?? null;
@@ -152,8 +156,7 @@ export class PendingQueue {
   ): Promise<void> {
     // Extract the function name from the FunctionReference.
     // getFunctionName also accepts plain strings as a passthrough.
-    const refName =
-      typeof ref === "string" ? ref : getFunctionName(ref as any);
+    const refName = typeof ref === "string" ? ref : getFunctionName(ref as any);
 
     const serialized = {
       ref: refName,
@@ -220,9 +223,9 @@ export class PendingQueue {
         ok: () =>
           this._mutationFn
             ? this._mutationFn(SYS_PENDING_REMOVE, { id: entry._id })
-            : (this._localClient as any).mutation(SYS_PENDING_REMOVE, {
+            : ((this._localClient as any).mutation(SYS_PENDING_REMOVE, {
                 id: entry._id,
-              }) as Promise<unknown>,
+              }) as Promise<unknown>),
         err: (e) => e as Error,
       }).pipe(
         Fx.inspect((err) =>
@@ -247,10 +250,10 @@ export class PendingQueue {
         ok: () =>
           this._mutationFn
             ? this._mutationFn(SYS_PENDING_CLEAR, {})
-            : (this._localClient as any).mutation(
+            : ((this._localClient as any).mutation(
                 SYS_PENDING_CLEAR,
                 {},
-              ) as Promise<unknown>,
+              ) as Promise<unknown>),
         err: (e) => e as Error,
       }).pipe(
         Fx.inspect((err) =>

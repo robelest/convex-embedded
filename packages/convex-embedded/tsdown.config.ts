@@ -38,6 +38,21 @@ export default defineConfig([
     outExtensions: jsExtensions,
     alias: srcAlias,
   },
+  // CRDT field constructors + runtime read helpers
+  {
+    entry: { "crdt/index": "src/crdt/index.ts" },
+    format: "esm",
+    outDir: "dist",
+    dts: true,
+    clean: false,
+    platform: "browser",
+    deps: {
+      neverBundle: [/^convex/, "yjs", "convex-helpers"],
+      alwaysBundle: ["@robelest/fx"],
+    },
+    outExtensions: jsExtensions,
+    alias: srcAlias,
+  },
   // Resolve client (browser) — sync engine
   {
     entry: { "client/index": "src/client/index.ts" },

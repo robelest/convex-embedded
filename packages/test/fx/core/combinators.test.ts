@@ -1,5 +1,5 @@
-import { afterEach, describe, it, expect, vi } from "vitest";
 import { Fx, TimeoutError } from "@robelest/fx";
+import { afterEach, describe, it, expect, vi } from "vitest";
 
 // ---------------------------------------------------------------------------
 // map
@@ -198,9 +198,7 @@ describe("Fx.fold", () => {
 
   it("always produces a successful Fx", async () => {
     expect(
-      await Fx.run(
-        Fx.fail("any").pipe(Fx.fold({ ok: () => 1, err: () => 2 })),
-      ),
+      await Fx.run(Fx.fail("any").pipe(Fx.fold({ ok: () => 1, err: () => 2 }))),
     ).toBe(2);
   });
 
@@ -254,11 +252,11 @@ describe("Fx.delay", () => {
   it("delays a failed computation equally", async () => {
     vi.useFakeTimers();
     const error = new Error("delayed fail");
-    const assertion = expect(
-      Fx.run(Fx.fail(error).pipe(Fx.delay(50))),
-    ).rejects.toBe(error);
+    const promise = Fx.run(Fx.fail(error).pipe(Fx.delay(50)));
+    // Suppress unhandled-rejection before advancing timers.
+    promise.catch(() => {});
     await vi.advanceTimersByTimeAsync(50);
-    await assertion;
+    await expect(promise).rejects.toBe(error);
   });
 });
 
@@ -291,8 +289,8 @@ describe("Fx.timeout", () => {
 
   it("timeout on an already-failed computation preserves the original error", async () => {
     const error = new Error("already failed");
-    await expect(
-      Fx.run(Fx.fail(error).pipe(Fx.timeout(1000))),
-    ).rejects.toBe(error);
+    await expect(Fx.run(Fx.fail(error).pipe(Fx.timeout(1000)))).rejects.toBe(
+      error,
+    );
   });
 });

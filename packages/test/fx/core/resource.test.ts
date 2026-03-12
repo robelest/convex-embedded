@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from "vitest";
 import { Fx, FxFatal } from "@robelest/fx";
+import { describe, it, expect, vi } from "vitest";
 
 // ---------------------------------------------------------------------------
 // Fx.bracket
@@ -27,7 +27,11 @@ describe("Fx.bracket", () => {
     );
 
     expect(result).toBe(42);
-    expect(log).toEqual(["acquire", "use:resource", "release:resource:Success"]);
+    expect(log).toEqual([
+      "acquire",
+      "use:resource",
+      "release:resource:Success",
+    ]);
   });
 
   it("releases on typed failure from use phase", async () => {
@@ -173,7 +177,9 @@ describe("Fx.bracket", () => {
           released(exit._tag);
           return Fx.unit;
         },
-      ).pipe(Fx.recover((err) => Fx.succeed(`recovered:${(err as Error).message}`))),
+      ).pipe(
+        Fx.recover((err) => Fx.succeed(`recovered:${(err as Error).message}`)),
+      ),
     );
 
     expect(released).toHaveBeenCalledWith("Failure");

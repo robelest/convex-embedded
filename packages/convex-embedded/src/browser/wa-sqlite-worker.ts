@@ -269,12 +269,9 @@ async function handleCommit(
               for (const id of deletes) {
                 yield* Fx.from({
                   ok: () =>
-                    execute(
-                      sqlite3,
-                      db,
-                      "DELETE FROM documents WHERE id = ?",
-                      [id],
-                    ),
+                    execute(sqlite3, db, "DELETE FROM documents WHERE id = ?", [
+                      id,
+                    ]),
                   err: (e) => e as Error,
                 });
               }

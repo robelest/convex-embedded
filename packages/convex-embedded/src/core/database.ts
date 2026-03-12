@@ -17,10 +17,7 @@ import { jsonToConvex } from "convex/values";
 import { QueryEngine } from "@/core/query-engine";
 import type { DocumentIterator } from "@/core/query-engine";
 import type { ParsedSchema } from "@/core/schema";
-import {
-  validateValidator,
-  validateSchemaDefinition,
-} from "@/core/schema";
+import { validateValidator, validateSchemaDefinition } from "@/core/schema";
 import type {
   DocumentId,
   QueryId,
@@ -439,7 +436,10 @@ export class Database {
     }
 
     const merged = { ...fields, ...convexValue };
-    this._validate(this._idTableMap.get(_id as string)!, merged as GenericDocument);
+    this._validate(
+      this._idTableMap.get(_id as string)!,
+      merged as GenericDocument,
+    );
     this._addWrite(id, { _id, _creationTime, ...merged });
   }
 

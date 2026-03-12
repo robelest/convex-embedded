@@ -1,12 +1,7 @@
 import { v } from "convex/values";
-
-import { register } from "./sync";
-import { taskSchema } from "./schema";
-
-const tasks = register("tasks", taskSchema);
+import { tasks } from "./schema";
 
 export const resolve = tasks.resolve;
-
 export const create = tasks.mutation({
   args: { title: v.string(), body: v.string() },
   handler: async (ctx, args) => {

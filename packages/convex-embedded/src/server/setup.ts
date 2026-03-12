@@ -1,37 +1,57 @@
 /**
- * setup() + register() — the single entry point for convex-resolve.
+ * embeddedTable() + setup() — the reimagined singularity API.
  *
- * `setup()` captures app-wide config (component, Convex builders) and
- * returns a `register()` factory. `register()` returns a table descriptor
- * with `resolve`, `mutation()`, and `query()` — everything needed to wire
- * a synced table with zero plumbing exports.
+ * `embeddedTable()` declares a synced table at schema-definition time. It
+ * returns an object that satisfies `defineSchema`'s shape contract AND
+ * exposes `.mutation()` / `.query()` builders that produce properly
+ * registered Convex functions. Each call registers the table in a
+ * module-level registry.
+ *
+ * `setup()` is an optional, side-effect-only call (e.g. in
+ * `convex/embedded.ts`). It binds the component reference to every
+ * table handle so that CRDT delta recording and resolve queries work
+ * against the real component. Function registration does NOT depend on
+ * `setup()` — `.mutation()` and `.query()` use `mutationGeneric` /
+ * `queryGeneric` directly.
  *
  * @example
  * ```ts
- * // convex/sync.ts — one-time per app
- * import { setup } from "@robelest/convex-embedded/server";
- * import { components } from "./_generated/api";
- * import { mutation, query } from "./_generated/server";
+ * // convex/schema.ts
+ * import { embeddedTable } from "@robelest/convex-embedded/server";
+ * import { schema } from "@robelest/convex-embedded/crdt";
+ * import { defineSchema, defineTable } from "convex/server";
+ * import { v } from "convex/values";
  *
- * export const register = setup({
- *   component: components.resolve,
- *   mutation,
- *   query,
+ * export const tasks = embeddedTable("tasks", {
+ *   title: schema.register(v.string()),
+ *   body:  schema.register(v.string()),
+ *   done:  v.boolean(),
+ * });
+ *
+ * export default defineSchema({
+ *   tasks,
+ *   analytics: defineTable({ event: v.string() }),
  * });
  * ```
  *
  * ```ts
- * // convex/tasks.ts — per synced table
- * import { register } from "./sync";
- * import { taskSchema } from "./schema";
+ * // convex/embedded.ts — binds the component for CRDT sync
+ * import { setup } from "@robelest/convex-embedded/server";
+ * import { components } from "./_generated/api";
  *
- * const tasks = register("tasks", taskSchema);
+ * setup({ component: components.embedded });
+ * ```
  *
- * export const resolve = tasks.resolve;
+ * ```ts
+ * // convex/tasks.ts — no import of embedded.ts needed
+ * import { tasks } from "./schema";
+ * import { v } from "convex/values";
+ *
  * export const create = tasks.mutation({
- *   args: { title: v.string() },
+ *   args: { title: v.string(), body: v.string() },
  *   handler: async (ctx, args) => ctx.db.insert("tasks", args),
  * });
+ *
  * export const list = tasks.query({
  *   args: {},
  *   handler: async (ctx) => ctx.db.query("tasks").collect(),
@@ -41,28 +61,82 @@
  * @module
  */
 import { Fx } from "@robelest/fx";
-import type { FunctionReference } from "convex/server";
+import type { FunctionReference, TableDefinition } from "convex/server";
+import { defineTable, mutationGeneric, queryGeneric } from "convex/server";
 import { v } from "convex/values";
 
 import type { Definition } from "@/server/schema";
-import { encodeDocumentState, computeDiff, isDiffEmpty } from "@/server/schema";
+import {
+  define,
+  isCrdtField,
+  encodeDocumentState,
+  computeDiff,
+  isDiffEmpty,
+} from "@/server/schema";
 import { createLogger } from "@/shared/logger";
 
 const log = createLogger("setup");
 
 // ---------------------------------------------------------------------------
-// SYNC_META — cross-package discovery symbol
+// Module-level registry
+// ---------------------------------------------------------------------------
+
+/**
+ * Global registry of all tables declared with `embeddedTable()`.
+ *
+ * Populated at import time (schema definition), read by `setup()` at
+ * initialization time. The browser-side discovery reads this registry
+ * via `getTableRegistry()` instead of scanning module exports.
+ *
+ * @internal
+ */
+const _registry = new Map<string, EmbeddedTableHandle>();
+
+/**
+ * Pending config stored by `setup()`.
+ *
+ * When `setup()` runs before `embeddedTable()` (e.g. due to ESM
+ * evaluation order in test environments), the config is stored here.
+ * Subsequent `embeddedTable()` calls auto-bind using this config so
+ * that evaluation order between `schema.ts` and `embedded.ts` does
+ * not matter.
+ *
+ * @internal
+ */
+let _pendingConfig: SetupConfig | undefined;
+
+/**
+ * Read-only snapshot of the table registry.
+ *
+ * Used by the browser entry point for auto-discovery and by `setup()`
+ * to bind builders.
+ *
+ * @internal
+ */
+export function getTableRegistry(): ReadonlyMap<string, EmbeddedTableHandle> {
+  return _registry;
+}
+
+/**
+ * Clear the module-level registry. For tests only.
+ *
+ * @internal
+ */
+export function _resetRegistry(): void {
+  _registry.clear();
+  _pendingConfig = undefined;
+}
+
+// ---------------------------------------------------------------------------
+// SYNC_META — cross-package discovery symbol (kept for backward compat)
 // ---------------------------------------------------------------------------
 
 /**
  * Global symbol used to tag the `resolve` export with sync metadata.
  *
- * The client-side discovery in `createConvexClient()` scans module
- * exports for this symbol to auto-discover synced tables — no separate
- * `__syncMeta` export needed.
- *
- * Uses `Symbol.for()` so the symbol is shared across package boundaries
- * without requiring an explicit import.
+ * @deprecated — The registry-based discovery in `embeddedTable()` +
+ * `setup()` replaces symbol scanning. Kept for backward compatibility
+ * with existing deployed modules.
  *
  * @internal
  */
@@ -75,23 +149,10 @@ export const SYNC_META = Symbol.for("convex-resolve:syncMeta");
  * auto-discovery. App code never reads this directly.
  */
 export interface SyncMeta {
-  /** Sentinel flag for module scanning. */
   readonly __brand: "convex-resolve:syncMeta";
-  /** Table name (e.g. `"tasks"`). */
   readonly table: string;
-  /** Schema definition for Yjs encode/materialize and omit stripping. */
   readonly schema: Definition;
-  /**
-   * The exported name of the resolve query in this module
-   * (always `"resolve"`). Used by the sync engine to build
-   * the function reference at runtime.
-   */
   readonly resolveExport: string;
-  /**
-   * The exported name of the list query that provides full-table
-   * materialized results for reactive subscriptions.
-   * `null` means "use `<module>:list` by convention".
-   */
   readonly listExport: string | null;
 }
 
@@ -99,24 +160,14 @@ export interface SyncMeta {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Safely convert a Uint8Array to a proper ArrayBuffer.
- * In some runtimes (e.g. edge-runtime used by convex-test), the
- * Uint8Array.buffer property doesn't return a native ArrayBuffer,
- * so we construct a fresh one and copy the bytes.
- */
+/** Safely convert a Uint8Array to a proper ArrayBuffer. */
 function toArrayBuffer(data: Uint8Array): ArrayBuffer {
   const buf = new ArrayBuffer(data.byteLength);
   new Uint8Array(buf).set(data);
   return buf;
 }
 
-/**
- * Extract a document ID from mutation result or args.
- *
- * Mutations that return an Id (insert) or receive one in args
- * (patch/delete) are tracked automatically for delta recording.
- */
+/** Extract a document ID from mutation result or args. */
 function extractDocId(result: any, args: any): string | null {
   if (typeof result === "string") return result;
   if (args?.id && typeof args.id === "string") return args.id;
@@ -131,99 +182,53 @@ function extractDocId(result: any, args: any): string | null {
 
 interface ResolveComponentApi {
   public: {
-    insertDelta: FunctionReference<"mutation">;
-    getLatestDelta: FunctionReference<"query">;
-    getLatestDeltas: FunctionReference<"query">;
-    cleanup: FunctionReference<"mutation">;
+    insertDelta: FunctionReference<"mutation", any>;
+    getLatestDelta: FunctionReference<"query", any>;
+    getLatestDeltas: FunctionReference<"query", any>;
+    cleanup: FunctionReference<"mutation", any>;
   };
 }
 
 /**
  * Configuration for {@link setup}.
  *
- * @remarks
- * Pass this once per app — typically in `convex/sync.ts`. The returned
- * `register()` factory inherits these settings for every table.
+ * Call once per app in `convex/embedded.ts`. Binds the component
+ * reference to every table in the registry so that CRDT delta
+ * recording and resolve queries work against the real component.
  *
- * @example
- * ```ts
- * import { setup } from "@robelest/convex-embedded/server";
- * import { components } from "./_generated/api";
- * import { mutation, query } from "./_generated/server";
- *
- * export const register = setup({
- *   component: components.resolve,
- *   mutation,
- *   query,
- * });
- * ```
+ * Function registration does not depend on `setup()`. The
+ * `.mutation()` and `.query()` builders use `mutationGeneric` /
+ * `queryGeneric` from `convex/server` directly.
  */
 export interface SetupConfig {
-  /**
-   * Convex component reference — required on remote, absent on local.
-   *
-   * `componentsGeneric()` returns a Proxy where every property access is
-   * truthy, so `!!component` is always true even on the embedded runtime.
-   * Runtime detection uses `detectRuntime()` at handler execution time.
-   */
+  /** Convex component reference (`components.embedded`). */
   component?: ResolveComponentApi;
-
-  /**
-   * The `mutation` builder from `_generated/server`.
-   *
-   * Used by `tasks.mutation()` to produce registered Convex mutations.
-   * When absent, `tasks.mutation()` returns raw `{ args, handler }` objects
-   * (useful in unit tests).
-   */
-  mutation?: (def: any) => any;
-
-  /**
-   * The `query` builder from `_generated/server`.
-   *
-   * Used by `tasks.query()` and internally to wrap `resolve`.
-   * When absent, returns raw `{ args, handler }` objects.
-   */
-  query?: (def: any) => any;
 }
 
 /**
- * A table descriptor returned by `register()`.
+ * The handle returned by `embeddedTable()`.
  *
- * @remarks
- * Contains everything needed to define a synced table's exports:
- * a pre-wrapped `resolve` query (tagged with sync metadata for
- * client auto-discovery), and `mutation()` / `query()` builders
- * that handle delta recording and `remote:` blocks.
- *
- * @example
- * ```ts
- * const tasks = register("tasks", taskSchema);
- *
- * export const resolve = tasks.resolve;
- * export const create = tasks.mutation({
- *   args: { title: v.string() },
- *   handler: async (ctx, args) => ctx.db.insert("tasks", args),
- * });
- * ```
+ * Doubles as a valid shape entry for `defineSchema()` (via the stored
+ * validators) and as a builder for per-table mutations and queries.
  */
-export interface TableDescriptor {
+export interface EmbeddedTableHandle {
+  /** Table name. */
+  readonly table: string;
+  /** Schema definition (CRDT metadata, version, shape). */
+  readonly schema: Definition;
+
   /**
-   * Pre-wrapped resolve query — export this from your module.
-   *
-   * Tagged with {@link SYNC_META} for client-side auto-discovery.
-   * The client scans module exports for this symbol to find synced tables.
+   * The auto-generated resolve query. Tagged with {@link SYNC_META}.
+   * After `setup()` runs this is a registered Convex query; before
+   * `setup()` it is a raw `{ args, handler }` definition.
    */
   resolve: any;
 
   /**
-   * Wrap a mutation definition with delta recording and `remote:` support.
+   * Wrap a mutation with delta recording and `remote:` support.
    *
-   * On remote Convex: runs handler → runs `remote:` block (same
-   * transaction) → records Yjs delta to the component.
+   * On remote Convex: runs handler -> `remote:` block -> records delta.
    * On local embedded: runs handler only.
-   *
-   * @param def - Standard Convex mutation definition with optional `remote:` key.
-   * @returns A registered Convex mutation (or raw definition if no builder was provided).
    */
   mutation(def: {
     args: Record<string, any>;
@@ -233,13 +238,10 @@ export interface TableDescriptor {
   }): any;
 
   /**
-   * Wrap a query definition with `remote:` support.
+   * Wrap a query with `remote:` support.
    *
-   * On remote Convex: runs handler → runs `remote:` block with result.
+   * On remote Convex: runs handler -> `remote:` block.
    * On local embedded: runs handler only.
-   *
-   * @param def - Standard Convex query definition with optional `remote:` key.
-   * @returns A registered Convex query (or raw definition if no builder was provided).
    */
   query(def: {
     args: Record<string, any>;
@@ -249,244 +251,268 @@ export interface TableDescriptor {
   }): any;
 }
 
+// Keep the old name as an alias so existing tests that import
+// `TableDescriptor` continue to compile.
+export type TableDescriptor = TableDefinition & EmbeddedTableHandle;
+
 // ---------------------------------------------------------------------------
-// setup()
+// embeddedTable()
 // ---------------------------------------------------------------------------
 
 /**
- * Create a `register()` factory for synced tables.
+ * Extract the raw Convex validator from a shape entry.
  *
- * Call once per app to capture the component reference and Convex builders.
- * The returned `register(table, schema)` function creates table descriptors
- * with `resolve`, `mutation()`, and `query()`.
- *
- * @param config - App-wide configuration.
- * @returns A `register(table, schema)` factory function.
- *
- * @example
- * ```ts
- * // convex/sync.ts
- * import { setup } from "@robelest/convex-embedded/server";
- * import { components } from "./_generated/api";
- * import { mutation, query } from "./_generated/server";
- *
- * export const register = setup({
- *   component: components.resolve,
- *   mutation,
- *   query,
- * });
- * ```
+ * CRDT field descriptors carry a `.validator` property; plain values
+ * (from `v.string()`, etc.) are already validators.
  */
-export function setup(config: SetupConfig) {
-  const {
-    component,
-    mutation: baseMutation,
-    query: baseQuery,
-  } = config;
+function extractValidator(value: unknown): any {
+  if (isCrdtField(value)) return value.validator;
+  return value;
+}
 
-  /**
-   * Register a table for sync.
-   *
-   * @param table - Table name in `convex/schema.ts`.
-   * @param schema - Versioned schema definition from `schema.define()`.
-   * @returns A {@link TableDescriptor} with `resolve`, `mutation()`, and `query()`.
-   *
-   * @example
-   * ```ts
-   * const tasks = register("tasks", taskSchema);
-   * export const resolve = tasks.resolve;
-   * export const create = tasks.mutation({ args: {...}, handler: ... });
-   * ```
-   */
-  function register(table: string, schema: Definition): TableDescriptor {
-    const schemaDef = schema;
+/**
+ * Declare a synced table.
+ *
+ * Call at schema-definition time (typically in `convex/schema.ts`).
+ * The shape mixes CRDT field descriptors (`schema.register(v)`,
+ * `schema.prose()`, etc.) with plain Convex validators (`v.boolean()`).
+ * Plain validators become last-write-wins fields.
+ *
+ * The return value IS a `TableDefinition` (from `defineTable`) with
+ * `.mutation()`, `.query()`, `.table`, and `.schema` patched on. Pass
+ * it directly to `defineSchema()` — Convex sees a normal table.
+ *
+ * @param table - Table name (must match the key used in `defineSchema`).
+ * @param shape - Field shape. Each value is either a CRDT descriptor
+ *   (from `schema.*`) or a plain Convex validator (from `v.*`).
+ * @param options - Optional version and history for migration support.
+ */
+export function embeddedTable(
+  tableName: string,
+  shape: Record<string, unknown>,
+  options?: {
+    version?: number;
+    history?: Record<number, Record<string, unknown>>;
+    defaults?: Record<string, unknown>;
+  },
+): TableDefinition & EmbeddedTableHandle {
+  // Build the Definition from the shape.
+  const schemaDef = define({
+    version: options?.version ?? 1,
+    shape,
+    history: options?.history,
+    defaults: options?.defaults,
+  });
 
-    // Runtime detection — deferred to first handler invocation.
-    // `componentsGeneric()` returns a Proxy that is truthy for every
-    // property access, so we probe the component at execution time.
-    let _runtimeKnown = false;
-    let _isRemote = false;
+  // Extract raw validators for Convex's defineTable().
+  const validators: Record<string, any> = {};
+  for (const [key, value] of Object.entries(shape)) {
+    validators[key] = extractValidator(value);
+  }
 
-    async function detectRuntime(ctx: any): Promise<boolean> {
-      if (_runtimeKnown) return _isRemote;
+  // Create a real TableDefinition that satisfies defineSchema().
+  const tableDef = defineTable(validators) as any;
 
-      if (!component) {
-        _runtimeKnown = true;
-        _isRemote = false;
-        log.info(`detectRuntime(${table}): component is falsy → local`);
-        return false;
-      }
+  // --- Component slot (filled by setup()) ---
+  let _component: ResolveComponentApi | undefined;
+  let _bound = false;
 
-      await Fx.run(
-        Fx.from({
-          ok: () =>
-            ctx.runQuery(component.public.getLatestDeltas, {
-              collection: table,
-              docIds: [],
-            }),
-          err: (e) => e,
-        }).pipe(
-          Fx.fold({
-            ok: () => {
-              _runtimeKnown = true;
-              _isRemote = true;
-              log.info(`detectRuntime(${table}): component resolved → remote`);
-            },
-            err: () => {
-              _runtimeKnown = true;
-              _isRemote = false;
-              log.info(
-                `detectRuntime(${table}): component unavailable → local`,
-              );
-            },
-          }),
-        ),
-      );
+  // Runtime detection — deferred to first handler invocation.
+  let _runtimeKnown = false;
+  let _isRemote = false;
 
-      return _isRemote;
+  async function detectRuntime(ctx: any): Promise<boolean> {
+    if (_runtimeKnown) return _isRemote;
+
+    if (!_component) {
+      _runtimeKnown = true;
+      _isRemote = false;
+      return false;
     }
 
-    log.info(
-      `register() table="${table}" version=${schemaDef.version} (runtime detection deferred)`,
-    );
-
-    // -------------------------------------------------------------------
-    // Record delta — inline helper (no longer a separate exported mutation)
-    // -------------------------------------------------------------------
-
-    async function recordDeltaInline(
-      ctx: any,
-      docId: string,
-    ): Promise<void> {
-      await Fx.run(
-        Fx.from({
-          ok: async () => {
-            const doc = await ctx.db.get(docId);
-            if (!doc) {
-              log.warn(
-                `recordDelta: document ${docId} not found in table "${table}"`,
-              );
-              return;
-            }
-
-            const update = encodeDocumentState(schemaDef, doc);
-
-            await ctx.runMutation(component!.public.insertDelta, {
-              collection: table,
-              docId,
-              update: toArrayBuffer(update),
-            });
-
-            log.debug(
-              `recordDelta: recorded delta for ${table}/${docId} (${update.byteLength} bytes)`,
+    await Fx.run(
+      Fx.from({
+        ok: () =>
+          ctx.runQuery(_component!.public.getLatestDeltas, {
+            collection: tableName,
+            docIds: [],
+          }),
+        err: (e) => e,
+      }).pipe(
+        Fx.fold({
+          ok: () => {
+            _runtimeKnown = true;
+            _isRemote = true;
+            log.info(
+              `detectRuntime(${tableName}): component resolved → remote`,
             );
           },
-          err: (err) => err,
-        }).pipe(
-          Fx.inspect((err) =>
-            Fx.sync(() =>
-              log.error(`recordDelta: failed for ${table}/${docId}`, err),
-            ),
+          err: () => {
+            _runtimeKnown = true;
+            _isRemote = false;
+            log.info(
+              `detectRuntime(${tableName}): component unavailable → local`,
+            );
+          },
+        }),
+      ),
+    );
+
+    return _isRemote;
+  }
+
+  // Record delta inline.
+  async function recordDeltaInline(ctx: any, docId: string): Promise<void> {
+    await Fx.run(
+      Fx.from({
+        ok: async () => {
+          const doc = await ctx.db.get(docId);
+          if (!doc) {
+            log.warn(
+              `recordDelta: document ${docId} not found in table "${tableName}"`,
+            );
+            return;
+          }
+
+          const update = encodeDocumentState(schemaDef, doc);
+
+          await ctx.runMutation(_component!.public.insertDelta, {
+            collection: tableName,
+            docId,
+            update: toArrayBuffer(update),
+          });
+
+          log.debug(
+            `recordDelta: recorded delta for ${tableName}/${docId} (${update.byteLength} bytes)`,
+          );
+        },
+        err: (err) => err,
+      }).pipe(
+        Fx.inspect((err) =>
+          Fx.sync(() =>
+            log.error(`recordDelta: failed for ${tableName}/${docId}`, err),
           ),
-          Fx.recover(() => Fx.unit),
         ),
+        Fx.recover(() => Fx.unit),
+      ),
+    );
+  }
+
+  // Resolve definition — auto-generated CRDT catch-up query.
+  const resolveDefinition = {
+    args: {
+      documents: v.array(
+        v.object({
+          docId: v.string(),
+          vector: v.bytes(),
+        }),
+      ),
+    },
+    handler: async (
+      ctx: any,
+      args: { documents: Array<{ docId: string; vector: ArrayBuffer }> },
+    ): Promise<Array<{ docId: string; diff?: ArrayBuffer }>> => {
+      if (!(await detectRuntime(ctx))) {
+        return args.documents.map((d) => ({ docId: d.docId }));
+      }
+
+      const docIds = args.documents.map((d) => d.docId);
+
+      const latestDeltas = await ctx.runQuery(
+        _component!.public.getLatestDeltas,
+        { collection: tableName, docIds },
       );
-    }
 
-    // -------------------------------------------------------------------
-    // resolve — one-shot CRDT catch-up query
-    // -------------------------------------------------------------------
+      const results = await Fx.run(
+        Fx.each(
+          args.documents.map(
+            (doc: { docId: string; vector: ArrayBuffer }, i: number) => ({
+              ...doc,
+              latest: latestDeltas[i],
+            }),
+          ),
+          ({ docId, vector, latest }) => {
+            if (!latest) {
+              return Fx.succeed({ docId } as {
+                docId: string;
+                diff?: ArrayBuffer;
+              });
+            }
 
-    const resolveDefinition = {
-      args: {
-        documents: v.array(
-          v.object({
-            docId: v.string(),
-            vector: v.bytes(),
-          }),
-        ),
-      },
-      handler: async (
-        ctx: any,
-        args: { documents: Array<{ docId: string; vector: ArrayBuffer }> },
-      ): Promise<Array<{ docId: string; diff?: ArrayBuffer }>> => {
-        if (!(await detectRuntime(ctx))) {
-          return args.documents.map((d) => ({ docId: d.docId }));
-        }
+            return Fx.from({
+              ok: () => {
+                const serverUpdate = new Uint8Array(latest.update);
+                const clientVector = new Uint8Array(vector);
+                const diff = computeDiff(serverUpdate, clientVector);
 
-        const docIds = args.documents.map((d) => d.docId);
-
-        const latestDeltas = await ctx.runQuery(
-          component!.public.getLatestDeltas,
-          { collection: table, docIds },
-        );
-
-        const results = await Fx.run(
-          Fx.each(
-            args.documents.map(
-              (doc: { docId: string; vector: ArrayBuffer }, i: number) => ({
-                ...doc,
-                latest: latestDeltas[i],
-              }),
-            ),
-            ({ docId, vector, latest }) => {
-              if (!latest) {
-                return Fx.succeed({ docId } as {
+                if (isDiffEmpty(diff)) {
+                  return { docId } as { docId: string; diff?: ArrayBuffer };
+                }
+                return { docId, diff: toArrayBuffer(diff) } as {
                   docId: string;
                   diff?: ArrayBuffer;
-                });
-              }
-
-              return Fx.from({
-                ok: () => {
-                  const serverUpdate = new Uint8Array(latest.update);
-                  const clientVector = new Uint8Array(vector);
-                  const diff = computeDiff(serverUpdate, clientVector);
-
-                  if (isDiffEmpty(diff)) {
-                    return { docId } as { docId: string; diff?: ArrayBuffer };
-                  }
-                  return { docId, diff: toArrayBuffer(diff) } as {
-                    docId: string;
-                    diff?: ArrayBuffer;
-                  };
-                },
-                err: (e) => e as Error,
-              }).pipe(
-                Fx.inspect((err) =>
-                  Fx.sync(() =>
-                    log.error(
-                      `resolve: failed to compute diff for ${table}/${docId}`,
-                      err,
-                    ),
+                };
+              },
+              err: (e) => e as Error,
+            }).pipe(
+              Fx.inspect((err) =>
+                Fx.sync(() =>
+                  log.error(
+                    `resolve: failed to compute diff for ${tableName}/${docId}`,
+                    err,
                   ),
                 ),
-                Fx.recover(
-                  () =>
-                    Fx.succeed({ docId } as {
-                      docId: string;
-                      diff?: ArrayBuffer;
-                    }),
-                ),
-              );
-            },
-          ),
-        );
+              ),
+              Fx.recover(() =>
+                Fx.succeed({ docId } as {
+                  docId: string;
+                  diff?: ArrayBuffer;
+                }),
+              ),
+            );
+          },
+        ),
+      );
 
-        return results;
-      },
-    };
+      return results;
+    },
+  };
 
-    // Wrap with the query builder if available, tag with SyncMeta.
-    const resolve = baseQuery
-      ? baseQuery(resolveDefinition)
-      : resolveDefinition;
+  // --- Patch methods onto the TableDefinition instance ---
 
-    // Tag with SyncMeta for client-side auto-discovery.
-    Object.defineProperty(resolve, SYNC_META, {
+  // Build resolve as a registered Convex query immediately.
+  tableDef._resolveRaw = queryGeneric(resolveDefinition);
+  tagResolve(tableDef._resolveRaw);
+
+  Object.defineProperty(tableDef, "table", {
+    value: tableName,
+    enumerable: false,
+    configurable: false,
+  });
+
+  Object.defineProperty(tableDef, "schema", {
+    value: schemaDef,
+    enumerable: false,
+    configurable: false,
+  });
+
+  Object.defineProperty(tableDef, "resolve", {
+    get() {
+      return tableDef._resolveRaw;
+    },
+    set(val: any) {
+      tableDef._resolveRaw = val;
+    },
+    enumerable: false,
+    configurable: true,
+  });
+
+  // Tag resolve with SyncMeta for backward-compatible symbol scanning.
+  function tagResolve(resolveObj: any): void {
+    Object.defineProperty(resolveObj, SYNC_META, {
       value: {
         __brand: "convex-resolve:syncMeta" as const,
-        table,
+        table: tableName,
         schema: schemaDef,
         resolveExport: "resolve",
         listExport: null,
@@ -494,85 +520,137 @@ export function setup(config: SetupConfig) {
       enumerable: false,
       configurable: false,
     });
-
-    // -------------------------------------------------------------------
-    // mutation() — wraps a mutation with delta recording + remote: key
-    // -------------------------------------------------------------------
-
-    function mutation(def: {
-      args: Record<string, any>;
-      returns?: any;
-      handler: (ctx: any, args: any) => any;
-      remote?: (ctx: any, args: any, result: any) => any;
-    }): any {
-      const { args, returns, handler, remote } = def;
-
-      const functionDef: any = {
-        args,
-        ...(returns !== undefined ? { returns } : {}),
-        handler: async (ctx: any, fnArgs: any) => {
-          // 1. Run the app handler.
-          const result = await handler(ctx, fnArgs);
-
-          // 2. Detect runtime — skip if no remote: block and no component.
-          const isRemote = (remote || component)
-            ? await detectRuntime(ctx)
-            : false;
-
-          // 3. On remote, run the remote: block in the same transaction.
-          if (isRemote && remote) {
-            await remote(ctx, fnArgs, result);
-          }
-
-          // 4. On remote, record the Yjs delta inline (same transaction).
-          if (isRemote && component) {
-            const docId = extractDocId(result, fnArgs);
-            if (docId) {
-              await recordDeltaInline(ctx, docId);
-            }
-          }
-
-          return result;
-        },
-      };
-
-      return baseMutation ? baseMutation(functionDef) : functionDef;
-    }
-
-    // -------------------------------------------------------------------
-    // query() — wraps a query with remote: key support
-    // -------------------------------------------------------------------
-
-    function query(def: {
-      args: Record<string, any>;
-      returns?: any;
-      handler: (ctx: any, args: any) => any;
-      remote?: (ctx: any, args: any, result: any) => any;
-    }): any {
-      const { args, returns, handler, remote } = def;
-
-      const functionDef: any = {
-        args,
-        ...(returns !== undefined ? { returns } : {}),
-        handler: async (ctx: any, fnArgs: any) => {
-          let result = await handler(ctx, fnArgs);
-
-          if (remote) {
-            const isRemote = await detectRuntime(ctx);
-            if (isRemote) {
-              result = await remote(ctx, fnArgs, result);
-            }
-          }
-
-          return result;
-        },
-      };
-
-      return baseQuery ? baseQuery(functionDef) : functionDef;
-    }
-
-    return { resolve, mutation, query };
   }
 
-  return register;
+  // mutation()
+  tableDef.mutation = function mutationBuilder(def: {
+    args: Record<string, any>;
+    returns?: any;
+    handler: (ctx: any, args: any) => any;
+    remote?: (ctx: any, args: any, result: any) => any;
+  }): any {
+    const { args, returns, handler, remote } = def;
+
+    return mutationGeneric({
+      args,
+      ...(returns !== undefined ? { returns } : {}),
+      handler: async (ctx: any, fnArgs: any) => {
+        const result = await handler(ctx, fnArgs);
+
+        const isRemote =
+          remote || _component ? await detectRuntime(ctx) : false;
+
+        if (isRemote && remote) {
+          await remote(ctx, fnArgs, result);
+        }
+
+        if (isRemote && _component) {
+          const docId = extractDocId(result, fnArgs);
+          if (docId) {
+            await recordDeltaInline(ctx, docId);
+          }
+        }
+
+        return result;
+      },
+    });
+  };
+
+  // query()
+  tableDef.query = function queryBuilder(def: {
+    args: Record<string, any>;
+    returns?: any;
+    handler: (ctx: any, args: any) => any;
+    remote?: (ctx: any, args: any, result: any) => any;
+  }): any {
+    const { args, returns, handler, remote } = def;
+
+    return queryGeneric({
+      args,
+      ...(returns !== undefined ? { returns } : {}),
+      handler: async (ctx: any, fnArgs: any) => {
+        let result = await handler(ctx, fnArgs);
+
+        if (remote) {
+          const isRemote = await detectRuntime(ctx);
+          if (isRemote) {
+            result = await remote(ctx, fnArgs, result);
+          }
+        }
+
+        return result;
+      },
+    });
+  };
+
+  // Internal binding hook — called by setup().
+  Object.defineProperty(tableDef, "_bind", {
+    value: (config: SetupConfig) => {
+      if (_bound) return;
+      _component = config.component;
+      _bound = true;
+
+      log.info(
+        `embeddedTable("${tableName}") bound — version=${schemaDef.version}`,
+      );
+    },
+    enumerable: false,
+    configurable: false,
+  });
+
+  // Register in the global registry.
+  if (_registry.has(tableName)) {
+    log.warn(
+      `embeddedTable("${tableName}") called twice — overwriting previous registration`,
+    );
+  }
+  _registry.set(tableName, tableDef as TableDefinition & EmbeddedTableHandle);
+
+  // Late-bind: if setup() ran before this registration, apply the
+  // stored config now. This handles ESM evaluation order where
+  // embedded.ts (setup) is evaluated before schema.ts (embeddedTable).
+  if (_pendingConfig) {
+    (tableDef as any)._bind(_pendingConfig);
+  }
+
+  log.info(
+    `embeddedTable("${tableName}") registered — version=${schemaDef.version}`,
+  );
+
+  return tableDef as TableDefinition & EmbeddedTableHandle;
+}
+
+// ---------------------------------------------------------------------------
+// setup() — side-effect-only binding
+// ---------------------------------------------------------------------------
+
+/**
+ * Bind the component reference to all registered embedded tables.
+ *
+ * Call once per app in a dedicated file (e.g. `convex/embedded.ts`).
+ * This enables CRDT delta recording and resolve queries against the
+ * real component. Function registration does not depend on this call —
+ * `.mutation()` and `.query()` use `mutationGeneric` / `queryGeneric`
+ * from `convex/server` directly and produce registered functions at
+ * definition time.
+ *
+ * @param config - Component reference.
+ *
+ * @example
+ * ```ts
+ * // convex/embedded.ts
+ * import { setup } from "@robelest/convex-embedded/server";
+ * import { components } from "./_generated/api";
+ *
+ * setup({ component: components.embedded });
+ * ```
+ */
+export function setup(config: SetupConfig): void {
+  // Store the config so that tables registered after this call
+  // (due to ESM evaluation order) can auto-bind.
+  _pendingConfig = config;
+
+  for (const [_table, handle] of _registry) {
+    (handle as any)._bind(config);
+  }
 }

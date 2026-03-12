@@ -1,5 +1,5 @@
-import { describe, it, expect, vi } from "vitest";
 import { Fx } from "@robelest/fx";
+import { describe, it, expect, vi } from "vitest";
 
 // ---------------------------------------------------------------------------
 // Fx.pipe (standalone utility)
@@ -140,7 +140,8 @@ describe("Fx.detach", () => {
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
     // detach returns void synchronously — even a rejecting fn must not throw
-    const act = () => Fx.detach(() => Promise.reject(new Error("ignored")), "[safe]");
+    const act = () =>
+      Fx.detach(() => Promise.reject(new Error("ignored")), "[safe]");
     expect(act).not.toThrow();
 
     // wait for the background rejection to be caught and logged

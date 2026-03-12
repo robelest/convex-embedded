@@ -46,7 +46,7 @@
  * const name: string = await Fx.run(getName);
  * ```
  */
-export { Fx, TimeoutError } from "./core.js";
-export type { Result, Exit } from "./types.js";
-export { FxFatal } from "./types.js";
-export type { RetryPolicy } from "./schedule.js";
+export { Fx, TimeoutError } from "./core";
+export type { Result, Exit } from "./types";
+export { FxFatal } from "./types";
+export type { RetryPolicy } from "./schedule";

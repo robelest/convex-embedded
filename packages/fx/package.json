@@ -13,12 +13,9 @@
     "zero-dependency"
   ],
   "license": "MIT",
-  "publishConfig": {
-    "access": "public"
-  },
   "repository": {
     "type": "git",
-    "url": "https://github.com/robelest/convex-edge.git",
+    "url": "https://github.com/robelest/convex-embedded.git",
     "directory": "packages/fx"
   },
   "files": [
@@ -32,11 +29,14 @@
       "import": "./dist/index.mjs"
     }
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsdown",
     "typecheck": "tsgo --noEmit",
-    "test": "bun --filter @robelest/convex-edge-tests test -- --project fx",
-    "test:once": "bun --filter @robelest/convex-edge-tests test:once -- --project fx",
+    "test": "bun --filter @robelest/embedded-tests test -- --project fx",
+    "test:once": "bun --filter @robelest/embedded-tests test:once -- --project fx",
     "prepublishOnly": "bun run build"
   },
   "devDependencies": {

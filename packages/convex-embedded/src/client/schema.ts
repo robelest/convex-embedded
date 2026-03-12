@@ -10,9 +10,9 @@
  */
 import * as Y from "yjs";
 
-import { createConflict } from "@/shared/conflict";
 import type { Definition } from "@/server/schema";
 import { getCrdtType } from "@/server/schema";
+import { createConflict } from "@/shared/conflict";
 import { CrdtType } from "@/shared/types";
 import type { Conflict, ConflictEntry } from "@/shared/types";
 

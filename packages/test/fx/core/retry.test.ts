@@ -1,5 +1,5 @@
-import { describe, it, expect, vi, afterEach } from "vitest";
 import { Fx } from "@robelest/fx";
+import { describe, it, expect, vi, afterEach } from "vitest";
 
 // ---------------------------------------------------------------------------
 // retry policies
@@ -87,7 +87,9 @@ describe("Fx.retry.compose", () => {
   });
 
   it("stops when delay policy returns null", () => {
-    const delayThatStops = { next: (attempt: number) => (attempt < 1 ? 50 : null) };
+    const delayThatStops = {
+      next: (attempt: number) => (attempt < 1 ? 50 : null),
+    };
     const composed = Fx.retry.compose(delayThatStops, Fx.retry.recurs(10));
     expect(composed.next(0, null)).toBe(50);
     expect(composed.next(1, null)).toBeNull();
@@ -117,13 +119,10 @@ describe("Fx.retry.while", () => {
 
   it("receives the typed error in the predicate during retry", () => {
     const seenErrors: string[] = [];
-    const policy = Fx.retry.while<string>(
-      Fx.retry.recurs(5),
-      (meta) => {
-        seenErrors.push(meta.input);
-        return meta.input !== "fatal-error";
-      },
-    );
+    const policy = Fx.retry.while<string>(Fx.retry.recurs(5), (meta) => {
+      seenErrors.push(meta.input);
+      return meta.input !== "fatal-error";
+    });
 
     // Simulate calling next with different errors on each attempt
     expect(policy.next(0, "transient-1")).toBe(0);
@@ -162,9 +161,9 @@ describe("Fx.retry (combinator)", () => {
       return Fx.fail(`fail-${attempt}`);
     });
 
-    await expect(
-      Fx.run(fx.pipe(Fx.retry(Fx.retry.recurs(2)))),
-    ).rejects.toBe("fail-3"); // initial + 2 retries = 3 attempts
+    await expect(Fx.run(fx.pipe(Fx.retry(Fx.retry.recurs(2))))).rejects.toBe(
+      "fail-3",
+    ); // initial + 2 retries = 3 attempts
   });
 
   it("does not retry on FxFatal", async () => {
@@ -237,13 +236,10 @@ describe("Fx.retry (combinator)", () => {
 
   it("retry with jittered(exponential) + recurs composes correctly", async () => {
     let attempt = 0;
-    const errors: string[] = [];
 
     const fx = Fx.defer(() => {
       attempt++;
-      return attempt <= 3
-        ? Fx.fail(`err-${attempt}`)
-        : Fx.succeed("jitter-ok");
+      return attempt <= 3 ? Fx.fail(`err-${attempt}`) : Fx.succeed("jitter-ok");
     });
 
     // Seed Math.random to return 0.5 (jitter multiplier = 0.75 + 0.5*0.5 = 1.0)
@@ -262,19 +258,23 @@ describe("Fx.retry (combinator)", () => {
 
     // With Math.random() = 0.5 → jitter multiplier = 1.0
     // So delays are exactly the exponential values
-    expect(delays[0]).toBe(10);  // 10 * 2^0 * 1.0
-    expect(delays[1]).toBe(20);  // 10 * 2^1 * 1.0
-    expect(delays[2]).toBe(40);  // 10 * 2^2 * 1.0
-    expect(delays[3]).toBe(80);  // 10 * 2^3 * 1.0
+    expect(delays[0]).toBe(10); // 10 * 2^0 * 1.0
+    expect(delays[1]).toBe(20); // 10 * 2^1 * 1.0
+    expect(delays[2]).toBe(40); // 10 * 2^2 * 1.0
+    expect(delays[3]).toBe(80); // 10 * 2^3 * 1.0
     expect(delays[4]).toBe(160); // 10 * 2^4 * 1.0
 
     // Now run the actual Fx to verify end-to-end behavior
-    const result = await Fx.run(fx.pipe(Fx.retry(
-      Fx.retry.compose(
-        Fx.retry.jittered(Fx.retry.exponential(1)),
-        Fx.retry.recurs(5),
+    const result = await Fx.run(
+      fx.pipe(
+        Fx.retry(
+          Fx.retry.compose(
+            Fx.retry.jittered(Fx.retry.exponential(1)),
+            Fx.retry.recurs(5),
+          ),
+        ),
       ),
-    )));
+    );
 
     expect(result).toBe("jitter-ok");
     expect(attempt).toBe(4); // 1 initial + 3 retries

@@ -238,9 +238,7 @@ describe("ingestDocuments", () => {
   it("no-ops when documents are identical", async () => {
     await runtime.hydrate();
 
-    const remoteDocs = [
-      { _id: "id1", _creationTime: 1, title: "Same" },
-    ];
+    const remoteDocs = [{ _id: "id1", _creationTime: 1, title: "Same" }];
 
     await runtime.ingestDocuments("tasks", remoteDocs);
 

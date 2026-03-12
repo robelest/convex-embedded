@@ -18,7 +18,7 @@ describe("createLogger", () => {
     const log = createLogger("test");
     log.info("hello");
 
-    expect(console.info).toHaveBeenCalledWith("[convex-resolve:test] hello");
+    expect(console.info).toHaveBeenCalledWith("[convex-embedded:test] hello");
   });
 
   it("passes extra args through", () => {
@@ -27,19 +27,21 @@ describe("createLogger", () => {
     log.warn("warning", extra);
 
     expect(console.warn).toHaveBeenCalledWith(
-      "[convex-resolve:cat] warning",
+      "[convex-embedded:cat] warning",
       extra,
     );
   });
 
-  it("suppresses debug by default", () => {
-    const log = createLogger("quiet");
-    log.debug("should not appear");
+  it("delegates debug to console.debug", () => {
+    const log = createLogger("verbose");
+    log.debug("trace msg");
 
-    expect(console.debug).not.toHaveBeenCalled();
+    expect(console.debug).toHaveBeenCalledWith(
+      "[convex-embedded:verbose] trace msg",
+    );
   });
 
-  it("logs info/warn/error by default", () => {
+  it("logs info/warn/error", () => {
     const log = createLogger("noisy");
     log.info("info msg");
     log.warn("warn msg");

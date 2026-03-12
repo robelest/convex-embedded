@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
 import { Fx } from "@robelest/fx";
+import { describe, it, expect } from "vitest";
 
 // ---------------------------------------------------------------------------
 // Fx.gen — generator runner
@@ -7,6 +7,7 @@ import { Fx } from "@robelest/fx";
 
 describe("Fx.gen", () => {
   it("empty generator returns the value directly", async () => {
+    // eslint-disable-next-line require-yield
     const fx = Fx.gen(function* () {
       return 42;
     });
@@ -42,7 +43,7 @@ describe("Fx.gen", () => {
         ok: () => {
           throw new Error("raw");
         },
-        err: (e) => new AppError(42),
+        err: (_e) => new AppError(42),
       });
       return "unreachable";
     });

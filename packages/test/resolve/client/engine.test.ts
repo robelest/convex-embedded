@@ -12,9 +12,7 @@ import type { Definition } from "#resolve/server/schema";
  * Uses plain (LWW) fields for title and body — no CRDT types,
  * no omitted fields.
  */
-function createMockSchema(
-  overrides?: Partial<Definition>,
-): Definition {
+function createMockSchema(overrides?: Partial<Definition>): Definition {
   return {
     version: 1,
     shape: { title: "string", body: "string" },
@@ -715,17 +713,14 @@ describe("engine.create()", () => {
     await settle();
 
     // ingestDocuments should have been called with the omitted fields removed.
-    expect(embedded.ingestDocuments).toHaveBeenCalledWith(
-      "tasks",
-      [
-        expect.objectContaining({
-          _id: "doc-1",
-          _creationTime: 100,
-          title: "Task",
-          body: "Body",
-        }),
-      ],
-    );
+    expect(embedded.ingestDocuments).toHaveBeenCalledWith("tasks", [
+      expect.objectContaining({
+        _id: "doc-1",
+        _creationTime: 100,
+        title: "Task",
+        body: "Body",
+      }),
+    ]);
 
     // Verify the omitted fields are NOT present.
     const ingestCall = embedded.ingestDocuments.mock.calls.find(

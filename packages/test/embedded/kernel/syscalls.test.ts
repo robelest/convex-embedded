@@ -21,10 +21,7 @@ const fullTableScan = (tableName: string) => ({
 });
 
 /** Insert a document within a transaction and commit, returning the _id. */
-function seedDocument(
-  table: string,
-  value: Record<string, unknown>,
-): string {
+function seedDocument(table: string, value: Record<string, unknown>): string {
   db.startTransaction();
   const _id = db.insert(table, value);
   db.commit();
@@ -46,7 +43,10 @@ describe("createSyncSyscall", () => {
 
     const syncSyscall = createSyncSyscall(db);
     const result = JSON.parse(
-      syncSyscall("1.0/queryStream", JSON.stringify({ query: fullTableScan("tasks") })),
+      syncSyscall(
+        "1.0/queryStream",
+        JSON.stringify({ query: fullTableScan("tasks") }),
+      ),
     );
 
     expect(result).toHaveProperty("queryId");
@@ -118,7 +118,10 @@ describe("createAsyncSyscall — Document CRUD", () => {
     const result = JSON.parse(
       await asyncSyscall(
         "1.0/get",
-        JSON.stringify({ table: "users", id: "00000000-0000-0000-0000-000000000000" }),
+        JSON.stringify({
+          table: "users",
+          id: "00000000-0000-0000-0000-000000000000",
+        }),
       ),
     );
     db.rollbackWrites();
@@ -196,7 +199,10 @@ describe("createAsyncSyscall — Query ops", () => {
 
     const syncSyscall = createSyncSyscall(db);
     const { queryId } = JSON.parse(
-      syncSyscall("1.0/queryStream", JSON.stringify({ query: fullTableScan("tasks") })),
+      syncSyscall(
+        "1.0/queryStream",
+        JSON.stringify({ query: fullTableScan("tasks") }),
+      ),
     );
 
     db.startTransaction();
@@ -338,8 +344,8 @@ describe("createJsSyscall — Storage", () => {
   it("throws on unknown js op", async () => {
     const jsSyscall = createJsSyscall(db);
 
-    await expect(
-      jsSyscall("storage/unknownOp", {}),
-    ).rejects.toThrow(/does not support js syscall.*storage\/unknownOp/);
+    await expect(jsSyscall("storage/unknownOp", {})).rejects.toThrow(
+      /does not support js syscall.*storage\/unknownOp/,
+    );
   });
 });

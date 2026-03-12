@@ -661,8 +661,8 @@ function _attachResolve(
 
   _resolveEntries.set(client, entry);
 
-   // Discover sync metadata from modules, then create + start engine
-   _discoverAndStart(entry, embedded, remoteClient, resolveOpts, modules);
+  // Discover sync metadata from modules, then create + start engine
+  _discoverAndStart(entry, embedded, remoteClient, resolveOpts, modules);
 
   // Patch client.mutation for local-first writes
   (client as any).mutation = async function patchedMutation(
@@ -734,7 +734,11 @@ async function _discoverAndStart(
       // Convex's query() builder returns a Function (via dontCallDirectly),
       // so we must check both "object" and "function" types.
       for (const exportValue of Object.values(mod as Record<string, any>)) {
-        if (!exportValue || (typeof exportValue !== "object" && typeof exportValue !== "function")) continue;
+        if (
+          !exportValue ||
+          (typeof exportValue !== "object" && typeof exportValue !== "function")
+        )
+          continue;
         const meta = (exportValue as any)[SYNC_META];
         if (meta && meta.__brand === "convex-resolve:syncMeta") {
           // Build the function references from the module path

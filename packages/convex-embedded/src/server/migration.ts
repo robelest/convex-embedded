@@ -213,9 +213,7 @@ async function getStoredVersion(
         return records[0].version as number;
       },
       err: (e) => e as Error,
-    }).pipe(
-      Fx.recover(() => Fx.succeed(null)),
-    ),
+    }).pipe(Fx.recover(() => Fx.succeed(null))),
   );
 }
 

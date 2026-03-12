@@ -4,7 +4,7 @@ import { sveltekit } from "@sveltejs/kit/vite";
 import { defineConfig } from "vite";
 
 const embeddedSrc = path.resolve(
-  __dirname,
+  import.meta.dirname,
   "../../packages/convex-embedded/src",
 );
 
@@ -31,6 +31,10 @@ export default defineConfig({
       {
         find: "@robelest/convex-embedded/server",
         replacement: embeddedSrc + "/server/index.ts",
+      },
+      {
+        find: "@robelest/convex-embedded/crdt",
+        replacement: embeddedSrc + "/crdt/index.ts",
       },
       {
         find: "@robelest/convex-embedded/client",

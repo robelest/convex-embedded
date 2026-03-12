@@ -200,7 +200,9 @@ describe("OccTransaction", () => {
       return null;
     });
 
-    expect(db.getDocumentTimestamp).toHaveBeenCalledWith("aaaaaaaa-0000-4000-8000-000000000001");
+    expect(db.getDocumentTimestamp).toHaveBeenCalledWith(
+      "aaaaaaaa-0000-4000-8000-000000000001",
+    );
     expect(db.commit).toHaveBeenCalledOnce();
   });
 

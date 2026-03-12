@@ -25,10 +25,7 @@ export type {
 /** @internal @deprecated Use engine instead. */
 export { monitor } from "@/client/monitor";
 /** @internal @deprecated */
-export type {
-  MonitorConfig,
-  MonitorInstance,
-} from "@/client/monitor";
+export type { MonitorConfig, MonitorInstance } from "@/client/monitor";
 
 // Runtime — creates ConvexClient over embedded transport
 /** @internal */

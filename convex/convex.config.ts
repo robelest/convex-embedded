@@ -1,8 +1,7 @@
+import embedded from "@robelest/convex-embedded/convex.config";
 import { defineApp } from "convex/server";
 
-import resolve from "@robelest/convex-embedded/convex.config";
-
 const app = defineApp();
-app.use(resolve);
+app.use(embedded);
 
 export default app;

@@ -1,5 +1,5 @@
+import { Fx } from "@robelest/fx";
 import { describe, it, expect, vi } from "vitest";
-import { Fx, FxFatal } from "@robelest/fx";
 
 // ---------------------------------------------------------------------------
 // succeed
@@ -48,9 +48,7 @@ describe("Fx.fatal", () => {
 
   it("bypasses recover", async () => {
     const defect = new Error("defect");
-    const fx = Fx.fatal(defect).pipe(
-      Fx.recover(() => Fx.succeed("recovered")),
-    );
+    const fx = Fx.fatal(defect).pipe(Fx.recover(() => Fx.succeed("recovered")));
     await expect(Fx.run(fx)).rejects.toBe(defect);
   });
 

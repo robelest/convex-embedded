@@ -11,6 +11,7 @@
 import { Fx } from "@robelest/fx";
 import type { ConvexClient } from "convex/browser";
 import { makeFunctionReference } from "convex/server";
+import * as Y from "yjs";
 
 import { IdMap } from "@/client/id-map";
 import { PendingQueue } from "@/client/pending-queue";
@@ -19,8 +20,6 @@ import { initYjsDoc } from "@/server/schema";
 import type { Definition } from "@/server/schema";
 import { createLogger } from "@/shared/logger";
 import type { EngineStatus, ResolveProgress } from "@/shared/types";
-
-import * as Y from "yjs";
 
 const log = createLogger("resolve");
 
@@ -117,9 +116,7 @@ export interface EmbeddedClientLike {
    * Used by the resolve path to encode local Yjs state vectors before
    * sending them to the server for CRDT diff computation.
    */
-  getDocumentsForTable(
-    table: string,
-  ): Promise<Array<Record<string, unknown>>>;
+  getDocumentsForTable(table: string): Promise<Array<Record<string, unknown>>>;
 
   /**
    * Execute a query directly against the embedded database, bypassing
@@ -132,10 +129,7 @@ export interface EmbeddedClientLike {
    *
    * Optional — when absent, hydration falls back to `client.query()`.
    */
-  queryDirect?(
-    path: string,
-    args: Record<string, unknown>,
-  ): Promise<unknown>;
+  queryDirect?(path: string, args: Record<string, unknown>): Promise<unknown>;
 
   /**
    * Execute a `_system:*` mutation directly against the embedded database,
@@ -169,10 +163,7 @@ export interface EmbeddedClientLike {
    *
    * Optional — when absent, falls back to `localClient.mutation()`.
    */
-  localMutation?(
-    ref: unknown,
-    args: Record<string, unknown>,
-  ): Promise<unknown>;
+  localMutation?(ref: unknown, args: Record<string, unknown>): Promise<unknown>;
 }
 
 /** @internal */
@@ -335,7 +326,11 @@ function createEngine(config: EngineConfig): EngineInstance {
   // writes bypass the patched ConvexClient methods entirely —
   // preventing infinite recursion through patchedMutation.
   const idMap = new IdMap(localClient, queryDirect, mutationDirect);
-  const pendingQueue = new PendingQueue(localClient, queryDirect, mutationDirect);
+  const pendingQueue = new PendingQueue(
+    localClient,
+    queryDirect,
+    mutationDirect,
+  );
 
   // Track whether we believe we're online (based on network events)
   let isOnline = false;
@@ -380,9 +375,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     if (processingQueue) return;
     if (pendingQueue.isEmpty) return;
 
-    log.info(
-      `sync: processing ${pendingQueue.length} queued mutation(s)`,
-    );
+    log.info(`sync: processing ${pendingQueue.length} queued mutation(s)`);
 
     await Fx.run(
       Fx.bracket(
@@ -610,9 +603,7 @@ function createEngine(config: EngineConfig): EngineInstance {
       }).pipe(
         Fx.inspect((err) =>
           Fx.sync(() => {
-            if (
-              !(err instanceof DOMException && err.name === "AbortError")
-            ) {
+            if (!(err instanceof DOMException && err.name === "AbortError")) {
               log.warn(
                 `sync: resolve attempt ${attempts}/${maxRetries} failed for "${tableName}"`,
                 err,
@@ -727,19 +718,14 @@ function createEngine(config: EngineConfig): EngineInstance {
           );
         },
         (err: Error) => {
-          log.error(
-            `sync: remote subscription error for "${tableName}"`,
-            err,
-          );
+          log.error(`sync: remote subscription error for "${tableName}"`, err);
         },
       );
 
       remoteUnsubscribes.push(unsub);
     }
 
-    log.info(
-      `sync: subscribed to ${tableNames.length} remote table(s)`,
-    );
+    log.info(`sync: subscribed to ${tableNames.length} remote table(s)`);
   }
 
   /**
@@ -904,10 +890,7 @@ function createEngine(config: EngineConfig): EngineInstance {
       return status;
     },
 
-    mutation(
-      ref: unknown,
-      args: Record<string, unknown>,
-    ): Promise<unknown> {
+    mutation(ref: unknown, args: Record<string, unknown>): Promise<unknown> {
       // 1. Write to local embedded client first (instant).
       // 2. Persist to pending queue for durability.
       // 3. When online: kick the serial queue processor.
@@ -939,17 +922,13 @@ function createEngine(config: EngineConfig): EngineInstance {
                   // It will pick up this entry and process it.
                   void processQueue();
                 } else {
-                  log.debug(
-                    "sync: offline — mutation queued for later push",
-                  );
+                  log.debug("sync: offline — mutation queued for later push");
                 }
               },
               err: (e) => e as Error,
             }).pipe(
               Fx.inspect((err) =>
-                Fx.sync(() =>
-                  log.warn("sync: failed to queue mutation", err),
-                ),
+                Fx.sync(() => log.warn("sync: failed to queue mutation", err)),
               ),
               Fx.recover(() => Fx.unit),
             ),

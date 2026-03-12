@@ -1,20 +1,22 @@
 import { register as registerResolveComponent } from "@robelest/convex-embedded/test";
 import { convexTest } from "convex-test";
 /**
- * Integration test for convex-resolve using convex-test.
+ * Integration test for convex-embedded using convex-test.
  *
  * Tests the full server-side pipeline:
  *   create task (wrapped mutation with inline delta recording)
- *   → delta stored in component (same transaction)
- *   → resolve returns diff
- *   → client applies diff
- *   → resolve returns empty (up to date)
+ *   -> delta stored in component (same transaction)
+ *   -> resolve returns diff
+ *   -> client applies diff
+ *   -> resolve returns empty (up to date)
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import * as Y from "yjs";
 
-import { api } from "../../../convex/_generated/api.js";
-import schema from "../../../convex/schema.js";
+import { api } from "#convex/_generated/api";
+// Ensure setup() runs so the component reference is bound.
+import "#convex/embedded";
+import schema from "#convex/schema";
 
 /** Safely convert a Uint8Array to a proper ArrayBuffer for Convex v.bytes() */
 function toArrayBuffer(data: Uint8Array): ArrayBuffer {
@@ -32,21 +34,22 @@ function readRegister(fields: Y.Map<unknown>, key: string): unknown {
   const registerMap = fields.get(key) as Y.Map<unknown>;
   // Early return via ternary — no Y.Map means no register
   return registerMap instanceof Y.Map
-    ? Array.from(registerMap.values())
-        .reduce<{ value: unknown; timestamp: number } | undefined>(
-          (winner, entry: any) =>
-            !winner || (entry.timestamp && entry.timestamp > winner.timestamp)
-              ? entry
-              : winner,
-          undefined,
-        )?.value
+    ? Array.from(registerMap.values()).reduce<
+        { value: unknown; timestamp: number } | undefined
+      >(
+        (winner, entry: any) =>
+          !winner || (entry.timestamp && entry.timestamp > winner.timestamp)
+            ? entry
+            : winner,
+        undefined,
+      )?.value
     : undefined;
 }
 
 // Glob all app modules for convex-test
 const modules = import.meta.glob("../../../convex/**/*.ts");
 
-describe("convex-resolve integration", () => {
+describe("convex-embedded integration", () => {
   beforeEach(() => {
     vi.useFakeTimers();
   });

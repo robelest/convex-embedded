@@ -84,7 +84,9 @@ describe("ephemeralStorage", () => {
     it("deletes documents by ID", async () => {
       const d1 = doc("1", "tasks", { text: "a" });
       const d2 = doc("2", "tasks", { text: "b" });
-      await storage.commit(batch([batchPut(d1, "tasks"), batchPut(d2, "tasks")]));
+      await storage.commit(
+        batch([batchPut(d1, "tasks"), batchPut(d2, "tasks")]),
+      );
 
       await storage.commit(batch([], [d1._id as string]));
 
@@ -96,7 +98,9 @@ describe("ephemeralStorage", () => {
     it("handles puts and deletes in the same batch", async () => {
       const d1 = doc("1", "tasks");
       const d2 = doc("2", "tasks");
-      await storage.commit(batch([batchPut(d1, "tasks"), batchPut(d2, "tasks")]));
+      await storage.commit(
+        batch([batchPut(d1, "tasks"), batchPut(d2, "tasks")]),
+      );
 
       const d3 = doc("3", "tasks");
       await storage.commit(batch([batchPut(d3, "tasks")], [d1._id as string]));

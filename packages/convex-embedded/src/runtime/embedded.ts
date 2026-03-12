@@ -48,10 +48,7 @@ import { SubscriptionManager } from "@/sync/subscriptions";
  * a remote document has actually changed relative to the local copy.
  * Returns `true` when all user-facing fields are identical.
  */
-function docsEqual(
-  a: StoredDocument,
-  b: Record<string, unknown>,
-): boolean {
+function docsEqual(a: StoredDocument, b: Record<string, unknown>): boolean {
   const skipKeys = new Set(["_id", "_creationTime"]);
 
   const aKeys = Object.keys(a)
@@ -443,13 +440,16 @@ export class EmbeddedRuntime {
     remoteDocs: Array<Record<string, unknown>>,
   ): Promise<void> {
     const db = this.db;
-    const runtime = this;
+    const hydrated = this._hydrated;
+    const onCommit = this.onMutationCommit.bind(this);
+    const syncProtocol = this.syncProtocol;
+    const transports = this._transports;
 
     return Fx.run(
       Fx.gen(function* () {
         // Wait for storage hydration before touching the database.
         yield* Fx.from({
-          ok: () => runtime._hydrated,
+          ok: () => hydrated,
           err: (e) => e as Error,
         });
 
@@ -537,16 +537,16 @@ export class EmbeddedRuntime {
         // --- 5. Propagate changes -------------------------------------------
 
         const tablesWritten = new Set([table]);
-        runtime.onMutationCommit(tablesWritten);
+        onCommit(tablesWritten);
 
         // Re-evaluate all active queries and push Transition messages.
         yield* Fx.from({
           ok: async () => {
-            const updates = await runtime.syncProtocol.reEvaluateQueries();
+            const updates = await syncProtocol.reEvaluateQueries();
             for (const [, messages] of updates) {
               for (const msg of messages) {
                 const data = JSON.stringify(msg);
-                for (const transport of runtime._transports) {
+                for (const transport of transports) {
                   transport.pushMessage(data);
                 }
               }

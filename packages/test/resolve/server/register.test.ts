@@ -1,26 +1,23 @@
 import { v } from "convex/values";
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
 import * as Y from "yjs";
 
-import { setup, SYNC_META } from "#resolve/server/setup";
+import { register as registerField, prose } from "#resolve/server/schema";
 import {
-  define,
-  register as registerField,
-  prose,
-} from "#resolve/server/schema";
+  embeddedTable,
+  setup,
+  _resetRegistry,
+  SYNC_META,
+} from "#resolve/server/setup";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-function makeSchema() {
-  return define({
-    version: 1,
-    shape: {
-      title: registerField(v.string()),
-      body: prose(),
-    },
-  });
+/** Unique table name per test to avoid registry collisions. */
+let _counter = 0;
+function uniqueTable(): string {
+  return `test_table_${++_counter}`;
 }
 
 function makeMockComponent() {
@@ -34,64 +31,85 @@ function makeMockComponent() {
   };
 }
 
-// ---------------------------------------------------------------------------
-// setup() + register()
-// ---------------------------------------------------------------------------
-
-describe("setup()", () => {
-  it("returns a register function", () => {
-    const register = setup({});
-    expect(typeof register).toBe("function");
-  });
+beforeEach(() => {
+  _resetRegistry();
 });
 
-describe("register()", () => {
-  it("returns a TableDescriptor with resolve, mutation, and query", () => {
-    const register = setup({});
-    const tasks = register("tasks", makeSchema());
+// ---------------------------------------------------------------------------
+// embeddedTable() + setup()
+// ---------------------------------------------------------------------------
+
+describe("embeddedTable()", () => {
+  it("returns a handle with resolve, mutation, and query", () => {
+    const tasks = embeddedTable(uniqueTable(), {
+      title: registerField(v.string()),
+      body: prose(),
+    });
 
     expect(tasks).toHaveProperty("resolve");
     expect(typeof tasks.mutation).toBe("function");
     expect(typeof tasks.query).toBe("function");
   });
 
-  it("resolve has properly typed args", () => {
-    const register = setup({});
-    const tasks = register("tasks", makeSchema());
+  it("resolve exports args via exportArgs", () => {
+    const tasks = embeddedTable(uniqueTable(), {
+      title: registerField(v.string()),
+    });
 
-    expect(tasks.resolve.args).toHaveProperty("documents");
+    expect(typeof tasks.resolve.exportArgs).toBe("function");
+    // exportArgs() returns a JSON string describing the validator shape.
+    const argsJson = JSON.parse(tasks.resolve.exportArgs());
+    expect(argsJson).toBeDefined();
   });
 
   it("tags resolve with SYNC_META symbol", () => {
-    const register = setup({});
-    const tasks = register("tasks", makeSchema());
+    const name = uniqueTable();
+    const tasks = embeddedTable(name, {
+      title: registerField(v.string()),
+    });
 
     const meta = tasks.resolve[SYNC_META];
     expect(meta).toBeDefined();
     expect(meta.__brand).toBe("convex-resolve:syncMeta");
-    expect(meta.table).toBe("tasks");
+    expect(meta.table).toBe(name);
     expect(meta.resolveExport).toBe("resolve");
   });
 
   it("SYNC_META is accessible via Symbol.for (cross-package)", () => {
-    const register = setup({});
-    const tasks = register("tasks", makeSchema());
+    const name = uniqueTable();
+    const tasks = embeddedTable(name, {
+      title: registerField(v.string()),
+    });
 
     const crossPkgSymbol = Symbol.for("convex-resolve:syncMeta");
     const meta = tasks.resolve[crossPkgSymbol];
     expect(meta).toBeDefined();
-    expect(meta.table).toBe("tasks");
+    expect(meta.table).toBe(name);
   });
 
   it("SYNC_META is not enumerable", () => {
-    const register = setup({});
-    const tasks = register("tasks", makeSchema());
+    const tasks = embeddedTable(uniqueTable(), {
+      title: registerField(v.string()),
+    });
 
     expect(Object.keys(tasks.resolve)).not.toContain(SYNC_META.toString());
-    // Also verify it doesn't appear in for..in or JSON.stringify
     const keys = [];
     for (const k in tasks.resolve) keys.push(k);
     expect(keys).not.toContain(SYNC_META.toString());
+  });
+});
+
+describe("setup()", () => {
+  it("is a void function (side-effect only)", () => {
+    embeddedTable(uniqueTable(), { title: registerField(v.string()) });
+    const result = setup({});
+    expect(result).toBeUndefined();
+  });
+
+  it("accepts component-only config", () => {
+    const component = makeMockComponent();
+    embeddedTable(uniqueTable(), { title: registerField(v.string()) });
+    expect(() => setup({ component })).not.toThrow();
   });
 });
 
@@ -100,23 +118,43 @@ describe("register()", () => {
 // ---------------------------------------------------------------------------
 
 describe("mutation()", () => {
-  it("runs handler and returns result on local (no component)", async () => {
-    const register = setup({});
-    const tasks = register("tasks", makeSchema());
+  it("returns a registered Convex mutation", () => {
+    const tasks = embeddedTable(uniqueTable(), {
+      title: registerField(v.string()),
+      body: prose(),
+    });
 
     const fn = tasks.mutation({
       args: { title: v.string() },
       handler: async (_ctx: any, args: any) => `id:${args.title}`,
     });
 
-    const result = await fn.handler({}, { title: "hello" });
+    expect(fn.isMutation).toBe(true);
+    expect(fn.isPublic).toBe(true);
+  });
+
+  it("runs handler and returns result on local (no component)", async () => {
+    const tasks = embeddedTable(uniqueTable(), {
+      title: registerField(v.string()),
+      body: prose(),
+    });
+
+    const fn = tasks.mutation({
+      args: { title: v.string() },
+      handler: async (_ctx: any, args: any) => `id:${args.title}`,
+    });
+
+    const result = await fn._handler({}, { title: "hello" });
     expect(result).toBe("id:hello");
   });
 
   it("runs handler then remote: block on remote", async () => {
     const component = makeMockComponent();
-    const register = setup({ component });
-    const tasks = register("tasks", makeSchema());
+    const tasks = embeddedTable(uniqueTable(), {
+      title: registerField(v.string()),
+      body: prose(),
+    });
+    setup({ component });
 
     const callOrder: string[] = [];
     const fn = tasks.mutation({
@@ -130,14 +168,13 @@ describe("mutation()", () => {
       },
     });
 
-    // Mock ctx with runQuery that succeeds (signals remote runtime)
     const ctx = {
       runQuery: vi.fn().mockResolvedValue([]),
       runMutation: vi.fn(),
       db: { get: vi.fn().mockResolvedValue({ _id: "doc123", title: "t" }) },
     };
 
-    const result = await fn.handler(ctx, {});
+    const result = await fn._handler(ctx, {});
 
     expect(callOrder).toEqual(["handler", "remote"]);
     expect(result).toBe("doc123");
@@ -145,8 +182,11 @@ describe("mutation()", () => {
 
   it("records delta inline (same transaction) on remote", async () => {
     const component = makeMockComponent();
-    const register = setup({ component });
-    const tasks = register("tasks", makeSchema());
+    const tasks = embeddedTable(uniqueTable(), {
+      title: registerField(v.string()),
+      body: prose(),
+    });
+    setup({ component });
 
     const runMutation = vi.fn();
     const ctx = {
@@ -166,21 +206,22 @@ describe("mutation()", () => {
       handler: async () => "doc123",
     });
 
-    await fn.handler(ctx, {});
+    await fn._handler(ctx, {});
 
-    // Should have called insertDelta directly (no scheduler.runAfter)
     expect(runMutation).toHaveBeenCalledWith(
       component.public.insertDelta,
       expect.objectContaining({
-        collection: "tasks",
+        collection: tasks.table,
         docId: "doc123",
       }),
     );
   });
 
   it("does not record delta on local (no component)", async () => {
-    const register = setup({});
-    const tasks = register("tasks", makeSchema());
+    const tasks = embeddedTable(uniqueTable(), {
+      title: registerField(v.string()),
+      body: prose(),
+    });
 
     const scheduler = { runAfter: vi.fn() };
     const fn = tasks.mutation({
@@ -188,34 +229,34 @@ describe("mutation()", () => {
       handler: async () => "result",
     });
 
-    await fn.handler({ scheduler }, {});
+    await fn._handler({ scheduler }, {});
 
-    // No scheduler calls — delta recording is inline and only on remote
     expect(scheduler.runAfter).not.toHaveBeenCalled();
   });
 
   it("extracts docId from args.id when result is not a string", async () => {
     const component = makeMockComponent();
-    const register = setup({ component });
-    const tasks = register("tasks", makeSchema());
+    const tasks = embeddedTable(uniqueTable(), {
+      title: registerField(v.string()),
+      body: prose(),
+    });
+    setup({ component });
 
     const runMutation = vi.fn();
     const ctx = {
       runQuery: vi.fn().mockResolvedValue([]),
       runMutation,
       db: {
-        get: vi
-          .fn()
-          .mockResolvedValue({ _id: "fromArgs", title: "t" }),
+        get: vi.fn().mockResolvedValue({ _id: "fromArgs", title: "t" }),
       },
     };
 
     const fn = tasks.mutation({
       args: {},
-      handler: async () => undefined, // no string result
+      handler: async () => undefined,
     });
 
-    await fn.handler(ctx, { id: "fromArgs" });
+    await fn._handler(ctx, { id: "fromArgs" });
 
     expect(runMutation).toHaveBeenCalledWith(
       component.public.insertDelta,
@@ -225,8 +266,11 @@ describe("mutation()", () => {
 
   it("does not throw on delta recording failure", async () => {
     const component = makeMockComponent();
-    const register = setup({ component });
-    const tasks = register("tasks", makeSchema());
+    const tasks = embeddedTable(uniqueTable(), {
+      title: registerField(v.string()),
+      body: prose(),
+    });
+    setup({ component });
 
     const ctx = {
       runQuery: vi.fn().mockResolvedValue([]),
@@ -241,28 +285,15 @@ describe("mutation()", () => {
       handler: async () => "doc1",
     });
 
-    // Should not throw
-    const result = await fn.handler(ctx, {});
+    const result = await fn._handler(ctx, {});
     expect(result).toBe("doc1");
   });
 
-  it("wraps with baseMutation builder when provided", () => {
-    const baseMutation = vi.fn((def: any) => ({ __wrapped: true, ...def }));
-    const register = setup({ mutation: baseMutation });
-    const tasks = register("tasks", makeSchema());
-
-    const fn = tasks.mutation({
-      args: { title: v.string() },
-      handler: async () => {},
+  it("exports args via exportArgs", () => {
+    const tasks = embeddedTable(uniqueTable(), {
+      title: registerField(v.string()),
+      body: prose(),
     });
-
-    expect(baseMutation).toHaveBeenCalledTimes(1);
-    expect(fn.__wrapped).toBe(true);
-  });
-
-  it("preserves args and returns in definition", () => {
-    const register = setup({});
-    const tasks = register("tasks", makeSchema());
 
     const fn = tasks.mutation({
       args: { title: v.string() },
@@ -270,20 +301,8 @@ describe("mutation()", () => {
       handler: async () => null,
     });
 
-    expect(fn.args).toHaveProperty("title");
-    expect(fn.returns).toBeDefined();
-  });
-
-  it("omits returns when undefined", () => {
-    const register = setup({});
-    const tasks = register("tasks", makeSchema());
-
-    const fn = tasks.mutation({
-      args: {},
-      handler: async () => {},
-    });
-
-    expect(fn).not.toHaveProperty("returns");
+    expect(typeof fn.exportArgs).toBe("function");
+    expect(typeof fn.exportReturns).toBe("function");
   });
 });
 
@@ -292,16 +311,33 @@ describe("mutation()", () => {
 // ---------------------------------------------------------------------------
 
 describe("query()", () => {
+  it("returns a registered Convex query", () => {
+    const tasks = embeddedTable(uniqueTable(), {
+      title: registerField(v.string()),
+      body: prose(),
+    });
+
+    const fn = tasks.query({
+      args: {},
+      handler: async () => [],
+    });
+
+    expect(fn.isQuery).toBe(true);
+    expect(fn.isPublic).toBe(true);
+  });
+
   it("runs handler only on local (no component)", async () => {
-    const register = setup({});
-    const tasks = register("tasks", makeSchema());
+    const tasks = embeddedTable(uniqueTable(), {
+      title: registerField(v.string()),
+      body: prose(),
+    });
 
     const handler = vi.fn().mockResolvedValue([1, 2, 3]);
     const remote = vi.fn();
 
     const fn = tasks.query({ args: {}, handler, remote });
 
-    const result = await fn.handler({}, {});
+    const result = await fn._handler({}, {});
     expect(handler).toHaveBeenCalledTimes(1);
     expect(remote).not.toHaveBeenCalled();
     expect(result).toEqual([1, 2, 3]);
@@ -309,8 +345,11 @@ describe("query()", () => {
 
   it("runs handler then remote: on remote", async () => {
     const component = makeMockComponent();
-    const register = setup({ component });
-    const tasks = register("tasks", makeSchema());
+    const tasks = embeddedTable(uniqueTable(), {
+      title: registerField(v.string()),
+      body: prose(),
+    });
+    setup({ component });
 
     const handler = vi.fn().mockResolvedValue([{ id: 1 }]);
     const remote = vi.fn(async (_ctx: any, _args: any, result: any) =>
@@ -320,32 +359,16 @@ describe("query()", () => {
     const fn = tasks.query({ args: {}, handler, remote });
 
     const ctx = { runQuery: vi.fn().mockResolvedValue([]) };
-    const result = await fn.handler(ctx, {});
+    const result = await fn._handler(ctx, {});
 
     expect(result).toEqual([{ id: 1, extra: true }]);
   });
 
-  it("wraps with baseQuery builder when provided", () => {
-    const baseQuery = vi.fn((def: any) => ({ __wrapped: true, ...def }));
-    const register = setup({ query: baseQuery });
-    const tasks = register("tasks", makeSchema());
-
-    // baseQuery is called once during register() for the internal resolve query
-    expect(baseQuery).toHaveBeenCalledTimes(1);
-
-    const fn = tasks.query({
-      args: {},
-      handler: async () => [],
+  it("exports args via exportArgs", () => {
+    const tasks = embeddedTable(uniqueTable(), {
+      title: registerField(v.string()),
+      body: prose(),
     });
-
-    // Now called a second time for the user query
-    expect(baseQuery).toHaveBeenCalledTimes(2);
-    expect(fn.__wrapped).toBe(true);
-  });
-
-  it("preserves returns in query definition", () => {
-    const register = setup({});
-    const tasks = register("tasks", makeSchema());
 
     const fn = tasks.query({
       args: {},
@@ -353,7 +376,8 @@ describe("query()", () => {
       handler: async () => [],
     });
 
-    expect(fn.returns).toBeDefined();
+    expect(typeof fn.exportArgs).toBe("function");
+    expect(typeof fn.exportReturns).toBe("function");
   });
 });
 
@@ -362,11 +386,23 @@ describe("query()", () => {
 // ---------------------------------------------------------------------------
 
 describe("resolve handler", () => {
-  it("returns empty diffs on local (no component)", async () => {
-    const register = setup({});
-    const tasks = register("tasks", makeSchema());
+  it("is a registered Convex query", () => {
+    const tasks = embeddedTable(uniqueTable(), {
+      title: registerField(v.string()),
+      body: prose(),
+    });
 
-    const result = await tasks.resolve.handler(
+    expect(tasks.resolve.isQuery).toBe(true);
+    expect(tasks.resolve.isPublic).toBe(true);
+  });
+
+  it("returns empty diffs on local (no component)", async () => {
+    const tasks = embeddedTable(uniqueTable(), {
+      title: registerField(v.string()),
+      body: prose(),
+    });
+
+    const result = await tasks.resolve._handler(
       {},
       {
         documents: [
@@ -383,10 +419,12 @@ describe("resolve handler", () => {
 
   it("computes diffs from component deltas on remote", async () => {
     const component = makeMockComponent();
-    const register = setup({ component });
-    const tasks = register("tasks", makeSchema());
+    const tasks = embeddedTable(uniqueTable(), {
+      title: registerField(v.string()),
+      body: prose(),
+    });
+    setup({ component });
 
-    // Create a server-side doc state
     const serverDoc = new Y.Doc();
     const fields = serverDoc.getMap("fields");
     const titleMap = new Y.Map();
@@ -398,11 +436,10 @@ describe("resolve handler", () => {
       .fn()
       .mockResolvedValue([{ update: serverUpdate.buffer, seq: 0 }]);
 
-    // Client has empty state
     const clientDoc = new Y.Doc();
     const clientVector = Y.encodeStateVector(clientDoc);
 
-    const result = await tasks.resolve.handler(
+    const result = await tasks.resolve._handler(
       { runQuery },
       {
         documents: [{ docId: "doc1", vector: clientVector.buffer }],
@@ -416,8 +453,11 @@ describe("resolve handler", () => {
 
   it("returns no diff when client is up to date", async () => {
     const component = makeMockComponent();
-    const register = setup({ component });
-    const tasks = register("tasks", makeSchema());
+    const tasks = embeddedTable(uniqueTable(), {
+      title: registerField(v.string()),
+      body: prose(),
+    });
+    setup({ component });
 
     const doc = new Y.Doc();
     const fields = doc.getMap("fields");
@@ -429,7 +469,7 @@ describe("resolve handler", () => {
       .fn()
       .mockResolvedValue([{ update: fullUpdate.buffer, seq: 0 }]);
 
-    const result = await tasks.resolve.handler(
+    const result = await tasks.resolve._handler(
       { runQuery },
       {
         documents: [{ docId: "doc1", vector: stateVector.buffer }],
@@ -442,12 +482,15 @@ describe("resolve handler", () => {
 
   it("handles missing deltas gracefully", async () => {
     const component = makeMockComponent();
-    const register = setup({ component });
-    const tasks = register("tasks", makeSchema());
+    const tasks = embeddedTable(uniqueTable(), {
+      title: registerField(v.string()),
+      body: prose(),
+    });
+    setup({ component });
 
     const runQuery = vi.fn().mockResolvedValue([null]);
 
-    const result = await tasks.resolve.handler(
+    const result = await tasks.resolve._handler(
       { runQuery },
       {
         documents: [{ docId: "missing", vector: new ArrayBuffer(0) }],

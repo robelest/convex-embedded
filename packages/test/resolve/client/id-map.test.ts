@@ -1,8 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+
 import { IdMap } from "#resolve/client/id-map";
 
 describe("IdMap", () => {
-  let mockClient: { query: ReturnType<typeof vi.fn>; mutation: ReturnType<typeof vi.fn> };
+  let mockClient: {
+    query: ReturnType<typeof vi.fn>;
+    mutation: ReturnType<typeof vi.fn>;
+  };
   let idMap: IdMap;
 
   beforeEach(() => {

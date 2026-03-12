@@ -35,6 +35,10 @@
       "types": "./dist/server/index.d.ts",
       "import": "./dist/server/index.js"
     },
+    "./crdt": {
+      "types": "./dist/crdt/index.d.ts",
+      "import": "./dist/crdt/index.js"
+    },
     "./client": {
       "types": "./dist/client/index.d.ts",
       "import": {
@@ -59,8 +63,8 @@
     "build": "tsdown",
     "codegen": "convex codegen --component-dir ./src/component",
     "typecheck": "tsgo --noEmit",
-    "test": "bun --filter @robelest/convex-edge-tests test -- --project embedded",
-    "test:once": "bun --filter @robelest/convex-edge-tests test:once -- --project embedded",
+    "test": "bun --filter @robelest/embedded-tests test -- --project embedded",
+    "test:once": "bun --filter @robelest/embedded-tests test:once -- --project embedded",
     "prepublishOnly": "bun run build"
   },
   "dependencies": {

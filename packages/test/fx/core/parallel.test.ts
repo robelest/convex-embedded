@@ -1,5 +1,5 @@
-import { afterEach, describe, it, expect, vi } from "vitest";
 import { Fx } from "@robelest/fx";
+import { afterEach, describe, it, expect, vi } from "vitest";
 
 const makeDelayed = (ms: number, value: number) =>
   Fx.promise(() => new Promise<number>((r) => setTimeout(() => r(value), ms)));
@@ -10,9 +10,9 @@ const makeDelayed = (ms: number, value: number) =>
 
 describe("Fx.each", () => {
   it("processes items sequentially and collects results", async () => {
-    expect(
-      await Fx.run(Fx.each([1, 2, 3], (x) => Fx.succeed(x * 10))),
-    ).toEqual([10, 20, 30]);
+    expect(await Fx.run(Fx.each([1, 2, 3], (x) => Fx.succeed(x * 10)))).toEqual(
+      [10, 20, 30],
+    );
   });
 
   it("short-circuits on the first failure", async () => {

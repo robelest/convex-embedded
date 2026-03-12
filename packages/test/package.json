@@ -1,5 +1,5 @@
 {
-  "name": "@robelest/convex-edge-tests",
+  "name": "@robelest/embedded-tests",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -12,10 +12,13 @@
     "test:integration": "vitest run --project integration"
   },
   "devDependencies": {
+    "@edge-runtime/vm": "^5.0.0",
     "@robelest/convex-embedded": "workspace:*",
+    "@types/node": "^25.5.0",
     "convex": "catalog:",
     "convex-test": "^0.0.36",
     "typescript": "catalog:",
+    "vite": "catalog:",
     "vitest": "catalog:",
     "yjs": "^13.6.0"
   }

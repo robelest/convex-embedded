@@ -1,5 +1,5 @@
 {
-  "name": "@robelest/convex-edge",
+  "name": "embedded",
   "private": true,
   "workspaces": {
     "packages": [
@@ -10,14 +10,15 @@
       "convex": "^1.32.0",
       "tsdown": "^0.21.1",
       "typescript": "^5.9.0",
+      "vite": "^7.3.1",
       "vitest": "^4.0.18"
     }
   },
   "scripts": {
-    "test": "bun --filter @robelest/convex-edge-tests test:once",
-    "build": "bun --filter @robelest/fx --filter @robelest/convex-embedded build",
+    "test": "bun --filter @robelest/embedded-tests test:once",
+    "build": "bunx convex codegen --component-dir ./packages/convex-embedded/src/component && bun --filter @robelest/fx --filter @robelest/convex-embedded build",
     "build:fx": "bun --filter @robelest/fx build",
-    "build:embedded": "bun --filter @robelest/convex-embedded build",
+    "build:embedded": "bunx convex codegen --component-dir ./packages/convex-embedded/src/component && bun --filter @robelest/convex-embedded build",
     "publish:fx": "npm publish --workspace packages/fx",
     "publish:embedded": "npm publish --workspace packages/convex-embedded",
     "typecheck": "bun --filter @robelest/fx --filter @robelest/convex-embedded typecheck",
@@ -34,8 +35,9 @@
   },
   "devDependencies": {
     "@convex-dev/action-retrier": "^0.3.0",
-    "@typescript/native-preview": "^7.0.0-dev.20260311.1",
-    "oxfmt": "^0.38.0",
-    "oxlint": "^1.53.0"
+    "@robelest/convex-embedded": "workspace:*",
+    "@typescript/native-preview": "^7.0.0-dev.20260312.1",
+    "oxfmt": "^0.40.0",
+    "oxlint": "^1.55.0"
   }
 }

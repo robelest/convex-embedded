@@ -1,7 +1,10 @@
 import { describe, it, expect, beforeEach } from "vitest";
 
 import { Database } from "#embedded/core/database";
-import { SYSTEM_FUNCTIONS, SystemPaths } from "#embedded/kernel/system-functions";
+import {
+  SYSTEM_FUNCTIONS,
+  SystemPaths,
+} from "#embedded/kernel/system-functions";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -66,7 +69,10 @@ describe("ID Map", () => {
 
     // Should still be a single mapping, not two.
     db.startTransaction();
-    const all = SYSTEM_FUNCTIONS[SystemPaths.idMapGetAll].handler(db, {}) as Array<{
+    const all = SYSTEM_FUNCTIONS[SystemPaths.idMapGetAll].handler(
+      db,
+      {},
+    ) as Array<{
       localId: string;
       remoteId: string;
       table: string;
@@ -127,7 +133,10 @@ describe("ID Map", () => {
     db.commit();
 
     db.startTransaction();
-    const all = SYSTEM_FUNCTIONS[SystemPaths.idMapGetAll].handler(db, {}) as Array<{
+    const all = SYSTEM_FUNCTIONS[SystemPaths.idMapGetAll].handler(
+      db,
+      {},
+    ) as Array<{
       localId: string;
       remoteId: string;
       table: string;

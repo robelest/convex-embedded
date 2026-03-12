@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
+
 import { PendingQueue } from "#resolve/client/pending-queue";
 
 // ---------------------------------------------------------------------------
@@ -35,10 +36,7 @@ describe("hydrate()", () => {
 
     await queue.hydrate();
 
-    expect(mockClient.query).toHaveBeenCalledWith(
-      "_system:pendingGetAll",
-      {},
-    );
+    expect(mockClient.query).toHaveBeenCalledWith("_system:pendingGetAll", {});
     expect(queue.length).toBe(1);
   });
 

@@ -1,7 +1,7 @@
-import type { RetryPolicy } from "./schedule.js";
-import * as schedule from "./schedule.js";
-import type { Result, Exit } from "./types.js";
-import { FxFatal } from "./types.js";
+import type { RetryPolicy } from "./schedule";
+import * as schedule from "./schedule";
+import type { Result, Exit } from "./types";
+import { FxFatal } from "./types";
 
 // ---------------------------------------------------------------------------
 // Core type
@@ -147,11 +147,7 @@ export interface Fx<A, E = never> {
    */
   pipe<B>(ab: (self: Fx<A, E>) => B): B;
   pipe<B, C>(ab: (self: Fx<A, E>) => B, bc: (b: B) => C): C;
-  pipe<B, C, D>(
-    ab: (self: Fx<A, E>) => B,
-    bc: (b: B) => C,
-    cd: (c: C) => D,
-  ): D;
+  pipe<B, C, D>(ab: (self: Fx<A, E>) => B, bc: (b: B) => C, cd: (c: C) => D): D;
   pipe<B, C, D, F>(
     ab: (self: Fx<A, E>) => B,
     bc: (b: B) => C,
@@ -203,11 +199,7 @@ class FxImpl<A, E = never> implements Fx<A, E> {
 
   pipe<B>(ab: (self: Fx<A, E>) => B): B;
   pipe<B, C>(ab: (self: Fx<A, E>) => B, bc: (b: B) => C): C;
-  pipe<B, C, D>(
-    ab: (self: Fx<A, E>) => B,
-    bc: (b: B) => C,
-    cd: (c: C) => D,
-  ): D;
+  pipe<B, C, D>(ab: (self: Fx<A, E>) => B, bc: (b: B) => C, cd: (c: C) => D): D;
   pipe<B, C, D, F>(
     ab: (self: Fx<A, E>) => B,
     bc: (b: B) => C,
@@ -1708,9 +1700,7 @@ function match<
   K extends keyof T & string,
   Tag extends T[K] & string,
   Handlers extends {
-    [V in T[K] & string]: (
-      value: Extract<T, Record<K, V>>,
-    ) => Fx<any, any>;
+    [V in T[K] & string]: (value: Extract<T, Record<K, V>>) => Fx<any, any>;
   },
 >(
   value: T,
@@ -2078,10 +2068,7 @@ function pipe<A, B, C, D, E, F>(
   de: (d: D) => E,
   ef: (e: E) => F,
 ): F;
-function pipe(
-  a: unknown,
-  ...fns: Array<(x: unknown) => unknown>
-): unknown {
+function pipe(a: unknown, ...fns: Array<(x: unknown) => unknown>): unknown {
   let result = a;
   for (const fn of fns) result = fn(result);
   return result;

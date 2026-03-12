@@ -669,9 +669,9 @@ function match<
 >(value: T, tag: Tag, handlers: Handlers): Fx<SuccessUnion, ErrorUnion>;
 ```
 
-Type-safe, exhaustive pattern matching on discriminated unions, lifted into `Fx`.
-The functional replacement for `switch` statements and `if/else` chains. Every
-variant gets a dedicated handler that receives the **narrowed** type, and
+Type-safe, exhaustive pattern matching on discriminated unions, lifted into
+`Fx`. The functional replacement for `switch` statements and `if/else` chains.
+Every variant gets a dedicated handler that receives the **narrowed** type, and
 TypeScript enforces **exhaustiveness** — a missing variant is a compile error.
 
 The second argument is the discriminant **value** (e.g. `msg.type`), not a key

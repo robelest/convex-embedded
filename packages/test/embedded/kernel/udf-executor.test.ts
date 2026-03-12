@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 
-import { UdfExecutor } from "#embedded/kernel/udf-executor";
 import type { ModuleLoader } from "#embedded/kernel/module-loader";
+import { UdfExecutor } from "#embedded/kernel/udf-executor";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -67,9 +67,7 @@ describe("executeQuery", () => {
   });
 
   it("runs invokeQuery SDK path and deserializes result", async () => {
-    const invokeQuery = vi.fn(async (_argsStr: string) =>
-      JSON.stringify(42),
-    );
+    const invokeQuery = vi.fn(async (_argsStr: string) => JSON.stringify(42));
     const { executor } = makeExecutor({
       messages: { list: { isQuery: true, invokeQuery } },
     });
@@ -146,10 +144,7 @@ describe("executeMutation", () => {
       messages: { send: { isMutation: true, invokeMutation } },
     });
 
-    const { result } = await executor.executeMutation(
-      fp("messages:send"),
-      {},
-    );
+    const { result } = await executor.executeMutation(fp("messages:send"), {});
 
     expect(result).toBe("created");
     expect(invokeMutation).toHaveBeenCalledOnce();
@@ -225,9 +220,9 @@ describe("executeAction", () => {
       api: { fetch: { isAction: true } },
     });
 
-    await expect(
-      executor.executeAction(fp("api:fetch"), {}),
-    ).rejects.toThrow(/could not extract a handler/);
+    await expect(executor.executeAction(fp("api:fetch"), {})).rejects.toThrow(
+      /could not extract a handler/,
+    );
   });
 });
 

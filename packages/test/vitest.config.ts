@@ -3,14 +3,15 @@ import path from "path";
 import type { Plugin } from "vite";
 import { defineConfig } from "vitest/config";
 
-const embeddedSrc = path.resolve(__dirname, "../convex-embedded/src");
-const fxSrc = path.resolve(__dirname, "../fx/src");
+const embeddedSrc = path.resolve(import.meta.dirname, "../convex-embedded/src");
+const fxSrc = path.resolve(import.meta.dirname, "../fx/src");
+const convexApp = path.resolve(import.meta.dirname, "../../convex");
 
 export default defineConfig({
   plugins: [
     ((): Plugin => ({
       name: "at-alias",
-      async resolveId(source, importer) {
+      async resolveId(source: string, importer: string | undefined) {
         if (!source.startsWith("@/") || !importer) return null;
         const rest = source.slice(2);
         let base: string;
@@ -42,7 +43,9 @@ export default defineConfig({
         embeddedSrc,
         "component/convex.config.ts",
       ),
+      "@robelest/convex-embedded/crdt": path.join(embeddedSrc, "crdt/index.ts"),
       "@robelest/convex-embedded/test": path.join(embeddedSrc, "test.ts"),
+      "#convex": convexApp,
     },
   },
   test: {

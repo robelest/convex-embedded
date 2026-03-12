@@ -29,6 +29,22 @@ export default defineConfig({
         replacement: embeddedSrc + "/browser/wa-sqlite-worker.ts",
       },
       {
+        find: "@robelest/convex-embedded/server",
+        replacement: embeddedSrc + "/server/index.ts",
+      },
+      {
+        find: "@robelest/convex-embedded/client",
+        replacement: embeddedSrc + "/client/index.ts",
+      },
+      {
+        find: "@robelest/convex-embedded/convex.config",
+        replacement: embeddedSrc + "/component/convex.config.ts",
+      },
+      {
+        find: "@robelest/convex-embedded/test",
+        replacement: embeddedSrc + "/test.ts",
+      },
+      {
         find: "@robelest/convex-embedded",
         replacement: embeddedSrc + "/index.ts",
       },

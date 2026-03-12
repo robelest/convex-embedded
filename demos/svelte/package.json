@@ -13,7 +13,6 @@
   },
   "dependencies": {
     "@robelest/convex-embedded": "workspace:*",
-    "@robelest/convex-resolve": "workspace:*",
     "convex": "^1.32.0",
     "convex-svelte": "^0.0.12"
   },

@@ -1,4 +1,4 @@
-import { setup } from "@robelest/convex-resolve/server";
+import { setup } from "@robelest/convex-embedded/server";
 
 import { components } from "./_generated/api";
 import { mutation, query } from "./_generated/server";

@@ -9,7 +9,7 @@
  * @example
  * ```ts
  * // convex/sync.ts — one-time per app
- * import { setup } from "@robelest/convex-resolve/server";
+ * import { setup } from "@robelest/convex-embedded/server";
  * import { components } from "./_generated/api";
  * import { mutation, query } from "./_generated/server";
  *
@@ -147,7 +147,7 @@ interface ResolveComponentApi {
  *
  * @example
  * ```ts
- * import { setup } from "@robelest/convex-resolve/server";
+ * import { setup } from "@robelest/convex-embedded/server";
  * import { components } from "./_generated/api";
  * import { mutation, query } from "./_generated/server";
  *
@@ -266,7 +266,7 @@ export interface TableDescriptor {
  * @example
  * ```ts
  * // convex/sync.ts
- * import { setup } from "@robelest/convex-resolve/server";
+ * import { setup } from "@robelest/convex-embedded/server";
  * import { components } from "./_generated/api";
  * import { mutation, query } from "./_generated/server";
  *

@@ -19,7 +19,6 @@
       "version": "0.0.1",
       "dependencies": {
         "@robelest/convex-embedded": "workspace:*",
-        "@robelest/convex-resolve": "workspace:*",
         "convex": "^1.32.0",
         "convex-svelte": "^0.0.12",
       },
@@ -35,22 +34,6 @@
     },
     "packages/convex-embedded": {
       "name": "@robelest/convex-embedded",
-      "version": "0.0.1",
-      "dependencies": {
-        "@robelest/fx": "workspace:*",
-      },
-      "devDependencies": {
-        "convex": "catalog:",
-        "tsdown": "catalog:",
-        "typescript": "catalog:",
-        "vitest": "catalog:",
-      },
-      "peerDependencies": {
-        "convex": "^1.32.0",
-      },
-    },
-    "packages/convex-resolve": {
-      "name": "@robelest/convex-resolve",
       "version": "0.0.1",
       "dependencies": {
         "@robelest/fx": "workspace:*",
@@ -81,7 +64,6 @@
       "version": "0.0.0",
       "devDependencies": {
         "@robelest/convex-embedded": "workspace:*",
-        "@robelest/convex-resolve": "workspace:*",
         "convex": "catalog:",
         "convex-test": "^0.0.36",
         "typescript": "catalog:",
@@ -264,8 +246,6 @@
     "@robelest/convex-edge-tests": ["@robelest/convex-edge-tests@workspace:packages/test"],
 
     "@robelest/convex-embedded": ["@robelest/convex-embedded@workspace:packages/convex-embedded"],
-
-    "@robelest/convex-resolve": ["@robelest/convex-resolve@workspace:packages/convex-resolve"],
 
     "@robelest/fx": ["@robelest/fx@workspace:packages/fx"],
 

@@ -4,7 +4,7 @@ import { v } from "convex/values";
 import {
   define,
   registerField,
-} from "@robelest/convex-resolve/server";
+} from "@robelest/convex-embedded/server";
 
 /**
  * CRDT schema definition for the tasks table.

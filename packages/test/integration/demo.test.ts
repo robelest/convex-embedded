@@ -1,4 +1,4 @@
-import { register as registerResolveComponent } from "@robelest/convex-resolve/test";
+import { register as registerResolveComponent } from "@robelest/convex-embedded/test";
 import { convexTest } from "convex-test";
 /**
  * Integration test for convex-resolve using convex-test.

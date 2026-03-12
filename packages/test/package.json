@@ -13,7 +13,6 @@
   },
   "devDependencies": {
     "@robelest/convex-embedded": "workspace:*",
-    "@robelest/convex-resolve": "workspace:*",
     "convex": "catalog:",
     "convex-test": "^0.0.36",
     "typescript": "catalog:",

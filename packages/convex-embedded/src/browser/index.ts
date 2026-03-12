@@ -21,9 +21,9 @@
  * - **Cross-tab sync** uses `WriteFanout` (`BroadcastChannel`) plus
  *   a shared IndexedDB database name.
  *
- * - **Remote sync** (optional) uses `@robelest/convex-resolve` — a
- *   Yjs CRDT-based resolve engine that reconciles offline changes
- *   on reconnect, plus reactive query subscriptions for live updates.
+ * - **Remote sync** (optional) uses the built-in Yjs CRDT-based resolve
+ *   engine that reconciles offline changes on reconnect, plus reactive
+ *   query subscriptions for live updates.
  *
  * ## Public API
  *
@@ -86,7 +86,7 @@ export {
  * happens when a client reconnects after being offline. While online,
  * data flows through standard reactive query subscriptions — resolve is
  * only invoked for offline catch-up. The name aligns with the
- * `@robelest/convex-resolve` package.
+ * `@robelest/convex-embedded` package (formerly `@robelest/convex-resolve`).
  *
  * **Retry behaviour**: Both `maxRetries` and `retryDelayMs` control
  * the retry policy for the Yjs CRDT resolve pass on reconnect (not for
@@ -250,9 +250,8 @@ export interface ClientOptions {
    * keep local state fresh with changes from other clients. On reconnect
    * after offline, a CRDT resolve pass merges any state that diverged.
    *
-   * Requires `@robelest/convex-resolve` as a peer/optional dependency.
-   * If the package is not installed, a helpful error is logged and
-   * sync is silently disabled.
+   * Sync is built into `@robelest/convex-embedded` — no separate
+   * dependency is required.
    *
    * @see {@link ResolveOptions}
    */
@@ -597,7 +596,7 @@ interface ResolveEntry {
   listeners: Set<(state: ResolveState) => void>;
 }
 
-/** @internal Duck-typed resolve engine instance (avoids hard dep on convex-resolve). */
+/** @internal Resolve engine instance interface. */
 interface EngineInstance {
   mutation(ref: any, args: any): Promise<any>;
   on(event: string, cb: (status: any) => void): void;
@@ -607,23 +606,12 @@ interface EngineInstance {
 
 /**
  * @internal
- * Dynamically import the resolve engine from `@robelest/convex-resolve`.
- * Uses a Vite-ignored dynamic import so the dependency remains optional.
+ * Load the resolve engine (now co-located after singularity merge).
  */
 async function _loadEngine(): Promise<any> {
-  try {
-    // @robelest/convex-resolve is a peer/optional dependency
-    const mod = await import(
-      /* @vite-ignore */ "@robelest/convex-resolve/client"
-    );
-    return (mod as any).engine ?? (mod as any).syncEngine ?? (mod as any).monitor;
-  } catch {
-    console.error(
-      "[convex-embedded] sync requires @robelest/convex-resolve. " +
-        "Install it: npm install @robelest/convex-resolve",
-    );
-    return null;
-  }
+  // Engine now lives inside convex-embedded (singularity merge)
+  const { engine } = await import("@/client/engine");
+  return engine;
 }
 
 /**

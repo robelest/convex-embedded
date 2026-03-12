@@ -2,7 +2,7 @@
  * runtime — creates a ConvexClient over an embedded runtime transport.
  *
  * Usage:
- *   import { runtime } from '@robelest/convex-resolve/client';
+ *   import { runtime } from '@robelest/convex-embedded/client';
  *
  *   // With an embedded local runtime (e.g. Tauri, Electrobun)
  *   const localRuntime = createLocalRuntime({ ... });

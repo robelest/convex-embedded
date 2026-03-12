@@ -4,7 +4,6 @@ import type { Plugin } from "vite";
 import { defineConfig } from "vitest/config";
 
 const embeddedSrc = path.resolve(__dirname, "../convex-embedded/src");
-const resolveSrc = path.resolve(__dirname, "../convex-resolve/src");
 const fxSrc = path.resolve(__dirname, "../fx/src");
 
 export default defineConfig({
@@ -16,7 +15,6 @@ export default defineConfig({
         const rest = source.slice(2);
         let base: string;
         if (importer.includes("/convex-embedded/")) base = embeddedSrc;
-        else if (importer.includes("/convex-resolve/")) base = resolveSrc;
         else return null;
         const resolved = await this.resolve(path.join(base, rest), importer, {
           skipSelf: true,
@@ -28,23 +26,23 @@ export default defineConfig({
   resolve: {
     alias: {
       "#embedded": embeddedSrc,
-      "#resolve": resolveSrc,
+      "#resolve": embeddedSrc,
       "#fx": fxSrc,
       "@robelest/fx": path.join(fxSrc, "index.ts"),
       // Integration tests: resolve workspace package exports to source
-      "@robelest/convex-resolve/server": path.join(
-        resolveSrc,
+      "@robelest/convex-embedded/server": path.join(
+        embeddedSrc,
         "server/index.ts",
       ),
-      "@robelest/convex-resolve/client": path.join(
-        resolveSrc,
+      "@robelest/convex-embedded/client": path.join(
+        embeddedSrc,
         "client/index.ts",
       ),
-      "@robelest/convex-resolve/convex.config": path.join(
-        resolveSrc,
+      "@robelest/convex-embedded/convex.config": path.join(
+        embeddedSrc,
         "component/convex.config.ts",
       ),
-      "@robelest/convex-resolve/test": path.join(resolveSrc, "test.ts"),
+      "@robelest/convex-embedded/test": path.join(embeddedSrc, "test.ts"),
     },
   },
   test: {

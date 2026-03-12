@@ -18,7 +18,7 @@ import { materializeYjsDoc } from "@/client/schema";
 import { initYjsDoc } from "@/server/schema";
 import type { Definition } from "@/server/schema";
 import { createLogger } from "@/shared/logger";
-import type { MonitorStatus, ResolveProgress } from "@/shared/types";
+import type { EngineStatus, ResolveProgress } from "@/shared/types";
 
 import * as Y from "yjs";
 
@@ -200,7 +200,7 @@ export interface EngineConfig {
   retryDelayMs?: number;
 }
 
-type ChangeListener = (status: MonitorStatus) => void;
+type ChangeListener = (status: EngineStatus) => void;
 
 /** @internal */
 export interface EngineInstance {
@@ -214,7 +214,7 @@ export interface EngineInstance {
   on(event: "change", listener: ChangeListener): () => void;
 
   /** Get the current status. */
-  getStatus(): MonitorStatus;
+  getStatus(): EngineStatus;
 
   /**
    * Proxy a mutation through the sync engine.
@@ -325,7 +325,7 @@ function createEngine(config: EngineConfig): EngineInstance {
 
   const tableNames = Object.keys(tables);
 
-  let status: MonitorStatus = { status: "idle" };
+  let status: EngineStatus = { status: "idle" };
   const listeners = new Set<ChangeListener>();
   let started = false;
   let abortController: AbortController | null = null;
@@ -350,7 +350,7 @@ function createEngine(config: EngineConfig): EngineInstance {
   // Active remote reactive subscriptions (unsubscribe functions)
   const remoteUnsubscribes: Array<() => void> = [];
 
-  function emit(newStatus: MonitorStatus) {
+  function emit(newStatus: EngineStatus) {
     status = newStatus;
     for (const listener of listeners) {
       try {
@@ -900,7 +900,7 @@ function createEngine(config: EngineConfig): EngineInstance {
       return () => listeners.delete(listener);
     },
 
-    getStatus(): MonitorStatus {
+    getStatus(): EngineStatus {
       return status;
     },
 

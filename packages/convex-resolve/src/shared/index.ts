@@ -1,7 +1,7 @@
 export type {
   Conflict,
   ConflictEntry,
-  MonitorStatus,
+  EngineStatus,
   ResolveProgress,
   RecoveryAction,
   RecoveryContext,

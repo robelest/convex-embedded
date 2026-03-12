@@ -46,10 +46,10 @@ export interface ConflictEntry<T> {
 }
 
 // ---------------------------------------------------------------------------
-// Monitor status — used by the client-side monitor state machine
+// Engine status — used by the client-side engine state machine
 // ---------------------------------------------------------------------------
 
-export type MonitorStatus =
+export type EngineStatus =
   | { status: "idle" }
   | { status: "offline" }
   | { status: "resolving"; progress: ResolveProgress }

@@ -67,7 +67,7 @@ export {
 export type {
   Conflict,
   ConflictEntry,
-  MonitorStatus,
+  EngineStatus,
   ResolveProgress,
   ResolveRequest,
   ResolveDocumentRequest,

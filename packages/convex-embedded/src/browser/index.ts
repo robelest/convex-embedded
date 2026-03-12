@@ -808,7 +808,7 @@ async function _discoverAndStart(
   engine.start();
 }
 
-/** @internal Map internal MonitorStatus to public {@link ResolveState}. */
+/** @internal Map internal EngineStatus to public {@link ResolveState}. */
 function _mapStatus(s: any): ResolveState {
   if (!s) return { status: "idle" };
   switch (s.status) {

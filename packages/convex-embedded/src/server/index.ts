@@ -20,7 +20,6 @@ export {
 export type {
   SetupConfig,
   EmbeddedTableHandle,
-  TableDescriptor,
   SyncMeta,
 } from "@/server/setup";
 

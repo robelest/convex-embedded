@@ -61,9 +61,22 @@
  * @module
  */
 import { Fx } from "@robelest/fx";
-import type { FunctionReference, TableDefinition } from "convex/server";
+import type {
+  ArgsArrayForOptionalValidator,
+  ArgsArrayToObject,
+  DefaultArgsForOptionalValidator,
+  DefaultFunctionArgs,
+  FunctionReference,
+  GenericMutationCtx,
+  GenericQueryCtx,
+  RegisteredMutation,
+  RegisteredQuery,
+  ReturnValueForOptionalValidator,
+  TableDefinition,
+} from "convex/server";
 import { defineTable, mutationGeneric, queryGeneric } from "convex/server";
 import { v } from "convex/values";
+import type { PropertyValidators, Validator } from "convex/values";
 
 import type { Definition } from "@/server/schema";
 import {
@@ -236,7 +249,7 @@ export interface EmbeddedTableHandle {
    * After `setup()` runs this is a registered Convex query; before
    * `setup()` it is a raw `{ args, handler }` definition.
    */
-  resolve: any;
+  resolve: RegisteredQuery<"public", DefaultFunctionArgs, any>;
 
   /**
    * Wrap a mutation with delta recording and `remote:` support.
@@ -244,12 +257,7 @@ export interface EmbeddedTableHandle {
    * On remote Convex: runs handler -> `remote:` block -> records delta.
    * On local embedded: runs handler only.
    */
-  mutation(def: {
-    args: Record<string, any>;
-    returns?: any;
-    handler: (ctx: any, args: any) => any;
-    remote?: (ctx: any, args: any, result: any) => any;
-  }): any;
+  mutation: EmbeddedMutationBuilder;
 
   /**
    * Wrap a query with `remote:` support.
@@ -257,17 +265,72 @@ export interface EmbeddedTableHandle {
    * On remote Convex: runs handler -> `remote:` block.
    * On local embedded: runs handler only.
    */
-  query(def: {
-    args: Record<string, any>;
-    returns?: any;
-    handler: (ctx: any, args: any) => any;
-    remote?: (ctx: any, args: any, result: any) => any;
-  }): any;
+  query: EmbeddedQueryBuilder;
 }
 
-// Keep the old name as an alias so existing tests that import
-// `TableDescriptor` continue to compile.
-export type TableDescriptor = TableDefinition & EmbeddedTableHandle;
+type EmbeddedMutationBuilder = <
+  ArgsValidator extends
+    | PropertyValidators
+    | Validator<any, "required", any>
+    | void,
+  ReturnsValidator extends
+    | PropertyValidators
+    | Validator<any, "required", any>
+    | void,
+  OneOrZeroArgs extends ArgsArrayForOptionalValidator<ArgsValidator> =
+    DefaultArgsForOptionalValidator<ArgsValidator>,
+>(def: {
+  args?: ArgsValidator;
+  returns?: ReturnsValidator;
+  handler: (
+    ctx: GenericMutationCtx<any>,
+    ...args: OneOrZeroArgs
+  ) =>
+    | ReturnValueForOptionalValidator<ReturnsValidator>
+    | Promise<ReturnValueForOptionalValidator<ReturnsValidator>>;
+  remote?: (
+    ctx: GenericMutationCtx<any>,
+    args: ArgsArrayToObject<OneOrZeroArgs>,
+    result: Awaited<ReturnValueForOptionalValidator<ReturnsValidator>>,
+  ) => unknown;
+}) => RegisteredMutation<
+  "public",
+  ArgsArrayToObject<OneOrZeroArgs>,
+  ReturnValueForOptionalValidator<ReturnsValidator>
+>;
+
+type EmbeddedQueryBuilder = <
+  ArgsValidator extends
+    | PropertyValidators
+    | Validator<any, "required", any>
+    | void,
+  ReturnsValidator extends
+    | PropertyValidators
+    | Validator<any, "required", any>
+    | void,
+  OneOrZeroArgs extends ArgsArrayForOptionalValidator<ArgsValidator> =
+    DefaultArgsForOptionalValidator<ArgsValidator>,
+>(def: {
+  args?: ArgsValidator;
+  returns?: ReturnsValidator;
+  handler: (
+    ctx: GenericQueryCtx<any>,
+    ...args: OneOrZeroArgs
+  ) =>
+    | ReturnValueForOptionalValidator<ReturnsValidator>
+    | Promise<ReturnValueForOptionalValidator<ReturnsValidator>>;
+  remote?: (
+    ctx: GenericQueryCtx<any>,
+    args: ArgsArrayToObject<OneOrZeroArgs>,
+    result: Awaited<ReturnValueForOptionalValidator<ReturnsValidator>>,
+  ) =>
+    | Awaited<ReturnValueForOptionalValidator<ReturnsValidator>>
+    | Promise<Awaited<ReturnValueForOptionalValidator<ReturnsValidator>>>;
+}) => RegisteredQuery<
+  "public",
+  ArgsArrayToObject<OneOrZeroArgs>,
+  ReturnValueForOptionalValidator<ReturnsValidator>
+>;
 
 // ---------------------------------------------------------------------------
 // embeddedTable()
@@ -537,19 +600,46 @@ export function embeddedTable(
   }
 
   // mutation()
-  tableDef.mutation = function mutationBuilder(def: {
-    args: Record<string, any>;
-    returns?: any;
-    handler: (ctx: any, args: any) => any;
-    remote?: (ctx: any, args: any, result: any) => any;
-  }): any {
+  tableDef.mutation = function mutationBuilder<
+    ArgsValidator extends
+      | PropertyValidators
+      | Validator<any, "required", any>
+      | void,
+    ReturnsValidator extends
+      | PropertyValidators
+      | Validator<any, "required", any>
+      | void,
+    OneOrZeroArgs extends ArgsArrayForOptionalValidator<ArgsValidator> =
+      DefaultArgsForOptionalValidator<ArgsValidator>,
+  >(def: {
+    args?: ArgsValidator;
+    returns?: ReturnsValidator;
+    handler: (
+      ctx: GenericMutationCtx<any>,
+      ...args: OneOrZeroArgs
+    ) =>
+      | ReturnValueForOptionalValidator<ReturnsValidator>
+      | Promise<ReturnValueForOptionalValidator<ReturnsValidator>>;
+    remote?: (
+      ctx: GenericMutationCtx<any>,
+      args: ArgsArrayToObject<OneOrZeroArgs>,
+      result: Awaited<ReturnValueForOptionalValidator<ReturnsValidator>>,
+    ) => unknown;
+  }): RegisteredMutation<
+    "public",
+    ArgsArrayToObject<OneOrZeroArgs>,
+    ReturnValueForOptionalValidator<ReturnsValidator>
+  > {
     const { args, returns, handler, remote } = def;
+    const tupleArgs = (
+      fnArgs: ArgsArrayToObject<OneOrZeroArgs>,
+    ): OneOrZeroArgs => [fnArgs] as unknown as OneOrZeroArgs;
 
     return mutationGeneric({
       args,
       ...(returns !== undefined ? { returns } : {}),
-      handler: async (ctx: any, fnArgs: any) => {
-        const result = await handler(ctx, fnArgs);
+      handler: async (ctx: GenericMutationCtx<any>, fnArgs: any) => {
+        const result = await handler(ctx, ...tupleArgs(fnArgs));
 
         const isRemote =
           remote || _component ? await detectRuntime(ctx) : false;
@@ -567,23 +657,56 @@ export function embeddedTable(
 
         return result;
       },
-    });
+    } as any) as RegisteredMutation<
+      "public",
+      ArgsArrayToObject<OneOrZeroArgs>,
+      ReturnValueForOptionalValidator<ReturnsValidator>
+    >;
   };
 
   // query()
-  tableDef.query = function queryBuilder(def: {
-    args: Record<string, any>;
-    returns?: any;
-    handler: (ctx: any, args: any) => any;
-    remote?: (ctx: any, args: any, result: any) => any;
-  }): any {
+  tableDef.query = function queryBuilder<
+    ArgsValidator extends
+      | PropertyValidators
+      | Validator<any, "required", any>
+      | void,
+    ReturnsValidator extends
+      | PropertyValidators
+      | Validator<any, "required", any>
+      | void,
+    OneOrZeroArgs extends ArgsArrayForOptionalValidator<ArgsValidator> =
+      DefaultArgsForOptionalValidator<ArgsValidator>,
+  >(def: {
+    args?: ArgsValidator;
+    returns?: ReturnsValidator;
+    handler: (
+      ctx: GenericQueryCtx<any>,
+      ...args: OneOrZeroArgs
+    ) =>
+      | ReturnValueForOptionalValidator<ReturnsValidator>
+      | Promise<ReturnValueForOptionalValidator<ReturnsValidator>>;
+    remote?: (
+      ctx: GenericQueryCtx<any>,
+      args: ArgsArrayToObject<OneOrZeroArgs>,
+      result: Awaited<ReturnValueForOptionalValidator<ReturnsValidator>>,
+    ) =>
+      | Awaited<ReturnValueForOptionalValidator<ReturnsValidator>>
+      | Promise<Awaited<ReturnValueForOptionalValidator<ReturnsValidator>>>;
+  }): RegisteredQuery<
+    "public",
+    ArgsArrayToObject<OneOrZeroArgs>,
+    ReturnValueForOptionalValidator<ReturnsValidator>
+  > {
     const { args, returns, handler, remote } = def;
+    const tupleArgs = (
+      fnArgs: ArgsArrayToObject<OneOrZeroArgs>,
+    ): OneOrZeroArgs => [fnArgs] as unknown as OneOrZeroArgs;
 
     return queryGeneric({
       args,
       ...(returns !== undefined ? { returns } : {}),
-      handler: async (ctx: any, fnArgs: any) => {
-        let result = await handler(ctx, fnArgs);
+      handler: async (ctx: GenericQueryCtx<any>, fnArgs: any) => {
+        let result = await handler(ctx, ...tupleArgs(fnArgs));
 
         if (remote) {
           const isRemote = await detectRuntime(ctx);
@@ -594,7 +717,11 @@ export function embeddedTable(
 
         return result;
       },
-    });
+    } as any) as RegisteredQuery<
+      "public",
+      ArgsArrayToObject<OneOrZeroArgs>,
+      ReturnValueForOptionalValidator<ReturnsValidator>
+    >;
   };
 
   // Internal binding hook — called by setup().

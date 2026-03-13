@@ -6,9 +6,9 @@ catalog:
   convex: ^1.33.0
   tsdown: ^0.21.1
   typescript: ^5.9.0
-  vite: npm:@voidzero-dev/vite-plus-core@latest
+  vite: npm:@voidzero-dev/vite-plus-core@^0.1.11
   vite-plus: ^0.1.11
-  vitest: npm:@voidzero-dev/vite-plus-test@latest
+  vitest: npm:@voidzero-dev/vite-plus-test@^0.1.11
 overrides:
   vite: "catalog:"
   vitest: "catalog:"

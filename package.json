@@ -29,10 +29,25 @@
     "@convex-dev/action-retrier": "^0.3.0",
     "@robelest/convex-embedded": "workspace:*",
     "@typescript/native-preview": "7.0.0-dev.20260313.1",
+    "vite": "catalog:",
     "vite-plus": "catalog:"
   },
   "packageManager": "pnpm@10.32.1",
   "pnpm": {
+    "overrides": {
+      "vite": "catalog:",
+      "vitest": "catalog:"
+    },
+    "peerDependencyRules": {
+      "allowAny": [
+        "vite",
+        "vitest"
+      ],
+      "allowedVersions": {
+        "vite": "*",
+        "vitest": "*"
+      }
+    },
     "allowBuilds": {
       "esbuild": true
     }

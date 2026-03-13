@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { getContext } from "svelte";
 	import { useQuery, useConvexClient } from "convex-svelte";
-	import { api } from "$convex/_generated/api";
+	import { api } from "../../../../convex/_generated/api.js";
 	import type { ResolveState } from "@robelest/convex-embedded/browser";
 
 	const client = useConvexClient();

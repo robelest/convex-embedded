@@ -32,12 +32,12 @@
       "import": "./dist/browser/wa-sqlite-worker.js"
     },
     "./server": {
-      "types": "./dist/server/index.d.ts",
-      "import": "./dist/server/index.js"
+      "types": "./src/server/index.ts",
+      "import": "./src/server/index.ts"
     },
     "./crdt": {
-      "types": "./dist/crdt/index.d.ts",
-      "import": "./dist/crdt/index.js"
+      "types": "./src/crdt/index.ts",
+      "import": "./src/crdt/index.ts"
     },
     "./client": {
       "types": "./dist/client/index.d.ts",
@@ -47,11 +47,8 @@
       }
     },
     "./convex.config": {
-      "types": "./dist/component/convex.config.d.ts",
-      "import": {
-        "@convex-dev/component-source": "./src/component/convex.config.ts",
-        "default": "./dist/component/convex.config.js"
-      }
+      "types": "./src/component/convex.config.ts",
+      "import": "./src/component/convex.config.ts"
     },
     "./test": {
       "types": "./src/test.ts",

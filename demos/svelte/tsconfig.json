@@ -10,15 +10,7 @@
     "skipLibCheck": true,
     "sourceMap": true,
     "strict": true,
-    "moduleResolution": "bundler",
-    "paths": {
-      "@robelest/convex-embedded/browser": [
-        "../../packages/convex-embedded/src/browser/index.ts"
-      ],
-      "@robelest/convex-embedded": [
-        "../../packages/convex-embedded/src/index.ts"
-      ]
-    }
+    "moduleResolution": "bundler"
   }
   // Path aliases are handled by https://svelte.dev/docs/kit/configuration#alias
   // except $lib which is handled by https://svelte.dev/docs/kit/configuration#files

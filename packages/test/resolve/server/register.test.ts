@@ -5,6 +5,7 @@ import * as Y from "yjs";
 import { register as registerField, prose } from "#resolve/server/schema";
 import {
   embeddedTable,
+  remoteOnly,
   setup,
   _resetRegistry,
   SYNC_META,
@@ -96,6 +97,30 @@ describe("embeddedTable()", () => {
     const keys = [];
     for (const k in tasks.resolve) keys.push(k);
     expect(keys).not.toContain(SYNC_META.toString());
+  });
+
+  it("remoteOnly() tags function exports with a symbol", () => {
+    const tasks = embeddedTable(uniqueTable(), {
+      title: registerField(v.string()),
+      body: prose(),
+    });
+
+    const fn = tasks.query({
+      args: {},
+      handler: async () => [],
+    });
+
+    const wrapped = remoteOnly(fn);
+    const symbol = Symbol.for("convex-embedded:remoteOnly");
+
+    expect(wrapped).toBe(fn);
+    expect(wrapped[symbol]).toEqual({ __brand: "convex-embedded:remoteOnly" });
+  });
+
+  it("remoteOnly() rejects non-function values", () => {
+    expect(() => remoteOnly("bad-input" as any)).toThrow(
+      /expects a Convex function export/,
+    );
   });
 });
 

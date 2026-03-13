@@ -28,6 +28,7 @@ import {
   createJsSyscall,
 } from "@/kernel/syscalls";
 import type { RunUdfFn } from "@/kernel/syscalls";
+import { isRemoteOnly } from "@/shared/remote-only";
 
 // ---------------------------------------------------------------------------
 // Global type augmentation for the Convex runtime
@@ -407,6 +408,12 @@ export class UdfExecutor {
       throw new Error(
         `Expected a Convex function exported from module "${modulePath}" ` +
           `as \`${exportName}\`, but there is no such export.`,
+      );
+    }
+
+    if (isRemoteOnly(rawExport)) {
+      throw new Error(
+        `Function "${modulePath}:${exportName}" is marked remoteOnly() and cannot run in the embedded runtime.`,
       );
     }
 

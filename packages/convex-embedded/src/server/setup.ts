@@ -74,6 +74,7 @@ import {
   isDiffEmpty,
 } from "@/server/schema";
 import { createLogger } from "@/shared/logger";
+import { markRemoteOnly } from "@/shared/remote-only";
 
 const log = createLogger("setup");
 
@@ -141,6 +142,19 @@ export function _resetRegistry(): void {
  * @internal
  */
 export const SYNC_META = Symbol.for("convex-resolve:syncMeta");
+
+export { REMOTE_ONLY } from "@/shared/remote-only";
+
+/**
+ * Mark a function as remote-only.
+ *
+ * A function wrapped with `remoteOnly()` is never executed in the local
+ * embedded runtime. Browser routing sends calls directly to the remote
+ * Convex client, and local execution paths reject if reached.
+ */
+export function remoteOnly<T>(fn: T): T {
+  return markRemoteOnly(fn);
+}
 
 /**
  * Sync metadata attached to the `resolve` export.

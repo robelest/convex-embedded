@@ -2,6 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 
 import type { ModuleLoader } from "#embedded/kernel/module-loader";
 import { UdfExecutor } from "#embedded/kernel/udf-executor";
+import { remoteOnly } from "#embedded/server/setup";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -109,6 +110,20 @@ describe("executeQuery", () => {
     await expect(
       executor.executeQuery(fp("messages:send"), {}),
     ).rejects.toThrow(/not a query/);
+  });
+
+  it("rejects local execution for remoteOnly() exports", async () => {
+    const handler = vi.fn(async () => "should-not-run");
+    const { executor } = makeExecutor({
+      messages: {
+        list: remoteOnly({ isQuery: true, handler }),
+      },
+    });
+
+    await expect(
+      executor.executeQuery(fp("messages:list"), {}),
+    ).rejects.toThrow(/marked remoteOnly\(\)/);
+    expect(handler).not.toHaveBeenCalled();
   });
 });
 

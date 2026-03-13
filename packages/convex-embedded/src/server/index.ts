@@ -12,6 +12,7 @@
 export {
   embeddedTable,
   setup,
+  remoteOnly,
   getTableRegistry,
   _resetRegistry,
   SYNC_META,

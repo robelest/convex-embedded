@@ -1,7 +1,7 @@
 import path from "path";
 
-import type { Plugin } from "vite";
-import { defineConfig } from "vitest/config";
+import type { Plugin } from "vite-plus";
+import { defineConfig } from "vite-plus";
 
 const embeddedSrc = path.resolve(import.meta.dirname, "../convex-embedded/src");
 const fxSrc = path.resolve(import.meta.dirname, "../fx/src");

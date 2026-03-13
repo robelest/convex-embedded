@@ -20,14 +20,15 @@ runtimes.
 
 Lightweight functional effect library for composable async error handling. Lazy
 `Fx<A, E>` computations with `pipe()` chaining and generator-based `Fx.gen`
-composition. Used across `convex-embedded` for all async and error-handling code.
+composition. Used across `convex-embedded` for all async and error-handling
+code.
 
 ## Quick start
 
 ### 1. Install
 
 ```sh
-bun add @robelest/convex-embedded
+vp add @robelest/convex-embedded
 ```
 
 ### 2. Define schema
@@ -240,7 +241,7 @@ const unsub = subscribeResolveState(client, (state) => {
 
 ```
 convex-embedded/
-  package.json              # Bun workspace root
+  package.json              # Vite+ workspace root
   convex/                   # Root-level Convex functions (tasks CRUD + demo)
   packages/
     convex-embedded/        # @robelest/convex-embedded
@@ -260,43 +261,42 @@ convex-embedded/
 ### Install
 
 ```sh
-bun install
+vp install
 ```
 
 ### Build
 
 ```sh
-bun run build
+vp run build
 ```
 
 ### Test
 
 ```sh
-bun run test
+vp run test
 ```
 
-Always use `bun run test`, never `bun test` (bun's built-in runner is
-incompatible with the vitest-based test suite).
+Always use `vp test` or `vp run test`, never `bun test`.
 
 Run a specific test suite:
 
 ```sh
-bun --filter @robelest/embedded-tests test:embedded
-bun --filter @robelest/embedded-tests test:resolve
-bun --filter @robelest/embedded-tests test:integration
+vp run --filter @robelest/embedded-tests test:embedded
+vp run --filter @robelest/embedded-tests test:resolve
+vp run --filter @robelest/embedded-tests test:integration
 ```
 
 ### Lint & format
 
 ```sh
-bun run lint
-bun run fmt
+vp run lint
+vp run fmt
 ```
 
 ### Demo
 
 ```sh
-bun run dev:svelte
+vp run dev:svelte
 ```
 
 ## Future work

@@ -1,5 +1,5 @@
 import { Fx } from "@robelest/fx";
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vite-plus/test";
 
 // ---------------------------------------------------------------------------
 // retry policies

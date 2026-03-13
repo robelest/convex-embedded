@@ -107,7 +107,7 @@ async function initSqlite(
       imports: WebAssembly.Imports,
       successCallback: (instance: WebAssembly.Instance) => void,
     ) {
-      WebAssembly.instantiate(wasmModule, imports).then(successCallback);
+      void WebAssembly.instantiate(wasmModule, imports).then(successCallback);
       return {};
     },
   });

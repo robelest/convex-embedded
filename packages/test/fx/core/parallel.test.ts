@@ -1,5 +1,5 @@
 import { Fx } from "@robelest/fx";
-import { afterEach, describe, it, expect, vi } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vite-plus/test";
 
 const makeDelayed = (ms: number, value: number) =>
   Fx.promise(() => new Promise<number>((r) => setTimeout(() => r(value), ms)));

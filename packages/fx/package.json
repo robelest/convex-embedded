@@ -33,15 +33,14 @@
     "access": "public"
   },
   "scripts": {
-    "build": "tsdown",
-    "typecheck": "tsgo --noEmit",
-    "test": "bun --filter @robelest/embedded-tests test -- --project fx",
-    "test:once": "bun --filter @robelest/embedded-tests test:once -- --project fx",
-    "prepublishOnly": "bun run build"
+    "build": "vp pack",
+    "typecheck": "vp exec tsgo --noEmit",
+    "test": "vp run --filter @robelest/embedded-tests test -- --project fx",
+    "test:once": "vp run --filter @robelest/embedded-tests test:once -- --project fx",
+    "prepublishOnly": "vp run build"
   },
   "devDependencies": {
-    "tsdown": "catalog:",
     "typescript": "catalog:",
-    "vitest": "catalog:"
+    "vite-plus": "catalog:"
   }
 }

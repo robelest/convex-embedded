@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vite-plus/test";
 
 import { createConflict } from "#resolve/shared/conflict";
 import type { ConflictEntry } from "#resolve/shared/types";

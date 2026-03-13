@@ -302,7 +302,8 @@ function createEngine(config: EngineConfig): EngineInstance {
 
   // Destructure the embedded client for convenience.
   const localClient = embedded.client;
-  const { ingestDocuments, getDocumentsForTable } = embedded;
+  const ingestDocuments = embedded.ingestDocuments.bind(embedded);
+  const getDocumentsForTable = embedded.getDocumentsForTable.bind(embedded);
   const queryDirect = embedded.queryDirect?.bind(embedded);
   // System mutation bypass — runs _system:* writes directly against the
   // embedded database, bypassing the ConvexClient entirely. Used by

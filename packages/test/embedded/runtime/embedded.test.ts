@@ -1,4 +1,11 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+  afterEach,
+} from "vite-plus/test";
 
 import { EmbeddedRuntime } from "#embedded/runtime/embedded";
 
@@ -212,7 +219,7 @@ describe("ingestDocuments", () => {
     const docs = await runtime.getDocumentsForTable("tasks");
     expect(docs).toHaveLength(2);
 
-    const titles = docs.map((d) => d.title).sort();
+    const titles = docs.map((d) => d.title).sort((a, b) => a.localeCompare(b));
     expect(titles).toEqual(["Task A", "Task B"]);
   });
 

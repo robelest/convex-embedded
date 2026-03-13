@@ -1,43 +1,40 @@
 {
   "name": "embedded",
   "private": true,
-  "workspaces": {
-    "packages": [
-      "packages/*",
-      "demos/*"
-    ],
-    "catalog": {
-      "convex": "^1.32.0",
-      "tsdown": "^0.21.1",
-      "typescript": "^5.9.0",
-      "vite": "^7.3.1",
-      "vitest": "^4.0.18"
-    }
-  },
+  "workspaces": [
+    "packages/*",
+    "demos/*"
+  ],
   "scripts": {
-    "test": "bun --filter @robelest/embedded-tests test:once",
-    "build": "bunx convex codegen --component-dir ./packages/convex-embedded/src/component && bun --filter @robelest/fx --filter @robelest/convex-embedded build",
-    "build:fx": "bun --filter @robelest/fx build",
-    "build:embedded": "bunx convex codegen --component-dir ./packages/convex-embedded/src/component && bun --filter @robelest/convex-embedded build",
-    "publish:fx": "npm publish --workspace packages/fx",
-    "publish:embedded": "npm publish --workspace packages/convex-embedded",
-    "typecheck": "bun --filter @robelest/fx --filter @robelest/convex-embedded typecheck",
-    "typecheck:fx": "bun --filter @robelest/fx typecheck",
-    "typecheck:embedded": "bun --filter @robelest/convex-embedded typecheck",
-    "lint": "oxlint --fix",
-    "fmt": "oxfmt .",
-    "check": "oxlint && oxfmt --check .",
-    "dev:convex": "bunx convex dev",
-    "dev:svelte": "bun --filter demo-svelte dev"
+    "test": "vp run --filter @robelest/embedded-tests test:once",
+    "build": "vp exec convex codegen --component-dir ./packages/convex-embedded/src/component && vp run --filter @robelest/fx build && vp run --filter @robelest/convex-embedded build",
+    "build:fx": "vp run --filter @robelest/fx build",
+    "build:embedded": "vp exec convex codegen --component-dir ./packages/convex-embedded/src/component && vp run --filter @robelest/convex-embedded build",
+    "publish:fx": "vp pm publish --filter @robelest/fx --access public",
+    "publish:embedded": "vp pm publish --filter @robelest/convex-embedded --access public",
+    "typecheck": "vp run --filter @robelest/fx typecheck && vp run --filter @robelest/convex-embedded typecheck",
+    "typecheck:fx": "vp run --filter @robelest/fx typecheck",
+    "typecheck:embedded": "vp run --filter @robelest/convex-embedded typecheck",
+    "lint": "vp lint --fix",
+    "fmt": "vp fmt .",
+    "check": "vp lint && vp fmt --check .",
+    "dev:convex": "vp exec convex dev",
+    "dev:svelte": "vp run --filter demo-svelte dev",
+    "prepare": "vp config"
   },
   "dependencies": {
-    "convex": "^1.32.0"
+    "convex": "catalog:"
   },
   "devDependencies": {
     "@convex-dev/action-retrier": "^0.3.0",
     "@robelest/convex-embedded": "workspace:*",
-    "@typescript/native-preview": "^7.0.0-dev.20260312.1",
-    "oxfmt": "^0.40.0",
-    "oxlint": "^1.55.0"
+    "@typescript/native-preview": "7.0.0-dev.20260313.1",
+    "vite-plus": "catalog:"
+  },
+  "packageManager": "pnpm@10.32.1",
+  "pnpm": {
+    "allowBuilds": {
+      "esbuild": true
+    }
   }
 }

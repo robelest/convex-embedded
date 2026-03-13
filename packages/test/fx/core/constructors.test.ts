@@ -1,5 +1,5 @@
 import { Fx } from "@robelest/fx";
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi } from "vite-plus/test";
 
 // ---------------------------------------------------------------------------
 // succeed

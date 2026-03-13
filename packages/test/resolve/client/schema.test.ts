@@ -1,5 +1,5 @@
 import { v } from "convex/values";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vite-plus/test";
 import * as Y from "yjs";
 
 import {

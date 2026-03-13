@@ -722,7 +722,7 @@ export class EmbeddedRuntime {
         return this.executor.executeAction(path, args);
 
       default:
-        throw new Error(`Unknown UDF type: ${type}`);
+        throw new Error("Unknown UDF type");
     }
   }
 

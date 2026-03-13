@@ -95,7 +95,7 @@ export class LoopbackWebSocket {
     this._handler = handler;
 
     // Schedule open on the next microtask, matching real WebSocket behaviour.
-    Promise.resolve().then(() => {
+    void Promise.resolve().then(() => {
       if (this.readyState !== CONNECTING) return;
       this.readyState = OPEN;
       console.debug("[convex-embedded:ws] open", url);

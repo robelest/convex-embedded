@@ -18,7 +18,7 @@ Gleam-inspired naming.
 ## Install
 
 ```sh
-bun add @robelest/fx
+vp add @robelest/fx
 ```
 
 ## Core Concepts

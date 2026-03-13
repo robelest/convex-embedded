@@ -1,5 +1,5 @@
 import { Fx } from "@robelest/fx";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vite-plus/test";
 
 // ---------------------------------------------------------------------------
 // Fx.gen — generator runner

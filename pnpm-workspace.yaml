@@ -1,0 +1,21 @@
+packages:
+  - packages/*
+  - demos/*
+
+catalog:
+  convex: ^1.33.0
+  tsdown: ^0.21.1
+  typescript: ^5.9.0
+  vite: npm:@voidzero-dev/vite-plus-core@latest
+  vite-plus: ^0.1.11
+  vitest: npm:@voidzero-dev/vite-plus-test@latest
+overrides:
+  vite: "catalog:"
+  vitest: "catalog:"
+peerDependencyRules:
+  allowAny:
+    - vite
+    - vitest
+  allowedVersions:
+    vite: "*"
+    vitest: "*"

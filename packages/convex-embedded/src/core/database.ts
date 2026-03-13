@@ -44,6 +44,28 @@ function evaluateValue(value: JSONValue): Value | undefined {
   return jsonToConvex(value);
 }
 
+function formatValueForError(value: unknown): string {
+  if (value === null || value === undefined) {
+    return String(value);
+  }
+  if (
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "bigint" ||
+    typeof value === "boolean"
+  ) {
+    return String(value);
+  }
+  if (value instanceof ArrayBuffer) {
+    return `ArrayBuffer(${value.byteLength})`;
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return Object.prototype.toString.call(value);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Database
 // ---------------------------------------------------------------------------
@@ -392,8 +414,9 @@ export class Database {
     id: DocumentId,
     value: Record<string, unknown>,
   ): void {
+    const idText = formatValueForError(id);
     if (!this._validateId(tableName, id)) {
-      throw new Error(`Patch on non-existent document with ID "${id}"`);
+      throw new Error(`Patch on non-existent document with ID "${idText}"`);
     }
 
     if (typeof value !== "object" || value === null) {
@@ -404,14 +427,14 @@ export class Database {
 
     const document = this.get(tableName, id);
     if (document === null) {
-      throw new Error(`Patch on non-existent document with ID "${id}"`);
+      throw new Error(`Patch on non-existent document with ID "${idText}"`);
     }
 
     const { _id, _creationTime, ...fields } = document;
 
     if (value._id !== undefined && value._id !== _id) {
       throw new Error(
-        `Provided \`_id\` field value "${value._id}" ` +
+        `Provided \`_id\` field value "${formatValueForError(value._id)}" ` +
           `does not match the document ID "${_id}"`,
       );
     }
@@ -420,7 +443,7 @@ export class Database {
       value._creationTime !== _creationTime
     ) {
       throw new Error(
-        `Provided \`_creationTime\` field value ${value._creationTime} ` +
+        `Provided \`_creationTime\` field value ${formatValueForError(value._creationTime)} ` +
           `does not match the document's creation time ${_creationTime}`,
       );
     }
@@ -449,8 +472,9 @@ export class Database {
     id: DocumentId,
     value: Record<string, unknown>,
   ): void {
+    const idText = formatValueForError(id);
     if (!this._validateId(tableName, id)) {
-      throw new Error(`Replace on non-existent document with ID "${id}"`);
+      throw new Error(`Replace on non-existent document with ID "${idText}"`);
     }
 
     if (typeof value !== "object" || value === null) {
@@ -461,12 +485,12 @@ export class Database {
 
     const document = this.get(tableName, id);
     if (document === null) {
-      throw new Error(`Replace on non-existent document with ID "${id}"`);
+      throw new Error(`Replace on non-existent document with ID "${idText}"`);
     }
 
     if (value._id !== undefined && value._id !== document._id) {
       throw new Error(
-        `Provided \`_id\` field value "${value._id}" ` +
+        `Provided \`_id\` field value "${formatValueForError(value._id)}" ` +
           `does not match the document ID "${document._id}"`,
       );
     }
@@ -475,7 +499,7 @@ export class Database {
       value._creationTime !== document._creationTime
     ) {
       throw new Error(
-        `Provided \`_creationTime\` field value ${value._creationTime} ` +
+        `Provided \`_creationTime\` field value ${formatValueForError(value._creationTime)} ` +
           `does not match the document's creation time ${document._creationTime}`,
       );
     }
@@ -744,7 +768,7 @@ export class Database {
 
     if (typeof expectedTableName !== "string") {
       throw new Error(
-        `Invalid argument \`tableName\`, expected string but got '${typeof expectedTableName}': ${String(expectedTableName)}`,
+        `Invalid argument \`tableName\`, expected string but got '${typeof expectedTableName}': ${formatValueForError(expectedTableName)}`,
       );
     }
 

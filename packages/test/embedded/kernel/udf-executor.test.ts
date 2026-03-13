@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi } from "vite-plus/test";
 
 import type { ModuleLoader } from "#embedded/kernel/module-loader";
 import { UdfExecutor } from "#embedded/kernel/udf-executor";

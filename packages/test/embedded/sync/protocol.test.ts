@@ -1,5 +1,5 @@
 import { ConvexError } from "convex/values";
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi } from "vite-plus/test";
 
 import { SyncProtocolHandler } from "#embedded/sync/protocol";
 import type { ClientMessage } from "#embedded/sync/protocol";

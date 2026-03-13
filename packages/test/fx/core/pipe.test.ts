@@ -1,5 +1,5 @@
 import { Fx } from "@robelest/fx";
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi } from "vite-plus/test";
 
 // ---------------------------------------------------------------------------
 // Fx.pipe (standalone utility)
@@ -13,7 +13,7 @@ describe("Fx.pipe", () => {
   it("applies functions left-to-right", () => {
     const result = Fx.pipe(
       [3, 1, 2],
-      (arr) => [...arr].sort(),
+      (arr) => [...arr].sort((a, b) => a - b),
       (arr) => arr.join(","),
       (s) => `[${s}]`,
     );

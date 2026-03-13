@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vite-plus/test";
 
 import { Database } from "#embedded/core/database";
 import type { ParsedSchema } from "#embedded/core/schema";

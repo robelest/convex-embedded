@@ -91,6 +91,28 @@ function isSimpleObject(value: unknown): boolean {
   return isObject && isSimple;
 }
 
+function formatValueForError(value: unknown): string {
+  if (value === null || value === undefined) {
+    return String(value);
+  }
+  if (
+    typeof value === "string" ||
+    typeof value === "number" ||
+    typeof value === "bigint" ||
+    typeof value === "boolean"
+  ) {
+    return String(value);
+  }
+  if (value instanceof ArrayBuffer) {
+    return `ArrayBuffer(${value.byteLength})`;
+  }
+  try {
+    return JSON.stringify(convexToJson(value as Value));
+  } catch {
+    return Object.prototype.toString.call(value);
+  }
+}
+
 /** Check whether a string is a valid Convex identifier (table/field/index name). */
 export function isValidIdentifier(name: string): boolean {
   return /(^_(id|creationTime)$)|^[a-zA-Z][a-zA-Z0-9_]*$/.test(name);
@@ -115,14 +137,16 @@ export function validateValidator(
   switch (validator.type) {
     case "null":
       if (value !== null) {
-        throw new Error(`Validator error: Expected \`null\`, got \`${value}\``);
+        throw new Error(
+          `Validator error: Expected \`null\`, got \`${formatValueForError(value)}\``,
+        );
       }
       return;
 
     case "number":
       if (typeof value !== "number") {
         throw new Error(
-          `Validator error: Expected \`number\`, got \`${value}\``,
+          `Validator error: Expected \`number\`, got \`${formatValueForError(value)}\``,
         );
       }
       return;
@@ -130,7 +154,7 @@ export function validateValidator(
     case "bigint":
       if (typeof value !== "bigint") {
         throw new Error(
-          `Validator error: Expected \`bigint\`, got \`${value}\``,
+          `Validator error: Expected \`bigint\`, got \`${formatValueForError(value)}\``,
         );
       }
       return;
@@ -138,7 +162,7 @@ export function validateValidator(
     case "boolean":
       if (typeof value !== "boolean") {
         throw new Error(
-          `Validator error: Expected \`boolean\`, got \`${value}\``,
+          `Validator error: Expected \`boolean\`, got \`${formatValueForError(value)}\``,
         );
       }
       return;
@@ -146,7 +170,7 @@ export function validateValidator(
     case "string":
       if (typeof value !== "string") {
         throw new Error(
-          `Validator error: Expected \`string\`, got \`${value}\``,
+          `Validator error: Expected \`string\`, got \`${formatValueForError(value)}\``,
         );
       }
       return;
@@ -154,7 +178,7 @@ export function validateValidator(
     case "bytes":
       if (!(value instanceof ArrayBuffer)) {
         throw new Error(
-          `Validator error: Expected \`ArrayBuffer\`, got \`${value}\``,
+          `Validator error: Expected \`ArrayBuffer\`, got \`${formatValueForError(value)}\``,
         );
       }
       return;
@@ -165,7 +189,7 @@ export function validateValidator(
     case "literal":
       if (value !== validator.value) {
         throw new Error(
-          `Validator error: Expected \`${String(validator.value)}\`, got \`${value}\``,
+          `Validator error: Expected \`${formatValueForError(validator.value)}\`, got \`${formatValueForError(value)}\``,
         );
       }
       return;
@@ -173,7 +197,7 @@ export function validateValidator(
     case "id":
       if (typeof value !== "string") {
         throw new Error(
-          `Validator error: Expected \`string\`, got \`${value}\``,
+          `Validator error: Expected \`string\`, got \`${formatValueForError(value)}\``,
         );
       }
       if (tableNameFromId(value, idLookup) !== validator.tableName) {
@@ -186,7 +210,7 @@ export function validateValidator(
     case "array":
       if (!Array.isArray(value)) {
         throw new Error(
-          `Validator error: Expected \`Array\`, got \`${value}\``,
+          `Validator error: Expected \`Array\`, got \`${formatValueForError(value)}\``,
         );
       }
       for (const v of value) {
@@ -216,12 +240,12 @@ export function validateValidator(
     case "object":
       if (typeof value !== "object") {
         throw new Error(
-          `Validator error: Expected \`object\`, got \`${value}\``,
+          `Validator error: Expected \`object\`, got \`${formatValueForError(value)}\``,
         );
       }
       if (!isSimpleObject(value)) {
         throw new Error(
-          `Validator error: Expected a plain old JavaScript \`object\`, got \`${value}\``,
+          `Validator error: Expected a plain old JavaScript \`object\`, got \`${formatValueForError(value)}\``,
         );
       }
       {

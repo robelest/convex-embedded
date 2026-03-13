@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 
-import { defineConfig } from "tsdown";
+import { defineConfig } from "vite-plus/pack";
 
 const jsExtensions = () => ({ js: ".js", dts: ".d.ts" });
 const srcAlias = { "@": resolve(import.meta.dirname, "src") };

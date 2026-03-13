@@ -4,12 +4,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "vitest",
-    "test:once": "vitest run",
-    "test:fx": "vitest run --project fx",
-    "test:embedded": "vitest run --project embedded",
-    "test:resolve": "vitest run --project resolve",
-    "test:integration": "vitest run --project integration"
+    "test": "vp test",
+    "test:once": "vp test --run",
+    "test:fx": "vp test --run --project fx",
+    "test:embedded": "vp test --run --project embedded",
+    "test:resolve": "vp test --run --project resolve",
+    "test:integration": "vp test --run --project integration"
   },
   "devDependencies": {
     "@edge-runtime/vm": "^5.0.0",
@@ -18,8 +18,7 @@
     "convex": "catalog:",
     "convex-test": "^0.0.36",
     "typescript": "catalog:",
-    "vite": "catalog:",
-    "vitest": "catalog:",
+    "vite-plus": "catalog:",
     "yjs": "^13.6.0"
   }
 }

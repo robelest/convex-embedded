@@ -10,7 +10,7 @@ import { convexTest } from "convex-test";
  *   -> client applies diff
  *   -> resolve returns empty (up to date)
  */
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vite-plus/test";
 import * as Y from "yjs";
 
 import { api } from "#convex/_generated/api";

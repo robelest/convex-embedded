@@ -1,7 +1,7 @@
 import path from "path";
 
 import { sveltekit } from "@sveltejs/kit/vite";
-import { defineConfig } from "vite";
+import { defineConfig } from "vite-plus";
 
 const embeddedSrc = path.resolve(
   import.meta.dirname,

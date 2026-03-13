@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vite-plus/test";
 
 import { Database } from "#embedded/core/database";
 import { evaluateFieldPath, evaluateFilter } from "#embedded/core/query-engine";
@@ -324,7 +324,9 @@ describe("QueryEngine — search", () => {
 
     // "hello world" and "help me please" both have words starting with "hel"
     expect(results).toHaveLength(2);
-    const titles = results.map((d: any) => d.title).sort();
+    const titles = results
+      .map((d: any) => d.title)
+      .sort((a, b) => a.localeCompare(b));
     expect(titles).toEqual(["a", "b"]);
   });
 

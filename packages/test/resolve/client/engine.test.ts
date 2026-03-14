@@ -540,6 +540,29 @@ describe("engine.create()", () => {
     );
   });
 
+  it("mutation() rejects when pending persistence degrades to ephemeral queueing", async () => {
+    const { embedded, localClient } = createMockEmbedded();
+    localClient.mutation.mockImplementation((path: string) => {
+      if (path === "_system:pendingPush") {
+        return Promise.reject(new Error("write failed"));
+      }
+      return Promise.resolve({ _id: "local-123" });
+    });
+    const remoteClient = createMockRemoteClient();
+
+    const m = engine.create({
+      embedded,
+      remoteClient,
+      tables: { tasks: tableConfig("resolve_ref") },
+    });
+
+    await expect(
+      m.mutation("tasks:create", { title: "Buy milk" }),
+    ).rejects.toThrow(/queued entry is ephemeral/);
+    expect(m.pendingCount()).toBe(1);
+    expect(m.pendingQueue.peek()?._id).toMatch(/^ephemeral_/);
+  });
+
   // -------------------------------------------------------------------------
   // resolveNow
   // -------------------------------------------------------------------------

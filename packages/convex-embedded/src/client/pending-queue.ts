@@ -44,6 +44,19 @@ export interface PendingEntry {
   table: string;
 }
 
+export class PendingQueuePersistenceError extends Error {
+  readonly entry: PendingEntry;
+
+  constructor(entry: PendingEntry, cause: Error) {
+    super(
+      `Failed to persist pending mutation for ${entry.ref}; queued entry is ephemeral for this session only.`,
+      { cause },
+    );
+    this.name = "PendingQueuePersistenceError";
+    this.entry = entry;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // PendingQueue
 // ---------------------------------------------------------------------------
@@ -164,6 +177,7 @@ export class PendingQueue {
       localResult: JSON.stringify(localResult),
       table,
     };
+    let persistenceError: PendingQueuePersistenceError | null = null;
 
     return Fx.run(
       Fx.from({
@@ -187,14 +201,20 @@ export class PendingQueue {
         Fx.inspect((err) =>
           Fx.sync(() => {
             log.warn("pending-queue: failed to persist entry", err);
-            // Still add to in-memory queue for this session
-            this._entries.push({
+            const ephemeralEntry = {
               _id: `ephemeral_${Date.now()}`,
               ...serialized,
-            });
+            };
+            // Keep an in-memory fallback for this session, but surface that
+            // durability has been lost so callers can react explicitly.
+            this._entries.push(ephemeralEntry);
+            persistenceError = new PendingQueuePersistenceError(
+              ephemeralEntry,
+              err,
+            );
           }),
         ),
-        Fx.recover(() => Fx.unit),
+        Fx.recover((err) => Fx.fail(persistenceError ?? (err as Error))),
         Fx.map(() => undefined as void),
       ),
     );

@@ -1,4 +1,7 @@
-import { PendingQueue } from "@resolve/client/pending-queue";
+import {
+  PendingQueue,
+  PendingQueuePersistenceError,
+} from "@resolve/client/pending-queue";
 import { describe, it, expect, vi, beforeEach } from "vite-plus/test";
 
 // ---------------------------------------------------------------------------
@@ -142,10 +145,12 @@ describe("push()", () => {
     expect(queue.peek()!.args).toBe(JSON.stringify({ title: "first" }));
   });
 
-  it("recovers on persistence failure (still adds ephemeral entry)", async () => {
+  it("surfaces persistence failure while still keeping an ephemeral entry", async () => {
     mockClient.mutation.mockRejectedValue(new Error("write failed"));
 
-    await queue.push("tasks:create", { title: "test" }, "uuid-1", "tasks");
+    await expect(
+      queue.push("tasks:create", { title: "test" }, "uuid-1", "tasks"),
+    ).rejects.toBeInstanceOf(PendingQueuePersistenceError);
 
     expect(queue.length).toBe(1);
 
@@ -239,7 +244,9 @@ describe("shift()", () => {
   it("skips the remove call for ephemeral entries", async () => {
     mockClient.mutation.mockRejectedValueOnce(new Error("write failed"));
 
-    await queue.push("tasks:create", { title: "test" }, "uuid-1", "tasks");
+    await expect(
+      queue.push("tasks:create", { title: "test" }, "uuid-1", "tasks"),
+    ).rejects.toBeInstanceOf(PendingQueuePersistenceError);
     expect(queue.peek()!._id).toMatch(/^ephemeral_/);
 
     mockClient.mutation.mockClear();

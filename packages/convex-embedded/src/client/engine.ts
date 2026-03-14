@@ -969,7 +969,6 @@ function createEngine(config: EngineConfig): EngineInstance {
               Fx.inspect((err) =>
                 Fx.sync(() => log.warn("sync: failed to queue mutation", err)),
               ),
-              Fx.recover(() => Fx.unit),
             ),
           ),
         ),

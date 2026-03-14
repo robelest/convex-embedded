@@ -72,6 +72,22 @@ describe("IdMap", () => {
       expect(idMap.getLocalId("remote-1")).toBe("local-1");
       expect(idMap.getLocalId("remote-2")).toBe("local-2");
     });
+
+    it("clears stale cache entries before rehydrating", async () => {
+      mockClient.mutation.mockResolvedValue(null);
+      await idMap.set("local-stale", "remote-stale", "tasks");
+
+      mockClient.query.mockResolvedValue([
+        { localId: "local-1", remoteId: "remote-1", table: "tasks" },
+      ]);
+
+      await idMap.hydrate();
+
+      expect(idMap.size).toBe(1);
+      expect(idMap.getRemoteId("local-stale")).toBeNull();
+      expect(idMap.getLocalId("remote-stale")).toBeNull();
+      expect(idMap.getRemoteId("local-1")).toBe("remote-1");
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -111,6 +127,14 @@ describe("IdMap", () => {
 
       expect(idMap.getRemoteId("local-1")).toBe("remote-2");
       expect(idMap.size).toBe(1);
+    });
+
+    it("removes the stale reverse mapping when overwriting a localId", async () => {
+      await idMap.set("local-1", "remote-1", "tasks");
+      await idMap.set("local-1", "remote-2", "tasks");
+
+      expect(idMap.getLocalId("remote-1")).toBeNull();
+      expect(idMap.getLocalId("remote-2")).toBe("local-1");
     });
 
     it("recovers gracefully on persistence failure (cache still updated)", async () => {

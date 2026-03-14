@@ -100,6 +100,8 @@ export class IdMap {
       }).pipe(
         Fx.tap((entries) =>
           Fx.sync(() => {
+            this._cache.clear();
+            this._reverse.clear();
             for (const entry of entries) {
               this._cache.set(entry.localId, entry.remoteId);
               this._reverse.set(entry.remoteId, entry.localId);
@@ -160,6 +162,11 @@ export class IdMap {
    * embedded DB's `_resolve_id_map` system table.
    */
   set(localId: string, remoteId: string, table: string): Promise<void> {
+    const previousRemoteId = this._cache.get(localId);
+    if (previousRemoteId !== undefined && previousRemoteId !== remoteId) {
+      this._reverse.delete(previousRemoteId);
+    }
+
     this._cache.set(localId, remoteId);
     this._reverse.set(remoteId, localId);
 

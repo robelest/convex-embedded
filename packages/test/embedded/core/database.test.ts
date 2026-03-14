@@ -362,6 +362,20 @@ describe("Database — normalizeId", () => {
     const db = createDb();
     expect(db.normalizeId("tasks", "random-string")).toBeNull();
   });
+
+  it("deleted IDs stop normalizing after commit", () => {
+    const db = createDb();
+    db.startTransaction();
+    const id = db.insert("tasks", { title: "a" });
+    db.commit();
+
+    db.startTransaction();
+    db.delete("tasks", id);
+    db.commit();
+
+    expect(db.normalizeId("tasks", id)).toBeNull();
+    expect(db.getTableForId(id)).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -300,6 +300,7 @@ export class Database {
         const _id = id as DocumentId;
         if (write === null) {
           delete this._documents[_id];
+          this._idTableMap.delete(id);
           deletes.push(id);
         } else {
           this._documents[_id] = write;

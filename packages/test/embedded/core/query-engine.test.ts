@@ -1,9 +1,8 @@
+import { Database } from "@embedded/core/database";
+import { evaluateFieldPath, evaluateFilter } from "@embedded/core/query-engine";
+import type { ParsedSchema } from "@embedded/core/schema";
+import type { SerializedQuery } from "@embedded/core/types";
 import { describe, it, expect } from "vite-plus/test";
-
-import { Database } from "#embedded/core/database";
-import { evaluateFieldPath, evaluateFilter } from "#embedded/core/query-engine";
-import type { ParsedSchema } from "#embedded/core/schema";
-import type { SerializedQuery } from "#embedded/core/types";
 
 // ---------------------------------------------------------------------------
 // Helpers

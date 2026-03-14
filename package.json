@@ -7,6 +7,7 @@
   ],
   "scripts": {
     "test": "vp run --filter @robelest/embedded-tests test:once",
+    "test:coverage": "vp test --run --coverage",
     "build": "vp exec convex codegen --component-dir ./packages/convex-embedded/src/component && vp run --filter @robelest/fx build && vp run --filter @robelest/convex-embedded build",
     "build:fx": "vp run --filter @robelest/fx build",
     "build:embedded": "vp exec convex codegen --component-dir ./packages/convex-embedded/src/component && vp run --filter @robelest/convex-embedded build",

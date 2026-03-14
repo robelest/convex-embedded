@@ -1,6 +1,5 @@
+import { PendingQueue } from "@resolve/client/pending-queue";
 import { describe, it, expect, vi, beforeEach } from "vite-plus/test";
-
-import { PendingQueue } from "#resolve/client/pending-queue";
 
 // ---------------------------------------------------------------------------
 // Mock client

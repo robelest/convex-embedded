@@ -1,3 +1,7 @@
+import { Database } from "@embedded/core/database";
+import type { ParsedSchema } from "@embedded/core/schema";
+import type { DocumentId, SerializedQuery } from "@embedded/core/types";
+import { SubscriptionManager } from "@embedded/sync/subscriptions";
 /**
  * Integration tests for the embedded Convex runtime.
  *
@@ -5,11 +9,6 @@
  * SubscriptionManager layers working together end-to-end.
  */
 import { describe, it, expect, vi } from "vite-plus/test";
-
-import { Database } from "#embedded/core/database";
-import type { ParsedSchema } from "#embedded/core/schema";
-import type { DocumentId, SerializedQuery } from "#embedded/core/types";
-import { SubscriptionManager } from "#embedded/sync/subscriptions";
 
 // ---------------------------------------------------------------------------
 // Helpers

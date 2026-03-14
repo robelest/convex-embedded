@@ -40,12 +40,12 @@
  * @packageDocumentation
  */
 
-import { Database } from "#embedded/core/database";
-import type { ParsedSchema } from "#embedded/core/schema";
-import { ModuleLoader } from "#embedded/kernel/module-loader";
-import type { FunctionPath } from "#embedded/kernel/module-loader";
-import { resolveFunctionPath } from "#embedded/kernel/module-loader";
-import { UdfExecutor } from "#embedded/kernel/udf-executor";
+import { Database } from "@embedded/core/database";
+import type { ParsedSchema } from "@embedded/core/schema";
+import { ModuleLoader } from "@embedded/kernel/module-loader";
+import type { FunctionPath } from "@embedded/kernel/module-loader";
+import { resolveFunctionPath } from "@embedded/kernel/module-loader";
+import { UdfExecutor } from "@embedded/kernel/udf-executor";
 
 // ---------------------------------------------------------------------------
 // Simple test function wrappers

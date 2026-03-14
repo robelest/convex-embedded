@@ -1,3 +1,4 @@
+import { SchedulerExecutor } from "@embedded/scheduler/executor";
 import {
   describe,
   it,
@@ -6,8 +7,6 @@ import {
   beforeEach,
   afterEach,
 } from "vite-plus/test";
-
-import { SchedulerExecutor } from "#embedded/scheduler/executor";
 
 describe("SchedulerExecutor", () => {
   beforeEach(() => {

@@ -1,3 +1,4 @@
+import { EmbeddedRuntime } from "@embedded/runtime/embedded";
 import {
   describe,
   it,
@@ -6,8 +7,6 @@ import {
   beforeEach,
   afterEach,
 } from "vite-plus/test";
-
-import { EmbeddedRuntime } from "#embedded/runtime/embedded";
 
 // ---------------------------------------------------------------------------
 // Mock BroadcastChannel (copied from write-fanout.test.ts)

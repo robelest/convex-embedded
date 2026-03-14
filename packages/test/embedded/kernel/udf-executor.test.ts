@@ -1,8 +1,7 @@
+import type { ModuleLoader } from "@embedded/kernel/module-loader";
+import { UdfExecutor } from "@embedded/kernel/udf-executor";
+import { remoteOnly } from "@embedded/server/setup";
 import { describe, it, expect, vi } from "vite-plus/test";
-
-import type { ModuleLoader } from "#embedded/kernel/module-loader";
-import { UdfExecutor } from "#embedded/kernel/udf-executor";
-import { remoteOnly } from "#embedded/server/setup";
 
 // ---------------------------------------------------------------------------
 // Helpers

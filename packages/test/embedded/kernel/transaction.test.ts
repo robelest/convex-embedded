@@ -1,4 +1,10 @@
 import {
+  TransactionManager,
+  OccTransaction,
+  OccConflictError,
+  OCC_MAX_RETRIES,
+} from "@embedded/kernel/transaction";
+import {
   describe,
   it,
   expect,
@@ -6,13 +12,6 @@ import {
   beforeEach,
   afterEach,
 } from "vite-plus/test";
-
-import {
-  TransactionManager,
-  OccTransaction,
-  OccConflictError,
-  OCC_MAX_RETRIES,
-} from "#embedded/kernel/transaction";
 
 // ---------------------------------------------------------------------------
 // TransactionManager

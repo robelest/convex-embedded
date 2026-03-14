@@ -1,7 +1,3 @@
-import { v } from "convex/values";
-import { describe, it, expect } from "vite-plus/test";
-import * as Y from "yjs";
-
 import {
   extractProseText,
   createEmptyDoc,
@@ -13,7 +9,7 @@ import {
   applyUpdate,
   encodeState,
   materializeYjsDoc,
-} from "#resolve/client/schema";
+} from "@resolve/client/schema";
 import {
   define,
   register,
@@ -22,7 +18,10 @@ import {
   omit,
   prose,
   initYjsDoc,
-} from "#resolve/server/schema";
+} from "@resolve/server/schema";
+import { v } from "convex/values";
+import { describe, it, expect } from "vite-plus/test";
+import * as Y from "yjs";
 
 // ---------------------------------------------------------------------------
 // Prose helpers

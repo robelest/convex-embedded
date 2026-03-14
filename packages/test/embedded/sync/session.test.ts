@@ -1,6 +1,5 @@
+import { Session, SessionManager } from "@embedded/sync/session";
 import { describe, it, expect, vi } from "vite-plus/test";
-
-import { Session, SessionManager } from "#embedded/sync/session";
 
 // ---------------------------------------------------------------------------
 // Session

@@ -1,8 +1,7 @@
+import { runMigrations, migration } from "@resolve/server/migration";
+import { define, register as registerField } from "@resolve/server/schema";
 import { v } from "convex/values";
 import { describe, it, expect, vi } from "vite-plus/test";
-
-import { runMigrations, migration } from "#resolve/server/migration";
-import { define, register as registerField } from "#resolve/server/schema";
 
 // ---------------------------------------------------------------------------
 // Mock Convex context

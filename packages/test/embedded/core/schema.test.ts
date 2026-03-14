@@ -1,13 +1,12 @@
-import { describe, it, expect } from "vite-plus/test";
-
 import {
   validateValidator,
   isValidIdentifier,
   tableNameFromId,
   validateFieldNames,
   parseSchema,
-} from "#embedded/core/schema";
-import type { ValidatorJSON } from "#embedded/core/schema";
+} from "@embedded/core/schema";
+import type { ValidatorJSON } from "@embedded/core/schema";
+import { describe, it, expect } from "vite-plus/test";
 
 // ---------------------------------------------------------------------------
 // Helpers

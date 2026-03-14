@@ -1,11 +1,10 @@
-import { describe, it, expect } from "vite-plus/test";
-
 import {
   ModuleLoader,
   createFunctionHandle,
   getFunctionFromHandle,
   resolveFunctionPath,
-} from "#embedded/kernel/module-loader";
+} from "@embedded/kernel/module-loader";
+import { describe, it, expect } from "vite-plus/test";
 
 // ---------------------------------------------------------------------------
 // Helpers

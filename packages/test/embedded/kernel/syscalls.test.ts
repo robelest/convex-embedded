@@ -1,11 +1,10 @@
-import { describe, it, expect, vi, beforeEach } from "vite-plus/test";
-
-import { Database } from "#embedded/core/database";
+import { Database } from "@embedded/core/database";
 import {
   createSyncSyscall,
   createAsyncSyscall,
   createJsSyscall,
-} from "#embedded/kernel/syscalls";
+} from "@embedded/kernel/syscalls";
+import { describe, it, expect, vi, beforeEach } from "vite-plus/test";
 
 // ---------------------------------------------------------------------------
 // Helpers

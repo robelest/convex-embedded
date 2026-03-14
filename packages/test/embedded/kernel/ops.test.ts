@@ -1,3 +1,4 @@
+import { OpsContext, createOpsContext } from "@embedded/kernel/ops";
 import {
   describe,
   it,
@@ -6,8 +7,6 @@ import {
   beforeEach,
   afterEach,
 } from "vite-plus/test";
-
-import { OpsContext, createOpsContext } from "#embedded/kernel/ops";
 
 describe("OpsContext", () => {
   // ---------------------------------------------------------------------------

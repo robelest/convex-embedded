@@ -1,3 +1,4 @@
+import { createLogger } from "@resolve/shared/logger";
 import {
   describe,
   it,
@@ -6,8 +7,6 @@ import {
   beforeEach,
   afterEach,
 } from "vite-plus/test";
-
-import { createLogger } from "#resolve/shared/logger";
 
 describe("createLogger", () => {
   beforeEach(() => {

@@ -1,10 +1,9 @@
-import { describe, it, expect, beforeEach } from "vite-plus/test";
-
-import { Database } from "#embedded/core/database";
+import { Database } from "@embedded/core/database";
 import {
   SYSTEM_FUNCTIONS,
   SystemPaths,
-} from "#embedded/kernel/system-functions";
+} from "@embedded/kernel/system-functions";
+import { describe, it, expect, beforeEach } from "vite-plus/test";
 
 // ---------------------------------------------------------------------------
 // Helpers

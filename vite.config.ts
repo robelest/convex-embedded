@@ -75,9 +75,9 @@ export default defineConfig({
   ],
   resolve: {
     alias: {
-      "#embedded": embeddedSrc,
-      "#resolve": embeddedSrc,
-      "#fx": fxSrc,
+      "@embedded": embeddedSrc,
+      "@resolve": embeddedSrc,
+      "@fx": fxSrc,
       "@robelest/fx": path.join(fxSrc, "index.ts"),
       "@robelest/convex-embedded/server": path.join(
         embeddedSrc,
@@ -93,41 +93,15 @@ export default defineConfig({
       ),
       "@robelest/convex-embedded/crdt": path.join(embeddedSrc, "crdt/index.ts"),
       "@robelest/convex-embedded/test": path.join(embeddedSrc, "test.ts"),
-      "#convex": convexApp,
+      "@convex": convexApp,
     },
   },
   test: {
-    projects: [
-      {
-        extends: true,
-        test: {
-          name: "fx",
-          include: ["packages/test/fx/**/*.test.ts"],
-        },
-      },
-      {
-        extends: true,
-        test: {
-          name: "embedded",
-          include: ["packages/test/embedded/**/*.test.ts"],
-          testTimeout: 10_000,
-        },
-      },
-      {
-        extends: true,
-        test: {
-          name: "resolve",
-          include: ["packages/test/resolve/**/*.test.ts"],
-        },
-      },
-      {
-        extends: true,
-        test: {
-          name: "integration",
-          include: ["packages/test/integration/**/*.test.ts"],
-          environment: "edge-runtime",
-        },
-      },
-    ],
+    include: ["packages/test/**/*.test.ts"],
+    testTimeout: 10_000,
+    coverage: {
+      reporter: ["text", "html"],
+      exclude: ["packages/test/**", "convex/_generated/**", "demos/**"],
+    },
   },
 });

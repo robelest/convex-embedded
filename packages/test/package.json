@@ -6,10 +6,11 @@
   "scripts": {
     "test": "vp test",
     "test:once": "vp test --run",
-    "test:fx": "vp test --run --project fx",
-    "test:embedded": "vp test --run --project embedded",
-    "test:resolve": "vp test --run --project resolve",
-    "test:integration": "vp test --run --project integration"
+    "test:coverage": "vp test --run --coverage",
+    "test:fx": "vp test --run fx/**/*.test.ts",
+    "test:embedded": "vp test --run embedded/**/*.test.ts",
+    "test:resolve": "vp test --run resolve/**/*.test.ts",
+    "test:integration": "vp test --run integration/**/*.test.ts"
   },
   "devDependencies": {
     "@edge-runtime/vm": "^5.0.0",

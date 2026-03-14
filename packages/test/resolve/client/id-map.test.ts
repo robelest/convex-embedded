@@ -1,6 +1,5 @@
+import { IdMap } from "@resolve/client/id-map";
 import { describe, it, expect, vi, beforeEach } from "vite-plus/test";
-
-import { IdMap } from "#resolve/client/id-map";
 
 describe("IdMap", () => {
   let mockClient: {

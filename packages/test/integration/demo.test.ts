@@ -1,3 +1,7 @@
+// @vitest-environment edge-runtime
+
+import { api } from "@convex/_generated/api";
+import schema from "@convex/schema";
 import { register as registerResolveComponent } from "@robelest/convex-embedded/test";
 import { convexTest } from "convex-test";
 /**
@@ -11,12 +15,9 @@ import { convexTest } from "convex-test";
  *   -> resolve returns empty (up to date)
  */
 import { describe, it, expect, vi, beforeEach } from "vite-plus/test";
-import * as Y from "yjs";
-
-import { api } from "#convex/_generated/api";
 // Ensure setup() runs so the component reference is bound.
-import "#convex/embedded";
-import schema from "#convex/schema";
+import "@convex/embedded";
+import * as Y from "yjs";
 
 /** Safely convert a Uint8Array to a proper ArrayBuffer for Convex v.bytes() */
 function toArrayBuffer(data: Uint8Array): ArrayBuffer {

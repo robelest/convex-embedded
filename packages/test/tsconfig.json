@@ -10,9 +10,10 @@
     "noEmit": true,
     "lib": ["ES2022", "DOM"],
     "paths": {
-      "#embedded/*": ["../convex-embedded/src/*"],
-      "#resolve/*": ["../convex-embedded/src/*"],
-      "#fx/*": ["../fx/src/*"]
+      "@embedded/*": ["../convex-embedded/src/*"],
+      "@resolve/*": ["../convex-embedded/src/*"],
+      "@fx/*": ["../fx/src/*"],
+      "@convex/*": ["../../convex/*"]
     }
   },
   "include": ["**/*.ts"],

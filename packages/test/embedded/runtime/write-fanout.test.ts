@@ -1,3 +1,4 @@
+import { WriteFanout } from "@embedded/runtime/write-fanout";
 import {
   describe,
   it,
@@ -6,8 +7,6 @@ import {
   beforeEach,
   afterEach,
 } from "vite-plus/test";
-
-import { WriteFanout } from "#embedded/runtime/write-fanout";
 
 // ---------------------------------------------------------------------------
 // Mock BroadcastChannel

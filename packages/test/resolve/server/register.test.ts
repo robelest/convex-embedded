@@ -1,15 +1,14 @@
-import { v } from "convex/values";
-import { describe, it, expect, vi, beforeEach } from "vite-plus/test";
-import * as Y from "yjs";
-
-import { register as registerField, prose } from "#resolve/server/schema";
+import { register as registerField, prose } from "@resolve/server/schema";
 import {
   embeddedTable,
   remoteOnly,
   setup,
   _resetRegistry,
   SYNC_META,
-} from "#resolve/server/setup";
+} from "@resolve/server/setup";
+import { v } from "convex/values";
+import { describe, it, expect, vi, beforeEach } from "vite-plus/test";
+import * as Y from "yjs";
 
 // ---------------------------------------------------------------------------
 // Helpers

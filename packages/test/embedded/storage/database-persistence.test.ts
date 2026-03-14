@@ -1,8 +1,7 @@
+import { Database } from "@embedded/core/database";
+import type { StorageAdapter } from "@embedded/storage/adapter";
+import { ephemeralStorage } from "@embedded/storage/memory";
 import { describe, it, expect, vi } from "vite-plus/test";
-
-import { Database } from "#embedded/core/database";
-import type { StorageAdapter } from "#embedded/storage/adapter";
-import { ephemeralStorage } from "#embedded/storage/memory";
 
 // ---------------------------------------------------------------------------
 // Helpers

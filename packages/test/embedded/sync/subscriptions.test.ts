@@ -1,6 +1,5 @@
+import { SubscriptionManager } from "@embedded/sync/subscriptions";
 import { describe, it, expect, vi } from "vite-plus/test";
-
-import { SubscriptionManager } from "#embedded/sync/subscriptions";
 
 describe("SubscriptionManager", () => {
   // -------------------------------------------------------------------------

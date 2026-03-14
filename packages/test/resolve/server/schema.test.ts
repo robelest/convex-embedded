@@ -1,7 +1,3 @@
-import { v } from "convex/values";
-import { describe, it, expect } from "vite-plus/test";
-import * as Y from "yjs";
-
 import {
   prose,
   register,
@@ -17,8 +13,11 @@ import {
   mergeUpdate,
   isDiffEmpty,
   createConflict,
-} from "#resolve/server/schema";
-import { CrdtType } from "#resolve/shared/types";
+} from "@resolve/server/schema";
+import { CrdtType } from "@resolve/shared/types";
+import { v } from "convex/values";
+import { describe, it, expect } from "vite-plus/test";
+import * as Y from "yjs";
 
 // ---------------------------------------------------------------------------
 // Field constructors

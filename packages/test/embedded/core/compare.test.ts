@@ -1,6 +1,5 @@
+import { compareValues } from "@embedded/core/compare";
 import { describe, it, expect } from "vite-plus/test";
-
-import { compareValues } from "#embedded/core/compare";
 
 // ---------------------------------------------------------------------------
 // Helpers

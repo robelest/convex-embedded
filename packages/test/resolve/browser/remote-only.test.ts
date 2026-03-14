@@ -1,3 +1,5 @@
+import { createConvexClient } from "@resolve/browser/index";
+import { remoteOnly } from "@resolve/server/setup";
 import { makeFunctionReference } from "convex/server";
 import {
   afterEach,
@@ -7,9 +9,6 @@ import {
   it,
   vi,
 } from "vite-plus/test";
-
-import { createConvexClient } from "#resolve/browser/index";
-import { remoteOnly } from "#resolve/server/setup";
 
 vi.mock("convex/browser", () => {
   function makeUnsubscribe() {

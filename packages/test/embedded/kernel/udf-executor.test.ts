@@ -10,9 +10,11 @@ import { describe, it, expect, vi } from "vite-plus/test";
 function createMockDb() {
   return {
     startTransaction: vi.fn(),
-    commit: vi
-      .fn()
-      .mockReturnValue({ timestamp: 1, tablesWritten: new Set(["messages"]) }),
+    commit: vi.fn().mockReturnValue({
+      timestamp: 1,
+      tablesWritten: new Set(["messages"]),
+      persisted: Promise.resolve(),
+    }),
     rollbackWrites: vi.fn(),
   } as any;
 }
@@ -139,13 +141,13 @@ describe("executeMutation", () => {
       db,
     );
 
-    const { result, tablesWritten } = await executor.executeMutation(
+    const { result, commit } = await executor.executeMutation(
       fp("messages:send"),
       { text: "hello" },
     );
 
     expect(result).toBe("hello");
-    expect(tablesWritten).toEqual(new Set(["messages"]));
+    expect(commit.tablesWritten).toEqual(new Set(["messages"]));
     expect(db.commit).toHaveBeenCalledOnce();
     expect(db.rollbackWrites).not.toHaveBeenCalled();
   });

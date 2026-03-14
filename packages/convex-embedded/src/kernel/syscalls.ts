@@ -29,6 +29,7 @@ export type RunUdfFn = (
   type: "query" | "mutation" | "action",
   path: FunctionPath,
   args: Record<string, unknown>,
+  context?: { holdsTransactionLock?: boolean },
 ) => Promise<unknown>;
 
 // ---------------------------------------------------------------------------

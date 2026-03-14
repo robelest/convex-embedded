@@ -250,20 +250,23 @@ export class IdMap {
       return value.map((item) => this._translateValue(item));
     }
 
-    if (value !== null && typeof value === "object") {
-      // Skip special Convex value types (ArrayBuffer, Blob, etc.)
-      if (value instanceof ArrayBuffer || value instanceof Uint8Array) {
-        return value;
-      }
-
-      const result: Record<string, unknown> = {};
-      for (const [key, val] of Object.entries(value)) {
-        result[key] = this._translateValue(val);
-      }
-      return result;
+    if (
+      this._isOpaqueValue(value) ||
+      value === null ||
+      typeof value !== "object"
+    ) {
+      return value;
     }
 
-    // Primitives (number, boolean, null, undefined)
-    return value;
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entryValue]) => [
+        key,
+        this._translateValue(entryValue),
+      ]),
+    );
+  }
+
+  private _isOpaqueValue(value: unknown): boolean {
+    return value instanceof ArrayBuffer || value instanceof Uint8Array;
   }
 }

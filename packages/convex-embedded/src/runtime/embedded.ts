@@ -13,6 +13,7 @@ import type { JSONValue } from "convex/values";
 import { AuthResolver } from "@/auth/resolver";
 import type { UserIdentity } from "@/auth/resolver";
 import { Database } from "@/core/database";
+import type { DatabaseCommitResult } from "@/core/database";
 import { parseSchema } from "@/core/schema";
 import type { ParsedSchema, SchemaExport } from "@/core/schema";
 import type { DocumentId, StoredDocument } from "@/core/types";
@@ -159,7 +160,8 @@ export class EmbeddedRuntime {
         type: "query" | "mutation" | "action",
         path: FunctionPath,
         args: Record<string, unknown>,
-      ) => this._runUdf(type, path, args),
+        context?: { holdsTransactionLock?: boolean },
+      ) => this._runUdf(type, path, args, context),
       getIdentity: () => this.auth.getUserIdentity(),
       activeTimers: this._activeTimers,
     });
@@ -358,10 +360,23 @@ export class EmbeddedRuntime {
    * Called after a mutation commits. Invalidates local subscriptions and
    * notifies other tabs via the write fanout.
    */
-  onMutationCommit(tablesWritten: Set<string>): void {
-    if (tablesWritten.size === 0) return;
-    this.subscriptions.invalidate(tablesWritten);
-    this.writeFanout.notify(tablesWritten);
+  onMutationCommit(commit: DatabaseCommitResult): void {
+    if (commit.tablesWritten.size === 0) return;
+
+    this.subscriptions.invalidate(commit.tablesWritten);
+    Fx.detach(async () => {
+      try {
+        await commit.persisted;
+      } catch (err) {
+        console.error(
+          "[convex-embedded] skipping cross-tab notify after persistence failure:",
+          err,
+        );
+        return;
+      }
+
+      this.writeFanout.notify(commit.tablesWritten);
+    }, "[convex-embedded] post-commit fanout failed:");
   }
 
   // -----------------------------------------------------------------------
@@ -540,8 +555,11 @@ export class EmbeddedRuntime {
 
         // --- 5. Propagate changes -------------------------------------------
 
-        const tablesWritten = new Set([table]);
-        onCommit(tablesWritten);
+        onCommit({
+          tablesWritten: new Set([table]),
+          persisted: Promise.resolve(),
+          timestamp: db.timestamp,
+        });
 
         // Re-evaluate all active queries and push Transition messages.
         yield* Fx.from({
@@ -702,28 +720,39 @@ export class EmbeddedRuntime {
     type: "query" | "mutation" | "action",
     path: FunctionPath,
     args: Record<string, unknown>,
+    context: { holdsTransactionLock?: boolean } = {},
   ): Promise<unknown> {
     // Intercept system functions — bypass module loader entirely.
     const systemFn = SYSTEM_FUNCTIONS[path.udfPath];
     if (systemFn !== undefined) {
-      return this._runSystemFunction(systemFn, type, args);
+      return this._runSystemFunction(systemFn, type, args, context);
     }
 
     switch (type) {
-      case "query":
-        return this.executor.executeQuery(path, args);
+      case "query": {
+        const runQuery = () =>
+          this.executor.executeQuery(path, args, {
+            holdsTransactionLock: true,
+          });
+        return context.holdsTransactionLock
+          ? runQuery()
+          : this._runWithTransactionLock(runQuery);
+      }
 
       case "mutation": {
-        const { result, tablesWritten } = await this.executor.executeMutation(
-          path,
-          args,
-        );
-        this.onMutationCommit(tablesWritten);
+        const runMutation = () =>
+          this.executor.executeMutation(path, args, {
+            holdsTransactionLock: true,
+          });
+        const { result, commit } = context.holdsTransactionLock
+          ? await runMutation()
+          : await this._runWithTransactionLock(runMutation);
+        this.onMutationCommit(commit);
         return result;
       }
 
       case "action":
-        return this.executor.executeAction(path, args);
+        return this.executor.executeAction(path, args, context);
 
       default:
         throw new Error("Unknown UDF type");
@@ -742,6 +771,7 @@ export class EmbeddedRuntime {
     def: SystemFunctionDef,
     calledAs: "query" | "mutation" | "action",
     args: Record<string, unknown>,
+    context: { holdsTransactionLock?: boolean } = {},
   ): Promise<unknown> {
     if (calledAs === "mutation" && def.type === "query") {
       return Promise.reject(
@@ -757,30 +787,47 @@ export class EmbeddedRuntime {
     const db = this.db;
     const onCommit = this.onMutationCommit.bind(this);
 
-    return Fx.run(
-      Fx.bracket(
-        Fx.sync(() => {
-          db.startTransaction();
-        }),
-        () =>
+    const runSystemFunction = () =>
+      Fx.run(
+        Fx.bracket(
           Fx.sync(() => {
-            const result = def.handler(db, args);
-            if (def.type === "mutation") {
-              const { tablesWritten } = db.commit();
-              onCommit(tablesWritten);
-            } else {
-              db.rollbackWrites();
-            }
-            return result;
+            db.startTransaction();
           }),
-        (_tx, exit) =>
-          Fx.sync(() => {
-            if (exit._tag === "Failure") {
-              db.rollbackWrites();
-            }
-          }),
-      ),
-    );
+          () =>
+            Fx.sync(() => {
+              const result = def.handler(db, args);
+              if (def.type === "mutation") {
+                onCommit(db.commit());
+              } else {
+                db.rollbackWrites();
+              }
+              return result;
+            }),
+          (_tx, exit) =>
+            Fx.sync(() => {
+              if (exit._tag === "Failure") {
+                db.rollbackWrites();
+              }
+            }),
+        ),
+      );
+
+    return context.holdsTransactionLock
+      ? runSystemFunction()
+      : this._runWithTransactionLock(runSystemFunction);
+  }
+
+  private async _runWithTransactionLock<T>(fn: () => Promise<T>): Promise<T> {
+    await this.transactionManager.begin(false);
+
+    try {
+      const result = await fn();
+      this.transactionManager.commit(false);
+      return result;
+    } catch (err) {
+      this.transactionManager.rollback(false);
+      throw err;
+    }
   }
 
   // -----------------------------------------------------------------------

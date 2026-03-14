@@ -27,7 +27,13 @@ import type {
   TableName,
   Timestamp,
 } from "@/core/types";
-import type { StorageAdapter } from "@/storage/adapter";
+import type { CommitBatch, StorageAdapter } from "@/storage/adapter";
+
+export interface DatabaseCommitResult {
+  timestamp: Timestamp;
+  tablesWritten: Set<string>;
+  persisted: Promise<void>;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -277,7 +283,7 @@ export class Database {
    * Returns the new timestamp and the set of tables that were written so
    * that callers can invalidate subscriptions.
    */
-  commit(): { timestamp: Timestamp; tablesWritten: Set<string> } {
+  commit(): DatabaseCommitResult {
     const lastWrites = this._writes.pop();
     if (lastWrites === undefined) {
       throw new Error("Transaction already committed or rolled back");
@@ -293,21 +299,7 @@ export class Database {
 
     if (this._writes.length === 0) {
       // Outermost commit — apply writes to in-memory storage.
-      const puts: Array<{ doc: StoredDocument; tableName: string }> = [];
-      const deletes: string[] = [];
-
-      for (const [id, write] of Object.entries(lastWrites)) {
-        const _id = id as DocumentId;
-        if (write === null) {
-          delete this._documents[_id];
-          this._idTableMap.delete(id);
-          deletes.push(id);
-        } else {
-          this._documents[_id] = write;
-          const table = this._idTableMap.get(id) ?? "";
-          puts.push({ doc: write, tableName: table });
-        }
-      }
+      const { puts, deletes } = this._applyCommittedWrites(lastWrites);
 
       // Bump timestamp only if there were actual writes.
       const tablesWritten = new Set(this._tablesWritten);
@@ -316,24 +308,16 @@ export class Database {
       }
       this._tablesWritten.clear();
 
-      // Persist to durable storage (fire-and-forget).
-      if (this._storage !== null && (puts.length > 0 || deletes.length > 0)) {
-        const storage = this._storage;
-        Fx.detach(
-          () =>
-            storage.commit({
-              puts,
-              deletes,
-              meta: {
-                timestamp: this._timestamp,
-                lastCreationTime: this._lastCreationTime,
-              },
-            }),
-          "[convex-embedded] storage commit failed:",
-        );
-      }
+      const persisted = this._persistCommitBatch({
+        puts,
+        deletes,
+        meta: {
+          timestamp: this._timestamp,
+          lastCreationTime: this._lastCreationTime,
+        },
+      });
 
-      return { timestamp: this._timestamp, tablesWritten };
+      return { timestamp: this._timestamp, tablesWritten, persisted };
     }
 
     // Nested commit — merge writes into the parent level.
@@ -346,6 +330,7 @@ export class Database {
     return {
       timestamp: this._timestamp,
       tablesWritten: new Set(this._tablesWritten),
+      persisted: Promise.resolve(),
     };
   }
 
@@ -830,6 +815,45 @@ export class Database {
    */
   private _addWriteRaw(id: DocumentId, newValue: StoredDocument | null): void {
     this._writes[this._writes.length - 1][id] = newValue;
+  }
+
+  private _applyCommittedWrites(
+    lastWrites: Record<DocumentId, StoredDocument | null>,
+  ): {
+    puts: Array<{ doc: StoredDocument; tableName: string }>;
+    deletes: string[];
+  } {
+    return Object.entries(lastWrites).reduce(
+      (acc, [id, write]) => {
+        const docId = id as DocumentId;
+
+        if (write === null) {
+          delete this._documents[docId];
+          this._idTableMap.delete(id);
+          acc.deletes.push(id);
+          return acc;
+        }
+
+        this._documents[docId] = write;
+        acc.puts.push({
+          doc: write,
+          tableName: this._idTableMap.get(id) ?? "",
+        });
+        return acc;
+      },
+      {
+        puts: [] as Array<{ doc: StoredDocument; tableName: string }>,
+        deletes: [] as string[],
+      },
+    );
+  }
+
+  private _persistCommitBatch(batch: CommitBatch): Promise<void> {
+    if (this._storage === null) return Promise.resolve();
+    if (batch.puts.length === 0 && batch.deletes.length === 0) {
+      return Promise.resolve();
+    }
+    return this._storage.commit(batch);
   }
 
   // -------------------------------------------------------------------------

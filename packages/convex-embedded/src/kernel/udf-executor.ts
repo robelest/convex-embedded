@@ -20,6 +20,7 @@ import type { Value } from "convex/values";
 import { convexToJson, jsonToConvex } from "convex/values";
 
 import type { Database } from "@/core/database";
+import type { DatabaseCommitResult } from "@/core/database";
 import type { FunctionPath, ModuleLoader } from "@/kernel/module-loader";
 import { OpsContext, createOpsContext } from "@/kernel/ops";
 import {
@@ -129,7 +130,7 @@ function getHandler(func: Record<string, unknown>): HandlerFn | null {
 
 export interface MutationResult {
   result: unknown;
-  tablesWritten: Set<string>;
+  commit: DatabaseCommitResult;
 }
 
 export interface UdfExecutorOptions {
@@ -144,6 +145,10 @@ export interface UdfExecutorOptions {
    * prevent leaked timers.
    */
   activeTimers?: Set<ReturnType<typeof setTimeout>>;
+}
+
+interface ExecutionContext {
+  holdsTransactionLock?: boolean;
 }
 
 /**
@@ -192,49 +197,54 @@ export class UdfExecutor {
   async executeQuery(
     functionPath: FunctionPath,
     args: Record<string, unknown>,
+    executionContext: ExecutionContext = {},
   ): Promise<unknown> {
     const db = this._db;
     const resolveFunc = this._resolveFunc.bind(this);
     const noHandlerError = this._noHandlerError.bind(this);
-    return this._runWithGlobals(() =>
-      Fx.run(
-        Fx.bracket(
-          // Acquire: start transaction
-          Fx.sync(() => {
-            db.startTransaction();
-          }),
-          // Use: run the query
-          () =>
-            Fx.gen(function* () {
-              const func: Record<string, unknown> = yield* Fx.promise(() =>
-                resolveFunc(functionPath, "query"),
-              );
-
-              if (typeof func.invokeQuery === "function") {
-                const argsStr = JSON.stringify(
-                  convexToJson([(args ?? {}) as Value]),
-                );
-                const rawResult: string = yield* Fx.promise(() =>
-                  (func.invokeQuery as (s: string) => Promise<string>)(argsStr),
-                );
-                return jsonToConvex(JSON.parse(rawResult));
-              }
-
-              const handler = getHandler(func);
-              if (handler === null) {
-                return yield* Fx.fail(noHandlerError(functionPath));
-              }
-              return yield* Fx.promise(() =>
-                Promise.resolve(handler({}, args ?? {})),
-              );
-            }),
-          // Release: always rollback (queries are read-only)
-          () =>
+    return this._runWithGlobals(
+      () =>
+        Fx.run(
+          Fx.bracket(
+            // Acquire: start transaction
             Fx.sync(() => {
-              db.rollbackWrites();
+              db.startTransaction();
             }),
+            // Use: run the query
+            () =>
+              Fx.gen(function* () {
+                const func: Record<string, unknown> = yield* Fx.promise(() =>
+                  resolveFunc(functionPath, "query"),
+                );
+
+                if (typeof func.invokeQuery === "function") {
+                  const argsStr = JSON.stringify(
+                    convexToJson([(args ?? {}) as Value]),
+                  );
+                  const rawResult: string = yield* Fx.promise(() =>
+                    (func.invokeQuery as (s: string) => Promise<string>)(
+                      argsStr,
+                    ),
+                  );
+                  return jsonToConvex(JSON.parse(rawResult));
+                }
+
+                const handler = getHandler(func);
+                if (handler === null) {
+                  return yield* Fx.fail(noHandlerError(functionPath));
+                }
+                return yield* Fx.promise(() =>
+                  Promise.resolve(handler({}, args ?? {})),
+                );
+              }),
+            // Release: always rollback (queries are read-only)
+            () =>
+              Fx.sync(() => {
+                db.rollbackWrites();
+              }),
+          ),
         ),
-      ),
+      executionContext,
     );
   }
 
@@ -250,58 +260,61 @@ export class UdfExecutor {
   async executeMutation(
     functionPath: FunctionPath,
     args: Record<string, unknown>,
+    executionContext: ExecutionContext = {},
   ): Promise<MutationResult> {
     const db = this._db;
     const resolveFunc = this._resolveFunc.bind(this);
     const noHandlerError = this._noHandlerError.bind(this);
-    return this._runWithGlobals(() =>
-      Fx.run(
-        Fx.bracket(
-          // Acquire: start transaction
-          Fx.sync(() => {
-            db.startTransaction();
-          }),
-          // Use: run the mutation
-          () =>
-            Fx.gen(function* () {
-              const func: Record<string, unknown> = yield* Fx.promise(() =>
-                resolveFunc(functionPath, "mutation"),
-              );
-
-              let result: unknown;
-              if (typeof func.invokeMutation === "function") {
-                const invokeMutation = func.invokeMutation as (
-                  argsStr: string,
-                ) => Promise<string>;
-                const argsStr = JSON.stringify(
-                  convexToJson([(args ?? {}) as Value]),
-                );
-                const rawResult: string = yield* Fx.promise(() =>
-                  invokeMutation(argsStr),
-                );
-                result = jsonToConvex(JSON.parse(rawResult));
-              } else {
-                const handler = getHandler(func);
-                if (handler === null) {
-                  return yield* Fx.fail(noHandlerError(functionPath));
-                }
-                result = yield* Fx.promise(() =>
-                  Promise.resolve(handler({}, args ?? {})),
-                );
-              }
-
-              const { tablesWritten } = db.commit();
-              return { result, tablesWritten } as MutationResult;
-            }),
-          // Release: rollback on failure (commit already happened on success path)
-          (_tx, exit) =>
+    return this._runWithGlobals(
+      () =>
+        Fx.run(
+          Fx.bracket(
+            // Acquire: start transaction
             Fx.sync(() => {
-              if (exit._tag === "Failure") {
-                db.rollbackWrites();
-              }
+              db.startTransaction();
             }),
+            // Use: run the mutation
+            () =>
+              Fx.gen(function* () {
+                const func: Record<string, unknown> = yield* Fx.promise(() =>
+                  resolveFunc(functionPath, "mutation"),
+                );
+
+                let result: unknown;
+                if (typeof func.invokeMutation === "function") {
+                  const invokeMutation = func.invokeMutation as (
+                    argsStr: string,
+                  ) => Promise<string>;
+                  const argsStr = JSON.stringify(
+                    convexToJson([(args ?? {}) as Value]),
+                  );
+                  const rawResult: string = yield* Fx.promise(() =>
+                    invokeMutation(argsStr),
+                  );
+                  result = jsonToConvex(JSON.parse(rawResult));
+                } else {
+                  const handler = getHandler(func);
+                  if (handler === null) {
+                    return yield* Fx.fail(noHandlerError(functionPath));
+                  }
+                  result = yield* Fx.promise(() =>
+                    Promise.resolve(handler({}, args ?? {})),
+                  );
+                }
+
+                const commit = db.commit();
+                return { result, commit } as MutationResult;
+              }),
+            // Release: rollback on failure (commit already happened on success path)
+            (_tx, exit) =>
+              Fx.sync(() => {
+                if (exit._tag === "Failure") {
+                  db.rollbackWrites();
+                }
+              }),
+          ),
         ),
-      ),
+      executionContext,
     );
   }
 
@@ -312,6 +325,7 @@ export class UdfExecutor {
   async executeAction(
     functionPath: FunctionPath,
     args: Record<string, unknown>,
+    executionContext: ExecutionContext = {},
   ): Promise<unknown> {
     return this._runWithGlobals(async () => {
       const func = await this._resolveFunc(functionPath, "action");
@@ -331,7 +345,7 @@ export class UdfExecutor {
         throw this._noHandlerError(functionPath);
       }
       return await handler({}, args ?? {});
-    });
+    }, executionContext);
   }
 
   // -----------------------------------------------------------------------
@@ -346,7 +360,10 @@ export class UdfExecutor {
    *
    * Everything is restored after the callback completes (or throws).
    */
-  private async _runWithGlobals<T>(fn: () => Promise<T>): Promise<T> {
+  private async _runWithGlobals<T>(
+    fn: () => Promise<T>,
+    executionContext: ExecutionContext = {},
+  ): Promise<T> {
     const db = this._db;
     const runUdf = this._runUdf;
     const getIdentity = this._getIdentity;
@@ -360,10 +377,18 @@ export class UdfExecutor {
           const previousConvex = globalThis.Convex;
           globalThis.Convex = {
             syscall: createSyncSyscall(db),
-            asyncSyscall: createAsyncSyscall(db, runUdf, {
-              getIdentity,
-              activeTimers,
-            }),
+            asyncSyscall: createAsyncSyscall(
+              db,
+              (type, path, args, nestedContext) =>
+                runUdf(type, path, args, {
+                  ...executionContext,
+                  ...nestedContext,
+                }),
+              {
+                getIdentity,
+                activeTimers,
+              },
+            ),
             jsSyscall: createJsSyscall(db),
           };
           return { savedGlobals, previousConvex };

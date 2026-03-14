@@ -293,6 +293,10 @@ export class EmbeddedRuntime {
     this.auth.setIdentity(identity);
   }
 
+  teardownSession(sessionId: string): void {
+    this.syncProtocol.removeSession(sessionId);
+  }
+
   // -----------------------------------------------------------------------
   // Message handling (ProtocolHandler interface for createTransport)
   // -----------------------------------------------------------------------
@@ -387,11 +391,11 @@ export class EmbeddedRuntime {
           const updates = await this.syncProtocol.reEvaluateQueries();
 
           // 3. Push Transition messages to all connected loopback sockets.
-          for (const [, messages] of updates) {
+          for (const [sessionId, messages] of updates) {
             for (const msg of messages) {
               const data = JSON.stringify(msg);
               for (const transport of this._transports) {
-                transport.pushMessage(data);
+                transport.pushMessage(sessionId, data);
               }
             }
           }
@@ -543,11 +547,11 @@ export class EmbeddedRuntime {
         yield* Fx.from({
           ok: async () => {
             const updates = await syncProtocol.reEvaluateQueries();
-            for (const [, messages] of updates) {
+            for (const [sessionId, messages] of updates) {
               for (const msg of messages) {
                 const data = JSON.stringify(msg);
                 for (const transport of transports) {
-                  transport.pushMessage(data);
+                  transport.pushMessage(sessionId, data);
                 }
               }
             }

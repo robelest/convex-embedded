@@ -1,9 +1,8 @@
+import { SyncProtocolHandler } from "@embedded/sync/protocol";
+import type { ClientMessage } from "@embedded/sync/protocol";
+import { SubscriptionManager } from "@embedded/sync/subscriptions";
 import { ConvexError } from "convex/values";
 import { describe, it, expect, vi } from "vite-plus/test";
-
-import { SyncProtocolHandler } from "#embedded/sync/protocol";
-import type { ClientMessage } from "#embedded/sync/protocol";
-import { SubscriptionManager } from "#embedded/sync/subscriptions";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -153,6 +152,80 @@ describe("SyncProtocolHandler", () => {
       expect(executor.runQuery).toHaveBeenCalledWith("users:list");
     });
 
+    it("serializes query re-evaluation with later query-set changes", async () => {
+      const { handler, executor } = createHandler();
+
+      await handler.handleMessage("s1", {
+        type: "Connect",
+        sessionId: "s1",
+        connectionCount: 0,
+        lastCloseReason: null,
+        clientTs: Date.now(),
+      } as ClientMessage);
+
+      await handler.handleMessage("s1", {
+        type: "ModifyQuerySet",
+        baseVersion: 0,
+        newVersion: 1,
+        modifications: [
+          {
+            type: "Add",
+            queryId: 0,
+            udfPath: "users:list",
+            args: [],
+          },
+        ],
+      } as ClientMessage);
+
+      let release!: () => void;
+      executor.runQuery.mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            release = () => resolve({ items: ["stale"] });
+          }),
+      );
+
+      const reevaluatePromise = handler.reEvaluateQueries();
+
+      let modifyResolved = false;
+      const modifyPromise = handler
+        .handleMessage("s1", {
+          type: "ModifyQuerySet",
+          baseVersion: 1,
+          newVersion: 2,
+          modifications: [
+            {
+              type: "Add",
+              queryId: 1,
+              udfPath: "users:detail",
+              args: [{ id: "123" }],
+            },
+          ],
+        } as ClientMessage)
+        .then((value) => {
+          modifyResolved = true;
+          return value;
+        });
+
+      await Promise.resolve();
+      expect(modifyResolved).toBe(false);
+
+      release();
+
+      const reevaluated = await reevaluatePromise;
+      const reevalTransition = reevaluated.get("s1")?.[0] as any;
+      const modifyMessages = await modifyPromise;
+      const modifyTransition = modifyMessages[0] as any;
+
+      expect(reevalTransition.type).toBe("Transition");
+      expect(modifyTransition.type).toBe("Transition");
+      expect(modifyTransition.startVersion.querySet).toBe(1);
+      expect(modifyTransition.endVersion.querySet).toBe(2);
+      expect(decodeU64(modifyTransition.endVersion.ts)).toBeGreaterThan(
+        decodeU64(reevalTransition.endVersion.ts),
+      );
+    });
+
     it("passes args to the query executor", async () => {
       const { handler, executor } = createHandler();
 
@@ -224,6 +297,58 @@ describe("SyncProtocolHandler", () => {
       const startTs = decodeU64(msg.startVersion.ts);
       const endTs = decodeU64(msg.endVersion.ts);
       expect(endTs).toBeGreaterThan(startTs);
+    });
+
+    it("rejects stale baseVersion and leaves active queries unchanged", async () => {
+      const { handler, executor } = createHandler();
+
+      await handler.handleMessage("s1", {
+        type: "Connect",
+        sessionId: "s1",
+        connectionCount: 0,
+        lastCloseReason: null,
+        clientTs: Date.now(),
+      } as ClientMessage);
+
+      await handler.handleMessage("s1", {
+        type: "ModifyQuerySet",
+        baseVersion: 0,
+        newVersion: 1,
+        modifications: [
+          { type: "Add", queryId: 0, udfPath: "users:list", args: [] },
+        ],
+      } as ClientMessage);
+
+      executor.runQuery.mockClear();
+
+      const staleMessages = await handler.handleMessage("s1", {
+        type: "ModifyQuerySet",
+        baseVersion: 0,
+        newVersion: 2,
+        modifications: [
+          { type: "Add", queryId: 1, udfPath: "users:detail", args: [] },
+        ],
+      } as ClientMessage);
+
+      expect(staleMessages).toEqual([
+        {
+          type: "FatalError",
+          error: "ModifyQuerySet baseVersion mismatch: expected 1, received 0",
+        },
+      ]);
+      expect(executor.runQuery).not.toHaveBeenCalled();
+
+      const mutationMessages = await handler.handleMessage("s1", {
+        type: "Mutation",
+        requestId: 1,
+        udfPath: "users:create",
+        args: [{}],
+      } as ClientMessage);
+
+      const transition = mutationMessages[1] as any;
+      expect(transition.type).toBe("Transition");
+      expect(transition.modifications).toHaveLength(1);
+      expect(transition.modifications[0].queryId).toBe(0);
     });
   });
 
@@ -477,6 +602,55 @@ describe("SyncProtocolHandler", () => {
 
       expect(auth.verifyToken).toHaveBeenCalledWith("my-secret-token");
     });
+
+    it("rejects stale baseVersion without attempting auth update", async () => {
+      const { handler, auth } = createHandler();
+
+      await handler.handleMessage("s1", {
+        type: "Connect",
+        sessionId: "s1",
+        connectionCount: 0,
+        lastCloseReason: null,
+        clientTs: Date.now(),
+      } as ClientMessage);
+
+      await handler.handleMessage("s1", {
+        type: "Authenticate",
+        tokenType: "User",
+        value: "valid-jwt-token",
+        baseVersion: 0,
+      } as ClientMessage);
+
+      auth.verifyToken.mockClear();
+
+      const messages = await handler.handleMessage("s1", {
+        type: "Authenticate",
+        tokenType: "User",
+        value: "stale-jwt-token",
+        baseVersion: 0,
+      } as ClientMessage);
+
+      expect(messages).toEqual([
+        {
+          type: "AuthError",
+          error: "Authenticate baseVersion mismatch: expected 1, received 0",
+          baseVersion: 0,
+          authUpdateAttempted: false,
+        },
+      ]);
+      expect(auth.verifyToken).not.toHaveBeenCalled();
+
+      const clearMessages = await handler.handleMessage("s1", {
+        type: "Authenticate",
+        tokenType: "None",
+        baseVersion: 1,
+      } as ClientMessage);
+
+      const clearTransition = clearMessages[0] as any;
+      expect(clearTransition.type).toBe("Transition");
+      expect(clearTransition.startVersion.identity).toBe(1);
+      expect(clearTransition.endVersion.identity).toBe(2);
+    });
   });
 
   // -----------------------------------------------------------------------
@@ -492,7 +666,7 @@ describe("SyncProtocolHandler", () => {
         type: "Authenticate",
         tokenType: "User",
         value: "expired-token",
-        baseVersion: 5,
+        baseVersion: 0,
       } as ClientMessage);
 
       expect(messages).toHaveLength(1);
@@ -501,7 +675,7 @@ describe("SyncProtocolHandler", () => {
       expect(msg.type).toBe("AuthError");
       // SDK wire format uses `error`, not `errorMessage`
       expect(msg.error).toBe("Token expired");
-      expect(msg.baseVersion).toBe(5);
+      expect(msg.baseVersion).toBe(0);
       expect(msg.authUpdateAttempted).toBe(true);
     });
 
@@ -570,7 +744,7 @@ describe("SyncProtocolHandler", () => {
       const messages = await handler.handleMessage("s1", {
         type: "Authenticate",
         tokenType: "None",
-        baseVersion: 0,
+        baseVersion: 1,
       } as ClientMessage);
 
       const msg = messages[0] as any;

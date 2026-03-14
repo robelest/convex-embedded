@@ -337,7 +337,8 @@ function createEngine(config: EngineConfig): EngineInstance {
   let isOnline = false;
 
   // Serial queue processor state
-  let processingQueue = false;
+  let queueProcessingPromise: Promise<void> | null = null;
+  let syncCyclePromise: Promise<void> | null = null;
 
   // Network event handlers
   let onOnline: (() => void) | null = null;
@@ -372,33 +373,50 @@ function createEngine(config: EngineConfig): EngineInstance {
    *
    * On failure, the entry stays in the queue for retry on next cycle.
    */
-  async function processQueue(): Promise<void> {
-    if (processingQueue) return;
+  async function processQueue(signal?: AbortSignal): Promise<void> {
+    if (queueProcessingPromise) return queueProcessingPromise;
     if (pendingQueue.isEmpty) return;
 
     log.info(`sync: processing ${pendingQueue.length} queued mutation(s)`);
 
-    await Fx.run(
+    queueProcessingPromise = Fx.run(
       Fx.bracket(
-        // Acquire: set processingQueue flag
-        Fx.sync(() => {
-          processingQueue = true;
-        }),
+        // Acquire: no-op, queueProcessingPromise is the active guard
+        Fx.unit,
         // Use: process entries
         () =>
           Fx.gen(function* () {
-            while (!pendingQueue.isEmpty && isOnline) {
+            while (!pendingQueue.isEmpty && isOnline && !signal?.aborted) {
               const entry = pendingQueue.peek();
               if (entry === undefined) break;
 
+              const localResult = JSON.parse(entry.localResult);
+              if (
+                entry.ref.endsWith(":create") &&
+                typeof localResult === "string" &&
+                idMap.hasLocalId(localResult)
+              ) {
+                yield* Fx.from({
+                  ok: () => pendingQueue.shift(),
+                  err: (e) => e as Error,
+                });
+                log.debug(
+                  `sync: dropping already-mapped create mutation (table: ${entry.table}, remaining: ${pendingQueue.length})`,
+                );
+                continue;
+              }
+
               const pushed = yield* Fx.from({
                 ok: async () => {
+                  if (signal?.aborted || !isOnline) {
+                    return false;
+                  }
+
                   const ref = makeFunctionReference<"mutation">(entry.ref);
                   const originalArgs = JSON.parse(entry.args) as Record<
                     string,
                     unknown
                   >;
-                  const localResult = JSON.parse(entry.localResult);
 
                   const translatedArgs = idMap.translateArgs(originalArgs);
 
@@ -438,17 +456,77 @@ function createEngine(config: EngineConfig): EngineInstance {
               if (!pushed) break;
             }
           }),
-        // Release: always clear processingQueue flag
-        () =>
-          Fx.sync(() => {
-            processingQueue = false;
-          }),
+        // Release: no-op, queueProcessingPromise is cleared in finally()
+        () => Fx.unit,
       ),
-    );
+    ).finally(() => {
+      queueProcessingPromise = null;
+    });
+
+    await queueProcessingPromise;
 
     if (pendingQueue.isEmpty) {
       log.info("sync: queue fully processed");
     }
+  }
+
+  function runSyncCycle(options?: { forceResolve?: boolean }): Promise<void> {
+    if (syncCyclePromise) return syncCyclePromise;
+
+    abortController?.abort();
+    abortController = new AbortController();
+    const signal = abortController.signal;
+
+    syncCyclePromise = Fx.run(
+      Fx.gen(function* () {
+        yield* Fx.from({
+          ok: () => processQueue(signal),
+          err: (e) => e as Error,
+        });
+
+        if (signal.aborted) return;
+        if (!options?.forceResolve && (!started || !isOnline)) return;
+
+        if (!pendingQueue.isEmpty) {
+          stopRemoteSubscriptions();
+          log.warn(
+            "sync: deferring resolve and remote subscriptions until pending queue drains",
+          );
+          return;
+        }
+
+        yield* Fx.from({
+          ok: () => resolveAll(signal),
+          err: (e) => e as Error,
+        });
+
+        if (
+          !signal.aborted &&
+          started &&
+          isOnline &&
+          pendingQueue.isEmpty &&
+          !options?.forceResolve
+        ) {
+          startRemoteSubscriptions();
+        }
+      }).pipe(
+        Fx.inspect((err) =>
+          Fx.sync(() => {
+            if (!(err instanceof DOMException && err.name === "AbortError")) {
+              log.error("sync: online cycle failed", err);
+            }
+          }),
+        ),
+        Fx.recover(() => Fx.unit),
+      ),
+    ).finally(() => {
+      syncCyclePromise = null;
+      if (abortController?.signal === signal) {
+        abortController = null;
+      }
+    });
+
+    return syncCyclePromise;
   }
 
   // -------------------------------------------------------------------------
@@ -754,49 +832,10 @@ function createEngine(config: EngineConfig): EngineInstance {
   function handleOnline() {
     log.info("sync: online event — flushing queue, resolving, subscribing");
     isOnline = true;
-    abortController?.abort();
-    abortController = new AbortController();
-    const signal = abortController.signal;
 
     // Process the serial queue, pull remote state, then start reactive
     // subscriptions so we receive ongoing changes from other clients.
-    Fx.detach(
-      () =>
-        Fx.run(
-          Fx.gen(function* () {
-            yield* Fx.from({
-              ok: () => processQueue(),
-              err: (e) => e as Error,
-            });
-
-            if (signal.aborted) return;
-
-            yield* Fx.from({
-              ok: () => resolveAll(signal),
-              err: (e) => e as Error,
-            });
-
-            // Start reactive subscriptions regardless of whether resolve
-            // succeeded — we still want real-time updates even if the
-            // one-shot catch-up failed.
-            if (!signal.aborted && isOnline) {
-              startRemoteSubscriptions();
-            }
-          }).pipe(
-            Fx.inspect((err) =>
-              Fx.sync(() => {
-                if (
-                  !(err instanceof DOMException && err.name === "AbortError")
-                ) {
-                  log.error("sync: online cycle failed", err);
-                }
-              }),
-            ),
-            Fx.recover(() => Fx.unit),
-          ),
-        ),
-      "[sync] handleOnline:",
-    );
+    Fx.detach(() => runSyncCycle(), "[sync] handleOnline:");
   }
 
   function handleOffline() {
@@ -919,9 +958,8 @@ function createEngine(config: EngineConfig): EngineInstance {
                 await pendingQueue.push(ref, args, localResult, table);
 
                 if (isOnline) {
-                  // Kick the serial queue processor (fire-and-forget).
-                  // It will pick up this entry and process it.
-                  void processQueue();
+                  stopRemoteSubscriptions();
+                  void runSyncCycle();
                 } else {
                   log.debug("sync: offline — mutation queued for later push");
                 }
@@ -939,22 +977,10 @@ function createEngine(config: EngineConfig): EngineInstance {
     },
 
     resolveNow(): Promise<void> {
-      abortController?.abort();
-      abortController = new AbortController();
-      const signal = abortController.signal;
-
-      return Fx.run(
-        Fx.gen(function* () {
-          yield* Fx.from({
-            ok: () => processQueue(),
-            err: (e) => e as Error,
-          });
-          yield* Fx.from({
-            ok: () => resolveAll(signal),
-            err: (e) => e as Error,
-          });
-        }),
-      );
+      if (isOnline) {
+        stopRemoteSubscriptions();
+      }
+      return runSyncCycle({ forceResolve: true });
     },
 
     pendingCount(): number {

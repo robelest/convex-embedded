@@ -1,3 +1,5 @@
+import { engine } from "@resolve/client/engine";
+import type { Definition } from "@resolve/server/schema";
 import {
   describe,
   it,
@@ -6,9 +8,6 @@ import {
   beforeEach,
   afterEach,
 } from "vite-plus/test";
-
-import { engine } from "#resolve/client/engine";
-import type { Definition } from "#resolve/server/schema";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -72,6 +71,14 @@ function createMockRemoteClient() {
 
 function settle(ms = 50) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+function getRegisteredHandler(eventName: string): () => void {
+  const addCalls = (globalThis.addEventListener as ReturnType<typeof vi.fn>)
+    .mock.calls;
+  const entry = addCalls.find((call: unknown[]) => call[0] === eventName);
+  expect(entry).toBeDefined();
+  return entry![1] as () => void;
 }
 
 /** Shorthand for a table config with both resolve and query refs. */
@@ -837,6 +844,59 @@ describe("engine.create()", () => {
       m.stop();
     });
 
+    it("drops a hydrated create entry when its local id is already mapped", async () => {
+      const { embedded, localClient } = createMockEmbedded();
+      localClient.query.mockImplementation((path: string) => {
+        const routes: Record<string, unknown> = {
+          "_system:idMapGetAll": [
+            {
+              localId: "local-uuid-1",
+              remoteId: "remote-id-99",
+              table: "tasks",
+            },
+          ],
+          "_system:pendingGetAll": [
+            {
+              _id: "pending-doc-1",
+              ref: "tasks:create",
+              args: JSON.stringify({ title: "Buy milk" }),
+              localResult: JSON.stringify("local-uuid-1"),
+              table: "tasks",
+            },
+          ],
+        };
+        return Promise.resolve(routes[path] ?? null);
+      });
+      localClient.mutation.mockImplementation((path: string) => {
+        const routes: Record<string, unknown> = {
+          "_system:pendingRemove": null,
+        };
+        return Promise.resolve(routes[path] ?? null);
+      });
+
+      const remoteClient = createMockRemoteClient();
+
+      const m = engine.create({
+        embedded,
+        remoteClient,
+        tables: { tasks: tableConfig("resolve_ref") },
+      });
+
+      m.start();
+      await settle(100);
+
+      expect(remoteClient.mutation).not.toHaveBeenCalled();
+      expect(m.pendingCount()).toBe(0);
+      expect(localClient.mutation).toHaveBeenCalledWith(
+        "_system:pendingRemove",
+        {
+          id: "pending-doc-1",
+        },
+      );
+
+      m.stop();
+    });
+
     it("retains entry in queue on remote push failure", async () => {
       const { embedded, localClient } = createMockEmbedded();
       localClient.mutation.mockImplementation((path: string) => {
@@ -907,13 +967,7 @@ describe("engine.create()", () => {
       expect(m.pendingCount()).toBe(2);
 
       // Find the registered "online" handler from mocked addEventListener
-      const addCalls = (globalThis.addEventListener as ReturnType<typeof vi.fn>)
-        .mock.calls;
-      const onlineEntry = addCalls.find(
-        (call: unknown[]) => call[0] === "online",
-      );
-      expect(onlineEntry).toBeDefined();
-      const onlineHandler = onlineEntry![1] as () => void;
+      const onlineHandler = getRegisteredHandler("online");
 
       // Go online
       Object.defineProperty(globalThis, "navigator", {
@@ -926,6 +980,149 @@ describe("engine.create()", () => {
 
       expect(remoteClient.mutation).toHaveBeenCalledTimes(2);
       m.stop();
+    });
+
+    it("coalesces duplicate online events into a single active sync cycle", async () => {
+      let resolveQuery!: (value: unknown[]) => void;
+      const { embedded } = createMockEmbedded();
+      const remoteClient = {
+        ...createMockRemoteClient(),
+        query: vi.fn(
+          () =>
+            new Promise<unknown[]>((resolve) => {
+              resolveQuery = resolve;
+            }),
+        ),
+      };
+
+      const m = engine.create({
+        embedded,
+        remoteClient,
+        tables: { tasks: tableConfig("resolve_ref") },
+      });
+
+      m.start();
+      await settle();
+
+      const onlineHandler = getRegisteredHandler("online");
+      onlineHandler();
+      await settle();
+
+      expect(remoteClient.query).toHaveBeenCalledTimes(1);
+
+      resolveQuery([]);
+      await settle(100);
+
+      expect(remoteClient.onUpdate).toHaveBeenCalledTimes(1);
+      m.stop();
+    });
+
+    it("does not start remote subscriptions while queued mutations remain pending", async () => {
+      Object.defineProperty(globalThis, "navigator", {
+        value: { onLine: false },
+        writable: true,
+        configurable: true,
+      });
+
+      const { embedded, localClient } = createMockEmbedded();
+      localClient.mutation.mockImplementation((path: string) => {
+        const routes: Record<string, unknown> = {
+          "_system:pendingPush": "pending-doc-1",
+        };
+        return Promise.resolve(routes[path] ?? { _id: "local-1" });
+      });
+
+      const remoteClient = {
+        ...createMockRemoteClient(),
+        mutation: vi.fn().mockRejectedValue(new Error("network failure")),
+      };
+
+      const m = engine.create({
+        embedded,
+        remoteClient,
+        tables: { tasks: tableConfig("resolve_ref", "tasks_list") },
+      });
+
+      m.start();
+      await settle();
+      await m.mutation("tasks:create", { title: "Offline 1" });
+      await settle();
+
+      Object.defineProperty(globalThis, "navigator", {
+        value: { onLine: true },
+        writable: true,
+        configurable: true,
+      });
+
+      getRegisteredHandler("online")();
+      await settle(150);
+
+      expect(remoteClient.mutation).toHaveBeenCalledTimes(1);
+      expect(remoteClient.onUpdate).not.toHaveBeenCalled();
+      expect(m.pendingCount()).toBe(1);
+
+      m.stop();
+    });
+
+    it("stops replay after stop() while leaving later entries queued", async () => {
+      Object.defineProperty(globalThis, "navigator", {
+        value: { onLine: false },
+        writable: true,
+        configurable: true,
+      });
+
+      let releaseFirstPush!: (value: unknown) => void;
+      const { embedded, localClient } = createMockEmbedded();
+      localClient.mutation.mockImplementation((path: string) => {
+        const routes: Record<string, unknown> = {
+          "_system:pendingPush": `pending-doc-${localClient.mutation.mock.calls.length}`,
+          "_system:pendingRemove": null,
+        };
+        return Promise.resolve(routes[path] ?? { _id: `local-${Date.now()}` });
+      });
+
+      const remoteClient = {
+        ...createMockRemoteClient(),
+        mutation: vi
+          .fn()
+          .mockImplementationOnce(
+            () =>
+              new Promise((resolve) => {
+                releaseFirstPush = resolve;
+              }),
+          )
+          .mockResolvedValue({ _id: "remote-2" }),
+      };
+
+      const m = engine.create({
+        embedded,
+        remoteClient,
+        tables: { tasks: tableConfig("resolve_ref") },
+      });
+
+      m.start();
+      await settle();
+      await m.mutation("tasks:create", { title: "Offline 1" });
+      await m.mutation("tasks:create", { title: "Offline 2" });
+      await settle();
+
+      Object.defineProperty(globalThis, "navigator", {
+        value: { onLine: true },
+        writable: true,
+        configurable: true,
+      });
+
+      getRegisteredHandler("online")();
+      await settle(50);
+
+      expect(remoteClient.mutation).toHaveBeenCalledTimes(1);
+
+      m.stop();
+      releaseFirstPush({ _id: "remote-1" });
+      await settle(150);
+
+      expect(remoteClient.mutation).toHaveBeenCalledTimes(1);
+      expect(m.pendingCount()).toBeGreaterThanOrEqual(1);
     });
 
     it("emits offline status on offline event", async () => {
@@ -945,13 +1142,7 @@ describe("engine.create()", () => {
       await settle();
 
       // Find the registered "offline" handler
-      const addCalls = (globalThis.addEventListener as ReturnType<typeof vi.fn>)
-        .mock.calls;
-      const offlineEntry = addCalls.find(
-        (call: unknown[]) => call[0] === "offline",
-      );
-      expect(offlineEntry).toBeDefined();
-      const offlineHandler = offlineEntry![1] as () => void;
+      const offlineHandler = getRegisteredHandler("offline");
 
       offlineHandler();
       await settle();
@@ -981,13 +1172,7 @@ describe("engine.create()", () => {
       expect(remoteClient.onUpdate).toHaveBeenCalledTimes(1);
 
       // Find the registered "offline" handler
-      const addCalls = (globalThis.addEventListener as ReturnType<typeof vi.fn>)
-        .mock.calls;
-      const offlineEntry = addCalls.find(
-        (call: unknown[]) => call[0] === "offline",
-      );
-      expect(offlineEntry).toBeDefined();
-      const offlineHandler = offlineEntry![1] as () => void;
+      const offlineHandler = getRegisteredHandler("offline");
 
       offlineHandler();
       await settle();

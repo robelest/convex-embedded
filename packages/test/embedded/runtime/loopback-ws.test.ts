@@ -1,10 +1,10 @@
-import { afterEach, describe, it, expect, vi } from "vite-plus/test";
-
 import {
   LoopbackWebSocket,
   LoopbackWebSocketConstructor,
-} from "#embedded/runtime/loopback-ws";
-import { createTransport } from "#embedded/runtime/transport";
+  type LoopbackMessageEvent,
+} from "@embedded/runtime/loopback-ws";
+import { createTransport } from "@embedded/runtime/transport";
+import { afterEach, describe, it, expect, vi } from "vite-plus/test";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -12,6 +12,12 @@ import { createTransport } from "#embedded/runtime/transport";
 
 /** Flush the microtask queue so the WebSocket transitions to OPEN. */
 const flushMicrotasks = () => new Promise<void>((r) => queueMicrotask(r));
+
+async function settleMicrotasks(count = 4): Promise<void> {
+  for (let i = 0; i < count; i++) {
+    await flushMicrotasks();
+  }
+}
 
 /** Default echo handler for most tests. */
 function echoHandler() {
@@ -146,12 +152,75 @@ describe("LoopbackWebSocket", () => {
       ws.onmessage = onmessage;
 
       ws.send("anything");
-      await flushMicrotasks();
+      await settleMicrotasks();
 
       expect(onmessage).toHaveBeenCalledTimes(3);
       expect(JSON.parse(onmessage.mock.calls[0][0].data)).toEqual({ seq: 1 });
       expect(JSON.parse(onmessage.mock.calls[1][0].data)).toEqual({ seq: 2 });
       expect(JSON.parse(onmessage.mock.calls[2][0].data)).toEqual({ seq: 3 });
+    });
+  });
+
+  describe("message ordering", () => {
+    it("delivers responses in send order even when handlers resolve out of order", async () => {
+      let first = true;
+      const handler = vi.fn(async (message: string) => {
+        const parsed = JSON.parse(message) as { seq: number };
+        if (first) {
+          first = false;
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        return [JSON.stringify({ seq: parsed.seq })];
+      });
+
+      const ws = new LoopbackWebSocket("ws://localhost", handler);
+      await flushMicrotasks();
+
+      const seen: number[] = [];
+      ws.onmessage = (event) => {
+        seen.push(JSON.parse(event.data).seq);
+      };
+
+      ws.send(JSON.stringify({ seq: 1 }));
+      ws.send(JSON.stringify({ seq: 2 }));
+
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      expect(seen).toEqual([1, 2]);
+    });
+
+    it("serializes pushed messages behind in-flight send responses", async () => {
+      let release!: () => void;
+      const handler = vi.fn(
+        () =>
+          new Promise<string[]>((resolve) => {
+            release = () =>
+              resolve([JSON.stringify({ type: "Response", seq: 1 })]);
+          }),
+      );
+
+      const ws = new LoopbackWebSocket("ws://localhost", handler);
+      await flushMicrotasks();
+
+      const seen: Array<{ type: string; seq: number }> = [];
+      ws.onmessage = (event) => {
+        const parsed = JSON.parse(event.data) as { type: string; seq: number };
+        seen.push(parsed);
+      };
+
+      ws.send(JSON.stringify({ seq: 1 }));
+      ws.deliverMessage(JSON.stringify({ type: "Push", seq: 2 }));
+
+      await Promise.resolve();
+      expect(seen).toEqual([]);
+
+      release();
+      await settleMicrotasks();
+
+      expect(seen).toEqual([
+        { type: "Response", seq: 1 },
+        { type: "Push", seq: 2 },
+      ]);
     });
   });
 
@@ -364,7 +433,7 @@ describe("LoopbackWebSocket", () => {
       ws.onerror = onerror;
 
       ws.send("test");
-      await flushMicrotasks();
+      await settleMicrotasks();
 
       expect(onerror).toHaveBeenCalledOnce();
       expect(onerror).toHaveBeenCalledWith(
@@ -383,7 +452,7 @@ describe("LoopbackWebSocket", () => {
       ws.addEventListener("error", listener);
 
       ws.send("test");
-      await flushMicrotasks();
+      await settleMicrotasks();
 
       expect(listener).toHaveBeenCalledOnce();
       expect(listener).toHaveBeenCalledWith(
@@ -485,8 +554,132 @@ describe("createTransport", () => {
       handleMessage: vi.fn(async (message: string) => {
         return [JSON.stringify({ echo: JSON.parse(message) })];
       }),
+      teardownSession: vi.fn(),
     };
   }
+
+  it("injects captured sessionId into later messages on the same socket", async () => {
+    const runtime = stubRuntime();
+    const transport = createTransport(runtime);
+
+    const ws = new transport.webSocketConstructor("ws://a");
+    await flushMicrotasks();
+
+    ws.send(
+      JSON.stringify({
+        type: "Connect",
+        sessionId: "session-a",
+        connectionCount: 0,
+        lastCloseReason: null,
+        clientTs: Date.now(),
+      }),
+    );
+    await settleMicrotasks();
+
+    ws.send(
+      JSON.stringify({
+        type: "ModifyQuerySet",
+        baseVersion: 0,
+        newVersion: 1,
+        modifications: [],
+      }),
+    );
+    await settleMicrotasks();
+
+    expect(runtime.handleMessage).toHaveBeenLastCalledWith(
+      JSON.stringify({
+        type: "ModifyQuerySet",
+        baseVersion: 0,
+        newVersion: 1,
+        modifications: [],
+        sessionId: "session-a",
+      }),
+    );
+  });
+
+  it("targets pushed messages to sockets in the matching session only", async () => {
+    const runtime = stubRuntime();
+    const transport = createTransport(runtime);
+
+    const ws1 = new transport.webSocketConstructor("ws://a");
+    const ws2 = new transport.webSocketConstructor("ws://b");
+    await flushMicrotasks();
+
+    const seen1: string[] = [];
+    const seen2: string[] = [];
+    ws1.onmessage = (event: LoopbackMessageEvent) => seen1.push(event.data);
+    ws2.onmessage = (event: LoopbackMessageEvent) => seen2.push(event.data);
+
+    ws1.send(
+      JSON.stringify({
+        type: "Connect",
+        sessionId: "session-a",
+        connectionCount: 0,
+        lastCloseReason: null,
+        clientTs: Date.now(),
+      }),
+    );
+    ws2.send(
+      JSON.stringify({
+        type: "Connect",
+        sessionId: "session-b",
+        connectionCount: 0,
+        lastCloseReason: null,
+        clientTs: Date.now(),
+      }),
+    );
+    await settleMicrotasks();
+
+    seen1.length = 0;
+    seen2.length = 0;
+
+    transport.pushMessage(
+      "session-a",
+      JSON.stringify({ type: "Transition", target: "a" }),
+    );
+    await settleMicrotasks();
+
+    expect(seen1).toEqual([
+      JSON.stringify({ type: "Transition", target: "a" }),
+    ]);
+    expect(seen2).toEqual([]);
+  });
+
+  it("tears down a session when its last socket closes", async () => {
+    const runtime = stubRuntime();
+    const transport = createTransport(runtime);
+
+    const ws1 = new transport.webSocketConstructor("ws://a");
+    const ws2 = new transport.webSocketConstructor("ws://b");
+    await flushMicrotasks();
+
+    ws1.send(
+      JSON.stringify({
+        type: "Connect",
+        sessionId: "session-a",
+        connectionCount: 0,
+        lastCloseReason: null,
+        clientTs: Date.now(),
+      }),
+    );
+    ws2.send(
+      JSON.stringify({
+        type: "Connect",
+        sessionId: "session-a",
+        connectionCount: 1,
+        lastCloseReason: null,
+        clientTs: Date.now(),
+      }),
+    );
+    await settleMicrotasks();
+
+    ws1.close();
+    expect(runtime.teardownSession).not.toHaveBeenCalled();
+
+    ws2.close();
+    expect(runtime.teardownSession).toHaveBeenCalledWith("session-a");
+    expect(runtime.teardownSession).toHaveBeenCalledTimes(1);
+  });
 
   describe("closeAll", () => {
     afterEach(() => vi.useRealTimers());

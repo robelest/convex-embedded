@@ -89,6 +89,7 @@ export class LoopbackWebSocket {
   private _handler: (message: string) => Promise<string[]>;
   private _listeners: Map<string, Set<(ev: LoopbackEvent) => void>> = new Map();
   private _pingInterval: ReturnType<typeof setInterval> | null = null;
+  private _sendQueue: Promise<void> = Promise.resolve();
 
   constructor(url: string, handler: (message: string) => Promise<string[]>) {
     this.url = url;
@@ -127,32 +128,27 @@ export class LoopbackWebSocket {
     })();
     console.debug("[convex-embedded:ws] send", msgType);
 
-    // Fire-and-forget: handler is async but we schedule delivery on the
-    // microtask queue so that ConvexClient's send() remains synchronous.
-    this._handler(data).then(
-      (responses) => {
-        for (const response of responses) {
-          if (this.readyState !== OPEN) break;
-          const respType = (() => {
-            try {
-              return JSON.parse(response).type;
-            } catch {
-              return "?";
-            }
-          })();
-          console.debug("[convex-embedded:ws] recv", respType);
-          const event = { type: "message" as const, data: response };
-          this.onmessage?.(event);
-          this._emit("message", event);
-        }
-      },
-      (error) => {
+    this._sendQueue = this._sendQueue
+      .then(
+        async () => {
+          const responses = await this._handler(data);
+          for (const response of responses) {
+            await this._queueInboundMessage(response);
+          }
+        },
+        async () => {
+          const responses = await this._handler(data);
+          for (const response of responses) {
+            await this._queueInboundMessage(response);
+          }
+        },
+      )
+      .catch((error) => {
         console.error("[convex-embedded:ws] handler error:", error);
         const event = { type: "error" as const, error };
         this.onerror?.(event);
         this._emit("error", event);
-      },
-    );
+      });
   }
 
   /** Close the connection and fire the `onclose` event. */
@@ -179,9 +175,10 @@ export class LoopbackWebSocket {
    */
   deliverMessage(data: string): void {
     if (this.readyState !== OPEN) return;
-    const event = { type: "message" as const, data };
-    this.onmessage?.(event);
-    this._emit("message", event);
+    this._sendQueue = this._sendQueue.then(
+      () => this._queueInboundMessage(data),
+      () => this._queueInboundMessage(data),
+    );
   }
 
   addEventListener(type: string, listener: (ev: LoopbackEvent) => void): void {
@@ -232,6 +229,21 @@ export class LoopbackWebSocket {
       }
     }
   }
+
+  private async _queueInboundMessage(data: string): Promise<void> {
+    if (this.readyState !== OPEN) return;
+    const respType = (() => {
+      try {
+        return JSON.parse(data).type;
+      } catch {
+        return "?";
+      }
+    })();
+    console.debug("[convex-embedded:ws] recv", respType);
+    const event = { type: "message" as const, data };
+    this.onmessage?.(event);
+    this._emit("message", event);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -264,6 +276,12 @@ export function LoopbackWebSocketConstructor(
         ? (handlerOrFactory as () => (message: string) => Promise<string[]>)()
         : (handlerOrFactory as (message: string) => Promise<string[]>);
       super(url, handler);
+      const socketAwareHandler = handler as ((
+        message: string,
+      ) => Promise<string[]>) & {
+        _setSocketRef?: (socket: LoopbackWebSocket) => void;
+      };
+      socketAwareHandler._setSocketRef?.(this);
     }
   };
 }

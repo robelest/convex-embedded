@@ -292,6 +292,9 @@ export class SyncProtocolHandler {
   /** Per-session bookkeeping. */
   private _sessions: Map<string, SessionState> = new Map();
 
+  /** Per-session operation queue to keep version transitions ordered. */
+  private _sessionQueues: Map<string, Promise<void>> = new Map();
+
   /** Monotonically increasing internal timestamp. */
   private _ts = 0;
 
@@ -309,22 +312,24 @@ export class SyncProtocolHandler {
     sessionId: string,
     message: ClientMessage,
   ): Promise<ServerMessage[]> {
-    console.debug("[convex-embedded:protocol]", message.type, sessionId);
-    switch (message.type) {
-      case "Connect":
-        return this._handleConnect(sessionId, message);
-      case "ModifyQuerySet":
-        return this._handleModifyQuerySet(sessionId, message);
-      case "Mutation":
-        return this._handleMutation(sessionId, message);
-      case "Action":
-        return this._handleAction(sessionId, message);
-      case "Authenticate":
-        return this._handleAuthenticate(sessionId, message);
-      case "Event":
-        // Events are client telemetry — acknowledge silently.
-        return [];
-    }
+    return this._withSessionLock(sessionId, async () => {
+      console.debug("[convex-embedded:protocol]", message.type, sessionId);
+      switch (message.type) {
+        case "Connect":
+          return this._handleConnect(sessionId, message);
+        case "ModifyQuerySet":
+          return this._handleModifyQuerySet(sessionId, message);
+        case "Mutation":
+          return this._handleMutation(sessionId, message);
+        case "Action":
+          return this._handleAction(sessionId, message);
+        case "Authenticate":
+          return this._handleAuthenticate(sessionId, message);
+        case "Event":
+          // Events are client telemetry — acknowledge silently.
+          return [];
+      }
+    });
   }
 
   /**
@@ -342,33 +347,41 @@ export class SyncProtocolHandler {
   async reEvaluateQueries(): Promise<Map<string, ServerMessage[]>> {
     const result = new Map<string, ServerMessage[]>();
 
-    for (const [sessionId, session] of this._sessions) {
-      if (session.activeQueries.size === 0) continue;
+    for (const sessionId of this._sessions.keys()) {
+      await this._withSessionLock(sessionId, async () => {
+        const session = this._sessions.get(sessionId);
+        if (!session || session.activeQueries.size === 0) return;
 
-      const startVersion = { ...session.version };
+        const startVersion = { ...session.version };
 
-      const modifications = await Fx.run(
-        Fx.each([...session.activeQueries.values()], (q) =>
-          this._evaluateQuery(q),
-        ),
-      );
+        const modifications = await Fx.run(
+          Fx.each([...session.activeQueries.values()], (q) =>
+            this._evaluateQuery(q),
+          ),
+        );
 
-      session.version = {
-        ...session.version,
-        ts: this._nextTs(),
-      };
+        session.version = {
+          ...session.version,
+          ts: this._nextTs(),
+        };
 
-      result.set(sessionId, [
-        {
-          type: "Transition",
-          startVersion: encodeStateVersion(startVersion),
-          endVersion: encodeStateVersion(session.version),
-          modifications,
-        },
-      ]);
+        result.set(sessionId, [
+          {
+            type: "Transition",
+            startVersion: encodeStateVersion(startVersion),
+            endVersion: encodeStateVersion(session.version),
+            modifications,
+          },
+        ]);
+      });
     }
 
     return result;
+  }
+
+  removeSession(sessionId: string): void {
+    this._sessions.delete(sessionId);
+    this._sessionQueues.delete(sessionId);
   }
 
   // -----------------------------------------------------------------------
@@ -377,6 +390,72 @@ export class SyncProtocolHandler {
 
   private _nextTs(): number {
     return ++this._ts;
+  }
+
+  private _hasExpectedQuerySetVersion(
+    session: SessionState,
+    baseVersion: number,
+  ): boolean {
+    return session.version.querySet === baseVersion;
+  }
+
+  private _hasExpectedIdentityVersion(
+    session: SessionState,
+    baseVersion: number,
+  ): boolean {
+    return session.version.identity === baseVersion;
+  }
+
+  private _querySetVersionError(
+    baseVersion: number,
+    currentVersion: number,
+  ): ServerMessage {
+    return {
+      type: "FatalError",
+      error: `ModifyQuerySet baseVersion mismatch: expected ${currentVersion}, received ${baseVersion}`,
+    };
+  }
+
+  private _identityVersionError(
+    baseVersion: number,
+    currentVersion: number,
+  ): ServerMessage {
+    return {
+      type: "AuthError",
+      error: `Authenticate baseVersion mismatch: expected ${currentVersion}, received ${baseVersion}`,
+      baseVersion,
+      authUpdateAttempted: false,
+    };
+  }
+
+  private async _withSessionLock<T>(
+    sessionId: string,
+    operation: () => Promise<T> | T,
+  ): Promise<T> {
+    const previous = this._sessionQueues.get(sessionId) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    this._sessionQueues.set(
+      sessionId,
+      previous.then(
+        () => current,
+        () => current,
+      ),
+    );
+
+    await previous;
+
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this._sessionQueues.get(sessionId) === current) {
+        this._sessionQueues.delete(sessionId);
+      }
+    }
   }
 
   private _getOrCreateSession(sessionId: string): SessionState {
@@ -450,6 +529,15 @@ export class SyncProtocolHandler {
     message: ClientModifyQuerySet,
   ): Promise<ServerMessage[]> {
     const session = this._getOrCreateSession(sessionId);
+    if (!this._hasExpectedQuerySetVersion(session, message.baseVersion)) {
+      return [
+        this._querySetVersionError(
+          message.baseVersion,
+          session.version.querySet,
+        ),
+      ];
+    }
+
     const startVersion = { ...session.version };
     const modifications: StateModification[] = [];
 
@@ -590,6 +678,14 @@ export class SyncProtocolHandler {
     message: ClientAuthenticate,
   ): Promise<ServerMessage[]> {
     const session = this._getOrCreateSession(sessionId);
+    if (!this._hasExpectedIdentityVersion(session, message.baseVersion)) {
+      return [
+        this._identityVersionError(
+          message.baseVersion,
+          session.version.identity,
+        ),
+      ];
+    }
 
     // "None" tokenType means clearing auth — always succeeds.
     if (message.tokenType === "None") {

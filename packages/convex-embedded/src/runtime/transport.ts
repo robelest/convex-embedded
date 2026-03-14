@@ -19,6 +19,53 @@ import type { LoopbackWebSocket } from "@/runtime/loopback-ws";
  */
 interface ProtocolHandler {
   handleMessage(message: string): Promise<string[]>;
+  teardownSession?(sessionId: string): void;
+}
+
+interface SessionSocketRegistry {
+  socketsBySession: Map<string, Set<LoopbackWebSocket>>;
+  sessionBySocket: WeakMap<LoopbackWebSocket, string>;
+}
+
+function addSocketToSession(
+  registry: SessionSocketRegistry,
+  sessionId: string,
+  socket: LoopbackWebSocket,
+): void {
+  const existingSession = registry.sessionBySocket.get(socket);
+  if (existingSession === sessionId) return;
+  if (existingSession !== undefined) {
+    removeSocketFromSession(registry, existingSession, socket);
+  }
+
+  const sockets = registry.socketsBySession.get(sessionId) ?? new Set();
+  sockets.add(socket);
+  registry.socketsBySession.set(sessionId, sockets);
+  registry.sessionBySocket.set(socket, sessionId);
+}
+
+function removeSocketFromSession(
+  registry: SessionSocketRegistry,
+  sessionId: string,
+  socket: LoopbackWebSocket,
+): boolean {
+  const sockets = registry.socketsBySession.get(sessionId);
+  if (sockets === undefined) return false;
+
+  sockets.delete(socket);
+  if (sockets.size === 0) {
+    registry.socketsBySession.delete(sessionId);
+    return true;
+  }
+
+  return false;
+}
+
+function getSocketsForSession(
+  registry: SessionSocketRegistry,
+  sessionId: string,
+): Set<LoopbackWebSocket> {
+  return registry.socketsBySession.get(sessionId) ?? new Set();
 }
 
 /** Transport configuration for ConvexClient. */
@@ -41,7 +88,7 @@ export interface EmbeddedTransport {
    * re-evaluated query results after another tab writes to the shared
    * IndexedDB store.
    */
-  pushMessage(data: string): void;
+  pushMessage(sessionId: string, data: string): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -68,17 +115,29 @@ export interface EmbeddedTransport {
 export function createTransport(runtime: ProtocolHandler): EmbeddedTransport {
   // Track live WebSocket instances so we can close them on shutdown.
   const activeSockets = new Set<LoopbackWebSocket>();
+  const sessionRegistry: SessionSocketRegistry = {
+    socketsBySession: new Map(),
+    sessionBySocket: new WeakMap(),
+  };
 
   const webSocketConstructor = LoopbackWebSocketConstructor(() => {
     // Per-connection session ID — captured from the first Connect message.
     let connectionSessionId: string | undefined;
+    let socketRef: LoopbackWebSocket | undefined;
 
-    return async (message: string): Promise<string[]> => {
+    const handler = async (message: string): Promise<string[]> => {
       // Peek at the message to capture sessionId from Connect.
       try {
         const parsed = JSON.parse(message);
         if (parsed.type === "Connect" && parsed.sessionId) {
           connectionSessionId = parsed.sessionId;
+          if (socketRef !== undefined) {
+            addSocketToSession(
+              sessionRegistry,
+              parsed.sessionId as string,
+              socketRef,
+            );
+          }
         }
         // Inject the captured sessionId so that EmbeddedRuntime.handleMessage
         // always has a consistent sessionId for this connection.
@@ -91,18 +150,38 @@ export function createTransport(runtime: ProtocolHandler): EmbeddedTransport {
       }
       return runtime.handleMessage(message);
     };
+
+    Object.assign(handler, {
+      _setSocketRef: (socket: LoopbackWebSocket) => {
+        socketRef = socket;
+      },
+    });
+
+    return handler;
   });
 
   // Wrap the constructor to track/untrack instances.
   const TrackedWsConstructor = class extends webSocketConstructor {
     constructor(url: string) {
       super(url);
-      activeSockets.add(this);
+      const socket = this as unknown as LoopbackWebSocket;
+      activeSockets.add(socket);
       // Remove from tracking when the socket closes (whether via
       // explicit close() or runtime shutdown).
       // Listen via addEventListener so we don't clobber the SDK's onclose.
-      this.addEventListener("close", () => {
-        activeSockets.delete(this);
+      socket.addEventListener("close", () => {
+        activeSockets.delete(socket);
+        const sessionId = sessionRegistry.sessionBySocket.get(socket);
+        if (sessionId === undefined) return;
+
+        const removedLastSocket = removeSocketFromSession(
+          sessionRegistry,
+          sessionId,
+          socket,
+        );
+        if (removedLastSocket) {
+          runtime.teardownSession?.(sessionId);
+        }
       });
     }
   };
@@ -117,8 +196,8 @@ export function createTransport(runtime: ProtocolHandler): EmbeddedTransport {
       }
       activeSockets.clear();
     },
-    pushMessage(data: string): void {
-      for (const ws of activeSockets) {
+    pushMessage(sessionId: string, data: string): void {
+      for (const ws of getSocketsForSession(sessionRegistry, sessionId)) {
         ws.deliverMessage(data);
       }
     },

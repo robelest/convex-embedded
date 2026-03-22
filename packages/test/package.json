@@ -7,6 +7,7 @@
     "test": "vp test",
     "test:once": "vp test --run",
     "test:coverage": "vp test --run --coverage",
+    "test:consumer": "vp run --filter @robelest/convex-embedded build && vp test --run resolve/package-consumer.test.ts",
     "test:fx": "vp test --run fx/**/*.test.ts",
     "test:embedded": "vp test --run embedded/**/*.test.ts",
     "test:resolve": "vp test --run resolve/**/*.test.ts",

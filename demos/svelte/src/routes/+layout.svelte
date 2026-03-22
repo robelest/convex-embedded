@@ -3,17 +3,18 @@
 	import { setConvexClientContext } from "convex-svelte";
 	import { createConvexClient, subscribeResolveState } from "@robelest/convex-embedded/browser";
 	import type { ResolveState } from "@robelest/convex-embedded/browser";
+	import schema from "../../../../convex/schema";
 
 	let { children } = $props();
 
-	const modules = import.meta.glob(
-		["$convex/**/*.{ts,tsx,js,jsx}", "!$convex/convex.config.ts"],
-	);
+	const modules = import.meta.glob(["../../../../convex/tasks.ts"]);
 
 	const convexUrl = import.meta.env.CONVEX_URL as string | undefined;
 
 	const client = createConvexClient({
 		modules,
+		schema,
+		name: "convex-embedded-svelte-demo",
 		...(convexUrl ? { sync: { url: convexUrl } } : {}),
 	});
 

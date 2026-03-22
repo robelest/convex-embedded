@@ -83,8 +83,8 @@ export default app;
 ### 4. Write functions
 
 Import the table handle from schema. Use `.mutation()` and `.query()` directly.
-No `register()` call. No `export const resolve` boilerplate. The resolve query
-is auto-generated.
+No `register()` call. The resolve query is auto-generated on the table handle,
+but you should still re-export it so sync discovery can find it.
 
 ```typescript
 // convex/tasks.ts
@@ -117,15 +117,26 @@ export const list = tasks.query({
 
 ```typescript
 import { createConvexClient } from "@robelest/convex-embedded/browser";
+import schema from "./convex/schema";
 
 // Local-only (no sync)
 const client = createConvexClient({
-  modules: import.meta.glob("./convex/*.ts"),
+  modules: import.meta.glob([
+    "./convex/**/*.{ts,tsx,js,jsx}",
+    "!./convex/convex.config.ts",
+  ]),
+  schema,
+  name: "my-local-app",
 });
 
 // Local-first with remote sync
 const client = createConvexClient({
-  modules: import.meta.glob("./convex/*.ts"),
+  modules: import.meta.glob([
+    "./convex/**/*.{ts,tsx,js,jsx}",
+    "!./convex/convex.config.ts",
+  ]),
+  schema,
+  name: "my-local-app",
   sync: { url: "https://happy-otter-123.convex.cloud" },
 });
 
@@ -170,7 +181,12 @@ import {
 } from "@robelest/convex-embedded/browser";
 
 const client = createConvexClient({
-  modules: import.meta.glob("./convex/*.ts"),
+  modules: import.meta.glob([
+    "./convex/**/*.{ts,tsx,js,jsx}",
+    "!./convex/convex.config.ts",
+  ]),
+  schema,
+  name: "my-local-app",
   sync: { url: import.meta.env.CONVEX_URL },
 });
 
@@ -192,10 +208,16 @@ const unsub = subscribeResolveState(client, (state) => {
   import { createConvexClient } from "@robelest/convex-embedded/browser";
   import { setConvexClientContext } from "convex-svelte";
   import { onDestroy } from "svelte";
+  import schema from "../../convex/schema";
 
-  const modules = import.meta.glob("../../convex/*.ts");
+  const modules = import.meta.glob([
+    "../../convex/**/*.{ts,tsx,js,jsx}",
+    "!../../convex/convex.config.ts",
+  ]);
   const client = createConvexClient({
     modules,
+    schema,
+    name: "my-svelte-app",
     sync: { url: import.meta.env.CONVEX_URL },
   });
 

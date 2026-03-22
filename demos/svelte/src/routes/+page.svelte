@@ -2,6 +2,7 @@
 	import { getContext } from "svelte";
 	import { useQuery, useConvexClient } from "convex-svelte";
 	import { api } from "../../../../convex/_generated/api.js";
+	import type { Id } from "../../../../convex/_generated/dataModel.js";
 	import type { ResolveState } from "@robelest/convex-embedded/browser";
 
 	const client = useConvexClient();
@@ -38,8 +39,8 @@
 		body = "";
 	}
 
-	async function handleRemove(id: string) {
-		await client.mutation(api.tasks.remove, { id: id as any });
+	async function handleRemove(id: Id<"tasks">) {
+		await client.mutation(api.tasks.remove, { id });
 	}
 </script>
 

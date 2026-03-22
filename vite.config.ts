@@ -58,6 +58,66 @@ export default defineConfig({
       typeCheck: false,
     },
   },
+  run: {
+    cache: {
+      scripts: false,
+      tasks: true,
+    },
+    tasks: {
+      "cache:build": {
+        command:
+          "vp exec convex codegen --component-dir ./packages/convex-embedded/src/component && vp run --filter @robelest/fx build && vp run --filter @robelest/convex-embedded build",
+        cache: true,
+        input: [
+          "convex/**",
+          "packages/**",
+          "demos/**",
+          "package.json",
+          "pnpm-lock.yaml",
+          "pnpm-workspace.yaml",
+          "tsconfig*.json",
+          "vite.config.ts",
+          "README.md",
+          "!**/dist/**",
+          "!**/_generated/**",
+        ],
+      },
+      "cache:check": {
+        command: "vp lint && vp fmt --check .",
+        cache: true,
+        input: [
+          "convex/**",
+          "packages/**",
+          "demos/**",
+          "package.json",
+          "pnpm-lock.yaml",
+          "pnpm-workspace.yaml",
+          "tsconfig*.json",
+          "vite.config.ts",
+          "README.md",
+          "!**/dist/**",
+          "!**/_generated/**",
+        ],
+      },
+      "cache:test": {
+        command: "vp run --filter @robelest/embedded-tests test:once",
+        cache: true,
+        input: [
+          "convex/**",
+          "packages/**",
+          "demos/**",
+          "package.json",
+          "pnpm-lock.yaml",
+          "pnpm-workspace.yaml",
+          "tsconfig*.json",
+          "vite.config.ts",
+          "README.md",
+          "!**/dist/**",
+          "!**/_generated/**",
+        ],
+      },
+    },
+  },
   plugins: [
     ((): Plugin => ({
       name: "at-alias",

@@ -68,6 +68,21 @@ export default defineConfig([
     outExtensions: jsExtensions,
     alias: srcAlias,
   },
+  // Test helper — consumer-facing convex-test registration
+  {
+    entry: { test: "src/test.ts" },
+    format: "esm",
+    outDir: "dist",
+    dts: true,
+    clean: false,
+    platform: "node",
+    deps: {
+      neverBundle: [/^convex/, "convex-test", "yjs", "convex-helpers"],
+      alwaysBundle: ["@robelest/fx"],
+    },
+    outExtensions: jsExtensions,
+    alias: srcAlias,
+  },
   // Convex component (node, unbundled)
   {
     entry: ["src/component/**/*.ts"],

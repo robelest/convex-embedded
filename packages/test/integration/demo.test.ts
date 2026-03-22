@@ -4,6 +4,7 @@ import { api } from "@convex/_generated/api";
 import schema from "@convex/schema";
 import { register as registerResolveComponent } from "@robelest/convex-embedded/test";
 import { convexTest } from "convex-test";
+import type { Id } from "convex/_generated/dataModel";
 /**
  * Integration test for convex-embedded using convex-test.
  *
@@ -48,7 +49,10 @@ function readRegister(fields: Y.Map<unknown>, key: string): unknown {
 }
 
 // Glob all app modules for convex-test
-const modules = import.meta.glob("../../../convex/**/*.ts");
+const modules = import.meta.glob([
+  "../../../convex/**/*.{ts,tsx,js,jsx}",
+  "!../../../convex/convex.config.ts",
+]);
 
 describe("convex-embedded integration", () => {
   beforeEach(() => {
@@ -61,7 +65,7 @@ describe("convex-embedded integration", () => {
 
     // 1. Create a task via the wrapped mutation.
     //    Delta recording happens inline (same transaction) — no scheduler needed.
-    const taskId = await t.mutation(api.tasks.create, {
+    const taskId: Id<"tasks"> = await t.mutation(api.tasks.create, {
       title: "Write tests",
       body: "Integration test for convex-resolve",
     });
@@ -77,7 +81,7 @@ describe("convex-embedded integration", () => {
     const resolveResults = await t.query(api.tasks.resolve, {
       documents: [
         {
-          docId: taskId as string,
+          docId: taskId,
           vector: toArrayBuffer(emptyVector),
         },
       ],
@@ -105,7 +109,7 @@ describe("convex-embedded integration", () => {
     const resolveResults2 = await t.query(api.tasks.resolve, {
       documents: [
         {
-          docId: taskId as string,
+          docId: taskId,
           vector: toArrayBuffer(clientVector),
         },
       ],
@@ -123,7 +127,7 @@ describe("convex-embedded integration", () => {
     registerResolveComponent(t);
 
     // Create a task — delta recorded inline
-    const taskId = await t.mutation(api.tasks.create, {
+    const taskId: Id<"tasks"> = await t.mutation(api.tasks.create, {
       title: "Original title",
       body: "Original body",
     });

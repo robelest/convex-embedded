@@ -5,10 +5,11 @@
     "packages/*",
     "demos/*"
   ],
+  "type": "module",
   "scripts": {
-    "test": "vp run --filter @robelest/embedded-tests test:once",
+    "test": "vp run cache:test",
     "test:coverage": "vp test --run --coverage",
-    "build": "vp exec convex codegen --component-dir ./packages/convex-embedded/src/component && vp run --filter @robelest/fx build && vp run --filter @robelest/convex-embedded build",
+    "build": "vp run cache:build",
     "build:fx": "vp run --filter @robelest/fx build",
     "build:embedded": "vp exec convex codegen --component-dir ./packages/convex-embedded/src/component && vp run --filter @robelest/convex-embedded build",
     "publish:fx": "vp pm publish --filter @robelest/fx --access public",
@@ -16,9 +17,11 @@
     "typecheck": "vp run --filter @robelest/fx typecheck && vp run --filter @robelest/convex-embedded typecheck",
     "typecheck:fx": "vp run --filter @robelest/fx typecheck",
     "typecheck:embedded": "vp run --filter @robelest/convex-embedded typecheck",
-    "lint": "vp lint --fix",
+    "lint": "vp lint",
+    "lint:fix": "vp lint --fix",
     "fmt": "vp fmt .",
-    "check": "vp lint && vp fmt --check .",
+    "fmt:check": "vp fmt --check .",
+    "check": "vp run cache:check",
     "dev:convex": "vp exec convex dev",
     "dev:svelte": "vp run --filter demo-svelte dev",
     "prepare": "vp config"

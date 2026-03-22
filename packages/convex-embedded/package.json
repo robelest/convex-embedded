@@ -32,37 +32,43 @@
       "import": "./dist/browser/wa-sqlite-worker.js"
     },
     "./server": {
-      "types": "./src/server/index.ts",
-      "import": "./src/server/index.ts"
+      "@convex-dev/component-source": "./src/server/index.ts",
+      "types": "./dist/server/index.d.ts",
+      "import": "./dist/server/index.js"
     },
     "./crdt": {
-      "types": "./src/crdt/index.ts",
-      "import": "./src/crdt/index.ts"
+      "@convex-dev/component-source": "./src/crdt/index.ts",
+      "types": "./dist/crdt/index.d.ts",
+      "import": "./dist/crdt/index.js"
     },
     "./client": {
+      "@convex-dev/component-source": "./src/client/index.ts",
       "types": "./dist/client/index.d.ts",
-      "import": {
-        "@convex-dev/component-source": "./src/client/index.ts",
-        "default": "./dist/client/index.js"
-      }
+      "import": "./dist/client/index.js"
     },
     "./convex.config": {
-      "types": "./src/component/convex.config.ts",
-      "import": "./src/component/convex.config.ts"
+      "@convex-dev/component-source": "./src/component/convex.config.ts",
+      "types": "./dist/component/convex.config.d.ts",
+      "default": "./dist/component/convex.config.js"
     },
     "./test": {
-      "types": "./src/test.ts",
-      "import": "./src/test.ts"
+      "@convex-dev/component-source": "./src/test.ts",
+      "types": "./dist/test.d.ts",
+      "import": "./dist/test.js"
     },
     "./package.json": "./package.json"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
-    "build": "vp pack",
+    "build": "vp exec tsdown",
     "codegen": "vp exec convex codegen --component-dir ./src/component",
     "typecheck": "vp exec tsgo --noEmit",
-    "test": "vp run --filter @robelest/embedded-tests test -- --project embedded",
-    "test:once": "vp run --filter @robelest/embedded-tests test:once -- --project embedded",
-    "prepublishOnly": "vp run build"
+    "typecheck:consumer": "vp exec tsc --project tsconfig.consumer.json --noEmit",
+    "test": "vp run --filter @robelest/embedded-tests test:embedded",
+    "test:once": "vp run --filter @robelest/embedded-tests test:embedded",
+    "prepublishOnly": "vp run build && vp run typecheck:consumer"
   },
   "dependencies": {
     "@robelest/fx": "workspace:*",
@@ -71,6 +77,7 @@
   },
   "devDependencies": {
     "convex": "catalog:",
+    "tsdown": "catalog:",
     "typescript": "catalog:",
     "vite-plus": "catalog:"
   },

@@ -70,6 +70,28 @@ const schemaWithIndex: ParsedSchema = {
   ]),
 };
 
+const schemaWithVectorIndex: ParsedSchema = {
+  schemaValidation: false,
+  tables: new Map([
+    [
+      "tasks",
+      {
+        indexes: [],
+        vectorIndexes: [
+          {
+            indexDescriptor: "by_embedding",
+            vectorField: "embedding",
+            dimensions: 2,
+            filterFields: ["status", "priority"],
+          },
+        ],
+        searchIndexes: [],
+        documentType: { type: "any" },
+      },
+    ],
+  ]),
+};
+
 // ---------------------------------------------------------------------------
 // Full table scan
 // ---------------------------------------------------------------------------
@@ -231,6 +253,63 @@ describe("QueryEngine — filter + limit", () => {
     expect(results).toHaveLength(2);
     expect(results[0].title).toBe("a");
     expect(results[1].title).toBe("c");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Vector search
+// ---------------------------------------------------------------------------
+
+describe("QueryEngine — vector search", () => {
+  it("applies Eq range filters before scoring", () => {
+    const db = seedDb(
+      "tasks",
+      [
+        { title: "active-a", status: "active", priority: 1, embedding: [1, 0] },
+        { title: "done-b", status: "done", priority: 2, embedding: [0, 1] },
+        {
+          title: "active-c",
+          status: "active",
+          priority: 3,
+          embedding: [0.8, 0.2],
+        },
+      ],
+      schemaWithVectorIndex,
+    );
+
+    const results = db.vectorSearch(
+      "tasks.by_embedding",
+      [1, 0],
+      [{ type: "Eq", fieldPath: "status", value: "active" }],
+      5,
+    );
+
+    expect(results).toHaveLength(2);
+    expect(results[0]._score).toBeGreaterThanOrEqual(results[1]._score);
+  });
+
+  it("applies Gt and Lte range filters before scoring", () => {
+    const db = seedDb(
+      "tasks",
+      [
+        { title: "low", status: "active", priority: 1, embedding: [1, 0] },
+        { title: "mid", status: "active", priority: 3, embedding: [0.9, 0.1] },
+        { title: "high", status: "active", priority: 5, embedding: [0.7, 0.3] },
+      ],
+      schemaWithVectorIndex,
+    );
+
+    const results = db.vectorSearch(
+      "tasks.by_embedding",
+      [1, 0],
+      [
+        { type: "Gt", fieldPath: "priority", value: 1 },
+        { type: "Lte", fieldPath: "priority", value: 3 },
+      ],
+      5,
+    );
+
+    expect(results).toHaveLength(1);
   });
 });
 
@@ -541,6 +620,10 @@ describe("evaluateFilter", () => {
     it("returns a literal string", () => {
       expect(evaluateFilter(doc, { $literal: "hello" })).toBe("hello");
     });
+
+    it("returns null without throwing", () => {
+      expect(evaluateFilter(doc, { $literal: null })).toBeNull();
+    });
   });
 
   describe("$eq", () => {
@@ -558,6 +641,17 @@ describe("evaluateFilter", () => {
           $eq: [{ $field: "name" }, { $literal: "bob" }],
         }),
       ).toBe(false);
+    });
+
+    it("compares null values without throwing", () => {
+      expect(
+        evaluateFilter(
+          { name: "alice", nickname: null },
+          {
+            $eq: [{ $field: "nickname" }, { $literal: null }],
+          },
+        ),
+      ).toBe(true);
     });
   });
 

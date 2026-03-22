@@ -599,7 +599,48 @@ interface ResolveEntry {
   remoteOnlyRefs: Set<string>;
   discovery: Promise<void> | null;
   discoveryReady: boolean;
+  closed: boolean;
 }
+
+interface ModuleLoadFailure {
+  path: string;
+  error: Error;
+}
+
+type DiscoveryResult =
+  | {
+      _tag: "Closed";
+    }
+  | {
+      _tag: "Empty";
+      remoteOnlyRefs: Set<string>;
+      moduleLoadFailures: ModuleLoadFailure[];
+    }
+  | {
+      _tag: "Ready";
+      remoteOnlyRefs: Set<string>;
+      moduleLoadFailures: ModuleLoadFailure[];
+      tables: Record<
+        string,
+        { resolve: string; query: string; schema?: unknown }
+      >;
+    };
+
+type CallRoute =
+  | { _tag: "RemoteOnly"; refName: string }
+  | { _tag: "LocalEngine" }
+  | { _tag: "OriginalClient" };
+
+type SubscriptionRoute =
+  | { _tag: "RemoteOnly"; refName: string }
+  | { _tag: "OriginalClient" };
+
+type BrowserResolvePhase =
+  | { _tag: "Idle" }
+  | { _tag: "Syncing"; progress?: { completed: number; total: number } }
+  | { _tag: "Synced" }
+  | { _tag: "Offline" }
+  | { _tag: "Error"; error: unknown };
 
 /** @internal Resolve engine instance interface. */
 interface EngineInstance {
@@ -607,6 +648,19 @@ interface EngineInstance {
   on(event: string, cb: (status: any) => void): void;
   start(): void;
   stop(): void;
+}
+
+function matchTag<
+  T extends Record<K, string>,
+  K extends keyof T & string,
+  Handlers extends {
+    [V in T[K] & string]: (value: Extract<T, Record<K, V>>) => unknown;
+  },
+>(value: T, key: K, handlers: Handlers): ReturnType<Handlers[T[K] & string]> {
+  const handler = handlers[value[key] as T[K] & string] as (
+    current: T,
+  ) => ReturnType<Handlers[T[K] & string]>;
+  return handler(value);
 }
 
 function getFunctionRefName(ref: unknown): string {
@@ -623,6 +677,30 @@ function getFunctionRefName(ref: unknown): string {
   }
 }
 
+function asError(err: unknown): Error {
+  if (err instanceof Error) {
+    return err;
+  }
+
+  if (typeof err === "string") {
+    return new Error(err);
+  }
+
+  if (typeof err === "number" || typeof err === "boolean") {
+    return new Error(`${err}`);
+  }
+
+  if (err === null || err === undefined) {
+    return new Error("unknown error");
+  }
+
+  try {
+    return new Error(JSON.stringify(err));
+  } catch {
+    return new Error("unknown error");
+  }
+}
+
 function isOffline(): boolean {
   return typeof navigator !== "undefined" && navigator.onLine === false;
 }
@@ -634,6 +712,252 @@ function remoteOnlyOfflineError(refName: string): Error {
   );
 }
 
+function resolveCallRoute(
+  entry: ResolveEntry,
+  ref: unknown,
+  preferEngine: boolean,
+): CallRoute {
+  const refName = getFunctionRefName(ref);
+  return refName.length > 0 && entry.remoteOnlyRefs.has(refName)
+    ? { _tag: "RemoteOnly", refName }
+    : preferEngine && entry.engine
+      ? { _tag: "LocalEngine" }
+      : { _tag: "OriginalClient" };
+}
+
+function resolveSubscriptionRoute(
+  entry: ResolveEntry,
+  ref: unknown,
+): SubscriptionRoute {
+  const refName = getFunctionRefName(ref);
+  return refName.length > 0 && entry.remoteOnlyRefs.has(refName)
+    ? { _tag: "RemoteOnly", refName }
+    : { _tag: "OriginalClient" };
+}
+
+function ensureRemoteRouteOnline(refName: string): void {
+  if (!isOffline()) return;
+  throw remoteOnlyOfflineError(refName);
+}
+
+function deferUntilDiscovery<T>(
+  entry: ResolveEntry,
+  run: () => Promise<T>,
+): Promise<T> {
+  return Fx.run(
+    Fx.gen(function* () {
+      if (entry.discovery) {
+        yield* Fx.from({
+          ok: () => entry.discovery!,
+          err: (err) => err as Error,
+        });
+      }
+
+      return yield* Fx.from({
+        ok: run,
+        err: (err) => err as Error,
+      });
+    }),
+  );
+}
+
+function createSubscriptionFactory(
+  entry: ResolveEntry,
+  originalSubscribe: (...args: any[]) => any,
+  remoteSubscribe: (...args: any[]) => any,
+  errorArgIndex: number,
+) {
+  const subscribeWithRoute = (...args: any[]): any => {
+    const route = resolveSubscriptionRoute(entry, args[0]);
+    return matchTag(route, "_tag", {
+      OriginalClient: () => originalSubscribe(...args),
+      RemoteOnly: (current) => {
+        if (isOffline()) {
+          const err = remoteOnlyOfflineError(current.refName);
+          const onError = args[errorArgIndex];
+          if (typeof onError === "function") {
+            onError(err);
+            return createNoopUnsubscribe();
+          }
+          throw err;
+        }
+
+        return remoteSubscribe(...args);
+      },
+    });
+  };
+
+  return (...args: any[]): any => {
+    if (entry.discoveryReady) {
+      return subscribeWithRoute(...args);
+    }
+
+    const onInitError = args[errorArgIndex];
+
+    return deferSubscription(
+      () => deferUntilDiscovery(entry, async () => subscribeWithRoute(...args)),
+      typeof onInitError === "function" ? onInitError : undefined,
+    );
+  };
+}
+
+function createDiscoveryAccumulator(): {
+  remoteOnlyRefs: Set<string>;
+  tables: Record<string, { resolve: string; query: string; schema?: unknown }>;
+  moduleLoadFailures: ModuleLoadFailure[];
+} {
+  return {
+    remoteOnlyRefs: new Set(),
+    tables: {},
+    moduleLoadFailures: [],
+  };
+}
+
+function warnModuleLoadFailures(failures: ModuleLoadFailure[]): void {
+  if (failures.length === 0) {
+    return;
+  }
+
+  const skipped = failures.map(({ path }) => path).join(", ");
+  const [firstFailure] = failures;
+
+  console.warn(
+    `[convex-embedded] ${failures.length} module(s) failed to load during sync discovery and were skipped: ${skipped}`,
+    firstFailure.error,
+  );
+}
+
+function findDiscoveryModulesRoot(modulePaths: string[]): string | null {
+  const generatedPath = modulePaths.find((path) => path.includes("_generated"));
+  return generatedPath
+    ? (generatedPath.split("_generated", 2)[0] ?? null)
+    : null;
+}
+
+function getDiscoveryModuleName(
+  path: string,
+  modulesRoot: string | null,
+): string {
+  const withoutExtension = path.replace(/\.[^.]+$/, "");
+  if (modulesRoot && withoutExtension.startsWith(modulesRoot)) {
+    return withoutExtension.slice(modulesRoot.length);
+  }
+  return withoutExtension.replace(/^.*\//, "");
+}
+
+function scanModuleExports(
+  path: string,
+  mod: ConvexModule,
+  accumulator: ReturnType<typeof createDiscoveryAccumulator>,
+  modulesRoot: string | null,
+): void {
+  const SYNC_META = Symbol.for("convex-resolve:syncMeta");
+  const moduleName = getDiscoveryModuleName(path, modulesRoot);
+  let syncMetaTagged = false;
+
+  for (const [exportName, exportValue] of Object.entries(
+    mod as Record<string, any>,
+  )) {
+    if (
+      !exportValue ||
+      (typeof exportValue !== "object" && typeof exportValue !== "function")
+    ) {
+      continue;
+    }
+
+    if (isRemoteOnly(exportValue)) {
+      accumulator.remoteOnlyRefs.add(`${moduleName}:${exportName}`);
+    }
+
+    const meta = exportValue[SYNC_META];
+    if (!syncMetaTagged && meta && meta.__brand === "convex-resolve:syncMeta") {
+      syncMetaTagged = true;
+
+      accumulator.tables[meta.table] = {
+        resolve: `${moduleName}:${meta.resolveExport}`,
+        query: meta.listExport
+          ? `${moduleName}:${meta.listExport}`
+          : `${moduleName}:list`,
+        schema: meta.schema,
+      };
+    }
+  }
+}
+
+function toDiscoveryResult(
+  entry: ResolveEntry,
+  accumulator: ReturnType<typeof createDiscoveryAccumulator>,
+): DiscoveryResult {
+  if (entry.closed) {
+    return { _tag: "Closed" };
+  }
+
+  return Object.keys(accumulator.tables).length === 0
+    ? {
+        _tag: "Empty",
+        remoteOnlyRefs: accumulator.remoteOnlyRefs,
+        moduleLoadFailures: accumulator.moduleLoadFailures,
+      }
+    : {
+        _tag: "Ready",
+        remoteOnlyRefs: accumulator.remoteOnlyRefs,
+        moduleLoadFailures: accumulator.moduleLoadFailures,
+        tables: accumulator.tables,
+      };
+}
+
+function notifyResolveListeners(
+  entry: ResolveEntry,
+  state: ResolveState,
+): void {
+  entry.state = state;
+  for (const cb of entry.listeners) {
+    try {
+      cb(state);
+    } catch {
+      /* listener error */
+    }
+  }
+}
+
+function toResolvePhase(status: any): BrowserResolvePhase {
+  if (!status) return { _tag: "Idle" };
+
+  const handlers = {
+    resolving: (current: any): BrowserResolvePhase => ({
+      _tag: "Syncing",
+      progress: current.progress
+        ? {
+            completed: current.progress.completed,
+            total: current.progress.total,
+          }
+        : undefined,
+    }),
+    resolved: (): BrowserResolvePhase => ({ _tag: "Synced" }),
+    error: (current: any): BrowserResolvePhase => ({
+      _tag: "Error",
+      error: current.error,
+    }),
+    offline: (): BrowserResolvePhase => ({ _tag: "Offline" }),
+    idle: (): BrowserResolvePhase => ({ _tag: "Idle" }),
+  } as const;
+
+  const handler =
+    handlers[(status.status as keyof typeof handlers) ?? "idle"] ??
+    handlers.idle;
+  return handler(status);
+}
+
+function toResolveState(phase: BrowserResolvePhase): ResolveState {
+  return matchTag(phase, "_tag", {
+    Idle: () => ({ status: "idle" }),
+    Syncing: (current) => ({ status: "syncing", progress: current.progress }),
+    Synced: () => ({ status: "synced" }),
+    Offline: () => ({ status: "offline" }),
+    Error: (current) => ({ status: "error", error: current.error }),
+  });
+}
+
 function createNoopUnsubscribe(): any {
   const noop = (() => {}) as any;
   noop.unsubscribe = noop;
@@ -641,7 +965,10 @@ function createNoopUnsubscribe(): any {
   return noop;
 }
 
-function deferSubscription(factory: () => Promise<any>): any {
+function deferSubscription(
+  factory: () => Promise<any>,
+  onInitError?: (error: Error) => void,
+): any {
   let inner: any = null;
   let cancelled = false;
 
@@ -675,7 +1002,19 @@ function deferSubscription(factory: () => Promise<any>): any {
       inner = actual;
     })
     .catch((err) => {
-      console.error("[convex-embedded] failed to initialize subscription", err);
+      const error = asError(err);
+      if (onInitError) {
+        try {
+          onInitError(error);
+          return;
+        } catch {
+          /* listener error */
+        }
+      }
+      console.error(
+        "[convex-embedded] failed to initialize subscription",
+        error,
+      );
     });
 
   return unsubscribe;
@@ -743,12 +1082,13 @@ function _attachResolve(
     remoteOnlyRefs: new Set(),
     discovery: null,
     discoveryReady: false,
+    closed: false,
   };
 
   _resolveEntries.set(client, entry);
 
   // Discover sync metadata from modules, then create + start engine
-  entry.discovery = _discoverAndStart(
+  const discovery = _discoverAndStart(
     entry,
     embedded,
     remoteClient,
@@ -757,129 +1097,76 @@ function _attachResolve(
   ).finally(() => {
     entry.discoveryReady = true;
   });
-
-  const awaitDiscovery = async (): Promise<void> => {
-    if (entry.discovery) {
-      await entry.discovery;
-    }
-  };
-
-  const isRemoteOnlyRef = (ref: unknown): boolean => {
-    const refName = getFunctionRefName(ref);
-    return refName.length > 0 && entry.remoteOnlyRefs.has(refName);
-  };
-
-  const ensureRemoteOnline = (ref: unknown): void => {
-    if (!isOffline()) return;
-    throw remoteOnlyOfflineError(getFunctionRefName(ref));
-  };
+  void discovery.catch(() => {});
+  entry.discovery = discovery;
 
   // Patch client.mutation for local-first writes
   (client as any).mutation = async function patchedMutation(
     ...args: Parameters<typeof client.mutation>
   ): Promise<any> {
-    await awaitDiscovery();
+    return deferUntilDiscovery(entry, async () => {
+      const route = resolveCallRoute(entry, args[0], true);
 
-    if (isRemoteOnlyRef(args[0])) {
-      ensureRemoteOnline(args[0]);
-      return (remoteClient as any).mutation(...args);
-    }
-
-    // If engine is ready, route through it (local-first + queue)
-    if (entry.engine) {
-      return entry.engine.mutation(args[0], (args[1] ?? {}) as any);
-    }
-    // Fallback: direct local mutation (engine not ready yet)
-    return originalMutation(...args);
+      return matchTag(route, "_tag", {
+        RemoteOnly: (current) => {
+          ensureRemoteRouteOnline(current.refName);
+          return (remoteClient as any).mutation(...args);
+        },
+        LocalEngine: () =>
+          entry.engine!.mutation(args[0], (args[1] ?? {}) as any),
+        OriginalClient: () => originalMutation(...args),
+      });
+    });
   };
 
   (client as any).query = async function patchedQuery(
     ...args: Parameters<typeof client.query>
   ): Promise<any> {
-    await awaitDiscovery();
+    return deferUntilDiscovery(entry, async () => {
+      const route = resolveCallRoute(entry, args[0], false);
 
-    if (isRemoteOnlyRef(args[0])) {
-      ensureRemoteOnline(args[0]);
-      return (remoteClient as any).query(...args);
-    }
-
-    return originalQuery(...args);
+      return matchTag(route, "_tag", {
+        RemoteOnly: (current) => {
+          ensureRemoteRouteOnline(current.refName);
+          return (remoteClient as any).query(...args);
+        },
+        LocalEngine: () => originalQuery(...args),
+        OriginalClient: () => originalQuery(...args),
+      });
+    });
   };
 
   (client as any).action = async function patchedAction(
     ...args: Parameters<typeof client.action>
   ): Promise<any> {
-    await awaitDiscovery();
+    return deferUntilDiscovery(entry, async () => {
+      const route = resolveCallRoute(entry, args[0], false);
 
-    if (isRemoteOnlyRef(args[0])) {
-      ensureRemoteOnline(args[0]);
-      return (remoteClient as any).action(...args);
-    }
-
-    return originalAction(...args);
-  };
-
-  (client as any).onUpdate = function patchedOnUpdate(...args: any[]): any {
-    const subscribe = (): any => {
-      if (!isRemoteOnlyRef(args[0])) {
-        return (originalOnUpdate as (...args: any[]) => any)(...args);
-      }
-
-      if (isOffline()) {
-        const err = remoteOnlyOfflineError(getFunctionRefName(args[0]));
-        const onError = args[3];
-        if (typeof onError === "function") {
-          onError(err);
-          return createNoopUnsubscribe();
-        }
-        throw err;
-      }
-
-      return (remoteClient as any).onUpdate(...args);
-    };
-
-    if (entry.discoveryReady) {
-      return subscribe();
-    }
-
-    return deferSubscription(async () => {
-      await awaitDiscovery();
-      return subscribe();
+      return matchTag(route, "_tag", {
+        RemoteOnly: (current) => {
+          ensureRemoteRouteOnline(current.refName);
+          return (remoteClient as any).action(...args);
+        },
+        LocalEngine: () => originalAction(...args),
+        OriginalClient: () => originalAction(...args),
+      });
     });
   };
 
+  (client as any).onUpdate = createSubscriptionFactory(
+    entry,
+    originalOnUpdate as (...args: any[]) => any,
+    (remoteClient as any).onUpdate.bind(remoteClient),
+    3,
+  );
+
   if (originalOnPaginatedUpdate) {
-    (client as any).onPaginatedUpdate_experimental =
-      function patchedOnPaginatedUpdate(...args: any[]): any {
-        const subscribe = (): any => {
-          if (!isRemoteOnlyRef(args[0])) {
-            return (originalOnPaginatedUpdate as (...args: any[]) => any)(
-              ...args,
-            );
-          }
-
-          if (isOffline()) {
-            const err = remoteOnlyOfflineError(getFunctionRefName(args[0]));
-            const onError = args[4];
-            if (typeof onError === "function") {
-              onError(err);
-              return createNoopUnsubscribe();
-            }
-            throw err;
-          }
-
-          return (remoteClient as any).onPaginatedUpdate_experimental(...args);
-        };
-
-        if (entry.discoveryReady) {
-          return subscribe();
-        }
-
-        return deferSubscription(async () => {
-          await awaitDiscovery();
-          return subscribe();
-        });
-      };
+    (client as any).onPaginatedUpdate_experimental = createSubscriptionFactory(
+      entry,
+      originalOnPaginatedUpdate as (...args: any[]) => any,
+      (remoteClient as any).onPaginatedUpdate_experimental.bind(remoteClient),
+      4,
+    );
   }
 
   (client as any).setAuth = (...args: Parameters<typeof client.setAuth>) => {
@@ -890,6 +1177,7 @@ function _attachResolve(
   // Patch client.close for cleanup
   const originalClose = client.close.bind(client);
   (client as any).close = async function patchedClose(): Promise<void> {
+    entry.closed = true;
     if (entry.engine) {
       entry.engine.stop();
     }
@@ -921,130 +1209,105 @@ async function _discoverAndStart(
   resolveOpts: ResolveOptions,
   modules: Record<string, () => Promise<ConvexModule>>,
 ): Promise<void> {
-  // Load the resolve engine dynamically
-  const engineFactory = await _loadEngine();
-  if (!engineFactory) return;
+  const setup = Fx.gen(function* () {
+    const engineFactory = yield* Fx.from({
+      ok: _loadEngine,
+      err: (err) => err as Error,
+    });
+    if (!engineFactory || entry.closed) return;
 
-  // Load all modules and scan for sync metadata (tagged via Symbol).
-  // The resolve export from register() carries SyncMeta on a well-known
-  // Symbol — no separate __syncMeta export needed.
-  const SYNC_META = Symbol.for("convex-resolve:syncMeta");
-  const tables: Record<
-    string,
-    { resolve: string; query: string; schema?: unknown }
-  > = {};
-  const remoteOnlyRefs = new Set<string>();
+    const discovered = yield* Fx.from({
+      ok: async () => {
+        const accumulator = createDiscoveryAccumulator();
+        const modulesRoot = findDiscoveryModulesRoot(Object.keys(modules));
 
-  for (const [path, loader] of Object.entries(modules)) {
-    // Skip _generated and non-function modules
-    if (path.includes("_generated")) continue;
+        await Fx.run(
+          Fx.each(Object.entries(modules), ([path, loader]) =>
+            Fx.from({
+              ok: async () => {
+                if (entry.closed || path.includes("_generated")) return;
+                try {
+                  const mod = await loader();
+                  if (entry.closed) return;
+                  scanModuleExports(path, mod, accumulator, modulesRoot);
+                } catch (err) {
+                  accumulator.moduleLoadFailures.push({
+                    path,
+                    error: asError(err),
+                  });
+                }
+              },
+              err: (err) => err as Error,
+            }),
+          ),
+        );
 
-    try {
-      const mod = await loader();
-      const moduleName = path.replace(/^.*\//, "").replace(/\.[^.]+$/, "");
+        return toDiscoveryResult(entry, accumulator);
+      },
+      err: (err) => err as Error,
+    });
 
-      let syncMetaTagged = false;
+    return yield* Fx.from({
+      ok: async () => {
+        matchTag(discovered, "_tag", {
+          Closed: () => undefined,
+          Empty: (current) => {
+            entry.remoteOnlyRefs = current.remoteOnlyRefs;
+            warnModuleLoadFailures(current.moduleLoadFailures);
+            if (entry.remoteOnlyRefs.size === 0) {
+              console.warn(
+                "[convex-embedded] sync enabled but no sync metadata found in modules. " +
+                  "Make sure your Convex modules export `tasks.resolve` (for example `export const resolve = tasks.resolve`).",
+              );
+            }
+          },
+          Ready: (current) => {
+            entry.remoteOnlyRefs = current.remoteOnlyRefs;
+            warnModuleLoadFailures(current.moduleLoadFailures);
+            const engine: EngineInstance = engineFactory.create({
+              embedded,
+              remoteClient,
+              tables: current.tables,
+              maxRetries: resolveOpts.maxRetries,
+              retryDelayMs: resolveOpts.retryDelayMs,
+            });
 
-      // Scan all exports for any that carry the SYNC_META symbol.
-      // Convex's query() builder returns a Function (via dontCallDirectly),
-      // so we must check both "object" and "function" types.
-      for (const [exportName, exportValue] of Object.entries(
-        mod as Record<string, any>,
-      )) {
-        if (
-          !exportValue ||
-          (typeof exportValue !== "object" && typeof exportValue !== "function")
-        )
-          continue;
+            if (entry.closed) {
+              engine.stop();
+              return;
+            }
 
-        if (isRemoteOnly(exportValue)) {
-          remoteOnlyRefs.add(`${moduleName}:${exportName}`);
-        }
+            entry.engine = engine;
+            engine.on("change", (monitorStatus: any) => {
+              if (entry.closed) return;
+              notifyResolveListeners(entry, _mapStatus(monitorStatus));
+            });
+            engine.start();
+          },
+        });
+      },
+      err: (err) => err as Error,
+    });
+  }).pipe(
+    Fx.inspect((err) =>
+      Fx.sync(() => {
+        if (entry.closed) return;
+        const error =
+          err instanceof Error
+            ? err
+            : new Error(String(err ?? "unknown error"));
+        console.error("[convex-embedded] resolve setup failed", error);
+        notifyResolveListeners(entry, { status: "error", error });
+      }),
+    ),
+  );
 
-        const meta = (exportValue as any)[SYNC_META];
-        if (
-          !syncMetaTagged &&
-          meta &&
-          meta.__brand === "convex-resolve:syncMeta"
-        ) {
-          syncMetaTagged = true;
-
-          const resolveRef = `${moduleName}:${meta.resolveExport}`;
-          const listRef = meta.listExport
-            ? `${moduleName}:${meta.listExport}`
-            : `${moduleName}:list`;
-
-          tables[meta.table] = {
-            resolve: resolveRef,
-            query: listRef,
-            schema: meta.schema,
-          };
-        }
-      }
-    } catch {
-      // Module failed to load — skip silently
-    }
-  }
-
-  entry.remoteOnlyRefs = remoteOnlyRefs;
-
-  if (Object.keys(tables).length === 0) {
-    if (entry.remoteOnlyRefs.size === 0) {
-      console.warn(
-        "[convex-embedded] sync enabled but no sync metadata found in modules. " +
-          "Make sure your Convex modules export the resolve query from register().",
-      );
-    }
-    return;
-  }
-
-  // Create the engine
-  const engine: EngineInstance = engineFactory.create({
-    embedded,
-    remoteClient,
-    tables,
-    maxRetries: resolveOpts.maxRetries,
-    retryDelayMs: resolveOpts.retryDelayMs,
-  });
-
-  entry.engine = engine;
-
-  // Wire status changes
-  engine.on("change", (monitorStatus: any) => {
-    const mapped = _mapStatus(monitorStatus);
-    entry.state = mapped;
-    for (const cb of entry.listeners) {
-      try {
-        cb(mapped);
-      } catch {
-        /* listener error */
-      }
-    }
-  });
-
-  engine.start();
+  return Fx.run(setup);
 }
 
 /** @internal Map internal EngineStatus to public {@link ResolveState}. */
 function _mapStatus(s: any): ResolveState {
-  if (!s) return { status: "idle" };
-  switch (s.status) {
-    case "resolving":
-      return {
-        status: "syncing",
-        progress: s.progress
-          ? { completed: s.progress.completed, total: s.progress.total }
-          : undefined,
-      };
-    case "resolved":
-      return { status: "synced" };
-    case "error":
-      return { status: "error", error: s.error };
-    case "offline":
-      return { status: "offline" };
-    default:
-      return { status: "idle" };
-  }
+  return Fx.pipe(s, toResolvePhase, toResolveState);
 }
 
 // ---------------------------------------------------------------------------

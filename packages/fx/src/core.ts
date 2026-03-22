@@ -1081,12 +1081,16 @@ function delay(ms: number) {
 function timeout(ms: number) {
   return <A, E>(self: Fx<A, E>): Fx<A, E | TimeoutError> =>
     FxImpl.of<A, E | TimeoutError>(() => {
-      return Promise.race([
-        self._run(),
-        new Promise<Result<never, TimeoutError>>((resolve) =>
-          setTimeout(() => resolve(err(new TimeoutError(ms))), ms),
-        ),
-      ]);
+      return new Promise<Result<A, E | TimeoutError>>((resolve, reject) => {
+        const timer = setTimeout(() => resolve(err(new TimeoutError(ms))), ms);
+
+        self
+          ._run()
+          .then(resolve, reject)
+          .finally(() => {
+            clearTimeout(timer);
+          });
+      });
     });
 }
 
@@ -1875,19 +1879,59 @@ function gen<A, E>(f: () => Generator<Fx<unknown, E>, A, unknown>): Fx<A, E> {
 
     while (!next.done) {
       const fx = next.value as Fx<unknown, E>;
-      const r = await fx._run();
+      let r: Result<unknown, E>;
 
-      if (r._tag === "Failure") {
-        const thrown = iter.return?.(undefined as never);
-        void thrown;
-        return r;
+      try {
+        r = await fx._run();
+      } catch (defect) {
+        const cleanupFailure = await unwindGenerator(iter, "throw", defect);
+        if (cleanupFailure) {
+          throw cleanupFailure.error;
+        }
+        throw defect;
       }
 
-      next = iter.next(r.value);
+      if (r._tag === "Failure") {
+        const cleanupFailure = await unwindGenerator(iter, "return");
+        return cleanupFailure ?? r;
+      }
+
+      try {
+        next = iter.next(r.value);
+      } catch (defect) {
+        const cleanupFailure = await unwindGenerator(iter, "throw", defect);
+        if (cleanupFailure) {
+          throw cleanupFailure.error;
+        }
+        throw defect;
+      }
     }
 
     return ok(next.value);
   });
+}
+
+async function unwindGenerator<E>(
+  iter: Generator<Fx<unknown, E>, unknown, unknown>,
+  mode: "return" | "throw",
+  cause?: unknown,
+): Promise<Extract<Result<void, E>, { _tag: "Failure" }> | null> {
+  let step =
+    mode === "throw"
+      ? iter.throw?.(cause as never)
+      : iter.return?.(undefined as never);
+
+  while (step && !step.done) {
+    const result = await (step.value as Fx<unknown, E>)._run();
+
+    if (result._tag === "Failure") {
+      return result;
+    }
+
+    step = iter.next(result.value);
+  }
+
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -2142,9 +2186,11 @@ function pipe(a: unknown, ...fns: Array<(x: unknown) => unknown>): unknown {
  * @category Execution
  */
 function detach(fn: () => Promise<unknown>, label: string): void {
-  fn().catch((err) => {
-    console.error(label, err);
-  });
+  void Promise.resolve()
+    .then(fn)
+    .catch((err) => {
+      console.error(label, err);
+    });
 }
 
 // ---------------------------------------------------------------------------

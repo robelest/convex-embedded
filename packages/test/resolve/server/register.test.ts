@@ -204,6 +204,39 @@ describe("mutation()", () => {
     expect(result).toBe("doc123");
   });
 
+  it("does not cache a local runtime decision across later remote contexts", async () => {
+    const component = makeMockComponent();
+    const tasks = embeddedTable(uniqueTable(), {
+      title: registerField(v.string()),
+      body: prose(),
+    });
+    setup({ component });
+
+    const remoteBlock = vi.fn(async () => {});
+    const fn = tasks.mutation({
+      args: {},
+      handler: async () => "doc123",
+      remote: remoteBlock,
+    });
+
+    const localCtx = {
+      runQuery: vi.fn().mockRejectedValue(new Error("component unavailable")),
+      runMutation: vi.fn(),
+      db: { get: vi.fn().mockResolvedValue({ _id: "doc123", title: "t" }) },
+    };
+    const remoteCtx = {
+      runQuery: vi.fn().mockResolvedValue([]),
+      runMutation: vi.fn(),
+      db: { get: vi.fn().mockResolvedValue({ _id: "doc123", title: "t" }) },
+    };
+
+    await fn._handler(localCtx, {});
+    expect(remoteBlock).not.toHaveBeenCalled();
+
+    await fn._handler(remoteCtx, {});
+    expect(remoteBlock).toHaveBeenCalledOnce();
+  });
+
   it("records delta inline (same transaction) on remote", async () => {
     const component = makeMockComponent();
     const tasks = embeddedTable(uniqueTable(), {

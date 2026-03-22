@@ -150,4 +150,22 @@ describe("Fx.detach", () => {
     });
     errorSpy.mockRestore();
   });
+
+  it("logs synchronous throws instead of throwing to the caller", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const error = new Error("sync detach fail");
+
+    const act = () =>
+      Fx.detach(() => {
+        throw error;
+      }, "[sync]");
+
+    expect(act).not.toThrow();
+
+    await vi.waitFor(() => {
+      expect(errorSpy).toHaveBeenCalledWith("[sync]", error);
+    });
+
+    errorSpy.mockRestore();
+  });
 });

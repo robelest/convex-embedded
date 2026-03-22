@@ -203,6 +203,109 @@ describe("runMigrations()", () => {
     expect(result).toBe(false);
   });
 
+  it("uses the highest stored version when duplicate rows exist", async () => {
+    const ctx = createMockCtx();
+    const schemaDef = define({
+      version: 2,
+      shape: { title: registerField(v.string()) },
+    });
+
+    ctx._tables["_resolve_schema_versions"] = [
+      { _id: "v1", table: "tasks", version: 1 },
+      { _id: "v2", table: "tasks", version: 2 },
+    ];
+
+    const result = await runMigrations(ctx as any, {
+      table: "tasks",
+      schema: schemaDef,
+      migrations: { 2: { _name: "shouldNotRun" } as any },
+    });
+
+    expect(result).toBe(false);
+    expect(ctx.runMutation).not.toHaveBeenCalled();
+  });
+
+  it("treats malformed stored versions as missing instead of looping forever", async () => {
+    const ctx = createMockCtx();
+    const schemaDef = define({
+      version: 1,
+      shape: { title: registerField(v.string()) },
+    });
+
+    ctx._tables["_resolve_schema_versions"] = [
+      { _id: "v1", table: "tasks", version: "not-a-number" },
+      { _id: "v2", table: "tasks", version: undefined },
+    ];
+
+    const result = await Promise.race([
+      runMigrations(ctx as any, {
+        table: "tasks",
+        schema: schemaDef,
+      }),
+      new Promise<never>((_resolve, reject) => {
+        setTimeout(() => reject(new Error("migration timeout")), 100);
+      }),
+    ]);
+
+    expect(result).toBe(true);
+    expect(ctx._tables["_resolve_schema_versions"]).toEqual([
+      expect.objectContaining({ table: "tasks", version: 1 }),
+    ]);
+  });
+
+  it("deduplicates version rows when storing a new version", async () => {
+    const ctx = createMockCtx();
+    const schemaDef = define({
+      version: 2,
+      shape: { title: registerField(v.string()) },
+      defaults: { priority: "medium" },
+    });
+
+    ctx._tables["_resolve_schema_versions"] = [
+      { _id: "v1", table: "tasks", version: 1 },
+      { _id: "v2", table: "tasks", version: 1 },
+    ];
+
+    await runMigrations(ctx as any, {
+      table: "tasks",
+      schema: schemaDef,
+    });
+
+    expect(ctx._tables["_resolve_schema_versions"]).toEqual([
+      expect.objectContaining({ table: "tasks", version: 2 }),
+    ]);
+  });
+
+  it("falls back to insert when patching stored version fails", async () => {
+    const ctx = createMockCtx();
+    const schemaDef = define({
+      version: 2,
+      shape: { title: registerField(v.string()) },
+    });
+
+    ctx._tables["_resolve_schema_versions"] = [
+      { _id: "v1", table: "tasks", version: 1 },
+    ];
+
+    const originalPatch = ctx.db.patch;
+    ctx.db.patch = vi.fn(async (id: string, patches: any) => {
+      if (id === "v1") {
+        throw new Error("patch failed");
+      }
+      await originalPatch(id, patches);
+    });
+
+    await runMigrations(ctx as any, {
+      table: "tasks",
+      schema: schemaDef,
+      migrations: { 2: { _name: "v2Migration" } as any },
+    });
+
+    expect(ctx._tables["_resolve_schema_versions"]).toEqual([
+      expect.objectContaining({ table: "tasks", version: 2 }),
+    ]);
+  });
+
   it("calls onMigrationError when migration fails", async () => {
     const ctx = createMockCtx();
     const schemaDef = define({

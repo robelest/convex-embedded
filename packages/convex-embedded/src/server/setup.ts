@@ -394,20 +394,26 @@ export function embeddedTable(
   let _component: ResolveComponentApi | undefined;
   let _bound = false;
 
-  // Runtime detection — deferred to first handler invocation.
-  let _runtimeKnown = false;
-  let _isRemote = false;
+  // Runtime detection — cached per Convex ctx so transient failures do not
+  // poison future calls made with a different runtime context.
+  const _runtimeCache = new WeakMap<object, boolean>();
 
   async function detectRuntime(ctx: any): Promise<boolean> {
-    if (_runtimeKnown) return _isRemote;
-
     if (!_component) {
-      _runtimeKnown = true;
-      _isRemote = false;
       return false;
     }
 
-    await Fx.run(
+    if (
+      ctx !== null &&
+      (typeof ctx === "object" || typeof ctx === "function")
+    ) {
+      const cached = _runtimeCache.get(ctx);
+      if (cached !== undefined) {
+        return cached;
+      }
+    }
+
+    const isRemote = await Fx.run(
       Fx.from({
         ok: () =>
           ctx.runQuery(_component!.public.getLatestDeltas, {
@@ -418,24 +424,29 @@ export function embeddedTable(
       }).pipe(
         Fx.fold({
           ok: () => {
-            _runtimeKnown = true;
-            _isRemote = true;
             log.info(
               `detectRuntime(${tableName}): component resolved → remote`,
             );
+            return true;
           },
           err: () => {
-            _runtimeKnown = true;
-            _isRemote = false;
             log.info(
               `detectRuntime(${tableName}): component unavailable → local`,
             );
+            return false;
           },
         }),
       ),
     );
 
-    return _isRemote;
+    if (
+      ctx !== null &&
+      (typeof ctx === "object" || typeof ctx === "function")
+    ) {
+      _runtimeCache.set(ctx, isRemote);
+    }
+
+    return isRemote;
   }
 
   // Record delta inline.

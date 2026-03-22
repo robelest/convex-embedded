@@ -265,6 +265,33 @@ describe("Fx.delay", () => {
 // ---------------------------------------------------------------------------
 
 describe("Fx.timeout", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("clears the timeout timer when the computation succeeds early", async () => {
+    vi.useFakeTimers();
+
+    await expect(Fx.run(Fx.succeed(42).pipe(Fx.timeout(1000)))).resolves.toBe(
+      42,
+    );
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("clears the timeout timer when the computation fails early", async () => {
+    vi.useFakeTimers();
+    const error = new Error("boom");
+
+    await expect(Fx.run(Fx.fail(error).pipe(Fx.timeout(1000)))).rejects.toBe(
+      error,
+    );
+    expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// timeout
+// ---------------------------------------------------------------------------
+
+describe("Fx.timeout", () => {
   it("returns value when computation finishes in time", async () => {
     expect(await Fx.run(Fx.succeed(42).pipe(Fx.timeout(1000)))).toBe(42);
   });

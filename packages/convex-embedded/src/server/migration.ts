@@ -210,7 +210,17 @@ async function getStoredVersion(
           .collect();
 
         if (records.length === 0) return null;
-        return records[0].version as number;
+        if (records.length > 1) {
+          log.warn(
+            `getStoredVersion: found ${records.length} version rows for ${table}`,
+          );
+        }
+
+        const versions = records
+          .map((record) => Number(record.version))
+          .filter(Number.isFinite);
+
+        return versions.length > 0 ? Math.max(...versions) : null;
       },
       err: (e) => e as Error,
     }).pipe(Fx.recover(() => Fx.succeed(null))),
@@ -222,48 +232,59 @@ async function setStoredVersion(
   table: string,
   version: number,
 ): Promise<void> {
-  await Fx.run(
-    Fx.from({
-      ok: async () => {
-        const existing = await ctx.db
-          .query(VERSION_TABLE)
-          .filter((q: unknown) =>
-            (
-              q as {
-                eq(a: unknown, b: unknown): unknown;
-                field(name: string): unknown;
-              }
-            ).eq((q as { field(name: string): unknown }).field("table"), table),
-          )
-          .collect();
+  const effect = Fx.from({
+    ok: async () => {
+      const existing = await ctx.db
+        .query(VERSION_TABLE)
+        .filter((q: unknown) =>
+          (
+            q as {
+              eq(a: unknown, b: unknown): unknown;
+              field(name: string): unknown;
+            }
+          ).eq((q as { field(name: string): unknown }).field("table"), table),
+        )
+        .collect();
 
-        if (existing.length > 0) {
-          await ctx.db.patch(existing[0]._id, { version });
-        } else {
-          await ctx.db.insert(VERSION_TABLE, { table, version });
-        }
-      },
-      err: (err) => err as Error,
-    }).pipe(
-      // Primary path failed — fall back to a plain insert
-      Fx.recover(() =>
-        Fx.from({
-          ok: () => ctx.db.insert(VERSION_TABLE, { table, version }),
-          err: (err) => err as Error,
-        }),
+      if (existing.length === 0) {
+        await ctx.db.insert(VERSION_TABLE, { table, version });
+        return;
+      }
+
+      const [primary, ...duplicates] = existing;
+      let staleRows = duplicates;
+
+      try {
+        await ctx.db.patch(primary._id, { version });
+      } catch (patchError) {
+        log.warn(
+          `setStoredVersion: patch failed for ${table}, inserting replacement row`,
+          patchError,
+        );
+        await ctx.db.insert(VERSION_TABLE, { table, version });
+        staleRows = [primary, ...duplicates];
+      }
+
+      for (const stale of staleRows) {
+        await ctx.db.delete(stale._id);
+      }
+
+      if (staleRows.length > 0) {
+        log.warn(
+          `setStoredVersion: removed ${staleRows.length} stale version row(s) for ${table}`,
+        );
+      }
+    },
+    err: (err) => err as Error,
+  }).pipe(
+    Fx.inspect((err) =>
+      Fx.sync(() =>
+        log.warn(`setStoredVersion: could not store version for ${table}`, err),
       ),
-      // If even the fallback failed, log and swallow
-      Fx.inspect((err) =>
-        Fx.sync(() =>
-          log.warn(
-            `setStoredVersion: could not store version for ${table}`,
-            err,
-          ),
-        ),
-      ),
-      Fx.recover(() => Fx.unit),
     ),
   );
+
+  await Fx.run(effect);
 }
 
 // ---------------------------------------------------------------------------

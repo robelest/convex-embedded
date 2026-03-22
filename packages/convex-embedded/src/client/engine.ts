@@ -15,6 +15,7 @@ import * as Y from "yjs";
 
 import { IdMap } from "@/client/id-map";
 import { PendingQueue } from "@/client/pending-queue";
+import type { PendingEntry } from "@/client/pending-queue";
 import { materializeYjsDoc } from "@/client/schema";
 import { initYjsDoc } from "@/server/schema";
 import type { Definition } from "@/server/schema";
@@ -51,6 +52,69 @@ function stripOmittedFields(
     }
     return stripped;
   });
+}
+
+function createRemoteUpdateHandler(input: {
+  ingestDocuments: (
+    table: string,
+    documents: Array<Record<string, unknown>>,
+  ) => Promise<void>;
+  schema: Definition;
+  tableName: string;
+}) {
+  return (remoteDocs: Array<Record<string, unknown>>) => {
+    const cleaned = stripOmittedFields(input.schema, remoteDocs);
+    Fx.detach(
+      () =>
+        Fx.run(
+          Fx.from({
+            ok: () => input.ingestDocuments(input.tableName, cleaned),
+            err: (e) => e as Error,
+          }).pipe(
+            Fx.inspect((err) =>
+              Fx.sync(() => {
+                log.error(
+                  `sync: failed to ingest remote data for "${input.tableName}"`,
+                  err,
+                );
+              }),
+            ),
+            Fx.recover(() => Fx.unit),
+          ),
+        ),
+      `[sync] ingest ${input.tableName}:`,
+    );
+  };
+}
+
+function createRemoteSubscriptionErrorHandler(tableName: string) {
+  return (err: Error) => {
+    log.error(`sync: remote subscription error for "${tableName}"`, err);
+  };
+}
+
+function registerRemoteSubscription(input: {
+  ingestDocuments: (
+    table: string,
+    documents: Array<Record<string, unknown>>,
+  ) => Promise<void>;
+  onUnsubscribe: (unsub: () => void) => void;
+  remoteClient: ConvexClient;
+  tableConfig: TableConfig;
+  tableName: string;
+}) {
+  const unsub = (input.remoteClient as any).onUpdate(
+    input.tableConfig.query,
+    {},
+    createRemoteUpdateHandler({
+      ingestDocuments: input.ingestDocuments,
+      schema: input.tableConfig.schema,
+      tableName: input.tableName,
+    }),
+    createRemoteSubscriptionErrorHandler(input.tableName),
+  );
+
+  input.onUnsubscribe(unsub);
 }
 
 // ---------------------------------------------------------------------------
@@ -193,6 +257,46 @@ export interface EngineConfig {
 
 type ChangeListener = (status: EngineStatus) => void;
 
+type SyncCycleRoute =
+  | { _tag: "Skip" }
+  | { _tag: "DeferUntilQueueDrains" }
+  | { _tag: "Resolve" };
+
+type QueueEntryRoute =
+  | { _tag: "Stop" }
+  | { _tag: "DropMappedCreate"; localResult: string }
+  | { _tag: "Push"; localResult: unknown };
+
+type StartLifecycleRoute =
+  | { _tag: "Offline" }
+  | { _tag: "WaitForHydrationThenOnline" };
+
+type LocalYjsEntry = {
+  localDoc: Record<string, unknown>;
+  yjsDoc: Y.Doc;
+};
+
+type ResolveDocument = {
+  docId: string;
+  vector: ArrayBuffer;
+};
+
+type ResolveResultRow = {
+  docId: string;
+  diff?: ArrayBuffer;
+};
+
+type PreparedResolveInput = {
+  localYjsMap: Map<string, LocalYjsEntry>;
+  resolveDocuments: Array<ResolveDocument>;
+  schemaDef: Definition;
+};
+
+type MergeResolveOutput = {
+  diffCount: number;
+  mergedDocs: Array<Record<string, unknown>>;
+};
+
 /** @internal */
 export interface EngineInstance {
   /** Start monitoring network state and triggering resolves. */
@@ -285,6 +389,191 @@ function inferTableFromRef(
   // Fallback: return first registered table (common case: single table app)
   const tableNames = Object.keys(tables);
   return tableNames[0] ?? "";
+}
+
+function matchTag<
+  T extends Record<K, string>,
+  K extends keyof T & string,
+  Handlers extends {
+    [V in T[K] & string]: (value: Extract<T, Record<K, V>>) => unknown;
+  },
+>(value: T, key: K, handlers: Handlers): ReturnType<Handlers[T[K] & string]> {
+  const handler = handlers[value[key] as T[K] & string] as (
+    current: T,
+  ) => ReturnType<Handlers[T[K] & string]>;
+  return handler(value);
+}
+
+function getSyncCycleRoute(input: {
+  aborted: boolean;
+  forceResolve: boolean;
+  hasPending: boolean;
+  isOnline: boolean;
+  started: boolean;
+}): SyncCycleRoute {
+  if (input.aborted) return { _tag: "Skip" };
+  if (!input.forceResolve && (!input.started || !input.isOnline)) {
+    return { _tag: "Skip" };
+  }
+  if (input.hasPending) {
+    return { _tag: "DeferUntilQueueDrains" };
+  }
+  return { _tag: "Resolve" };
+}
+
+function shouldStartRemoteSubscriptions(input: {
+  aborted: boolean;
+  forceResolve: boolean;
+  hasPending: boolean;
+  isOnline: boolean;
+  started: boolean;
+}): boolean {
+  return (
+    !input.aborted &&
+    input.started &&
+    input.isOnline &&
+    !input.hasPending &&
+    !input.forceResolve
+  );
+}
+
+function getStartLifecycleRoute(input: {
+  hasNavigator: boolean;
+  navigatorOnline: boolean | undefined;
+}): StartLifecycleRoute {
+  return input.hasNavigator && input.navigatorOnline === false
+    ? { _tag: "Offline" }
+    : { _tag: "WaitForHydrationThenOnline" };
+}
+
+function createHydrationAwareOnlineHandler(input: {
+  handleOnline: () => void;
+  hydrationPromise: Promise<unknown>;
+  isStarted: () => boolean;
+}): () => void {
+  return () => {
+    void input.hydrationPromise.then(() => {
+      if (input.isStarted()) {
+        input.handleOnline();
+      }
+    });
+  };
+}
+
+function toArrayBuffer(data: Uint8Array): ArrayBuffer {
+  const buf = new ArrayBuffer(data.byteLength);
+  new Uint8Array(buf).set(data);
+  return buf;
+}
+
+function prepareResolveInput(
+  schemaDef: Definition,
+  localDocs: Array<Record<string, unknown>>,
+): PreparedResolveInput {
+  return localDocs.reduce<PreparedResolveInput>(
+    (acc, doc) => {
+      const docId = doc._id as string | undefined;
+      if (!docId) {
+        return acc;
+      }
+
+      const yjsDoc = initYjsDoc(schemaDef, doc);
+      acc.localYjsMap.set(docId, { localDoc: doc, yjsDoc });
+      acc.resolveDocuments.push({
+        docId,
+        vector: toArrayBuffer(Y.encodeStateVector(yjsDoc)),
+      });
+      return acc;
+    },
+    {
+      schemaDef,
+      localYjsMap: new Map<string, LocalYjsEntry>(),
+      resolveDocuments: [],
+    },
+  );
+}
+
+function createResolveRetrySchedule(input: {
+  maxRetries: number;
+  retryDelayMs: number;
+  signal?: AbortSignal;
+}) {
+  return Fx.retry.while(
+    Fx.retry.compose(
+      Fx.retry.jittered(Fx.retry.exponential(input.retryDelayMs)),
+      Fx.retry.recurs(input.maxRetries - 1),
+    ),
+    (meta) => {
+      if (input.signal?.aborted) return false;
+      const err = meta.input as Error;
+      return !(err instanceof DOMException && err.name === "AbortError");
+    },
+  );
+}
+
+function mergeResolveResult(input: {
+  localYjsMap: Map<string, LocalYjsEntry>;
+  resolveResult: Array<ResolveResultRow>;
+  schemaDef: Definition;
+  tableName: string;
+}): MergeResolveOutput {
+  return input.resolveResult.reduce<MergeResolveOutput>(
+    (acc, { docId, diff }) => {
+      const entry = input.localYjsMap.get(docId);
+      if (!entry) {
+        log.warn(
+          `sync: resolve returned diff for unknown doc "${docId}" in "${input.tableName}"`,
+        );
+        return acc;
+      }
+
+      if (diff) {
+        Y.applyUpdateV2(entry.yjsDoc, new Uint8Array(diff));
+        acc.diffCount += 1;
+      }
+
+      const materialized = materializeYjsDoc(input.schemaDef, entry.yjsDoc);
+      materialized._id = entry.localDoc._id;
+      materialized._creationTime = entry.localDoc._creationTime;
+      acc.mergedDocs.push(materialized);
+      return acc;
+    },
+    { diffCount: 0, mergedDocs: [] },
+  );
+}
+
+function ingestMergedDocsFx(input: {
+  ingestDocuments: (
+    table: string,
+    documents: Array<Record<string, unknown>>,
+  ) => Promise<void>;
+  mergedDocs: Array<Record<string, unknown>>;
+  tableName: string;
+}) {
+  return input.mergedDocs.length === 0
+    ? Fx.unit
+    : Fx.from({
+        ok: () => input.ingestDocuments(input.tableName, input.mergedDocs),
+        err: (e) => e as Error,
+      });
+}
+
+function getQueueEntryRoute(input: {
+  entry: PendingEntry | undefined;
+  hasLocalId: (localId: string) => boolean;
+  isOnline: boolean;
+  signal?: AbortSignal;
+}): QueueEntryRoute {
+  if (input.entry === undefined || !input.isOnline || input.signal?.aborted) {
+    return { _tag: "Stop" };
+  }
+
+  const localResult = JSON.parse(input.entry.localResult);
+  return input.entry.ref.endsWith(":create") &&
+    typeof localResult === "string" &&
+    input.hasLocalId(localResult)
+    ? { _tag: "DropMappedCreate", localResult }
+    : { _tag: "Push", localResult };
 }
 
 // ---------------------------------------------------------------------------
@@ -388,72 +677,77 @@ function createEngine(config: EngineConfig): EngineInstance {
           Fx.gen(function* () {
             while (!pendingQueue.isEmpty && isOnline && !signal?.aborted) {
               const entry = pendingQueue.peek();
-              if (entry === undefined) break;
+              const route = getQueueEntryRoute({
+                entry,
+                hasLocalId: (localId) => idMap.hasLocalId(localId),
+                isOnline,
+                signal,
+              });
 
-              const localResult = JSON.parse(entry.localResult);
-              if (
-                entry.ref.endsWith(":create") &&
-                typeof localResult === "string" &&
-                idMap.hasLocalId(localResult)
-              ) {
-                yield* Fx.from({
-                  ok: () => pendingQueue.shift(),
-                  err: (e) => e as Error,
-                });
-                log.debug(
-                  `sync: dropping already-mapped create mutation (table: ${entry.table}, remaining: ${pendingQueue.length})`,
-                );
-                continue;
-              }
-
-              const pushed = yield* Fx.from({
-                ok: async () => {
-                  if (signal?.aborted || !isOnline) {
-                    return false;
-                  }
-
-                  const ref = makeFunctionReference<"mutation">(entry.ref);
-                  const originalArgs = JSON.parse(entry.args) as Record<
-                    string,
-                    unknown
-                  >;
-
-                  const translatedArgs = idMap.translateArgs(originalArgs);
-
-                  const remoteResult = await (remoteClient as any).mutation(
-                    ref,
-                    translatedArgs,
-                  );
-
-                  if (
-                    typeof localResult === "string" &&
-                    typeof remoteResult === "string" &&
-                    localResult !== remoteResult
-                  ) {
-                    await idMap.set(localResult, remoteResult, entry.table);
-                  }
-
-                  await pendingQueue.shift();
-
-                  log.debug(
-                    `sync: pushed mutation to remote (table: ${entry.table}, remaining: ${pendingQueue.length})`,
-                  );
-                  return true;
-                },
-                err: (e) => e as Error,
-              }).pipe(
-                Fx.inspect((err) =>
-                  Fx.sync(() =>
-                    log.warn(
-                      "sync: remote push failed, stopping queue processing",
-                      err,
+              const shouldContinue = yield* matchTag(route, "_tag", {
+                Stop: () => Fx.succeed(false),
+                DropMappedCreate: () =>
+                  Fx.from({
+                    ok: () => pendingQueue.shift(),
+                    err: (e) => e as Error,
+                  }).pipe(
+                    Fx.tap(() =>
+                      Fx.sync(() => {
+                        log.debug(
+                          `sync: dropping already-mapped create mutation (remaining: ${pendingQueue.length})`,
+                        );
+                      }),
                     ),
+                    Fx.map(() => true),
                   ),
-                ),
-                Fx.recover(() => Fx.succeed(false)),
-              );
+                Push: (current) =>
+                  Fx.from({
+                    ok: async () => {
+                      const ref = makeFunctionReference<"mutation">(entry!.ref);
+                      const originalArgs = JSON.parse(entry!.args) as Record<
+                        string,
+                        unknown
+                      >;
+                      const translatedArgs = idMap.translateArgs(originalArgs);
+                      const remoteResult = await (remoteClient as any).mutation(
+                        ref,
+                        translatedArgs,
+                      );
 
-              if (!pushed) break;
+                      if (
+                        typeof current.localResult === "string" &&
+                        typeof remoteResult === "string" &&
+                        current.localResult !== remoteResult
+                      ) {
+                        await idMap.set(
+                          current.localResult,
+                          remoteResult,
+                          entry!.table,
+                        );
+                      }
+
+                      await pendingQueue.shift();
+
+                      log.debug(
+                        `sync: pushed mutation to remote (table: ${entry!.table}, remaining: ${pendingQueue.length})`,
+                      );
+                      return true;
+                    },
+                    err: (e) => e as Error,
+                  }).pipe(
+                    Fx.inspect((err) =>
+                      Fx.sync(() =>
+                        log.warn(
+                          "sync: remote push failed, stopping queue processing",
+                          err,
+                        ),
+                      ),
+                    ),
+                    Fx.recover(() => Fx.succeed(false)),
+                  ),
+              });
+
+              if (!shouldContinue) break;
             }
           }),
         // Release: no-op, queueProcessingPromise is cleared in finally()
@@ -484,28 +778,38 @@ function createEngine(config: EngineConfig): EngineInstance {
           err: (e) => e as Error,
         });
 
-        if (signal.aborted) return;
-        if (!options?.forceResolve && (!started || !isOnline)) return;
+        const route = getSyncCycleRoute({
+          aborted: signal.aborted,
+          forceResolve: options?.forceResolve ?? false,
+          hasPending: !pendingQueue.isEmpty,
+          isOnline,
+          started,
+        });
 
-        if (!pendingQueue.isEmpty) {
-          stopRemoteSubscriptions();
-          log.warn(
-            "sync: deferring resolve and remote subscriptions until pending queue drains",
-          );
-          return;
-        }
-
-        yield* Fx.from({
-          ok: () => resolveAll(signal),
-          err: (e) => e as Error,
+        yield* matchTag(route, "_tag", {
+          Skip: () => Fx.unit,
+          DeferUntilQueueDrains: () =>
+            Fx.sync(() => {
+              stopRemoteSubscriptions();
+              log.warn(
+                "sync: deferring resolve and remote subscriptions until pending queue drains",
+              );
+            }),
+          Resolve: () =>
+            Fx.from({
+              ok: () => resolveAll(signal),
+              err: (e) => e as Error,
+            }),
         });
 
         if (
-          !signal.aborted &&
-          started &&
-          isOnline &&
-          pendingQueue.isEmpty &&
-          !options?.forceResolve
+          shouldStartRemoteSubscriptions({
+            aborted: signal.aborted,
+            forceResolve: options?.forceResolve ?? false,
+            hasPending: !pendingQueue.isEmpty,
+            isOnline,
+            started,
+          })
         ) {
           startRemoteSubscriptions();
         }
@@ -589,37 +893,17 @@ function createEngine(config: EngineConfig): EngineInstance {
     );
   }
 
-  /**
-   * Safely convert a Uint8Array to ArrayBuffer.
-   * In some runtimes the Uint8Array.buffer property may not be a native
-   * ArrayBuffer, so we copy the bytes.
-   */
-  function toArrayBuffer(data: Uint8Array): ArrayBuffer {
-    const buf = new ArrayBuffer(data.byteLength);
-    new Uint8Array(buf).set(data);
-    return buf;
-  }
-
   function resolveTableFx(
     tableName: string,
     tableConfig: TableConfig,
     signal?: AbortSignal,
   ) {
     let attempts = 0;
-
-    const retrySchedule = Fx.retry.while(
-      Fx.retry.compose(
-        Fx.retry.jittered(Fx.retry.exponential(retryDelayMs)),
-        Fx.retry.recurs(maxRetries - 1),
-      ),
-      (meta) => {
-        if (signal?.aborted) return false;
-        const err = meta.input as Error;
-        if (err instanceof DOMException && err.name === "AbortError")
-          return false;
-        return true;
-      },
-    );
+    const retrySchedule = createResolveRetrySchedule({
+      maxRetries,
+      retryDelayMs,
+      signal,
+    });
 
     return Fx.gen(function* () {
       // ------------------------------------------------------------------
@@ -631,31 +915,10 @@ function createEngine(config: EngineConfig): EngineInstance {
         err: (e) => e as Error,
       });
 
-      const schemaDef = tableConfig.schema;
-
-      // Build a map of docId → { localDoc, yjsDoc } for later merge.
-      const localYjsMap = new Map<
-        string,
-        { localDoc: Record<string, unknown>; yjsDoc: Y.Doc }
-      >();
-
-      const resolveDocuments: Array<{
-        docId: string;
-        vector: ArrayBuffer;
-      }> = [];
-
-      for (const doc of localDocs) {
-        const docId = doc._id as string | undefined;
-        if (!docId) continue;
-
-        const yjsDoc = initYjsDoc(schemaDef, doc);
-        localYjsMap.set(docId, { localDoc: doc, yjsDoc });
-
-        resolveDocuments.push({
-          docId,
-          vector: toArrayBuffer(Y.encodeStateVector(yjsDoc)),
-        });
-      }
+      const { schemaDef, localYjsMap, resolveDocuments } = prepareResolveInput(
+        tableConfig.schema,
+        localDocs,
+      );
 
       log.debug(
         `sync: resolving "${tableName}" with ${resolveDocuments.length} local doc(s)`,
@@ -665,9 +928,7 @@ function createEngine(config: EngineConfig): EngineInstance {
       // 2. Call the remote resolve query with retry.
       // ------------------------------------------------------------------
 
-      type ResolveResult = Array<{ docId: string; diff?: ArrayBuffer }>;
-
-      const resolveResult: ResolveResult = yield* Fx.defer(() => {
+      const resolveResult: Array<ResolveResultRow> = yield* Fx.defer(() => {
         if (signal?.aborted) {
           return Fx.fail(new DOMException("Aborted", "AbortError"));
         }
@@ -676,7 +937,7 @@ function createEngine(config: EngineConfig): EngineInstance {
           ok: () =>
             (remoteClient as any).query(tableConfig.resolve, {
               documents: resolveDocuments,
-            }) as Promise<ResolveResult>,
+            }) as Promise<Array<ResolveResultRow>>,
           err: (err) => err as Error,
         });
       }).pipe(
@@ -697,36 +958,12 @@ function createEngine(config: EngineConfig): EngineInstance {
       // 3. Apply diffs, materialize, and ingest.
       // ------------------------------------------------------------------
 
-      const mergedDocs: Array<Record<string, unknown>> = [];
-      let diffCount = 0;
-
-      for (const { docId, diff } of resolveResult) {
-        const entry = localYjsMap.get(docId);
-        if (!entry) {
-          // Server returned a diff for a doc we don't have locally.
-          // This shouldn't happen (resolve only processes docs we sent),
-          // but handle it gracefully by skipping.
-          log.warn(
-            `sync: resolve returned diff for unknown doc "${docId}" in "${tableName}"`,
-          );
-          continue;
-        }
-
-        if (diff) {
-          // Apply the server's binary diff to the local Yjs doc.
-          Y.applyUpdateV2(entry.yjsDoc, new Uint8Array(diff));
-          diffCount++;
-        }
-
-        // Materialize the (possibly updated) Yjs doc back to a plain record.
-        const materialized = materializeYjsDoc(schemaDef, entry.yjsDoc);
-
-        // Reattach the document identity fields.
-        materialized._id = entry.localDoc._id;
-        materialized._creationTime = entry.localDoc._creationTime;
-
-        mergedDocs.push(materialized);
-      }
+      const { mergedDocs, diffCount } = mergeResolveResult({
+        localYjsMap,
+        resolveResult,
+        schemaDef,
+        tableName,
+      });
 
       // ------------------------------------------------------------------
       // 4. Ingest the merged documents.
@@ -734,12 +971,11 @@ function createEngine(config: EngineConfig): EngineInstance {
       //    change will be no-ops (no unnecessary writes).
       // ------------------------------------------------------------------
 
-      if (mergedDocs.length > 0) {
-        yield* Fx.from({
-          ok: () => ingestDocuments(tableName, mergedDocs),
-          err: (e) => e as Error,
-        });
-      }
+      yield* ingestMergedDocsFx({
+        ingestDocuments,
+        mergedDocs,
+        tableName,
+      });
 
       log.debug(
         `sync: resolved table "${tableName}" — ` +
@@ -769,39 +1005,13 @@ function createEngine(config: EngineConfig): EngineInstance {
     stopRemoteSubscriptions();
 
     for (const [tableName, tableConfig] of Object.entries(tables)) {
-      const unsub = (remoteClient as any).onUpdate(
-        tableConfig.query,
-        {},
-        (remoteDocs: Array<Record<string, unknown>>) => {
-          // Strip schema.omit() fields before ingesting into local DB.
-          const cleaned = stripOmittedFields(tableConfig.schema, remoteDocs);
-          Fx.detach(
-            () =>
-              Fx.run(
-                Fx.from({
-                  ok: () => ingestDocuments(tableName, cleaned),
-                  err: (e) => e as Error,
-                }).pipe(
-                  Fx.inspect((err) =>
-                    Fx.sync(() => {
-                      log.error(
-                        `sync: failed to ingest remote data for "${tableName}"`,
-                        err,
-                      );
-                    }),
-                  ),
-                  Fx.recover(() => Fx.unit),
-                ),
-              ),
-            `[sync] ingest ${tableName}:`,
-          );
-        },
-        (err: Error) => {
-          log.error(`sync: remote subscription error for "${tableName}"`, err);
-        },
-      );
-
-      remoteUnsubscribes.push(unsub);
+      registerRemoteSubscription({
+        ingestDocuments,
+        onUnsubscribe: (unsub) => remoteUnsubscribes.push(unsub),
+        remoteClient,
+        tableConfig,
+        tableName,
+      });
     }
 
     log.info(`sync: subscribed to ${tableNames.length} remote table(s)`);
@@ -873,31 +1083,38 @@ function createEngine(config: EngineConfig): EngineInstance {
         ),
       );
 
-      if (typeof globalThis !== "undefined" && "navigator" in globalThis) {
-        const nav = (globalThis as { navigator?: { onLine?: boolean } })
-          .navigator;
-        if (nav?.onLine === false) {
+      const runOnlineAfterHydration = createHydrationAwareOnlineHandler({
+        handleOnline,
+        hydrationPromise,
+        isStarted: () => started,
+      });
+
+      const hasNavigator =
+        typeof globalThis !== "undefined" && "navigator" in globalThis;
+      const nav = hasNavigator
+        ? (globalThis as { navigator?: { onLine?: boolean } }).navigator
+        : undefined;
+
+      const startRoute = getStartLifecycleRoute({
+        hasNavigator,
+        navigatorOnline: nav?.onLine,
+      });
+
+      matchTag(startRoute, "_tag", {
+        Offline: () => {
           isOnline = false;
           emit({ status: "offline" });
-        } else {
-          // Wait for hydration before the first online cycle
-          void hydrationPromise.then(() => {
-            if (started) handleOnline();
-          });
-        }
+        },
+        WaitForHydrationThenOnline: () => {
+          runOnlineAfterHydration();
+        },
+      });
 
-        onOnline = () => {
-          void hydrationPromise.then(() => {
-            if (started) handleOnline();
-          });
-        };
+      if (hasNavigator) {
+        onOnline = runOnlineAfterHydration;
         onOffline = handleOffline;
         globalThis.addEventListener("online", onOnline);
         globalThis.addEventListener("offline", onOffline);
-      } else {
-        void hydrationPromise.then(() => {
-          if (started) handleOnline();
-        });
       }
     },
 

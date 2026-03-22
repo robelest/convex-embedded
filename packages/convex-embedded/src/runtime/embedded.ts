@@ -74,6 +74,19 @@ function docsEqual(a: StoredDocument, b: Record<string, unknown>): boolean {
   return true;
 }
 
+function matchTag<
+  T extends Record<K, string>,
+  K extends keyof T & string,
+  Handlers extends {
+    [V in T[K] & string]: (value: Extract<T, Record<K, V>>) => unknown;
+  },
+>(value: T, key: K, handlers: Handlers): ReturnType<Handlers[T[K] & string]> {
+  const handler = handlers[value[key] as T[K] & string] as (
+    current: T,
+  ) => ReturnType<Handlers[T[K] & string]>;
+  return handler(value);
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -299,6 +312,67 @@ export class EmbeddedRuntime {
     this.syncProtocol.removeSession(sessionId);
   }
 
+  private _buildLocalDocumentMap(table: string): Map<string, StoredDocument> {
+    return this.db
+      .getDocumentsForTable(table)
+      .reduce(
+        (acc, doc) => acc.set(doc._id as string, doc),
+        new Map<string, StoredDocument>(),
+      );
+  }
+
+  private _buildRemoteDocumentMap(
+    remoteDocs: Array<Record<string, unknown>>,
+  ): Map<string, Record<string, unknown>> {
+    return remoteDocs.reduce((acc, doc) => {
+      const id = doc._id;
+      return typeof id === "string" ? acc.set(id, doc) : acc;
+    }, new Map<string, Record<string, unknown>>());
+  }
+
+  private _diffIngestDocuments(
+    localMap: Map<string, StoredDocument>,
+    remoteMap: Map<string, Record<string, unknown>>,
+  ): {
+    toDelete: string[];
+    toUpsert: Array<
+      Record<string, unknown> & { _id: string; _creationTime: number }
+    >;
+  } {
+    const toUpsert = [...remoteMap.entries()].flatMap(([id, remoteDoc]) => {
+      const localDoc = localMap.get(id);
+      return localDoc === undefined || !docsEqual(localDoc, remoteDoc)
+        ? [
+            remoteDoc as Record<string, unknown> & {
+              _id: string;
+              _creationTime: number;
+            },
+          ]
+        : [];
+    });
+
+    const toDelete = [...localMap.keys()].filter((id) => !remoteMap.has(id));
+
+    return { toDelete, toUpsert };
+  }
+
+  private _pushProtocolUpdates(
+    updates: Map<string, ServerMessage[]>,
+  ): Promise<void> {
+    return Fx.run(
+      Fx.each([...updates.entries()], ([sessionId, messages]) =>
+        Fx.each(messages, (message) =>
+          Fx.sync(() => {
+            const data = JSON.stringify(message);
+            this._transports.forEach((transport) => {
+              transport.pushMessage(sessionId, data);
+            });
+          }),
+        ),
+      ).pipe(Fx.map(() => undefined)),
+    );
+  }
+
   // -----------------------------------------------------------------------
   // Message handling (ProtocolHandler interface for createTransport)
   // -----------------------------------------------------------------------
@@ -364,19 +438,33 @@ export class EmbeddedRuntime {
     if (commit.tablesWritten.size === 0) return;
 
     this.subscriptions.invalidate(commit.tablesWritten);
-    Fx.detach(async () => {
-      try {
-        await commit.persisted;
-      } catch (err) {
-        console.error(
-          "[convex-embedded] skipping cross-tab notify after persistence failure:",
-          err,
-        );
-        return;
-      }
+    Fx.detach(
+      () => this._notifyCrossTabAfterPersistence(commit),
+      "[convex-embedded] post-commit fanout failed:",
+    );
+  }
 
-      this.writeFanout.notify(commit.tablesWritten);
-    }, "[convex-embedded] post-commit fanout failed:");
+  private _notifyCrossTabAfterPersistence(
+    commit: DatabaseCommitResult,
+  ): Promise<void> {
+    return Fx.run(
+      Fx.from({
+        ok: () => commit.persisted,
+        err: (err) => err as Error,
+      }).pipe(
+        Fx.fold({
+          ok: () => {
+            this.writeFanout.notify(commit.tablesWritten);
+          },
+          err: (err) => {
+            console.error(
+              "[convex-embedded] skipping cross-tab notify after persistence failure:",
+              err,
+            );
+          },
+        }),
+      ),
+    );
   }
 
   // -----------------------------------------------------------------------
@@ -462,7 +550,10 @@ export class EmbeddedRuntime {
     const hydrated = this._hydrated;
     const onCommit = this.onMutationCommit.bind(this);
     const syncProtocol = this.syncProtocol;
-    const transports = this._transports;
+    const buildLocalDocumentMap = this._buildLocalDocumentMap.bind(this);
+    const buildRemoteDocumentMap = this._buildRemoteDocumentMap.bind(this);
+    const diffIngestDocuments = this._diffIngestDocuments.bind(this);
+    const pushProtocolUpdates = this._pushProtocolUpdates.bind(this);
 
     return Fx.run(
       Fx.gen(function* () {
@@ -472,51 +563,9 @@ export class EmbeddedRuntime {
           err: (e) => e as Error,
         });
 
-        // --- 1. Build lookup maps -------------------------------------------
-
-        const localDocs = db.getDocumentsForTable(table);
-
-        const localMap = new Map<string, StoredDocument>();
-        for (const doc of localDocs) {
-          localMap.set(doc._id as string, doc);
-        }
-
-        const remoteMap = new Map<string, Record<string, unknown>>();
-        for (const doc of remoteDocs) {
-          const id = doc._id as string | undefined;
-          if (id != null) {
-            remoteMap.set(id, doc);
-          }
-        }
-
-        // --- 2. Compute diff ------------------------------------------------
-
-        type UpsertDoc = Record<string, unknown> & {
-          _id: string;
-          _creationTime: number;
-        };
-
-        const toUpsert: UpsertDoc[] = [];
-        const toDelete: string[] = [];
-
-        // Docs in remote that are new or changed locally.
-        for (const [id, remoteDoc] of remoteMap) {
-          const localDoc = localMap.get(id);
-          if (localDoc === undefined) {
-            // New document — needs insert.
-            toUpsert.push(remoteDoc as UpsertDoc);
-          } else if (!docsEqual(localDoc, remoteDoc)) {
-            // Existing document with changed fields — needs update.
-            toUpsert.push(remoteDoc as UpsertDoc);
-          }
-        }
-
-        // Docs in local that are missing from remote — needs delete.
-        for (const id of localMap.keys()) {
-          if (!remoteMap.has(id)) {
-            toDelete.push(id);
-          }
-        }
+        const localMap = buildLocalDocumentMap(table);
+        const remoteMap = buildRemoteDocumentMap(remoteDocs);
+        const { toDelete, toUpsert } = diffIngestDocuments(localMap, remoteMap);
 
         // --- 3. Early exit if nothing changed --------------------------------
 
@@ -565,14 +614,7 @@ export class EmbeddedRuntime {
         yield* Fx.from({
           ok: async () => {
             const updates = await syncProtocol.reEvaluateQueries();
-            for (const [sessionId, messages] of updates) {
-              for (const msg of messages) {
-                const data = JSON.stringify(msg);
-                for (const transport of transports) {
-                  transport.pushMessage(sessionId, data);
-                }
-              }
-            }
+            await pushProtocolUpdates(updates);
           },
           err: (e) => e as Error,
         });
@@ -728,8 +770,8 @@ export class EmbeddedRuntime {
       return this._runSystemFunction(systemFn, type, args, context);
     }
 
-    switch (type) {
-      case "query": {
+    return matchTag({ _tag: type }, "_tag", {
+      query: () => {
         const runQuery = () =>
           this.executor.executeQuery(path, args, {
             holdsTransactionLock: true,
@@ -737,9 +779,8 @@ export class EmbeddedRuntime {
         return context.holdsTransactionLock
           ? runQuery()
           : this._runWithTransactionLock(runQuery);
-      }
-
-      case "mutation": {
+      },
+      mutation: async () => {
         const runMutation = () =>
           this.executor.executeMutation(path, args, {
             holdsTransactionLock: true,
@@ -749,14 +790,9 @@ export class EmbeddedRuntime {
           : await this._runWithTransactionLock(runMutation);
         this.onMutationCommit(commit);
         return result;
-      }
-
-      case "action":
-        return this.executor.executeAction(path, args, context);
-
-      default:
-        throw new Error("Unknown UDF type");
-    }
+      },
+      action: () => this.executor.executeAction(path, args, context),
+    });
   }
 
   /**
@@ -773,15 +809,16 @@ export class EmbeddedRuntime {
     args: Record<string, unknown>,
     context: { holdsTransactionLock?: boolean } = {},
   ): Promise<unknown> {
-    if (calledAs === "mutation" && def.type === "query") {
-      return Promise.reject(
-        new Error("Cannot call a system query as a mutation"),
-      );
-    }
-    if (calledAs === "query" && def.type === "mutation") {
-      return Promise.reject(
-        new Error("Cannot call a system mutation as a query"),
-      );
+    const incompatibleCall =
+      (calledAs === "mutation" && def.type === "query") ||
+      (calledAs === "query" && def.type === "mutation");
+
+    if (incompatibleCall) {
+      const errorMessage =
+        calledAs === "mutation"
+          ? "Cannot call a system query as a mutation"
+          : "Cannot call a system mutation as a query";
+      return Promise.reject(new Error(errorMessage));
     }
 
     const db = this.db;
@@ -794,13 +831,20 @@ export class EmbeddedRuntime {
             db.startTransaction();
           }),
           () =>
-            Fx.sync(() => {
-              const result = def.handler(db, args);
-              if (def.type === "mutation") {
-                onCommit(db.commit());
-              } else {
-                db.rollbackWrites();
-              }
+            Fx.gen(function* () {
+              const result = yield* Fx.sync(() => def.handler(db, args));
+
+              yield* matchTag({ _tag: def.type }, "_tag", {
+                mutation: () =>
+                  Fx.sync(() => {
+                    onCommit(db.commit());
+                  }),
+                query: () =>
+                  Fx.sync(() => {
+                    db.rollbackWrites();
+                  }),
+              });
+
               return result;
             }),
           (_tx, exit) =>

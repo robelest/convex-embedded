@@ -110,6 +110,76 @@ describe("Fx.gen", () => {
     await expect(Fx.run(fx)).rejects.toBe(defect);
   });
 
+  it("runs finally cleanup when a yielded Fx fails", async () => {
+    const events: string[] = [];
+    const error = new Error("boom");
+
+    const fx = Fx.gen(function* () {
+      try {
+        yield* Fx.fail(error);
+      } finally {
+        yield* Fx.sync(() => {
+          events.push("cleanup");
+        });
+      }
+    });
+
+    await expect(Fx.run(fx)).rejects.toBe(error);
+    expect(events).toEqual(["cleanup"]);
+  });
+
+  it("runs finally cleanup when a yielded Fx throws a defect", async () => {
+    const events: string[] = [];
+    const defect = new Error("kaboom");
+
+    const fx = Fx.gen(function* () {
+      try {
+        yield* Fx.sync(() => {
+          throw defect;
+        });
+      } finally {
+        yield* Fx.sync(() => {
+          events.push("cleanup");
+        });
+      }
+    });
+
+    await expect(Fx.run(fx)).rejects.toBe(defect);
+    expect(events).toEqual(["cleanup"]);
+  });
+
+  it("propagates finally failure over an earlier failure", async () => {
+    const original = new Error("original");
+    const cleanupFailure = new Error("cleanup");
+
+    const fx = Fx.gen(function* () {
+      try {
+        yield* Fx.fail(original);
+      } finally {
+        yield* Fx.fail(cleanupFailure);
+      }
+    });
+
+    await expect(Fx.run(fx)).rejects.toBe(cleanupFailure);
+  });
+
+  it("propagates finally failure over an earlier defect", async () => {
+    const defect = new Error("defect");
+    const cleanupFailure = new Error("cleanup");
+
+    const fx = Fx.gen(function* () {
+      try {
+        yield* Fx.sync(() => {
+          throw defect;
+        });
+      } finally {
+        yield* Fx.fail(cleanupFailure);
+      }
+    });
+
+    await expect(Fx.run(fx)).rejects.toBe(cleanupFailure);
+  });
+
   // -------------------------------------------------------------------------
   // guard inside gen
   // -------------------------------------------------------------------------

@@ -86,6 +86,40 @@ function extractErrorData(err: unknown): JSONValue | undefined {
   return undefined;
 }
 
+function buildTransition(
+  startVersion: StateVersion,
+  endVersion: StateVersion,
+  modifications: StateModification[],
+): ServerMessage {
+  return {
+    type: "Transition",
+    startVersion: encodeStateVersion(startVersion),
+    endVersion: encodeStateVersion(endVersion),
+    modifications,
+  };
+}
+
+function authSuccessResult(identity: unknown) {
+  return { _tag: "Success" as const, identity };
+}
+
+function authFailureResult(error: string) {
+  return { _tag: "Failure" as const, error };
+}
+
+function matchTag<
+  T extends Record<K, string>,
+  K extends keyof T & string,
+  Handlers extends {
+    [V in T[K] & string]: (value: Extract<T, Record<K, V>>) => unknown;
+  },
+>(value: T, key: K, handlers: Handlers): ReturnType<Handlers[T[K] & string]> {
+  const handler = handlers[value[key] as T[K] & string] as (
+    current: T,
+  ) => ReturnType<Handlers[T[K] & string]>;
+  return handler(value);
+}
+
 // ---------------------------------------------------------------------------
 // Client → Server messages
 // ---------------------------------------------------------------------------
@@ -314,21 +348,36 @@ export class SyncProtocolHandler {
   ): Promise<ServerMessage[]> {
     return this._withSessionLock(sessionId, async () => {
       console.debug("[convex-embedded:protocol]", message.type, sessionId);
-      switch (message.type) {
-        case "Connect":
-          return this._handleConnect(sessionId, message);
-        case "ModifyQuerySet":
-          return this._handleModifyQuerySet(sessionId, message);
-        case "Mutation":
-          return this._handleMutation(sessionId, message);
-        case "Action":
-          return this._handleAction(sessionId, message);
-        case "Authenticate":
-          return this._handleAuthenticate(sessionId, message);
-        case "Event":
-          // Events are client telemetry — acknowledge silently.
-          return [];
-      }
+      return Fx.run(
+        Fx.match(message, message.type, {
+          Connect: (current) =>
+            Fx.from({
+              ok: () => this._handleConnect(sessionId, current),
+              err: (err) => err as Error,
+            }),
+          ModifyQuerySet: (current) =>
+            Fx.from({
+              ok: () => this._handleModifyQuerySet(sessionId, current),
+              err: (err) => err as Error,
+            }),
+          Mutation: (current) =>
+            Fx.from({
+              ok: () => this._handleMutation(sessionId, current),
+              err: (err) => err as Error,
+            }),
+          Action: (current) =>
+            Fx.from({
+              ok: () => this._handleAction(sessionId, current),
+              err: (err) => err as Error,
+            }),
+          Authenticate: (current) =>
+            Fx.from({
+              ok: () => this._handleAuthenticate(sessionId, current),
+              err: (err) => err as Error,
+            }),
+          Event: () => Fx.succeed([]),
+        }),
+      );
     });
   }
 
@@ -539,29 +588,30 @@ export class SyncProtocolHandler {
     }
 
     const startVersion = { ...session.version };
-    const modifications: StateModification[] = [];
-
-    for (const mod of message.modifications) {
-      if (mod.type === "Add") {
-        // Track this query so we can re-evaluate it after mutations.
-        session.activeQueries.set(mod.queryId, {
-          queryId: mod.queryId,
-          udfPath: mod.udfPath,
-          args: mod.args ?? [],
-        });
-
-        const modification = await Fx.run(
-          this._evaluateQuery({
-            queryId: mod.queryId,
-            udfPath: mod.udfPath,
-            args: mod.args ?? [],
-          }),
-        );
-        modifications.push(modification);
-      } else if (mod.type === "Remove") {
-        session.activeQueries.delete(mod.queryId);
-      }
-    }
+    const modifications = await Fx.run(
+      Fx.each(message.modifications, (modification) =>
+        Fx.match(modification, modification.type, {
+          Add: (current) =>
+            Fx.from({
+              ok: async () => {
+                const query = {
+                  queryId: current.queryId,
+                  udfPath: current.udfPath,
+                  args: current.args ?? [],
+                };
+                session.activeQueries.set(current.queryId, query);
+                return await Fx.run(this._evaluateQuery(query));
+              },
+              err: (err) => err as Error,
+            }),
+          Remove: (current) =>
+            Fx.sync(() => {
+              session.activeQueries.delete(current.queryId);
+              return null;
+            }),
+        }),
+      ).pipe(Fx.map((values) => values.filter((value) => value !== null))),
+    );
 
     session.version = {
       ...session.version,
@@ -569,14 +619,7 @@ export class SyncProtocolHandler {
       ts: this._nextTs(),
     };
 
-    return [
-      {
-        type: "Transition",
-        startVersion: encodeStateVersion(startVersion),
-        endVersion: encodeStateVersion(session.version),
-        modifications,
-      },
-    ];
+    return [buildTransition(startVersion, session.version, modifications)];
   }
 
   /** Mutation — execute, re-evaluate active queries, return both responses. */
@@ -612,32 +655,35 @@ export class SyncProtocolHandler {
       ),
     );
 
-    const responses: ServerMessage[] = [mutationResponse];
+    const transition =
+      session.activeQueries.size === 0
+        ? null
+        : await Fx.run(
+            Fx.from({
+              ok: async () => {
+                const startVersion = { ...session.version };
+                const modifications = await Fx.run(
+                  Fx.each([...session.activeQueries.values()], (q) =>
+                    this._evaluateQuery(q),
+                  ),
+                );
 
-    // Re-evaluate all active queries and send a Transition with updated results.
-    if (session.activeQueries.size > 0) {
-      const startVersion = { ...session.version };
+                session.version = {
+                  ...session.version,
+                  ts: this._nextTs(),
+                };
 
-      const modifications = await Fx.run(
-        Fx.each([...session.activeQueries.values()], (q) =>
-          this._evaluateQuery(q),
-        ),
-      );
+                return buildTransition(
+                  startVersion,
+                  session.version,
+                  modifications,
+                );
+              },
+              err: (err) => err as Error,
+            }),
+          );
 
-      session.version = {
-        ...session.version,
-        ts: this._nextTs(),
-      };
-
-      responses.push({
-        type: "Transition",
-        startVersion: encodeStateVersion(startVersion),
-        endVersion: encodeStateVersion(session.version),
-        modifications,
-      });
-    }
-
-    return responses;
+    return transition ? [mutationResponse, transition] : [mutationResponse];
   }
 
   /** Action — execute and return success/error. */
@@ -687,60 +733,50 @@ export class SyncProtocolHandler {
       ];
     }
 
-    // "None" tokenType means clearing auth — always succeeds.
-    if (message.tokenType === "None") {
-      session.identity = null;
-      const startVersion = { ...session.version };
-      session.version = {
-        ...session.version,
-        identity: session.version.identity + 1,
-      };
-      return [
-        {
-          type: "Transition",
-          startVersion: encodeStateVersion(startVersion),
-          endVersion: encodeStateVersion(session.version),
-          modifications: [],
-        },
-      ];
-    }
-
     const authResult = await Fx.run(
-      Fx.from({
-        ok: () => this._auth.verifyToken(message.value ?? ""),
-        err: errorMessage,
-      }).pipe(
-        Fx.fold({
-          ok: (identity) => ({ ok: true as const, identity }),
-          err: (error) => ({ ok: false as const, error }),
-        }),
-      ),
+      Fx.match(message, message.tokenType, {
+        None: () => Fx.succeed(authSuccessResult(null)),
+        User: () =>
+          Fx.from({
+            ok: () => this._auth.verifyToken(message.value ?? ""),
+            err: errorMessage,
+          }).pipe(
+            Fx.fold({
+              ok: authSuccessResult,
+              err: authFailureResult,
+            }),
+          ),
+        Admin: () =>
+          Fx.from({
+            ok: () => this._auth.verifyToken(message.value ?? ""),
+            err: errorMessage,
+          }).pipe(
+            Fx.fold({
+              ok: authSuccessResult,
+              err: authFailureResult,
+            }),
+          ),
+      }),
     );
 
-    if (authResult.ok) {
-      session.identity = authResult.identity;
-      const startVersion = { ...session.version };
-      session.version = {
-        ...session.version,
-        identity: session.version.identity + 1,
-      };
-      return [
-        {
-          type: "Transition",
-          startVersion: encodeStateVersion(startVersion),
-          endVersion: encodeStateVersion(session.version),
-          modifications: [],
-        },
-      ];
-    } else {
-      return [
+    return matchTag(authResult, "_tag", {
+      Success: (current) => {
+        session.identity = current.identity;
+        const startVersion = { ...session.version };
+        session.version = {
+          ...session.version,
+          identity: session.version.identity + 1,
+        };
+        return [buildTransition(startVersion, session.version, [])];
+      },
+      Failure: (current) => [
         {
           type: "AuthError",
-          error: authResult.error,
+          error: current.error,
           baseVersion: message.baseVersion,
           authUpdateAttempted: true,
         },
-      ];
-    }
+      ],
+    });
   }
 }

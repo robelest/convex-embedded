@@ -29,6 +29,12 @@ import type {
 } from "@/core/types";
 import type { CommitBatch, StorageAdapter } from "@/storage/adapter";
 
+const IDENTITY_SCOPE_FIELD = "__identityKey";
+
+type IdentityScopedDocument = StoredDocument & {
+  [IDENTITY_SCOPE_FIELD]?: string | null;
+};
+
 export interface DatabaseCommitResult {
   timestamp: Timestamp;
   tablesWritten: Set<string>;
@@ -97,6 +103,9 @@ export class Database {
 
   /** Parsed schema definition (may be null if running schema-less). */
   private _schema: ParsedSchema | null;
+
+  /** Active identity namespace for non-system tables. */
+  private _activeIdentityKey: string | null = null;
 
   // ---- MVCC state ---------------------------------------------------------
 
@@ -170,6 +179,14 @@ export class Database {
    */
   setStorage(storage: StorageAdapter): void {
     this._storage = storage;
+  }
+
+  setActiveIdentityKey(identityKey: string | null): void {
+    this._activeIdentityKey = identityKey;
+  }
+
+  getActiveIdentityKey(): string | null {
+    return this._activeIdentityKey;
   }
 
   // -------------------------------------------------------------------------
@@ -362,23 +379,12 @@ export class Database {
       return null;
     }
 
-    let hasPendingWrite = false;
-    let document: StoredDocument | null = null;
-
-    for (let i = this._writes.length - 1; i >= 0; i--) {
-      const write = this._writes[i][id];
-      if (write !== undefined) {
-        hasPendingWrite = true;
-        document = write;
-        break;
-      }
+    const document = this._getRaw(id);
+    if (document === null || !this._isVisibleInScope(tableName, document)) {
+      return null;
     }
 
-    if (!hasPendingWrite) {
-      document = this._documents[id] ?? null;
-    }
-
-    return document;
+    return this._stripIdentityScope(document);
   }
 
   /** Insert a new document. Returns the generated UUID `_id`. */
@@ -390,7 +396,10 @@ export class Database {
     const _creationTime =
       now <= this._lastCreationTime ? this._lastCreationTime + 0.001 : now;
     this._lastCreationTime = _creationTime;
-    this._addWrite(_id, { ...value, _id, _creationTime });
+    this._addWrite(
+      _id,
+      this._withIdentityScope(table, { ...value, _id, _creationTime }),
+    );
     return _id;
   }
 
@@ -411,10 +420,14 @@ export class Database {
       );
     }
 
-    const document = this.get(tableName, id);
-    if (document === null) {
+    const rawDocument = this._getRaw(id);
+    if (
+      rawDocument === null ||
+      !this._isVisibleInScope(tableName, rawDocument)
+    ) {
       throw new Error(`Patch on non-existent document with ID "${idText}"`);
     }
+    const document = this._stripIdentityScope(rawDocument);
 
     const { _id, _creationTime, ...fields } = document;
 
@@ -449,7 +462,10 @@ export class Database {
       this._idTableMap.get(_id as string)!,
       merged as GenericDocument,
     );
-    this._addWrite(id, { _id, _creationTime, ...merged });
+    this._addWrite(
+      id,
+      this._withIdentityScope(tableName, { _id, _creationTime, ...merged }),
+    );
   }
 
   /** Replace all user fields of an existing document. */
@@ -469,10 +485,14 @@ export class Database {
       );
     }
 
-    const document = this.get(tableName, id);
-    if (document === null) {
+    const rawDocument = this._getRaw(id);
+    if (
+      rawDocument === null ||
+      !this._isVisibleInScope(tableName, rawDocument)
+    ) {
       throw new Error(`Replace on non-existent document with ID "${idText}"`);
     }
+    const document = this._stripIdentityScope(rawDocument);
 
     if (value._id !== undefined && value._id !== document._id) {
       throw new Error(
@@ -502,11 +522,14 @@ export class Database {
       this._idTableMap.get(document._id as string)!,
       convexValue as GenericDocument,
     );
-    this._addWrite(id, {
-      ...convexValue,
-      _id: document._id,
-      _creationTime: document._creationTime,
-    });
+    this._addWrite(
+      id,
+      this._withIdentityScope(tableName, {
+        ...convexValue,
+        _id: document._id,
+        _creationTime: document._creationTime,
+      }),
+    );
   }
 
   /** Mark a document as deleted. */
@@ -515,8 +538,11 @@ export class Database {
       throw new Error("Delete on non-existent doc");
     }
 
-    const document = this.get(tableName, id);
-    if (document === null) {
+    const rawDocument = this._getRaw(id);
+    if (
+      rawDocument === null ||
+      !this._isVisibleInScope(tableName, rawDocument)
+    ) {
       throw new Error("Delete on non-existent doc");
     }
     this._addWrite(id, null);
@@ -561,7 +587,14 @@ export class Database {
         );
       }
       // Replace in-place — keep the incoming _id and _creationTime.
-      this._addWrite(docId, { _id: docId, _creationTime, ...userFields });
+      this._addWrite(
+        docId,
+        this._withIdentityScope(table, {
+          _id: docId,
+          _creationTime,
+          ...userFields,
+        }),
+      );
     } else {
       // New document — register in the ID table map.
       this._idTableMap.set(_id, table);
@@ -571,7 +604,14 @@ export class Database {
         this._lastCreationTime = _creationTime;
       }
 
-      this._addWrite(docId, { _id: docId, _creationTime, ...userFields });
+      this._addWrite(
+        docId,
+        this._withIdentityScope(table, {
+          _id: docId,
+          _creationTime,
+          ...userFields,
+        }),
+      );
     }
   }
 
@@ -599,8 +639,8 @@ export class Database {
       );
     }
 
-    const document = this.get(table, id);
-    if (document === null) {
+    const rawDocument = this._getRaw(id);
+    if (rawDocument === null || !this._isVisibleInScope(table, rawDocument)) {
       return false;
     }
 
@@ -618,6 +658,25 @@ export class Database {
     const results: StoredDocument[] = [];
     this._iterateDocs(tableName, (doc) => results.push(doc));
     return results;
+  }
+
+  migrateAnonymousDataToIdentity(identityKey: string): Set<string> {
+    const tablesWritten = new Set<string>();
+    for (const [id, doc] of Object.entries(this._documents)) {
+      const tableName = this._idTableMap.get(id);
+      if (!tableName || !this._isIdentityScopedTable(tableName)) {
+        continue;
+      }
+      if ((doc as IdentityScopedDocument)[IDENTITY_SCOPE_FIELD] != null) {
+        continue;
+      }
+      this._addWrite(id as DocumentId, {
+        ...(doc as IdentityScopedDocument),
+        [IDENTITY_SCOPE_FIELD]: identityKey,
+      });
+      tablesWritten.add(tableName);
+    }
+    return tablesWritten;
   }
 
   // -------------------------------------------------------------------------
@@ -885,5 +944,61 @@ export class Database {
         callback(document);
       }
     }
+  }
+
+  private _getRaw(id: DocumentId): IdentityScopedDocument | null {
+    let hasPendingWrite = false;
+    let document: IdentityScopedDocument | null = null;
+
+    for (let i = this._writes.length - 1; i >= 0; i--) {
+      const write = this._writes[i][id];
+      if (write !== undefined) {
+        hasPendingWrite = true;
+        document = write as IdentityScopedDocument | null;
+        break;
+      }
+    }
+
+    if (!hasPendingWrite) {
+      document =
+        (this._documents[id] as IdentityScopedDocument | undefined) ?? null;
+    }
+
+    return document;
+  }
+
+  private _isIdentityScopedTable(tableName: TableName | undefined): boolean {
+    return typeof tableName === "string" && !tableName.startsWith("_");
+  }
+
+  private _isVisibleInScope(
+    tableName: TableName | undefined,
+    document: IdentityScopedDocument,
+  ): boolean {
+    if (!this._isIdentityScopedTable(tableName)) {
+      return true;
+    }
+    return (document[IDENTITY_SCOPE_FIELD] ?? null) === this._activeIdentityKey;
+  }
+
+  private _withIdentityScope<T extends Record<string, unknown>>(
+    tableName: TableName | undefined,
+    document: T,
+  ): T & { [IDENTITY_SCOPE_FIELD]?: string | null } {
+    if (!this._isIdentityScopedTable(tableName)) {
+      return document;
+    }
+
+    return {
+      ...document,
+      [IDENTITY_SCOPE_FIELD]: this._activeIdentityKey,
+    };
+  }
+
+  private _stripIdentityScope(
+    document: IdentityScopedDocument,
+  ): StoredDocument {
+    const { [IDENTITY_SCOPE_FIELD]: _identityKey, ...rest } = document;
+    return rest as StoredDocument;
   }
 }

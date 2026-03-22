@@ -4,6 +4,7 @@ import {
   remoteOnly,
   setup,
   _resetRegistry,
+  RESOLVE_QUERY_META,
   SYNC_META,
 } from "@resolve/server/setup";
 import { v } from "convex/values";
@@ -120,6 +121,25 @@ describe("embeddedTable()", () => {
     expect(() => remoteOnly("bad-input" as any)).toThrow(
       /expects a Convex function export/,
     );
+  });
+
+  it("query() tags scoped resolve queries with RESOLVE_QUERY_META", () => {
+    const tasks = embeddedTable(uniqueTable(), {
+      title: registerField(v.string()),
+    });
+
+    const listMine = tasks.query({
+      args: { owner: v.string() },
+      resolve: { args: () => ({ owner: "alice" }) },
+      handler: async () => [],
+    });
+
+    expect(listMine[RESOLVE_QUERY_META]).toEqual({
+      __brand: "convex-embedded:resolveQueryMeta",
+      table: tasks.table,
+      getArgs: expect.any(Function),
+    });
+    expect(listMine[RESOLVE_QUERY_META].getArgs()).toEqual({ owner: "alice" });
   });
 });
 

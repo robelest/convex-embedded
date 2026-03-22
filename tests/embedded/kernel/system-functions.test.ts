@@ -418,6 +418,111 @@ describe("Pending Queue", () => {
     expect(allB[0]?.identityKey).toBe("user:b");
     expect(allB[0]?.ref).toBe("mutations:other");
   });
+
+  it("pendingListIdentityKeys returns distinct pending identity keys", () => {
+    db.startTransaction();
+    SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, {
+      ...sampleEntry,
+      identityKey: "user:b",
+    });
+    SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, {
+      ...sampleEntry,
+      ref: "mutations:other",
+      identityKey: "user:a",
+    });
+    SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, {
+      ...sampleEntry,
+      ref: "mutations:third",
+      identityKey: "user:b",
+    });
+    db.commit();
+
+    db.startTransaction();
+    const keys = SYSTEM_FUNCTIONS[SystemPaths.pendingListIdentityKeys].handler(
+      db,
+      {},
+    );
+    db.rollbackWrites();
+
+    expect(keys).toEqual(["user:a", "user:b"]);
+  });
+
+  it("identityMoveAnonymousToIdentity migrates anonymous pending and id map state", () => {
+    db.startTransaction();
+    SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, {
+      ...sampleEntry,
+      identityKey: null,
+    });
+    SYSTEM_FUNCTIONS[SystemPaths.idMapSet].handler(db, {
+      localId: "local-anon",
+      remoteId: "remote-anon",
+      table: "tasks",
+      identityKey: null,
+    });
+    db.commit();
+
+    db.startTransaction();
+    SYSTEM_FUNCTIONS[SystemPaths.identityMoveAnonymousToIdentity].handler(db, {
+      identityKey: "user:a",
+    });
+    db.commit();
+
+    db.startTransaction();
+    const pending = SYSTEM_FUNCTIONS[SystemPaths.pendingGetAll].handler(db, {
+      identityKey: "user:a",
+    }) as Array<Record<string, unknown>>;
+    const idMap = SYSTEM_FUNCTIONS[SystemPaths.idMapGetAll].handler(db, {
+      identityKey: "user:a",
+    }) as Array<Record<string, unknown>>;
+    db.rollbackWrites();
+
+    expect(pending).toHaveLength(1);
+    expect(pending[0]?.identityKey).toBe("user:a");
+    expect(idMap).toHaveLength(1);
+    expect(idMap[0]?.identityKey).toBe("user:a");
+  });
+});
+
+describe("Auth State", () => {
+  it("persists and returns the active identity key", () => {
+    db.startTransaction();
+    SYSTEM_FUNCTIONS[SystemPaths.authStateSetActive].handler(db, {
+      activeIdentityKey: "user:a",
+    });
+    db.commit();
+
+    db.startTransaction();
+    const key = SYSTEM_FUNCTIONS[SystemPaths.authStateGetActive].handler(
+      db,
+      {},
+    );
+    db.rollbackWrites();
+
+    expect(key).toBe("user:a");
+  });
+
+  it("updates the active identity key in place", () => {
+    db.startTransaction();
+    SYSTEM_FUNCTIONS[SystemPaths.authStateSetActive].handler(db, {
+      activeIdentityKey: "user:a",
+    });
+    db.commit();
+
+    db.startTransaction();
+    SYSTEM_FUNCTIONS[SystemPaths.authStateSetActive].handler(db, {
+      activeIdentityKey: "user:b",
+    });
+    db.commit();
+
+    db.startTransaction();
+    const key = SYSTEM_FUNCTIONS[SystemPaths.authStateGetActive].handler(
+      db,
+      {},
+    );
+    db.rollbackWrites();
+
+    expect(key).toBe("user:b");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -425,8 +530,8 @@ describe("Pending Queue", () => {
 // ---------------------------------------------------------------------------
 
 describe("SYSTEM_FUNCTIONS registry", () => {
-  it("contains exactly 8 entries", () => {
-    expect(Object.keys(SYSTEM_FUNCTIONS)).toHaveLength(8);
+  it("contains exactly 12 entries", () => {
+    expect(Object.keys(SYSTEM_FUNCTIONS)).toHaveLength(12);
   });
 
   it("has all expected keys", () => {
@@ -439,6 +544,10 @@ describe("SYSTEM_FUNCTIONS registry", () => {
       "_system:pendingGetAll",
       "_system:pendingRemove",
       "_system:pendingClear",
+      "_system:authStateSetActive",
+      "_system:authStateGetActive",
+      "_system:pendingListIdentityKeys",
+      "_system:identityMoveAnonymousToIdentity",
     ];
 
     for (const key of expectedKeys) {

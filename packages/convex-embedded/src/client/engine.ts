@@ -105,7 +105,7 @@ function registerRemoteSubscription(input: {
 }) {
   const unsub = (input.remoteClient as any).onUpdate(
     input.tableConfig.query,
-    {},
+    input.tableConfig.resolveArgs?.() ?? {},
     createRemoteUpdateHandler({
       ingestDocuments: input.ingestDocuments,
       schema: input.tableConfig.schema,
@@ -144,6 +144,9 @@ export interface TableConfig {
    * reactively and pipes every update into the embedded runtime.
    */
   query: unknown;
+
+  /** Optional args factory for the remote resolve-scoped subscription query. */
+  resolveArgs?: () => Record<string, unknown>;
 
   /**
    * The schema {@link Definition} for this table (from `schema.define()`).
@@ -330,6 +333,9 @@ export interface EngineInstance {
 
   /** Manually trigger a resolve cycle (e.g., after coming back online). */
   resolveNow(): Promise<void>;
+
+  /** Re-hydrate identity-scoped state and resume sync for the active identity. */
+  reloadIdentity(): Promise<void>;
 
   /** Number of mutations waiting to be pushed to remote. */
   pendingCount(): number;
@@ -1069,6 +1075,20 @@ function createEngine(config: EngineConfig): EngineInstance {
     emit({ status: "offline" });
   }
 
+  function hydrateIdentityState(): Promise<void> {
+    return Fx.run(
+      Fx.zip(
+        Fx.from({ ok: () => idMap.hydrate(), err: (e) => e as Error }),
+        Fx.from({ ok: () => pendingQueue.hydrate(), err: (e) => e as Error }),
+      ).pipe(
+        Fx.inspect((err) =>
+          Fx.sync(() => log.warn("sync: hydration failed", err)),
+        ),
+        Fx.recover(() => Fx.unit),
+      ),
+    );
+  }
+
   // -------------------------------------------------------------------------
   // Public API
   // -------------------------------------------------------------------------
@@ -1083,17 +1103,7 @@ function createEngine(config: EngineConfig): EngineInstance {
       // Hydrate ID map and pending queue from embedded DB.
       // This is fire-and-forget — the queue processor will wait
       // for hydration to complete before accessing the data.
-      const hydrationPromise = Fx.run(
-        Fx.zip(
-          Fx.from({ ok: () => idMap.hydrate(), err: (e) => e as Error }),
-          Fx.from({ ok: () => pendingQueue.hydrate(), err: (e) => e as Error }),
-        ).pipe(
-          Fx.inspect((err) =>
-            Fx.sync(() => log.warn("sync: hydration failed", err)),
-          ),
-          Fx.recover(() => Fx.unit),
-        ),
-      );
+      const hydrationPromise = hydrateIdentityState();
 
       const runOnlineAfterHydration = createHydrationAwareOnlineHandler({
         handleOnline,
@@ -1209,6 +1219,22 @@ function createEngine(config: EngineConfig): EngineInstance {
         stopRemoteSubscriptions();
       }
       return runSyncCycle({ forceResolve: true });
+    },
+
+    async reloadIdentity(): Promise<void> {
+      await hydrateIdentityState();
+
+      if (!started) {
+        return;
+      }
+
+      if (isOnline) {
+        stopRemoteSubscriptions();
+        await runSyncCycle({ forceResolve: true });
+        return;
+      }
+
+      emit({ status: "offline" });
     },
 
     pendingCount(): number {

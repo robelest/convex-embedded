@@ -8,10 +8,18 @@ import {
   type EmbeddedRuntimeOptions,
 } from "@robelest/convex-embedded";
 import {
+  getAuthState,
+  getAuthIdentity,
   compileWasmModule,
   createConvexClient,
   getResolveState,
+  logout,
+  setAuthIdentity,
+  subscribeAuthState,
   subscribeResolveState,
+  switchIdentity,
+  type AuthOptions,
+  type AuthState,
   type ClientOptions,
   type ResolveOptions,
   type ResolveState,
@@ -57,8 +65,16 @@ type _RootSurface = {
 type _BrowserSurface = {
   compileWasmModule: typeof compileWasmModule;
   createConvexClient: typeof createConvexClient;
+  getAuthIdentity: typeof getAuthIdentity;
+  getAuthState: typeof getAuthState;
   getResolveState: typeof getResolveState;
+  logout: typeof logout;
+  setAuthIdentity: typeof setAuthIdentity;
+  subscribeAuthState: typeof subscribeAuthState;
   subscribeResolveState: typeof subscribeResolveState;
+  switchIdentity: typeof switchIdentity;
+  authOptions: AuthOptions | null;
+  authState: AuthState | null;
   clientOptions: ClientOptions | null;
   resolveOptions: ResolveOptions | null;
   resolveState: ResolveState | null;
@@ -106,8 +122,16 @@ void (<_RootSurface>{
 void (<_BrowserSurface>{
   compileWasmModule,
   createConvexClient,
+  getAuthIdentity,
+  getAuthState,
   getResolveState,
+  logout,
+  setAuthIdentity,
+  subscribeAuthState,
   subscribeResolveState,
+  switchIdentity,
+  authOptions: null,
+  authState: null,
   clientOptions: null,
   resolveOptions: null,
   resolveState: null,

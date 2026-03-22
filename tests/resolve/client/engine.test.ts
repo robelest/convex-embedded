@@ -249,6 +249,34 @@ describe("engine.create()", () => {
     m.stop();
   });
 
+  it("uses resolveArgs for remote subscriptions when provided", async () => {
+    const { embedded } = createMockEmbedded();
+    const remoteClient = createMockRemoteClient();
+
+    const m = engine.create({
+      embedded,
+      remoteClient,
+      tables: {
+        tasks: {
+          ...tableConfig("resolve_ref"),
+          resolveArgs: () => ({ owner: "alice" }),
+        },
+      },
+    });
+
+    m.start();
+    await settle();
+
+    expect(remoteClient.onUpdate).toHaveBeenCalledWith(
+      "resolve_ref_list",
+      { owner: "alice" },
+      expect.any(Function),
+      expect.any(Function),
+    );
+
+    m.stop();
+  });
+
   it("stop() cleans up and sets status to idle", async () => {
     const { embedded } = createMockEmbedded();
     const remoteClient = createMockRemoteClient();
@@ -585,6 +613,88 @@ describe("engine.create()", () => {
 
     expect(remoteClient.query).toHaveBeenCalledTimes(1);
     expect(m.getStatus()).toEqual({ status: "resolved" });
+  });
+
+  it("reloadIdentity() rehydrates scoped state before resolving", async () => {
+    let activeIdentityKey: string | null = "user:a";
+    const localClient = {
+      query: vi
+        .fn()
+        .mockImplementation(
+          (path: string, args?: { identityKey?: string | null }) => {
+            if (path === "_system:idMapGetAll") {
+              return Promise.resolve(
+                args?.identityKey === "user:b"
+                  ? [
+                      {
+                        localId: "local-b",
+                        remoteId: "remote-b",
+                        table: "tasks",
+                      },
+                    ]
+                  : [
+                      {
+                        localId: "local-a",
+                        remoteId: "remote-a",
+                        table: "tasks",
+                      },
+                    ],
+              );
+            }
+
+            if (path === "_system:pendingGetAll") {
+              return Promise.resolve(
+                args?.identityKey === "user:b"
+                  ? [
+                      {
+                        _id: "pending-b",
+                        ref: "tasks:create",
+                        args: JSON.stringify({ id: "local-b" }),
+                        localResult: JSON.stringify({ _id: "local-b" }),
+                        table: "tasks",
+                      },
+                    ]
+                  : [],
+              );
+            }
+
+            return Promise.resolve(null);
+          },
+        ),
+      mutation: vi.fn().mockResolvedValue("pending-doc-1"),
+    };
+
+    const embedded = {
+      client: localClient,
+      ingestDocuments: vi.fn().mockResolvedValue(undefined),
+      getDocumentsForTable: vi.fn().mockResolvedValue([]),
+    };
+    const remoteClient = createMockRemoteClient();
+
+    const m = engine.create({
+      embedded,
+      remoteClient,
+      tables: { tasks: tableConfig("resolve_ref") },
+      getIdentityKey: () => activeIdentityKey,
+    });
+
+    m.start();
+    await settle();
+
+    activeIdentityKey = "user:b";
+    await m.reloadIdentity();
+
+    expect(localClient.query).toHaveBeenCalledWith("_system:idMapGetAll", {
+      identityKey: "user:b",
+    });
+    expect(localClient.query).toHaveBeenCalledWith("_system:pendingGetAll", {
+      identityKey: "user:b",
+    });
+    expect(remoteClient.mutation).toHaveBeenCalledWith(expect.anything(), {
+      id: "remote-b",
+    });
+    expect(m.pendingCount()).toBe(0);
+    m.stop();
   });
 
   // -------------------------------------------------------------------------

@@ -1,3 +1,4 @@
+import { createTestIdentity } from "@embedded/auth/resolver";
 import { EmbeddedRuntime } from "@embedded/runtime/embedded";
 import {
   describe,
@@ -371,6 +372,53 @@ describe("ingestDocuments", () => {
     expect(invalidateSpy).not.toHaveBeenCalled();
 
     invalidateSpy.mockRestore();
+  });
+
+  it("scopes mirrored table contents by identity and anonymous namespace", async () => {
+    await runtime.hydrate();
+
+    await runtime.ingestDocuments("tasks", [
+      { _id: "anon-1", _creationTime: 1, title: "Anonymous" },
+    ]);
+
+    expect(await runtime.getDocumentsForTable("tasks")).toEqual([
+      { _id: "anon-1", _creationTime: 1, title: "Anonymous" },
+    ]);
+
+    runtime.setIdentity(createTestIdentity({ subject: "alice" }));
+    expect(await runtime.getDocumentsForTable("tasks")).toEqual([]);
+
+    await runtime.ingestDocuments("tasks", [
+      { _id: "alice-1", _creationTime: 2, title: "Alice" },
+    ]);
+
+    expect(await runtime.getDocumentsForTable("tasks")).toEqual([
+      { _id: "alice-1", _creationTime: 2, title: "Alice" },
+    ]);
+
+    runtime.setIdentity(null);
+    expect(await runtime.getDocumentsForTable("tasks")).toEqual([
+      { _id: "anon-1", _creationTime: 1, title: "Anonymous" },
+    ]);
+  });
+
+  it("migrates anonymous mirrored data into an authenticated namespace", async () => {
+    await runtime.hydrate();
+
+    await runtime.ingestDocuments("tasks", [
+      { _id: "anon-1", _creationTime: 1, title: "Anonymous" },
+    ]);
+
+    const identity = createTestIdentity({ subject: "alice" });
+    runtime.setIdentity(identity);
+    await runtime.migrateAnonymousDataToIdentity(identity.tokenIdentifier);
+
+    expect(await runtime.getDocumentsForTable("tasks")).toEqual([
+      { _id: "anon-1", _creationTime: 1, title: "Anonymous" },
+    ]);
+
+    runtime.setIdentity(null);
+    expect(await runtime.getDocumentsForTable("tasks")).toEqual([]);
   });
 });
 

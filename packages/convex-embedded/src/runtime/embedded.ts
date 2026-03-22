@@ -10,7 +10,7 @@
 import { Fx } from "@robelest/fx";
 import type { JSONValue } from "convex/values";
 
-import { AuthResolver } from "@/auth/resolver";
+import { AuthResolver, getIdentityKey } from "@/auth/resolver";
 import type { UserIdentity } from "@/auth/resolver";
 import { Database } from "@/core/database";
 import type { DatabaseCommitResult } from "@/core/database";
@@ -306,10 +306,37 @@ export class EmbeddedRuntime {
    */
   setIdentity(identity: UserIdentity | null): void {
     this.auth.setIdentity(identity);
+    this.db.setActiveIdentityKey(getIdentityKey(identity));
+  }
+
+  setActiveIdentityKey(identityKey: string | null): void {
+    this.db.setActiveIdentityKey(identityKey);
   }
 
   getIdentity(): UserIdentity | null {
     return this.auth.peekUserIdentity();
+  }
+
+  async migrateAnonymousDataToIdentity(identityKey: string): Promise<void> {
+    await this._hydrated;
+
+    this.db.startTransaction();
+    let tablesWritten: Set<string>;
+    try {
+      tablesWritten = this.db.migrateAnonymousDataToIdentity(identityKey);
+      const commit = this.db.commit();
+      this.onMutationCommit(commit);
+    } catch (error) {
+      this.db.rollbackWrites();
+      throw error;
+    }
+
+    if (tablesWritten.size === 0) {
+      return;
+    }
+
+    const updates = await this.syncProtocol.reEvaluateQueries();
+    await this._pushProtocolUpdates(updates);
   }
 
   teardownSession(sessionId: string): void {

@@ -155,6 +155,9 @@ export function _resetRegistry(): void {
  * @internal
  */
 export const SYNC_META = Symbol.for("convex-resolve:syncMeta");
+export const RESOLVE_QUERY_META = Symbol.for(
+  "convex-embedded:resolveQueryMeta",
+);
 
 export { REMOTE_ONLY } from "@/shared/remote-only";
 
@@ -181,6 +184,12 @@ export interface SyncMeta {
   readonly schema: Definition;
   readonly resolveExport: string;
   readonly listExport: string | null;
+}
+
+export interface ResolveQueryMeta {
+  readonly __brand: "convex-embedded:resolveQueryMeta";
+  readonly table: string;
+  readonly getArgs?: () => Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------
@@ -703,17 +712,20 @@ export function embeddedTable(
     ) =>
       | Awaited<ReturnValueForOptionalValidator<ReturnsValidator>>
       | Promise<Awaited<ReturnValueForOptionalValidator<ReturnsValidator>>>;
+    resolve?: {
+      args?: () => Record<string, unknown>;
+    };
   }): RegisteredQuery<
     "public",
     ArgsArrayToObject<OneOrZeroArgs>,
     ReturnValueForOptionalValidator<ReturnsValidator>
   > {
-    const { args, returns, handler, remote } = def;
+    const { args, returns, handler, remote, resolve } = def;
     const tupleArgs = (
       fnArgs: ArgsArrayToObject<OneOrZeroArgs>,
     ): OneOrZeroArgs => [fnArgs] as unknown as OneOrZeroArgs;
 
-    return queryGeneric({
+    const query = queryGeneric({
       args,
       ...(returns !== undefined ? { returns } : {}),
       handler: async (ctx: GenericQueryCtx<any>, fnArgs: any) => {
@@ -733,6 +745,20 @@ export function embeddedTable(
       ArgsArrayToObject<OneOrZeroArgs>,
       ReturnValueForOptionalValidator<ReturnsValidator>
     >;
+
+    if (resolve) {
+      Object.defineProperty(query, RESOLVE_QUERY_META, {
+        value: {
+          __brand: "convex-embedded:resolveQueryMeta" as const,
+          table: tableName,
+          getArgs: resolve.args,
+        } satisfies ResolveQueryMeta,
+        enumerable: false,
+        configurable: false,
+      });
+    }
+
+    return query;
   };
 
   // Internal binding hook — called by setup().

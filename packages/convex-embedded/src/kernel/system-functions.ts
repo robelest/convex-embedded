@@ -44,6 +44,24 @@ function matchesIdentityKey(
   return (value.identityKey ?? null) === identityKey;
 }
 
+function readActiveAuthState(
+  db: Database,
+): (StoredDocument & { activeIdentityKey?: string | null }) | null {
+  const qid = db.startQuery({
+    source: {
+      type: "FullTableScan",
+      tableName: "_resolve_auth_state",
+      order: null,
+    },
+    operators: [],
+  });
+  const next = db.queryNext(qid);
+  db.queryCleanup(qid);
+  return next.done || !next.value
+    ? null
+    : (next.value as StoredDocument & { activeIdentityKey?: string | null });
+}
+
 // ---------------------------------------------------------------------------
 // ID Map functions (_resolve_id_map table)
 // ---------------------------------------------------------------------------
@@ -382,6 +400,98 @@ const pendingClear: SystemFunctionDef = {
 };
 
 // ---------------------------------------------------------------------------
+// Auth state functions (_resolve_auth_state table)
+// ---------------------------------------------------------------------------
+
+const authStateSetActive: SystemFunctionDef = {
+  type: "mutation",
+  handler: (db, args) => {
+    const { activeIdentityKey } = args as {
+      activeIdentityKey?: string | null;
+    };
+
+    const existing = readActiveAuthState(db);
+    if (existing) {
+      db.patch("_resolve_auth_state", existing._id as DocumentId, {
+        activeIdentityKey: activeIdentityKey ?? null,
+        updatedAt: Date.now(),
+      });
+    } else {
+      db.insert("_resolve_auth_state", {
+        activeIdentityKey: activeIdentityKey ?? null,
+        updatedAt: Date.now(),
+      });
+    }
+
+    return null;
+  },
+};
+
+const authStateGetActive: SystemFunctionDef = {
+  type: "query",
+  handler: (db) => {
+    const existing = readActiveAuthState(db);
+    return existing?.activeIdentityKey ?? null;
+  },
+};
+
+const pendingListIdentityKeys: SystemFunctionDef = {
+  type: "query",
+  handler: (db) => {
+    const keys = new Set<string>();
+    const qid = db.startQuery({
+      source: {
+        type: "FullTableScan",
+        tableName: "_resolve_pending",
+        order: null,
+      },
+      operators: [],
+    });
+
+    let next = db.queryNext(qid);
+    while (!next.done) {
+      const identityKey = (next.value as { identityKey?: string | null } | null)
+        ?.identityKey;
+      if (identityKey) {
+        keys.add(identityKey);
+      }
+      next = db.queryNext(qid);
+    }
+    db.queryCleanup(qid);
+    return Array.from(keys.values()).sort();
+  },
+};
+
+const identityMoveAnonymousToIdentity: SystemFunctionDef = {
+  type: "mutation",
+  handler: (db, args) => {
+    const { identityKey } = args as { identityKey: string };
+
+    for (const tableName of ["_resolve_id_map", "_resolve_pending"] as const) {
+      const qid = db.startQuery({
+        source: {
+          type: "FullTableScan",
+          tableName,
+          order: null,
+        },
+        operators: [],
+      });
+
+      let next = db.queryNext(qid);
+      while (!next.done) {
+        if (next.value && ((next.value as any).identityKey ?? null) === null) {
+          db.patch(tableName, next.value._id as DocumentId, { identityKey });
+        }
+        next = db.queryNext(qid);
+      }
+      db.queryCleanup(qid);
+    }
+
+    return null;
+  },
+};
+
+// ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
 
@@ -406,6 +516,10 @@ export const SYSTEM_FUNCTIONS: Record<string, SystemFunctionDef> = {
   "_system:pendingGetAll": pendingGetAll,
   "_system:pendingRemove": pendingRemove,
   "_system:pendingClear": pendingClear,
+  "_system:authStateSetActive": authStateSetActive,
+  "_system:authStateGetActive": authStateGetActive,
+  "_system:pendingListIdentityKeys": pendingListIdentityKeys,
+  "_system:identityMoveAnonymousToIdentity": identityMoveAnonymousToIdentity,
 };
 
 /**
@@ -421,4 +535,8 @@ export const SystemPaths = {
   pendingGetAll: "_system:pendingGetAll",
   pendingRemove: "_system:pendingRemove",
   pendingClear: "_system:pendingClear",
+  authStateSetActive: "_system:authStateSetActive",
+  authStateGetActive: "_system:authStateGetActive",
+  pendingListIdentityKeys: "_system:pendingListIdentityKeys",
+  identityMoveAnonymousToIdentity: "_system:identityMoveAnonymousToIdentity",
 } as const;

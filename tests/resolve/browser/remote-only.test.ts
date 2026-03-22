@@ -176,6 +176,40 @@ function createSyncModules() {
   };
 }
 
+function createScopedSyncModules() {
+  const resolveExport = () => {};
+  Object.defineProperty(resolveExport, Symbol.for("convex-resolve:syncMeta"), {
+    value: {
+      __brand: "convex-resolve:syncMeta",
+      table: "tasks",
+      resolveExport: "resolve",
+      listExport: null,
+      schema: undefined,
+    },
+  });
+
+  const listMine = () => [];
+  Object.defineProperty(
+    listMine,
+    Symbol.for("convex-embedded:resolveQueryMeta"),
+    {
+      value: {
+        __brand: "convex-embedded:resolveQueryMeta",
+        table: "tasks",
+        getArgs: () => ({ owner: "alice" }),
+      },
+    },
+  );
+
+  return {
+    "./convex/_generated/api.ts": async () => ({}),
+    "./convex/tasks.ts": async () => ({
+      resolve: resolveExport,
+      listMine,
+    }),
+  };
+}
+
 function createSyncModulesWithFailure() {
   return {
     ...createSyncModules(),
@@ -360,6 +394,32 @@ describe("remoteOnly routing", () => {
         },
       }),
     );
+  });
+
+  it("uses explicit scoped sync queries when provided", async () => {
+    const client = createConvexClient({
+      modules: createScopedSyncModules(),
+      sync: { url: REMOTE_URL },
+    }) as any;
+    clientsToClose.push(client);
+
+    await settle();
+
+    expect(mockEngineFactory.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tables: {
+          tasks: {
+            query: "tasks:listMine",
+            resolveArgs: expect.any(Function),
+            resolve: "tasks:resolve",
+            schema: undefined,
+          },
+        },
+      }),
+    );
+
+    const call = mockEngineFactory.create.mock.calls.at(-1)?.[0];
+    expect(call.tables.tasks.resolveArgs()).toEqual({ owner: "alice" });
   });
 
   it("forwards setAuth to remote client", async () => {

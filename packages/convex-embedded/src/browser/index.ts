@@ -30,8 +30,12 @@
  * | Symbol | Kind | Description |
  * |--------|------|-------------|
  * | {@link createConvexClient} | Factory | Create an embedded `ConvexClient` |
+ * | {@link getAuthState} | Accessor | Read current embedded auth state |
+ * | {@link subscribeAuthState} | Subscription | Observe embedded auth state changes |
  * | {@link getResolveState} | Accessor | Read current sync state |
  * | {@link subscribeResolveState} | Subscription | Observe sync state changes |
+ * | {@link AuthOptions} | Interface | Embedded auth configuration |
+ * | {@link AuthState} | Type | Auth state discriminated union |
  * | {@link ClientOptions} | Interface | Options for the factory |
  * | {@link ResolveOptions} | Interface | Sync-specific options |
  * | {@link ResolveState} | Type | Sync state discriminated union |
@@ -370,9 +374,19 @@ export type ResolveState =
   | { status: "error"; error?: Error };
 
 interface AuthEntry {
+  runtime: EmbeddedRuntime;
+  getIdentityKey?: (identity: UserIdentity | null) => string | null;
+  getPendingCount: () => number;
+  refreshSync?: () => Promise<void>;
+  activeIdentityKey: string | null;
   state: AuthState;
   listeners: Set<(state: AuthState) => void>;
 }
+
+type AuthIdentitySnapshot = {
+  identity?: UserIdentity;
+  identityKey?: string;
+};
 
 // ---------------------------------------------------------------------------
 // Allow Convex server functions to be imported in the browser.
@@ -507,6 +521,11 @@ export function createConvexClient(options: ClientOptions): ConvexClient {
   });
 
   const authEntry: AuthEntry = {
+    runtime,
+    getIdentityKey: options.auth?.getIdentityKey,
+    getPendingCount: () => 0,
+    refreshSync: () => Promise.resolve(),
+    activeIdentityKey: null,
     state: { status: "idle" },
     listeners: new Set(),
   };
@@ -516,13 +535,26 @@ export function createConvexClient(options: ClientOptions): ConvexClient {
     ? _attachResolve(
         client,
         runtime,
+        authEntry,
         options.sync,
         modules,
-        () =>
-          options.auth?.getIdentityKey?.(runtime.getIdentity()) ??
-          getIdentityKey(runtime.getIdentity()),
+        () => authEntry.activeIdentityKey,
       )
     : null;
+
+  authEntry.getPendingCount = () => resolveAttachment?.getPendingCount?.() ?? 0;
+  authEntry.refreshSync = () =>
+    resolveAttachment?.refresh?.() ?? Promise.resolve();
+
+  void readStoredActiveIdentityKey(runtime)
+    .then((identityKey) => {
+      authEntry.activeIdentityKey = identityKey;
+      runtime.setActiveIdentityKey(identityKey);
+    })
+    .catch(() => {
+      authEntry.activeIdentityKey = null;
+      runtime.setActiveIdentityKey(null);
+    });
 
   _installAuth(client, runtime, authEntry, {
     authOptions: options.auth,
@@ -543,10 +575,45 @@ export function createConvexClient(options: ClientOptions): ConvexClient {
   return client;
 }
 
+/**
+ * Get the current embedded auth state of a client.
+ *
+ * Returns `{ status: "idle" }` if the client was not created by
+ * {@link createConvexClient}.
+ *
+ * @remarks
+ * This is a point-in-time read. For reactive updates, use
+ * {@link subscribeAuthState} instead.
+ *
+ * @param client - A `ConvexClient`, typically created by {@link createConvexClient}.
+ * @returns The current {@link AuthState}.
+ *
+ * @see {@link subscribeAuthState} - Reactive alternative.
+ * @see {@link AuthState} - The state union type.
+ *
+ * @category Auth
+ */
 export function getAuthState(client: ConvexClient): AuthState {
   return _authEntries.get(client)?.state ?? { status: "idle" };
 }
 
+/**
+ * Subscribe to embedded auth state changes on a client.
+ *
+ * The callback fires whenever the embedded auth state transitions.
+ * Returns a no-op unsubscribe if the client was not created by
+ * {@link createConvexClient}.
+ *
+ * @param client - A `ConvexClient`, typically created by {@link createConvexClient}.
+ * @param callback - Called on each auth state transition with the new
+ *                   {@link AuthState}.
+ * @returns An unsubscribe function. Call it to stop receiving updates.
+ *
+ * @see {@link getAuthState} - One-shot read of the current state.
+ * @see {@link AuthState} - The state union type.
+ *
+ * @category Auth
+ */
 export function subscribeAuthState(
   client: ConvexClient,
   callback: (state: AuthState) => void,
@@ -555,6 +622,113 @@ export function subscribeAuthState(
   if (!entry) return () => {};
   entry.listeners.add(callback);
   return () => entry.listeners.delete(callback);
+}
+
+/**
+ * Get the current embedded identity for a client.
+ *
+ * Returns `null` if the client was not created by {@link createConvexClient}
+ * or if no identity is currently active.
+ *
+ * @category Auth
+ */
+export function getAuthIdentity(client: ConvexClient): UserIdentity | null {
+  return _authEntries.get(client)?.runtime.getIdentity() ?? null;
+}
+
+/**
+ * Set the embedded identity for local auth-aware execution.
+ *
+ * This updates only the embedded runtime identity and auth state. It does not
+ * install or replace the remote token fetcher; pair it with `client.setAuth(...)`
+ * or `createConvexClient({ auth })` when you also need remote Convex auth.
+ *
+ * @category Auth
+ */
+export function setAuthIdentity(
+  client: ConvexClient,
+  identity: UserIdentity | null,
+): Promise<void> {
+  const entry = _authEntries.get(client);
+  if (!entry) {
+    return Promise.resolve();
+  }
+
+  const previous = getAuthIdentitySnapshot(entry.state);
+  const identityKey =
+    entry.getIdentityKey?.(identity) ?? getIdentityKey(identity);
+  return Fx.run(
+    Fx.from({
+      ok: async () => {
+        entry.runtime.setIdentity(identity);
+        await migrateAnonymousNamespaceIfNeeded(
+          entry,
+          previous.identityKey,
+          identityKey,
+        );
+        entry.activeIdentityKey = identityKey;
+        await writeStoredActiveIdentityKey(entry.runtime, identityKey);
+
+        if (identity === null) {
+          notifyAuthListeners(entry, { status: "unauthenticated" });
+          await entry.refreshSync?.();
+          return;
+        }
+
+        if (
+          previous.identityKey &&
+          identityKey &&
+          previous.identityKey !== identityKey &&
+          (await hasInactivePendingIdentityWork(entry))
+        ) {
+          notifyAuthListeners(entry, {
+            status: "identityMismatch",
+            identity,
+            identityKey,
+          });
+          await entry.refreshSync?.();
+          return;
+        }
+
+        notifyAuthListeners(entry, toAuthenticatedState(identity, identityKey));
+        await entry.refreshSync?.();
+      },
+      err: (err) => asError(err),
+    }).pipe(
+      Fx.inspect((err) =>
+        Fx.sync(() => {
+          notifyAuthListeners(entry, { status: "error", error: err });
+        }),
+      ),
+      Fx.recover(() => Fx.unit),
+    ),
+  );
+}
+
+/**
+ * Clear the current embedded identity without deleting local data.
+ *
+ * Pending sync state remains persisted and identity-scoped for later reuse.
+ *
+ * @category Auth
+ */
+export function logout(client: ConvexClient): Promise<void> {
+  return setAuthIdentity(client, null);
+}
+
+/**
+ * Switch the active embedded identity without deleting local data.
+ *
+ * If queued sync work exists for another identity, the auth state becomes
+ * `identityMismatch` instead of silently replaying under the new identity.
+ *
+ * @category Auth
+ */
+export function switchIdentity(
+  client: ConvexClient,
+  identity: UserIdentity,
+): Promise<void> {
+  return setAuthIdentity(client, identity);
 }
 
 // ---------------------------------------------------------------------------
@@ -738,14 +912,23 @@ type BrowserResolvePhase =
 interface EngineInstance {
   mutation(ref: any, args: any): Promise<any>;
   on(event: string, cb: (status: any) => void): void;
+  resolveNow?(): Promise<void>;
   start(): void;
   stop(): void;
+  pendingCount?(): number;
 }
 
 interface ResolveAttachment {
   forwardSetAuth: (...args: Parameters<ConvexClient["setAuth"]>) => void;
+  getPendingCount: () => number;
+  refresh: () => Promise<void>;
   close: () => Promise<void>;
 }
+
+const SYS_AUTH_STATE_SET_ACTIVE = "_system:authStateSetActive";
+const SYS_AUTH_STATE_GET_ACTIVE = "_system:authStateGetActive";
+const SYS_PENDING_LIST_IDENTITY_KEYS = "_system:pendingListIdentityKeys";
+const SYS_IDENTITY_MOVE_ANONYMOUS = "_system:identityMoveAnonymousToIdentity";
 
 function matchTag<
   T extends Record<K, string>,
@@ -900,7 +1083,15 @@ function createSubscriptionFactory(
 
 function createDiscoveryAccumulator(): {
   remoteOnlyRefs: Set<string>;
-  tables: Record<string, { resolve: string; query: string; schema?: unknown }>;
+  tables: Record<
+    string,
+    {
+      resolve: string;
+      query: string;
+      resolveArgs?: () => Record<string, unknown>;
+      schema?: unknown;
+    }
+  >;
   moduleLoadFailures: ModuleLoadFailure[];
 } {
   return {
@@ -949,6 +1140,7 @@ function scanModuleExports(
   modulesRoot: string | null,
 ): void {
   const SYNC_META = Symbol.for("convex-resolve:syncMeta");
+  const RESOLVE_QUERY_META = Symbol.for("convex-embedded:resolveQueryMeta");
   const moduleName = getDiscoveryModuleName(path, modulesRoot);
   let syncMetaTagged = false;
 
@@ -976,6 +1168,22 @@ function scanModuleExports(
           ? `${moduleName}:${meta.listExport}`
           : `${moduleName}:list`,
         schema: meta.schema,
+      };
+    }
+
+    const resolveQueryMeta = exportValue[RESOLVE_QUERY_META];
+    if (
+      resolveQueryMeta &&
+      resolveQueryMeta.__brand === "convex-embedded:resolveQueryMeta"
+    ) {
+      accumulator.tables[resolveQueryMeta.table] = {
+        ...(accumulator.tables[resolveQueryMeta.table] ?? {
+          resolve: `${moduleName}:resolve`,
+          query: `${moduleName}:list`,
+          schema: undefined,
+        }),
+        query: `${moduleName}:${exportName}`,
+        resolveArgs: resolveQueryMeta.getArgs,
       };
     }
   }
@@ -1028,6 +1236,109 @@ function notifyAuthListeners(entry: AuthEntry, state: AuthState): void {
   }
 }
 
+function getAuthIdentitySnapshot(state: AuthState): AuthIdentitySnapshot {
+  switch (state.status) {
+    case "authenticated":
+    case "offlineStale":
+    case "reauthRequired":
+    case "identityMismatch":
+      return {
+        identity: state.identity,
+        identityKey: state.identityKey,
+      };
+    default:
+      return {};
+  }
+}
+
+function setOfflineStaleIfNeeded(entry: AuthEntry): void {
+  if (entry.state.status !== "authenticated") {
+    return;
+  }
+
+  notifyAuthListeners(entry, {
+    status: "offlineStale",
+    identity: entry.state.identity,
+    identityKey: entry.state.identityKey,
+  });
+}
+
+function restoreAuthenticatedIfNeeded(entry: AuthEntry): void {
+  if (entry.state.status !== "offlineStale") {
+    return;
+  }
+
+  notifyAuthListeners(entry, {
+    status: "authenticated",
+    identity: entry.state.identity,
+    identityKey: entry.state.identityKey,
+  });
+}
+
+function toAuthenticatedState(
+  identity: UserIdentity | null,
+  identityKey: string | null,
+): AuthState {
+  return identity
+    ? {
+        status: "authenticated",
+        identity,
+        identityKey: identityKey ?? undefined,
+      }
+    : { status: "authenticated" };
+}
+
+async function readStoredActiveIdentityKey(
+  runtime: EmbeddedRuntime,
+): Promise<string | null> {
+  const value = await runtime.queryDirect(SYS_AUTH_STATE_GET_ACTIVE, {});
+  return typeof value === "string" ? value : null;
+}
+
+async function writeStoredActiveIdentityKey(
+  runtime: EmbeddedRuntime,
+  identityKey: string | null,
+): Promise<void> {
+  await runtime.mutationDirect(SYS_AUTH_STATE_SET_ACTIVE, {
+    activeIdentityKey: identityKey,
+  });
+}
+
+async function listPendingIdentityKeys(
+  runtime: EmbeddedRuntime,
+): Promise<string[]> {
+  const value = await runtime.queryDirect(SYS_PENDING_LIST_IDENTITY_KEYS, {});
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === "string")
+    : [];
+}
+
+async function hasInactivePendingIdentityWork(
+  entry: AuthEntry,
+): Promise<boolean> {
+  const activeIdentityKey = entry.activeIdentityKey;
+  const keys = await listPendingIdentityKeys(entry.runtime);
+  return keys.some((key) => key !== activeIdentityKey);
+}
+
+async function migrateAnonymousNamespaceIfNeeded(
+  entry: AuthEntry,
+  previousIdentityKey: string | undefined,
+  nextIdentityKey: string | null,
+): Promise<void> {
+  if (previousIdentityKey !== null && previousIdentityKey !== undefined) {
+    return;
+  }
+  if (nextIdentityKey === null) {
+    return;
+  }
+
+  await entry.runtime.mutationDirect(SYS_IDENTITY_MOVE_ANONYMOUS, {
+    identityKey: nextIdentityKey,
+  });
+  await entry.runtime.migrateAnonymousDataToIdentity(nextIdentityKey);
+}
+
 function wrapFetchToken(
   entry: AuthEntry,
   runtime: EmbeddedRuntime,
@@ -1036,6 +1347,7 @@ function wrapFetchToken(
   getIdentityKeyForState?: (identity: UserIdentity | null) => string | null,
 ): AuthTokenFetcher {
   return async (args) => {
+    const previous = getAuthIdentitySnapshot(entry.state);
     notifyAuthListeners(entry, { status: "refreshing" });
 
     try {
@@ -1043,7 +1355,15 @@ function wrapFetchToken(
 
       if (token === null || token === undefined) {
         runtime.setIdentity(null);
-        notifyAuthListeners(entry, { status: "unauthenticated" });
+        if (previous.identityKey) {
+          notifyAuthListeners(entry, {
+            status: "reauthRequired",
+            identity: previous.identity,
+            identityKey: previous.identityKey,
+          });
+        } else {
+          notifyAuthListeners(entry, { status: "unauthenticated" });
+        }
         return token;
       }
 
@@ -1051,16 +1371,23 @@ function wrapFetchToken(
       const identityKey =
         getIdentityKeyForState?.(identity) ?? getIdentityKey(identity);
       runtime.setIdentity(identity);
-      notifyAuthListeners(
+      await migrateAnonymousNamespaceIfNeeded(
         entry,
-        identity
-          ? {
-              status: "authenticated",
-              identity,
-              identityKey: identityKey ?? undefined,
-            }
-          : { status: "authenticated" },
+        previous.identityKey,
+        identityKey,
       );
+      entry.activeIdentityKey = identityKey;
+      await writeStoredActiveIdentityKey(runtime, identityKey);
+
+      if (await hasInactivePendingIdentityWork(entry)) {
+        notifyAuthListeners(entry, {
+          status: "identityMismatch",
+          identity: identity ?? undefined,
+          identityKey,
+        });
+      } else {
+        notifyAuthListeners(entry, toAuthenticatedState(identity, identityKey));
+      }
       return token;
     } catch (err) {
       runtime.setIdentity(null);
@@ -1085,15 +1412,13 @@ function installIdentityBridge(
     .then((identity) => {
       const identityKey =
         getIdentityKeyForState?.(identity) ?? getIdentityKey(identity);
+      entry.activeIdentityKey = identityKey;
       runtime.setIdentity(identity);
+      void writeStoredActiveIdentityKey(runtime, identityKey);
       notifyAuthListeners(
         entry,
         identity
-          ? {
-              status: "authenticated",
-              identity,
-              identityKey: identityKey ?? undefined,
-            }
+          ? toAuthenticatedState(identity, identityKey)
           : { status: "unauthenticated" },
       );
     })
@@ -1266,6 +1591,7 @@ async function _loadEngine(): Promise<any> {
 function _attachResolve(
   client: ConvexClient,
   runtime: EmbeddedRuntime,
+  authEntry: AuthEntry,
   resolveOpts: ResolveOptions,
   modules: Record<string, () => Promise<ConvexModule>>,
   getIdentityKeyForSync: () => string | null,
@@ -1317,6 +1643,7 @@ function _attachResolve(
   // Discover sync metadata from modules, then create + start engine
   const discovery = _discoverAndStart(
     entry,
+    authEntry,
     embedded,
     remoteClient,
     resolveOpts,
@@ -1401,6 +1728,8 @@ function _attachResolve(
     forwardSetAuth: (...args) => {
       (remoteClient as any).setAuth(...args);
     },
+    getPendingCount: () => entry.engine?.pendingCount?.() ?? 0,
+    refresh: () => entry.engine?.reloadIdentity?.() ?? Promise.resolve(),
     close: async () => {
       entry.closed = true;
       if (entry.engine) {
@@ -1418,6 +1747,7 @@ function _attachResolve(
  */
 async function _discoverAndStart(
   entry: ResolveEntry,
+  authEntry: AuthEntry,
   embedded: {
     client: ConvexClient;
     ingestDocuments: (
@@ -1506,6 +1836,18 @@ async function _discoverAndStart(
             engine.on("change", (monitorStatus: any) => {
               if (entry.closed) return;
               notifyResolveListeners(entry, _mapStatus(monitorStatus));
+
+              if (monitorStatus?.status === "offline") {
+                setOfflineStaleIfNeeded(authEntry);
+                return;
+              }
+
+              if (
+                monitorStatus?.status === "resolving" ||
+                monitorStatus?.status === "resolved"
+              ) {
+                restoreAuthenticatedIfNeeded(authEntry);
+              }
             });
             engine.start();
           },

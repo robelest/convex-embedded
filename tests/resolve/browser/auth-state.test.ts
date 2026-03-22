@@ -3,7 +3,10 @@ import { EmbeddedRuntime } from "@embedded/runtime/embedded";
 import {
   createConvexClient,
   getAuthState,
+  getAuthIdentity,
+  logout,
   subscribeAuthState,
+  switchIdentity,
 } from "@resolve/browser/index";
 import { ConvexClient } from "convex/browser";
 import {
@@ -193,6 +196,63 @@ describe("auth state accessors", () => {
       status: "authenticated",
       identity,
       identityKey: "workspace:carol",
+    });
+  });
+
+  it("exposes the active embedded identity", async () => {
+    const identity = createTestIdentity({ subject: "dana" });
+
+    const client = createConvexClient({
+      modules: createModules(),
+      auth: {
+        getUserIdentity: vi.fn(async () => identity),
+      },
+    });
+    clientsToClose.push(client as any);
+
+    await settle();
+
+    expect(getAuthIdentity(client)).toEqual(identity);
+  });
+
+  it("logout clears embedded identity without deleting local state", async () => {
+    const identity = createTestIdentity({ subject: "erin" });
+
+    const client = createConvexClient({
+      modules: createModules(),
+      auth: {
+        getUserIdentity: vi.fn(async () => identity),
+      },
+    });
+    clientsToClose.push(client as any);
+
+    await settle();
+    await logout(client);
+
+    expect(getAuthIdentity(client)).toBeNull();
+    expect(getAuthState(client)).toEqual({ status: "unauthenticated" });
+  });
+
+  it("switchIdentity updates the active embedded identity", async () => {
+    const alice = createTestIdentity({ subject: "alice" });
+    const bob = createTestIdentity({ subject: "bob" });
+
+    const client = createConvexClient({
+      modules: createModules(),
+      auth: {
+        getUserIdentity: vi.fn(async () => alice),
+      },
+    });
+    clientsToClose.push(client as any);
+
+    await settle();
+    await switchIdentity(client, bob);
+
+    expect(getAuthIdentity(client)).toEqual(bob);
+    expect(getAuthState(client)).toEqual({
+      status: "authenticated",
+      identity: bob,
+      identityKey: bob.tokenIdentifier,
     });
   });
 });

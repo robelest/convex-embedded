@@ -100,7 +100,7 @@ export default defineConfig({
         ],
       },
       "cache:test": {
-        command: "vp run --filter @robelest/embedded-tests test:once",
+        command: "vp run --filter tests test:once",
         cache: true,
         input: [
           "convex/**",
@@ -157,11 +157,11 @@ export default defineConfig({
     },
   },
   test: {
-    include: ["packages/test/**/*.test.ts"],
+    include: ["**/*.test.ts"],
     testTimeout: 10_000,
     coverage: {
       reporter: ["text", "html"],
-      exclude: ["packages/test/**", "convex/_generated/**", "demos/**"],
+      exclude: ["tests/**", "convex/_generated/**", "demos/**"],
     },
   },
 });

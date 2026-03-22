@@ -66,8 +66,8 @@
     "codegen": "vp exec convex codegen --component-dir ./src/component",
     "typecheck": "vp exec tsgo --noEmit",
     "typecheck:consumer": "vp exec tsc --project tsconfig.consumer.json --noEmit",
-    "test": "vp run --filter @robelest/embedded-tests test:embedded",
-    "test:once": "vp run --filter @robelest/embedded-tests test:embedded",
+    "test": "vp run --filter tests test:embedded",
+    "test:once": "vp run --filter tests test:embedded",
     "prepublishOnly": "vp run build && vp run typecheck:consumer"
   },
   "dependencies": {

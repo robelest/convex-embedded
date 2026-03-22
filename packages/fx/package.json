@@ -35,8 +35,8 @@
   "scripts": {
     "build": "vp exec tsdown",
     "typecheck": "vp exec tsgo --noEmit",
-    "test": "vp run --filter @robelest/embedded-tests test:fx",
-    "test:once": "vp run --filter @robelest/embedded-tests test:fx",
+    "test": "vp run --filter tests test:fx",
+    "test:once": "vp run --filter tests test:fx",
     "prepublishOnly": "vp run build"
   },
   "devDependencies": {

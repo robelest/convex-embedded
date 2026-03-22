@@ -265,10 +265,10 @@ const unsub = subscribeResolveState(client, (state) => {
 convex-embedded/
   package.json              # Vite+ workspace root
   convex/                   # Root-level Convex functions (tasks CRUD + demo)
+  tests/                    # private test workspace
   packages/
     convex-embedded/        # @robelest/convex-embedded
     fx/                     # @robelest/fx
-    test/                   # @robelest/embedded-tests (private)
   demos/
     svelte/                 # SvelteKit demo
 ```
@@ -303,9 +303,9 @@ Always use `vp test` or `vp run test`, never `bun test`.
 Run a specific test suite:
 
 ```sh
-vp run --filter @robelest/embedded-tests test:embedded
-vp run --filter @robelest/embedded-tests test:resolve
-vp run --filter @robelest/embedded-tests test:integration
+vp run --filter tests test:embedded
+vp run --filter tests test:resolve
+vp run --filter tests test:integration
 ```
 
 ### Lint & format

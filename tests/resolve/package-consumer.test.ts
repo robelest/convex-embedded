@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vite-plus/test";
 
 const hasBuildArtifacts = await access(
-  new URL("../../convex-embedded/dist/index.js", import.meta.url),
+  new URL("../../packages/convex-embedded/dist/index.js", import.meta.url),
 )
   .then(() => true)
   .catch(() => false);

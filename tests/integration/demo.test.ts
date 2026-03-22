@@ -50,8 +50,8 @@ function readRegister(fields: Y.Map<unknown>, key: string): unknown {
 
 // Glob all app modules for convex-test
 const modules = import.meta.glob([
-  "../../../convex/**/*.{ts,tsx,js,jsx}",
-  "!../../../convex/convex.config.ts",
+  "../../convex/**/*.{ts,tsx,js,jsx}",
+  "!../../convex/convex.config.ts",
 ]);
 
 describe("convex-embedded integration", () => {

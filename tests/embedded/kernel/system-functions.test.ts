@@ -195,6 +195,52 @@ describe("ID Map", () => {
 
     expect(result).toBeNull();
   });
+
+  it("idMap functions are scoped by identityKey", () => {
+    db.startTransaction();
+    SYSTEM_FUNCTIONS[SystemPaths.idMapSet].handler(db, {
+      localId: "shared-local",
+      remoteId: "remote-a",
+      table: "tasks",
+      identityKey: "user:a",
+    });
+    db.commit();
+
+    db.startTransaction();
+    SYSTEM_FUNCTIONS[SystemPaths.idMapSet].handler(db, {
+      localId: "shared-local",
+      remoteId: "remote-b",
+      table: "tasks",
+      identityKey: "user:b",
+    });
+    db.commit();
+
+    db.startTransaction();
+    const allA = SYSTEM_FUNCTIONS[SystemPaths.idMapGetAll].handler(db, {
+      identityKey: "user:a",
+    });
+    const allB = SYSTEM_FUNCTIONS[SystemPaths.idMapGetAll].handler(db, {
+      identityKey: "user:b",
+    });
+    db.rollbackWrites();
+
+    expect(allA).toEqual([
+      {
+        localId: "shared-local",
+        remoteId: "remote-a",
+        table: "tasks",
+        identityKey: "user:a",
+      },
+    ]);
+    expect(allB).toEqual([
+      {
+        localId: "shared-local",
+        remoteId: "remote-b",
+        table: "tasks",
+        identityKey: "user:b",
+      },
+    ]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -338,6 +384,39 @@ describe("Pending Queue", () => {
     db.rollbackWrites();
 
     expect(all).toEqual([]);
+  });
+
+  it("pending queue functions are scoped by identityKey", () => {
+    db.startTransaction();
+    SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, {
+      ...sampleEntry,
+      identityKey: "user:a",
+    });
+    db.commit();
+
+    db.startTransaction();
+    SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, {
+      ...sampleEntry,
+      ref: "mutations:other",
+      identityKey: "user:b",
+    });
+    db.commit();
+
+    db.startTransaction();
+    const allA = SYSTEM_FUNCTIONS[SystemPaths.pendingGetAll].handler(db, {
+      identityKey: "user:a",
+    }) as Array<Record<string, unknown>>;
+    const allB = SYSTEM_FUNCTIONS[SystemPaths.pendingGetAll].handler(db, {
+      identityKey: "user:b",
+    }) as Array<Record<string, unknown>>;
+    db.rollbackWrites();
+
+    expect(allA).toHaveLength(1);
+    expect(allA[0]?.identityKey).toBe("user:a");
+    expect(allA[0]?.ref).toBe(sampleEntry.ref);
+    expect(allB).toHaveLength(1);
+    expect(allB[0]?.identityKey).toBe("user:b");
+    expect(allB[0]?.ref).toBe("mutations:other");
   });
 });
 

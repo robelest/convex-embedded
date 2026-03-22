@@ -54,6 +54,7 @@ import { ConvexClient } from "convex/browser";
 import type { BaseConvexClientOptions } from "convex/browser";
 import { getFunctionName } from "convex/server";
 
+import { getIdentityKey, type UserIdentity } from "@/auth/resolver";
 import { compileWasmModule } from "@/browser/preload";
 import { openWaSqliteStorage } from "@/browser/wa-sqlite";
 import type { ConvexModule } from "@/kernel/module-loader";
@@ -146,6 +147,46 @@ export interface ResolveOptions {
    */
   retryDelayMs?: number;
 }
+
+export type AuthTokenFetcher = Parameters<ConvexClient["setAuth"]>[0];
+
+export interface AuthOptions {
+  /**
+   * Optional token fetcher passed through to `client.setAuth(...)`.
+   *
+   * When provided here, `createConvexClient()` installs it automatically on
+   * both the embedded client and the remote sync client (if sync is enabled).
+   */
+  fetchToken?: AuthTokenFetcher;
+
+  /**
+   * Optional bridge that returns the local embedded identity.
+   *
+   * Use this to keep `ctx.auth.getUserIdentity()` in sync with your auth
+   * provider. The returned identity is stored in-memory only.
+   */
+  getUserIdentity?: () => Promise<UserIdentity | null>;
+
+  /**
+   * Override how identities are grouped for local auth/session state.
+   * Defaults to `identity.tokenIdentifier ?? identity.subject`.
+   */
+  getIdentityKey?: (identity: UserIdentity | null) => string | null;
+}
+
+export type AuthState =
+  | { status: "idle" }
+  | { status: "refreshing" }
+  | { status: "unauthenticated" }
+  | { status: "authenticated"; identity?: UserIdentity; identityKey?: string }
+  | { status: "offlineStale"; identity?: UserIdentity; identityKey?: string }
+  | { status: "reauthRequired"; identity?: UserIdentity; identityKey?: string }
+  | {
+      status: "identityMismatch";
+      identity?: UserIdentity;
+      identityKey?: string;
+    }
+  | { status: "error"; error: Error };
 
 /**
  * Options for {@link createConvexClient}.
@@ -258,6 +299,14 @@ export interface ClientOptions {
    * @see {@link ResolveOptions}
    */
   sync?: ResolveOptions;
+
+  /**
+   * Optional auth configuration for the embedded client.
+   *
+   * This is the preferred way to keep local embedded auth in sync with the
+   * remote Convex client's `setAuth(...)` flow.
+   */
+  auth?: AuthOptions;
 }
 
 /**
@@ -319,6 +368,11 @@ export type ResolveState =
   | { status: "synced" }
   | { status: "offline" }
   | { status: "error"; error?: Error };
+
+interface AuthEntry {
+  state: AuthState;
+  listeners: Set<(state: AuthState) => void>;
+}
 
 // ---------------------------------------------------------------------------
 // Allow Convex server functions to be imported in the browser.
@@ -452,19 +506,55 @@ export function createConvexClient(options: ClientOptions): ConvexClient {
     unsavedChangesWarning: false,
   });
 
-  // 4. If sync is configured, attach resolve engine internally
-  if (options.sync) {
-    _attachResolve(client, runtime, options.sync, modules);
-  } else {
-    // Even without sync, patch close() to tear down the runtime
-    const originalClose = client.close.bind(client);
-    (client as any).close = function patchedClose(): void {
-      runtime.shutdown();
-      void originalClose();
-    };
-  }
+  const authEntry: AuthEntry = {
+    state: { status: "idle" },
+    listeners: new Set(),
+  };
+  _authEntries.set(client, authEntry);
+
+  const resolveAttachment = options.sync
+    ? _attachResolve(
+        client,
+        runtime,
+        options.sync,
+        modules,
+        () =>
+          options.auth?.getIdentityKey?.(runtime.getIdentity()) ??
+          getIdentityKey(runtime.getIdentity()),
+      )
+    : null;
+
+  _installAuth(client, runtime, authEntry, {
+    authOptions: options.auth,
+    forwardSetAuth: resolveAttachment?.forwardSetAuth,
+  });
+
+  const originalClose = client.close.bind(client);
+  (client as any).close = async function patchedClose(): Promise<void> {
+    _authEntries.delete(client);
+    if (resolveAttachment) {
+      await resolveAttachment.close();
+      _resolveEntries.delete(client);
+    }
+    runtime.shutdown();
+    return originalClose();
+  };
 
   return client;
+}
+
+export function getAuthState(client: ConvexClient): AuthState {
+  return _authEntries.get(client)?.state ?? { status: "idle" };
+}
+
+export function subscribeAuthState(
+  client: ConvexClient,
+  callback: (state: AuthState) => void,
+): () => void {
+  const entry = _authEntries.get(client);
+  if (!entry) return () => {};
+  entry.listeners.add(callback);
+  return () => entry.listeners.delete(callback);
 }
 
 // ---------------------------------------------------------------------------
@@ -585,6 +675,8 @@ export function subscribeResolveState(
   return () => entry.listeners.delete(callback);
 }
 
+const _authEntries = new WeakMap<ConvexClient, AuthEntry>();
+
 // ---------------------------------------------------------------------------
 // Internal resolve wiring
 // ---------------------------------------------------------------------------
@@ -648,6 +740,11 @@ interface EngineInstance {
   on(event: string, cb: (status: any) => void): void;
   start(): void;
   stop(): void;
+}
+
+interface ResolveAttachment {
+  forwardSetAuth: (...args: Parameters<ConvexClient["setAuth"]>) => void;
+  close: () => Promise<void>;
 }
 
 function matchTag<
@@ -920,6 +1017,130 @@ function notifyResolveListeners(
   }
 }
 
+function notifyAuthListeners(entry: AuthEntry, state: AuthState): void {
+  entry.state = state;
+  for (const cb of entry.listeners) {
+    try {
+      cb(state);
+    } catch {
+      /* listener error */
+    }
+  }
+}
+
+function wrapFetchToken(
+  entry: AuthEntry,
+  runtime: EmbeddedRuntime,
+  fetchToken: AuthTokenFetcher,
+  getUserIdentity?: () => Promise<UserIdentity | null>,
+  getIdentityKeyForState?: (identity: UserIdentity | null) => string | null,
+): AuthTokenFetcher {
+  return async (args) => {
+    notifyAuthListeners(entry, { status: "refreshing" });
+
+    try {
+      const token = await fetchToken(args);
+
+      if (token === null || token === undefined) {
+        runtime.setIdentity(null);
+        notifyAuthListeners(entry, { status: "unauthenticated" });
+        return token;
+      }
+
+      const identity = getUserIdentity ? await getUserIdentity() : null;
+      const identityKey =
+        getIdentityKeyForState?.(identity) ?? getIdentityKey(identity);
+      runtime.setIdentity(identity);
+      notifyAuthListeners(
+        entry,
+        identity
+          ? {
+              status: "authenticated",
+              identity,
+              identityKey: identityKey ?? undefined,
+            }
+          : { status: "authenticated" },
+      );
+      return token;
+    } catch (err) {
+      runtime.setIdentity(null);
+      notifyAuthListeners(entry, { status: "error", error: asError(err) });
+      throw err;
+    }
+  };
+}
+
+function installIdentityBridge(
+  entry: AuthEntry,
+  runtime: EmbeddedRuntime,
+  getUserIdentity?: () => Promise<UserIdentity | null>,
+  getIdentityKeyForState?: (identity: UserIdentity | null) => string | null,
+): void {
+  if (!getUserIdentity) {
+    return;
+  }
+
+  notifyAuthListeners(entry, { status: "refreshing" });
+  void getUserIdentity()
+    .then((identity) => {
+      const identityKey =
+        getIdentityKeyForState?.(identity) ?? getIdentityKey(identity);
+      runtime.setIdentity(identity);
+      notifyAuthListeners(
+        entry,
+        identity
+          ? {
+              status: "authenticated",
+              identity,
+              identityKey: identityKey ?? undefined,
+            }
+          : { status: "unauthenticated" },
+      );
+    })
+    .catch((err) => {
+      runtime.setIdentity(null);
+      notifyAuthListeners(entry, { status: "error", error: asError(err) });
+    });
+}
+
+function _installAuth(
+  client: ConvexClient,
+  runtime: EmbeddedRuntime,
+  entry: AuthEntry,
+  options: {
+    authOptions?: AuthOptions;
+    forwardSetAuth?: (...args: Parameters<ConvexClient["setAuth"]>) => void;
+  },
+): void {
+  const originalSetAuth = client.setAuth.bind(client);
+
+  (client as any).setAuth = (...args: Parameters<typeof client.setAuth>) => {
+    const [fetchToken, onChange] = args;
+    const wrappedFetchToken = wrapFetchToken(
+      entry,
+      runtime,
+      fetchToken,
+      options.authOptions?.getUserIdentity,
+      options.authOptions?.getIdentityKey,
+    );
+
+    originalSetAuth(wrappedFetchToken, onChange);
+    options.forwardSetAuth?.(wrappedFetchToken, onChange);
+  };
+
+  if (options.authOptions?.fetchToken) {
+    (client as any).setAuth(options.authOptions.fetchToken);
+    return;
+  }
+
+  installIdentityBridge(
+    entry,
+    runtime,
+    options.authOptions?.getUserIdentity,
+    options.authOptions?.getIdentityKey,
+  );
+}
+
 function toResolvePhase(status: any): BrowserResolvePhase {
   if (!status) return { _tag: "Idle" };
 
@@ -950,11 +1171,17 @@ function toResolvePhase(status: any): BrowserResolvePhase {
 
 function toResolveState(phase: BrowserResolvePhase): ResolveState {
   return matchTag(phase, "_tag", {
-    Idle: () => ({ status: "idle" }),
-    Syncing: (current) => ({ status: "syncing", progress: current.progress }),
-    Synced: () => ({ status: "synced" }),
-    Offline: () => ({ status: "offline" }),
-    Error: (current) => ({ status: "error", error: current.error }),
+    Idle: (): ResolveState => ({ status: "idle" }),
+    Syncing: (current): ResolveState => ({
+      status: "syncing",
+      progress: current.progress,
+    }),
+    Synced: (): ResolveState => ({ status: "synced" }),
+    Offline: (): ResolveState => ({ status: "offline" }),
+    Error: (current): ResolveState => ({
+      status: "error",
+      error: current.error,
+    }),
   });
 }
 
@@ -1041,7 +1268,8 @@ function _attachResolve(
   runtime: EmbeddedRuntime,
   resolveOpts: ResolveOptions,
   modules: Record<string, () => Promise<ConvexModule>>,
-): void {
+  getIdentityKeyForSync: () => string | null,
+): ResolveAttachment {
   const remoteClient = new ConvexClient(resolveOpts.url);
 
   // Capture the original, unpatched mutation BEFORE we patch it below.
@@ -1053,7 +1281,6 @@ function _attachResolve(
   const originalOnUpdate = client.onUpdate.bind(client);
   const originalOnPaginatedUpdate =
     client.onPaginatedUpdate_experimental?.bind(client);
-  const originalSetAuth = client.setAuth.bind(client);
 
   const embedded = {
     client,
@@ -1094,6 +1321,7 @@ function _attachResolve(
     remoteClient,
     resolveOpts,
     modules,
+    getIdentityKeyForSync,
   ).finally(() => {
     entry.discoveryReady = true;
   });
@@ -1169,22 +1397,17 @@ function _attachResolve(
     );
   }
 
-  (client as any).setAuth = (...args: Parameters<typeof client.setAuth>) => {
-    originalSetAuth(...args);
-    return (remoteClient as any).setAuth(...args);
-  };
-
-  // Patch client.close for cleanup
-  const originalClose = client.close.bind(client);
-  (client as any).close = async function patchedClose(): Promise<void> {
-    entry.closed = true;
-    if (entry.engine) {
-      entry.engine.stop();
-    }
-    _resolveEntries.delete(client);
-    await remoteClient.close();
-    runtime.shutdown();
-    return originalClose();
+  return {
+    forwardSetAuth: (...args) => {
+      (remoteClient as any).setAuth(...args);
+    },
+    close: async () => {
+      entry.closed = true;
+      if (entry.engine) {
+        entry.engine.stop();
+      }
+      await remoteClient.close();
+    },
   };
 }
 
@@ -1208,6 +1431,7 @@ async function _discoverAndStart(
   remoteClient: ConvexClient,
   resolveOpts: ResolveOptions,
   modules: Record<string, () => Promise<ConvexModule>>,
+  getIdentityKeyForSync: () => string | null,
 ): Promise<void> {
   const setup = Fx.gen(function* () {
     const engineFactory = yield* Fx.from({
@@ -1270,6 +1494,7 @@ async function _discoverAndStart(
               tables: current.tables,
               maxRetries: resolveOpts.maxRetries,
               retryDelayMs: resolveOpts.retryDelayMs,
+              getIdentityKey: getIdentityKeyForSync,
             });
 
             if (entry.closed) {

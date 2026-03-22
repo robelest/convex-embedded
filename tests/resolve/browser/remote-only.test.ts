@@ -375,7 +375,14 @@ describe("remoteOnly routing", () => {
     const convexBrowser = (await vi.importMock("convex/browser")) as any;
     const instances = convexBrowser.__mock.instances() as Array<any>;
     const remote = instances.find((c) => c.url === REMOTE_URL)!;
-    expect(remote.setAuth).toHaveBeenCalledWith(fetchToken);
+    expect(remote.setAuth).toHaveBeenCalledTimes(1);
+
+    const wrappedFetchToken = remote.setAuth.mock.calls[0][0];
+    expect(typeof wrappedFetchToken).toBe("function");
+    await expect(wrappedFetchToken({ forceRefreshToken: false })).resolves.toBe(
+      "token",
+    );
+    expect(fetchToken).toHaveBeenCalledWith({ forceRefreshToken: false });
   });
 
   it("does not start a discovered engine after client.close()", async () => {

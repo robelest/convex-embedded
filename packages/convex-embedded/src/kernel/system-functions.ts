@@ -37,6 +37,13 @@ export interface SystemFunctionDef {
   handler: SystemFn;
 }
 
+function matchesIdentityKey(
+  value: { identityKey?: string | null },
+  identityKey: string | null,
+): boolean {
+  return (value.identityKey ?? null) === identityKey;
+}
+
 // ---------------------------------------------------------------------------
 // ID Map functions (_resolve_id_map table)
 // ---------------------------------------------------------------------------
@@ -49,10 +56,11 @@ export interface SystemFunctionDef {
 const idMapSet: SystemFunctionDef = {
   type: "mutation",
   handler: (db, args) => {
-    const { localId, remoteId, table } = args as {
+    const { localId, remoteId, table, identityKey } = args as {
       localId: string;
       remoteId: string;
       table: string;
+      identityKey?: string | null;
     };
 
     // Check if a mapping already exists for this localId.
@@ -67,7 +75,11 @@ const idMapSet: SystemFunctionDef = {
     });
     let next = db.queryNext(qid);
     while (!next.done) {
-      if (next.value && (next.value as any).localId === localId) {
+      if (
+        next.value &&
+        (next.value as any).localId === localId &&
+        matchesIdentityKey(next.value as any, identityKey ?? null)
+      ) {
         existingId = next.value._id as DocumentId;
         break;
       }
@@ -76,9 +88,18 @@ const idMapSet: SystemFunctionDef = {
     db.queryCleanup(qid);
 
     if (existingId !== null) {
-      db.patch("_resolve_id_map", existingId, { remoteId, table });
+      db.patch("_resolve_id_map", existingId, {
+        remoteId,
+        table,
+        identityKey: identityKey ?? null,
+      });
     } else {
-      db.insert("_resolve_id_map", { localId, remoteId, table });
+      db.insert("_resolve_id_map", {
+        localId,
+        remoteId,
+        table,
+        identityKey: identityKey ?? null,
+      });
     }
 
     return null;
@@ -94,7 +115,10 @@ const idMapSet: SystemFunctionDef = {
 const idMapGet: SystemFunctionDef = {
   type: "query",
   handler: (db, args) => {
-    const { localId } = args as { localId: string };
+    const { localId, identityKey } = args as {
+      localId: string;
+      identityKey?: string | null;
+    };
 
     const qid = db.startQuery({
       source: {
@@ -106,7 +130,11 @@ const idMapGet: SystemFunctionDef = {
     });
     let next = db.queryNext(qid);
     while (!next.done) {
-      if (next.value && (next.value as any).localId === localId) {
+      if (
+        next.value &&
+        (next.value as any).localId === localId &&
+        matchesIdentityKey(next.value as any, identityKey ?? null)
+      ) {
         db.queryCleanup(qid);
         return (next.value as any).remoteId as string;
       }
@@ -125,11 +153,13 @@ const idMapGet: SystemFunctionDef = {
  */
 const idMapGetAll: SystemFunctionDef = {
   type: "query",
-  handler: (db) => {
+  handler: (db, args) => {
+    const { identityKey } = args as { identityKey?: string | null };
     const results: Array<{
       localId: string;
       remoteId: string;
       table: string;
+      identityKey?: string;
     }> = [];
 
     const qid = db.startQuery({
@@ -147,11 +177,17 @@ const idMapGetAll: SystemFunctionDef = {
           localId: string;
           remoteId: string;
           table: string;
+          identityKey?: string | null;
         };
+        if (!matchesIdentityKey(doc, identityKey ?? null)) {
+          next = db.queryNext(qid);
+          continue;
+        }
         results.push({
           localId: doc.localId,
           remoteId: doc.remoteId,
           table: doc.table,
+          identityKey: doc.identityKey ?? undefined,
         });
       }
       next = db.queryNext(qid);
@@ -169,7 +205,10 @@ const idMapGetAll: SystemFunctionDef = {
 const idMapDelete: SystemFunctionDef = {
   type: "mutation",
   handler: (db, args) => {
-    const { localId } = args as { localId: string };
+    const { localId, identityKey } = args as {
+      localId: string;
+      identityKey?: string | null;
+    };
 
     const qid = db.startQuery({
       source: {
@@ -181,7 +220,11 @@ const idMapDelete: SystemFunctionDef = {
     });
     let next = db.queryNext(qid);
     while (!next.done) {
-      if (next.value && (next.value as any).localId === localId) {
+      if (
+        next.value &&
+        (next.value as any).localId === localId &&
+        matchesIdentityKey(next.value as any, identityKey ?? null)
+      ) {
         db.delete("_resolve_id_map", next.value._id as DocumentId);
         db.queryCleanup(qid);
         return null;
@@ -212,17 +255,20 @@ const pendingPush: SystemFunctionDef = {
       args: mutArgs,
       localResult,
       table,
+      identityKey,
     } = args as {
       ref: string;
       args: string;
       localResult: string;
       table: string;
+      identityKey?: string | null;
     };
     const id = db.insert("_resolve_pending", {
       ref,
       args: mutArgs,
       localResult,
       table,
+      identityKey: identityKey ?? null,
       createdAt: Date.now(),
     });
     return id as string;
@@ -237,7 +283,8 @@ const pendingPush: SystemFunctionDef = {
  */
 const pendingGetAll: SystemFunctionDef = {
   type: "query",
-  handler: (db) => {
+  handler: (db, args) => {
+    const { identityKey } = args as { identityKey?: string | null };
     const results: Array<Record<string, unknown>> = [];
 
     const qid = db.startQuery({
@@ -251,12 +298,17 @@ const pendingGetAll: SystemFunctionDef = {
     let next = db.queryNext(qid);
     while (!next.done) {
       if (next.value) {
+        if (!matchesIdentityKey(next.value as any, identityKey ?? null)) {
+          next = db.queryNext(qid);
+          continue;
+        }
         results.push({
           _id: next.value._id,
           ref: (next.value as any).ref,
           args: (next.value as any).args,
           localResult: (next.value as any).localResult,
           table: (next.value as any).table,
+          identityKey: (next.value as any).identityKey,
           createdAt: (next.value as any).createdAt,
         });
       }
@@ -298,7 +350,8 @@ const pendingRemove: SystemFunctionDef = {
  */
 const pendingClear: SystemFunctionDef = {
   type: "mutation",
-  handler: (db) => {
+  handler: (db, args) => {
+    const { identityKey } = args as { identityKey?: string | null };
     const ids: DocumentId[] = [];
     const qid = db.startQuery({
       source: {
@@ -311,6 +364,10 @@ const pendingClear: SystemFunctionDef = {
     let next = db.queryNext(qid);
     while (!next.done) {
       if (next.value) {
+        if (!matchesIdentityKey(next.value as any, identityKey ?? null)) {
+          next = db.queryNext(qid);
+          continue;
+        }
         ids.push(next.value._id as DocumentId);
       }
       next = db.queryNext(qid);

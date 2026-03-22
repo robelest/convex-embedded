@@ -190,8 +190,12 @@ describe("engine.create()", () => {
     expect(statuses).toContain("resolved");
 
     // Hydration queries were issued on localClient
-    expect(localClient.query).toHaveBeenCalledWith("_system:idMapGetAll", {});
-    expect(localClient.query).toHaveBeenCalledWith("_system:pendingGetAll", {});
+    expect(localClient.query).toHaveBeenCalledWith("_system:idMapGetAll", {
+      identityKey: null,
+    });
+    expect(localClient.query).toHaveBeenCalledWith("_system:pendingGetAll", {
+      identityKey: null,
+    });
 
     m.stop();
   });

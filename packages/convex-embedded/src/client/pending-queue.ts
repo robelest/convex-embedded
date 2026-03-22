@@ -42,6 +42,8 @@ export interface PendingEntry {
   localResult: string;
   /** Table name this mutation targets. */
   table: string;
+  /** Identity namespace this entry belongs to. */
+  identityKey?: string;
 }
 
 export class PendingQueuePersistenceError extends Error {
@@ -89,14 +91,19 @@ export class PendingQueue {
   /** Direct mutation bypass (avoids patched ConvexClient.mutation()). */
   private _mutationFn: DirectMutationFn | null;
 
+  /** Active identity namespace for persistence. */
+  private _getIdentityKey: (() => string | null) | null;
+
   constructor(
     localClient: ConvexClient,
     queryFn?: DirectQueryFn,
     mutationFn?: DirectMutationFn,
+    getIdentityKey?: () => string | null,
   ) {
     this._localClient = localClient;
     this._queryFn = queryFn ?? null;
     this._mutationFn = mutationFn ?? null;
+    this._getIdentityKey = getIdentityKey ?? null;
   }
 
   // -----------------------------------------------------------------------
@@ -108,18 +115,18 @@ export class PendingQueue {
    * Must be called (and awaited) before processing the queue.
    */
   hydrate(): Promise<void> {
+    const identityKey = this._getIdentityKey?.() ?? null;
     return Fx.run(
       Fx.from({
         ok: () => {
           if (this._queryFn) {
-            return this._queryFn(SYS_PENDING_GET_ALL, {}) as Promise<
-              Array<Record<string, unknown>>
-            >;
+            return this._queryFn(SYS_PENDING_GET_ALL, {
+              identityKey,
+            }) as Promise<Array<Record<string, unknown>>>;
           }
-          return (this._localClient as any).query(
-            SYS_PENDING_GET_ALL,
-            {},
-          ) as Promise<Array<Record<string, unknown>>>;
+          return (this._localClient as any).query(SYS_PENDING_GET_ALL, {
+            identityKey,
+          }) as Promise<Array<Record<string, unknown>>>;
         },
         err: (e) => e as Error,
       }).pipe(
@@ -131,6 +138,7 @@ export class PendingQueue {
               args: e.args as string,
               localResult: e.localResult as string,
               table: e.table as string,
+              identityKey: (e.identityKey as string | undefined) ?? undefined,
             }));
             log.info(
               `pending-queue: hydrated ${this._entries.length} entry/entries`,
@@ -176,6 +184,7 @@ export class PendingQueue {
       args: JSON.stringify(args),
       localResult: JSON.stringify(localResult),
       table,
+      identityKey: this._getIdentityKey?.() ?? null,
     };
     let persistenceError: PendingQueuePersistenceError | null = null;
 
@@ -269,11 +278,12 @@ export class PendingQueue {
       Fx.from({
         ok: () =>
           this._mutationFn
-            ? this._mutationFn(SYS_PENDING_CLEAR, {})
-            : ((this._localClient as any).mutation(
-                SYS_PENDING_CLEAR,
-                {},
-              ) as Promise<unknown>),
+            ? this._mutationFn(SYS_PENDING_CLEAR, {
+                identityKey: this._getIdentityKey?.() ?? null,
+              })
+            : ((this._localClient as any).mutation(SYS_PENDING_CLEAR, {
+                identityKey: this._getIdentityKey?.() ?? null,
+              }) as Promise<unknown>),
         err: (e) => e as Error,
       }).pipe(
         Fx.inspect((err) =>

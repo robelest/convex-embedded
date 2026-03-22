@@ -14,10 +14,17 @@ const mockClient = {
 };
 
 let queue: PendingQueue;
+let activeIdentityKey: string | null;
 
 beforeEach(() => {
   vi.clearAllMocks();
-  queue = new PendingQueue(mockClient as any);
+  activeIdentityKey = null;
+  queue = new PendingQueue(
+    mockClient as any,
+    undefined,
+    undefined,
+    () => activeIdentityKey,
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -38,7 +45,9 @@ describe("hydrate()", () => {
 
     await queue.hydrate();
 
-    expect(mockClient.query).toHaveBeenCalledWith("_system:pendingGetAll", {});
+    expect(mockClient.query).toHaveBeenCalledWith("_system:pendingGetAll", {
+      identityKey: null,
+    });
     expect(queue.length).toBe(1);
   });
 
@@ -97,6 +106,7 @@ describe("hydrate()", () => {
 describe("push()", () => {
   it("stores function name string and JSON-serializes args/localResult", async () => {
     mockClient.mutation.mockResolvedValue("doc-1");
+    activeIdentityKey = "user:alice";
 
     await queue.push("tasks:create", { title: "test" }, "uuid-1", "tasks");
 
@@ -105,6 +115,7 @@ describe("push()", () => {
       args: JSON.stringify({ title: "test" }),
       localResult: JSON.stringify("uuid-1"),
       table: "tasks",
+      identityKey: "user:alice",
     });
   });
 
@@ -291,10 +302,9 @@ describe("clear()", () => {
 
     await queue.clear();
 
-    expect(mockClient.mutation).toHaveBeenCalledWith(
-      "_system:pendingClear",
-      {},
-    );
+    expect(mockClient.mutation).toHaveBeenCalledWith("_system:pendingClear", {
+      identityKey: null,
+    });
   });
 
   it("on empty queue is safe", async () => {

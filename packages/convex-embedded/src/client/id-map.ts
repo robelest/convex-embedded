@@ -61,14 +61,19 @@ export class IdMap {
   /** Direct mutation bypass (avoids patched ConvexClient.mutation). */
   private _mutationFn: DirectMutationFn | null;
 
+  /** Active identity namespace for persistence. */
+  private _getIdentityKey: (() => string | null) | null;
+
   constructor(
     localClient: ConvexClient,
     queryFn?: DirectQueryFn,
     mutationFn?: DirectMutationFn,
+    getIdentityKey?: () => string | null,
   ) {
     this._localClient = localClient;
     this._queryFn = queryFn ?? null;
     this._mutationFn = mutationFn ?? null;
+    this._getIdentityKey = getIdentityKey ?? null;
   }
 
   // -----------------------------------------------------------------------
@@ -81,19 +86,31 @@ export class IdMap {
    * `translateArgs`.
    */
   hydrate(): Promise<void> {
+    const identityKey = this._getIdentityKey?.() ?? null;
     return Fx.run(
       Fx.from({
         ok: () => {
           if (this._queryFn) {
-            return this._queryFn(SYS_ID_MAP_GET_ALL, {}) as Promise<
-              Array<{ localId: string; remoteId: string; table: string }>
+            return this._queryFn(SYS_ID_MAP_GET_ALL, {
+              identityKey,
+            }) as Promise<
+              Array<{
+                localId: string;
+                remoteId: string;
+                table: string;
+                identityKey?: string;
+              }>
             >;
           }
-          return (this._localClient as any).query(
-            SYS_ID_MAP_GET_ALL,
-            {},
-          ) as Promise<
-            Array<{ localId: string; remoteId: string; table: string }>
+          return (this._localClient as any).query(SYS_ID_MAP_GET_ALL, {
+            identityKey,
+          }) as Promise<
+            Array<{
+              localId: string;
+              remoteId: string;
+              table: string;
+              identityKey?: string;
+            }>
           >;
         },
         err: (e) => e as Error,
@@ -174,11 +191,17 @@ export class IdMap {
       Fx.from({
         ok: () =>
           this._mutationFn
-            ? this._mutationFn(SYS_ID_MAP_SET, { localId, remoteId, table })
+            ? this._mutationFn(SYS_ID_MAP_SET, {
+                localId,
+                remoteId,
+                table,
+                identityKey: this._getIdentityKey?.() ?? null,
+              })
             : ((this._localClient as any).mutation(SYS_ID_MAP_SET, {
                 localId,
                 remoteId,
                 table,
+                identityKey: this._getIdentityKey?.() ?? null,
               }) as Promise<unknown>),
         err: (e) => e as Error,
       }).pipe(
@@ -211,9 +234,13 @@ export class IdMap {
       Fx.from({
         ok: () =>
           this._mutationFn
-            ? this._mutationFn(SYS_ID_MAP_DELETE, { localId })
+            ? this._mutationFn(SYS_ID_MAP_DELETE, {
+                localId,
+                identityKey: this._getIdentityKey?.() ?? null,
+              })
             : ((this._localClient as any).mutation(SYS_ID_MAP_DELETE, {
                 localId,
+                identityKey: this._getIdentityKey?.() ?? null,
               }) as Promise<unknown>),
         err: (e) => e as Error,
       }).pipe(

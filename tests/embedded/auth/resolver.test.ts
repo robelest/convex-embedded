@@ -1,4 +1,8 @@
-import { AuthResolver, createTestIdentity } from "@embedded/auth/resolver";
+import {
+  AuthResolver,
+  createTestIdentity,
+  getIdentityKey,
+} from "@embedded/auth/resolver";
 import { describe, it, expect } from "vite-plus/test";
 
 describe("AuthResolver", () => {
@@ -81,5 +85,28 @@ describe("createTestIdentity", () => {
     expect(identity.pictureUrl).toBe("https://example.com/pic.jpg");
     expect(identity.nickname).toBe("tester");
     expect(identity.customField).toBe(42);
+  });
+});
+
+describe("getIdentityKey", () => {
+  it("prefers tokenIdentifier", () => {
+    expect(
+      getIdentityKey(
+        createTestIdentity({
+          tokenIdentifier: "issuer|alice",
+          subject: "alice",
+        }),
+      ),
+    ).toBe("issuer|alice");
+  });
+
+  it("falls back to subject when tokenIdentifier is missing", () => {
+    expect(getIdentityKey({ subject: "alice", issuer: "issuer" } as any)).toBe(
+      "alice",
+    );
+  });
+
+  it("returns null for null identity", () => {
+    expect(getIdentityKey(null)).toBeNull();
   });
 });

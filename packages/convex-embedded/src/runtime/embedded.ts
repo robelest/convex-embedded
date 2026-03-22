@@ -308,6 +308,10 @@ export class EmbeddedRuntime {
     this.auth.setIdentity(identity);
   }
 
+  getIdentity(): UserIdentity | null {
+    return this.auth.peekUserIdentity();
+  }
+
   teardownSession(sessionId: string): void {
     this.syncProtocol.removeSession(sessionId);
   }

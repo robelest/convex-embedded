@@ -1,0 +1,198 @@
+import { createTestIdentity } from "@embedded/auth/resolver";
+import { EmbeddedRuntime } from "@embedded/runtime/embedded";
+import {
+  createConvexClient,
+  getAuthState,
+  subscribeAuthState,
+} from "@resolve/browser/index";
+import { ConvexClient } from "convex/browser";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vite-plus/test";
+
+vi.mock("convex/browser", () => {
+  class MockConvexClient {
+    static instances: MockConvexClient[] = [];
+
+    url: string;
+    authFetcher:
+      | ((args: { forceRefreshToken: boolean }) => Promise<any>)
+      | null = null;
+
+    mutation = vi.fn(async () => undefined);
+    query = vi.fn(async () => undefined);
+    action = vi.fn(async () => undefined);
+    onUpdate = vi.fn(() => (() => {}) as any);
+    close = vi.fn(() => undefined);
+    setAuth = vi.fn((fetchToken: typeof this.authFetcher) => {
+      this.authFetcher = fetchToken;
+    });
+
+    constructor(url: string) {
+      this.url = url;
+      MockConvexClient.instances.push(this);
+    }
+  }
+
+  return {
+    ConvexClient: MockConvexClient,
+    __mock: {
+      reset: () => {
+        MockConvexClient.instances.length = 0;
+      },
+      instances: () => MockConvexClient.instances,
+    },
+  };
+});
+
+function createModules() {
+  return {
+    "./convex/_generated/api.ts": async () => ({}),
+    "./convex/tasks.ts": async () => ({
+      list: () => [],
+    }),
+  };
+}
+
+async function settle(): Promise<void> {
+  await Promise.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+describe("auth state accessors", () => {
+  const clientsToClose: Array<{ close: () => Promise<void> | void }> = [];
+
+  beforeEach(async () => {
+    const convexBrowser = (await vi.importMock("convex/browser")) as {
+      __mock: { reset: () => void };
+    };
+    convexBrowser.__mock.reset();
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    for (const client of clientsToClose.splice(0)) {
+      await client.close();
+    }
+  });
+
+  it("returns idle and a no-op unsubscribe for non-embedded clients", () => {
+    const client = new ConvexClient("https://example.com");
+    const callback = vi.fn();
+    const unsubscribe = subscribeAuthState(client, callback);
+
+    expect(getAuthState(client)).toEqual({ status: "idle" });
+    expect(typeof unsubscribe).toBe("function");
+
+    unsubscribe();
+    expect(callback).not.toHaveBeenCalled();
+  });
+
+  it("hydrates local auth state from getUserIdentity on create", async () => {
+    const identity = createTestIdentity({ subject: "alice" });
+    const setIdentitySpy = vi.spyOn(EmbeddedRuntime.prototype, "setIdentity");
+
+    const client = createConvexClient({
+      modules: createModules(),
+      auth: {
+        getUserIdentity: vi.fn(async () => identity),
+      },
+    });
+    clientsToClose.push(client as any);
+
+    await settle();
+
+    expect(setIdentitySpy).toHaveBeenCalledWith(identity);
+    expect(getAuthState(client)).toEqual({
+      status: "authenticated",
+      identity,
+      identityKey: identity.tokenIdentifier,
+    });
+  });
+
+  it("wraps fetchToken and updates local identity when auth succeeds", async () => {
+    const identity = createTestIdentity({ subject: "bob" });
+    const setIdentitySpy = vi.spyOn(EmbeddedRuntime.prototype, "setIdentity");
+    const fetchToken = vi.fn(async () => "token");
+
+    const client = createConvexClient({
+      modules: createModules(),
+      auth: {
+        fetchToken,
+        getUserIdentity: vi.fn(async () => identity),
+      },
+    });
+    clientsToClose.push(client as any);
+
+    const convexBrowser = (await vi.importMock("convex/browser")) as {
+      __mock: { instances: () => Array<any> };
+    };
+    const embeddedClient = convexBrowser.__mock.instances()[0];
+
+    expect(getAuthState(client)).toEqual({ status: "idle" });
+
+    const token = await embeddedClient.authFetcher({
+      forceRefreshToken: false,
+    });
+
+    expect(token).toBe("token");
+    expect(fetchToken).toHaveBeenCalledWith({ forceRefreshToken: false });
+    expect(setIdentitySpy).toHaveBeenLastCalledWith(identity);
+    expect(getAuthState(client)).toEqual({
+      status: "authenticated",
+      identity,
+      identityKey: identity.tokenIdentifier,
+    });
+  });
+
+  it("clears local identity when fetchToken returns null", async () => {
+    const setIdentitySpy = vi.spyOn(EmbeddedRuntime.prototype, "setIdentity");
+
+    const client = createConvexClient({
+      modules: createModules(),
+      auth: {
+        fetchToken: vi.fn(async () => null),
+        getUserIdentity: vi.fn(async () => createTestIdentity()),
+      },
+    });
+    clientsToClose.push(client as any);
+
+    const convexBrowser = (await vi.importMock("convex/browser")) as {
+      __mock: { instances: () => Array<any> };
+    };
+    const embeddedClient = convexBrowser.__mock.instances()[0];
+
+    const token = await embeddedClient.authFetcher({ forceRefreshToken: true });
+
+    expect(token).toBeNull();
+    expect(setIdentitySpy).toHaveBeenLastCalledWith(null);
+    expect(getAuthState(client)).toEqual({ status: "unauthenticated" });
+  });
+
+  it("supports custom identity keys", async () => {
+    const identity = createTestIdentity({ subject: "carol" });
+
+    const client = createConvexClient({
+      modules: createModules(),
+      auth: {
+        getUserIdentity: vi.fn(async () => identity),
+        getIdentityKey: (current) =>
+          current ? `workspace:${current.subject}` : null,
+      },
+    });
+    clientsToClose.push(client as any);
+
+    await settle();
+
+    expect(getAuthState(client)).toEqual({
+      status: "authenticated",
+      identity,
+      identityKey: "workspace:carol",
+    });
+  });
+});

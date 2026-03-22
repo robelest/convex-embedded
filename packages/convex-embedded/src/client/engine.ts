@@ -253,6 +253,11 @@ export interface EngineConfig {
 
   /** Delay between retries in ms (default: 1000). Doubles on each retry. */
   retryDelayMs?: number;
+
+  /**
+   * Returns the active identity key for identity-scoped local sync state.
+   */
+  getIdentityKey?: () => string | null;
 }
 
 type ChangeListener = (status: EngineStatus) => void;
@@ -587,6 +592,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     tables,
     maxRetries = 3,
     retryDelayMs = 1000,
+    getIdentityKey,
   } = config;
 
   // Destructure the embedded client for convenience.
@@ -615,11 +621,17 @@ function createEngine(config: EngineConfig): EngineInstance {
   // When queryDirect / mutationDirect are available, all reads and
   // writes bypass the patched ConvexClient methods entirely —
   // preventing infinite recursion through patchedMutation.
-  const idMap = new IdMap(localClient, queryDirect, mutationDirect);
+  const idMap = new IdMap(
+    localClient,
+    queryDirect,
+    mutationDirect,
+    getIdentityKey,
+  );
   const pendingQueue = new PendingQueue(
     localClient,
     queryDirect,
     mutationDirect,
+    getIdentityKey,
   );
 
   // Track whether we believe we're online (based on network events)

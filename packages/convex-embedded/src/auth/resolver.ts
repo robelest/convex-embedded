@@ -60,6 +60,23 @@ export class AuthResolver {
   async getUserIdentity(): Promise<UserIdentity | null> {
     return this._identity;
   }
+
+  /**
+   * Read the current identity synchronously.
+   */
+  peekUserIdentity(): UserIdentity | null {
+    return this._identity;
+  }
+}
+
+export function getIdentityKey(
+  identity: UserIdentity | null | undefined,
+): string | null {
+  if (!identity) {
+    return null;
+  }
+
+  return identity.tokenIdentifier ?? identity.subject ?? null;
 }
 
 // ---------------------------------------------------------------------------

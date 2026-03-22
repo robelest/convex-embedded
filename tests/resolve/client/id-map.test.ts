@@ -7,13 +7,20 @@ describe("IdMap", () => {
     mutation: ReturnType<typeof vi.fn>;
   };
   let idMap: IdMap;
+  let activeIdentityKey: string | null;
 
   beforeEach(() => {
     mockClient = {
       query: vi.fn(),
       mutation: vi.fn(),
     };
-    idMap = new IdMap(mockClient as any);
+    activeIdentityKey = null;
+    idMap = new IdMap(
+      mockClient as any,
+      undefined,
+      undefined,
+      () => activeIdentityKey,
+    );
   });
 
   // ---------------------------------------------------------------------------
@@ -30,7 +37,9 @@ describe("IdMap", () => {
       await idMap.hydrate();
 
       expect(idMap.size).toBe(2);
-      expect(mockClient.query).toHaveBeenCalledWith("_system:idMapGetAll", {});
+      expect(mockClient.query).toHaveBeenCalledWith("_system:idMapGetAll", {
+        identityKey: null,
+      });
     });
 
     it("handles empty result", async () => {
@@ -106,12 +115,14 @@ describe("IdMap", () => {
     });
 
     it("calls client mutation with correct args", async () => {
+      activeIdentityKey = "user:alice";
       await idMap.set("local-1", "remote-1", "tasks");
 
       expect(mockClient.mutation).toHaveBeenCalledWith("_system:idMapSet", {
         localId: "local-1",
         remoteId: "remote-1",
         table: "tasks",
+        identityKey: "user:alice",
       });
     });
 
@@ -176,6 +187,7 @@ describe("IdMap", () => {
 
       expect(mockClient.mutation).toHaveBeenCalledWith("_system:idMapDelete", {
         localId: "local-1",
+        identityKey: null,
       });
     });
 
@@ -184,6 +196,7 @@ describe("IdMap", () => {
 
       expect(mockClient.mutation).toHaveBeenCalledWith("_system:idMapDelete", {
         localId: "nonexistent",
+        identityKey: null,
       });
     });
   });

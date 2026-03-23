@@ -1,8 +1,8 @@
 <script lang="ts">
 	import { onDestroy, setContext } from "svelte";
 	import { setConvexClientContext } from "convex-svelte";
-	import { createConvexClient, subscribeResolveState } from "@robelest/convex-embedded/browser";
-	import type { ResolveState } from "@robelest/convex-embedded/browser";
+	import { createConvexClient, subscribeRemoteState } from "@robelest/convex-embedded/browser";
+	import type { RemoteState } from "@robelest/convex-embedded/browser";
 	import schema from "../../../../convex/schema";
 
 	let { children } = $props();
@@ -15,16 +15,16 @@
 		modules,
 		schema,
 		name: "convex-embedded-svelte-demo",
-		...(convexUrl ? { sync: { url: convexUrl } } : {}),
+		...(convexUrl ? { remote: { url: convexUrl } } : {}),
 	});
 
 	setConvexClientContext(client);
 
-	// Reactive sync status shared via context
-	let syncStatus: ResolveState = $state({ status: "idle" });
+	// Reactive remote status shared via context
+	let syncStatus: RemoteState = $state({ status: "idle" });
 	setContext("syncStatus", () => syncStatus);
 
-	const unsubResolve = subscribeResolveState(client, (s: ResolveState) => {
+	const unsubResolve = subscribeRemoteState(client, (s: RemoteState) => {
 		syncStatus = s;
 	});
 

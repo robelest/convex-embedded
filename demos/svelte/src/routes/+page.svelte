@@ -3,12 +3,12 @@
 	import { useQuery, useConvexClient } from "convex-svelte";
 	import { api } from "../../../../convex/_generated/api.js";
 	import type { Id } from "../../../../convex/_generated/dataModel.js";
-	import type { ResolveState } from "@robelest/convex-embedded/browser";
+	import type { RemoteState } from "@robelest/convex-embedded/browser";
 
 	const client = useConvexClient();
 	const tasks = useQuery(api.tasks.list, {});
 
-	const getSyncStatus = getContext<() => ResolveState>("syncStatus");
+	const getSyncStatus = getContext<() => RemoteState>("syncStatus");
 
 	let title = $state("");
 	let body = $state("");

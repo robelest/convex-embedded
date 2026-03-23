@@ -66,7 +66,7 @@ describe("createSyncSyscall", () => {
     expect(result).toEqual({ id: docId });
   });
 
-  it("throws on unknown sync op", () => {
+  it("throws on unknown remote op", () => {
     const syncSyscall = createSyncSyscall(db);
 
     expect(() => syncSyscall("1.0/unknownOp", JSON.stringify({}))).toThrow(

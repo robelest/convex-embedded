@@ -21,6 +21,7 @@ import { convexToJson, jsonToConvex } from "convex/values";
 
 import type { Database } from "@/core/database";
 import type { DatabaseCommitResult } from "@/core/database";
+import type { QueryDependency } from "@/core/types";
 import type { FunctionPath, ModuleLoader } from "@/kernel/module-loader";
 import { OpsContext, createOpsContext } from "@/kernel/ops";
 import {
@@ -149,6 +150,9 @@ export interface UdfExecutorOptions {
 
 interface ExecutionContext {
   holdsTransactionLock?: boolean;
+  identity?: unknown;
+  identityKey?: string | null;
+  dependencies?: QueryDependency[];
 }
 
 /**
@@ -233,9 +237,10 @@ export class UdfExecutor {
                 if (handler === null) {
                   return yield* Fx.fail(noHandlerError(functionPath));
                 }
-                return yield* Fx.promise(() =>
+                const result = yield* Fx.promise(() =>
                   Promise.resolve(handler({}, args ?? {})),
                 );
+                return result;
               }),
             // Release: always rollback (queries are read-only)
             () =>
@@ -368,6 +373,10 @@ export class UdfExecutor {
     const runUdf = this._runUdf;
     const getIdentity = this._getIdentity;
     const activeTimers = this._activeTimers;
+    const previousIdentityKey =
+      typeof (db as any).getActiveIdentityKey === "function"
+        ? (db as any).getActiveIdentityKey()
+        : null;
     return Fx.run(
       Fx.bracket(
         // Acquire: patch globals and install syscalls
@@ -375,8 +384,16 @@ export class UdfExecutor {
           const ops = createOpsContext();
           const savedGlobals = patchGlobals(ops);
           const previousConvex = globalThis.Convex;
+          if (typeof (db as any).setActiveIdentityKey === "function") {
+            (db as any).setActiveIdentityKey(
+              executionContext.identityKey ?? null,
+            );
+          }
           globalThis.Convex = {
-            syscall: createSyncSyscall(db),
+            syscall: createSyncSyscall(db, {
+              onDependency: (dependency) =>
+                executionContext.dependencies?.push(dependency),
+            }),
             asyncSyscall: createAsyncSyscall(
               db,
               (type, path, args, nestedContext) =>
@@ -385,8 +402,12 @@ export class UdfExecutor {
                   ...nestedContext,
                 }),
               {
-                getIdentity,
+                getIdentity: executionContext.identity
+                  ? async () => executionContext.identity
+                  : getIdentity,
                 activeTimers,
+                onDependency: (dependency) =>
+                  executionContext.dependencies?.push(dependency),
               },
             ),
             jsSyscall: createJsSyscall(db),
@@ -399,6 +420,9 @@ export class UdfExecutor {
         ({ savedGlobals, previousConvex }) =>
           Fx.sync(() => {
             globalThis.Convex = previousConvex;
+            if (typeof (db as any).setActiveIdentityKey === "function") {
+              (db as any).setActiveIdentityKey(previousIdentityKey);
+            }
             restoreGlobals(savedGlobals);
           }),
       ),

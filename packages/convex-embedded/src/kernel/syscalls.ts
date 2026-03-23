@@ -3,7 +3,7 @@ import { Fx } from "@robelest/fx";
  * Syscall routers for the embedded Convex runtime.
  *
  * Three routers matching the Convex backend interface:
- * - sync syscall   — queryStream, queryCleanup, normalizeId
+ * - remote syscall   — queryStream, queryCleanup, normalizeId
  * - async syscall  — db ops, scheduling, actions, storage
  * - js syscall     — blob storage
  *
@@ -14,7 +14,11 @@ import type { Value } from "convex/values";
 import { convexToJson, jsonToConvex } from "convex/values";
 
 import type { Database } from "@/core/database";
-import type { DocumentId } from "@/core/types";
+import type {
+  DocumentId,
+  QueryDependency,
+  SerializedQuery,
+} from "@/core/types";
 import type { FunctionPath } from "@/kernel/module-loader";
 import {
   resolveFunctionPath,
@@ -73,6 +77,41 @@ function decodeJsSyscall(
   return { op, args };
 }
 
+function extractQueryDependencies(query: unknown): QueryDependency[] {
+  const current = query as SerializedQuery | undefined;
+  const source = current?.source;
+  if (!source) {
+    return [];
+  }
+  if (source.type === "FullTableScan") {
+    return [{ type: "FullTableScan", tableName: source.tableName }];
+  }
+  if (source.type === "IndexRange") {
+    const [tableName, indexName] = source.indexName.split(".");
+    return [
+      {
+        type: "IndexRange",
+        tableName,
+        indexName,
+        range: source.range,
+        order: source.order,
+      },
+    ];
+  }
+  if (source.type === "Search") {
+    const [tableName, indexName] = source.indexName.split(".");
+    return [
+      {
+        type: "Search",
+        tableName,
+        indexName,
+        filters: source.filters,
+      },
+    ];
+  }
+  return [];
+}
+
 function unsupportedSyncSyscall(op: string): never {
   throw new Error(`\`convex-embedded\` does not support syscall: "${op}"`);
 }
@@ -129,10 +168,14 @@ async function dispatchJsSyscall(
  */
 export function createSyncSyscall(
   db: Database,
+  options?: { onDependency?: (dependency: QueryDependency) => void },
 ): (op: string, jsonArgs: string) => string {
   const handlers: Record<string, SyncSyscallHandler> = {
     "1.0/queryStream": (args) => {
       const { query } = args as { query: unknown };
+      for (const dependency of extractQueryDependencies(query)) {
+        options?.onDependency?.(dependency);
+      }
       const queryId = db.startQuery(query);
       return JSON.stringify({ queryId });
     },
@@ -177,6 +220,7 @@ export function createAsyncSyscall(
      * runtime can clear them on shutdown (prevents leaked timers).
      */
     activeTimers?: Set<ReturnType<typeof setTimeout>>;
+    onDependency?: (dependency: QueryDependency) => void;
   },
 ): (op: string, jsonArgs: string) => Promise<string> {
   const scheduleHandler: AsyncSyscallHandler = async (args) => {
@@ -319,6 +363,7 @@ export function createAsyncSyscall(
   const handlers: Record<string, AsyncSyscallHandler> = {
     "1.0/get": async (args) => {
       const { table, id } = args as { table: string; id: string };
+      options?.onDependency?.({ type: "FullTableScan", tableName: table });
       const doc = db.get(table, id);
       return JSON.stringify(convexToJson(doc));
     },
@@ -333,6 +378,9 @@ export function createAsyncSyscall(
         cursor: string | null;
         pageSize: number;
       };
+      for (const dependency of extractQueryDependencies(query)) {
+        options?.onDependency?.(dependency);
+      }
       const { page, isDone, continueCursor } = db.paginate({
         query: query as any,
         cursor,
@@ -373,6 +421,7 @@ export function createAsyncSyscall(
     },
     "1.0/count": async (args) => {
       const { table } = args as { table: string };
+      options?.onDependency?.({ type: "FullTableScan", tableName: table });
       const queryId = db.startQuery({
         source: { type: "FullTableScan", tableName: table, order: "asc" },
         operators: [],
@@ -418,6 +467,13 @@ export function createAsyncSyscall(
         expressions === null ? [] : [expressions as any],
         limit,
       );
+      options?.onDependency?.({
+        type: "IndexRange",
+        tableName: indexName.split(".")[0] ?? indexName,
+        indexName: indexName.split(".")[1] ?? indexName,
+        range: expressions === null ? [] : ([expressions] as any),
+        order: "desc",
+      });
       return JSON.stringify(convexToJson({ results }));
     },
     "1.0/runUdf": async (args) => {

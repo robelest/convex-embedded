@@ -481,6 +481,46 @@ describe("Pending Queue", () => {
     expect(idMap).toHaveLength(1);
     expect(idMap[0]?.identityKey).toBe("user:a");
   });
+
+  it("pendingBlock and pendingUnblockAll update replay state", () => {
+    db.startTransaction();
+    const id = SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, {
+      ...sampleEntry,
+      identityKey: "user:a",
+    }) as string;
+    db.commit();
+
+    db.startTransaction();
+    SYSTEM_FUNCTIONS[SystemPaths.pendingBlock].handler(db, {
+      id,
+      reason: "authorizationDenied",
+    });
+    db.commit();
+
+    db.startTransaction();
+    let pending = SYSTEM_FUNCTIONS[SystemPaths.pendingGetAll].handler(db, {
+      identityKey: "user:a",
+    }) as Array<Record<string, unknown>>;
+    db.rollbackWrites();
+
+    expect(pending[0]?.state).toBe("blocked");
+    expect(pending[0]?.blockedReason).toBe("authorizationDenied");
+
+    db.startTransaction();
+    SYSTEM_FUNCTIONS[SystemPaths.pendingUnblockAll].handler(db, {
+      identityKey: "user:a",
+    });
+    db.commit();
+
+    db.startTransaction();
+    pending = SYSTEM_FUNCTIONS[SystemPaths.pendingGetAll].handler(db, {
+      identityKey: "user:a",
+    }) as Array<Record<string, unknown>>;
+    db.rollbackWrites();
+
+    expect(pending[0]?.state).toBe("pending");
+    expect(pending[0]?.blockedReason).toBeUndefined();
+  });
 });
 
 describe("Auth State", () => {
@@ -530,8 +570,8 @@ describe("Auth State", () => {
 // ---------------------------------------------------------------------------
 
 describe("SYSTEM_FUNCTIONS registry", () => {
-  it("contains exactly 12 entries", () => {
-    expect(Object.keys(SYSTEM_FUNCTIONS)).toHaveLength(12);
+  it("contains exactly 14 entries", () => {
+    expect(Object.keys(SYSTEM_FUNCTIONS)).toHaveLength(14);
   });
 
   it("has all expected keys", () => {
@@ -544,6 +584,8 @@ describe("SYSTEM_FUNCTIONS registry", () => {
       "_system:pendingGetAll",
       "_system:pendingRemove",
       "_system:pendingClear",
+      "_system:pendingBlock",
+      "_system:pendingUnblockAll",
       "_system:authStateSetActive",
       "_system:authStateGetActive",
       "_system:pendingListIdentityKeys",

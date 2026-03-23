@@ -25,6 +25,8 @@ const SYS_PENDING_PUSH = "_system:pendingPush";
 const SYS_PENDING_GET_ALL = "_system:pendingGetAll";
 const SYS_PENDING_REMOVE = "_system:pendingRemove";
 const SYS_PENDING_CLEAR = "_system:pendingClear";
+const SYS_PENDING_BLOCK = "_system:pendingBlock";
+const SYS_PENDING_UNBLOCK_ALL = "_system:pendingUnblockAll";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -44,6 +46,10 @@ export interface PendingEntry {
   table: string;
   /** Identity namespace this entry belongs to. */
   identityKey?: string;
+  /** Replay state for this entry. */
+  state?: "pending" | "blocked";
+  /** Optional blocked replay reason. */
+  blockedReason?: "reauthRequired" | "authorizationDenied" | "scopeChanged";
 }
 
 export class PendingQueuePersistenceError extends Error {
@@ -79,7 +85,7 @@ export type DirectMutationFn = (
 ) => Promise<unknown>;
 
 export class PendingQueue {
-  /** In-memory queue — kept in sync with the DB. */
+  /** In-memory queue — kept in remote with the DB. */
   private _entries: PendingEntry[] = [];
 
   /** The local embedded client. */
@@ -139,6 +145,12 @@ export class PendingQueue {
               localResult: e.localResult as string,
               table: e.table as string,
               identityKey: (e.identityKey as string | undefined) ?? undefined,
+              state:
+                (e.state as PendingEntry["state"] | undefined) ?? "pending",
+              blockedReason:
+                (e.blockedReason as
+                  | PendingEntry["blockedReason"]
+                  | undefined) ?? undefined,
             }));
             log.info(
               `pending-queue: hydrated ${this._entries.length} entry/entries`,
@@ -185,6 +197,7 @@ export class PendingQueue {
       localResult: JSON.stringify(localResult),
       table,
       identityKey: this._getIdentityKey?.() ?? null,
+      state: "pending" as const,
     };
     let persistenceError: PendingQueuePersistenceError | null = null;
 
@@ -234,6 +247,40 @@ export class PendingQueue {
    */
   peek(): PendingEntry | undefined {
     return this._entries[0];
+  }
+
+  async block(
+    entry: PendingEntry,
+    reason: NonNullable<PendingEntry["blockedReason"]>,
+  ): Promise<void> {
+    entry.state = "blocked";
+    entry.blockedReason = reason;
+
+    if (entry._id.startsWith("ephemeral_")) {
+      return;
+    }
+
+    await (this._mutationFn
+      ? this._mutationFn(SYS_PENDING_BLOCK, { id: entry._id, reason })
+      : ((this._localClient as any).mutation(SYS_PENDING_BLOCK, {
+          id: entry._id,
+          reason,
+        }) as Promise<unknown>));
+  }
+
+  async unblockAll(): Promise<void> {
+    for (const entry of this._entries) {
+      entry.state = "pending";
+      delete entry.blockedReason;
+    }
+
+    await (this._mutationFn
+      ? this._mutationFn(SYS_PENDING_UNBLOCK_ALL, {
+          identityKey: this._getIdentityKey?.() ?? null,
+        })
+      : ((this._localClient as any).mutation(SYS_PENDING_UNBLOCK_ALL, {
+          identityKey: this._getIdentityKey?.() ?? null,
+        }) as Promise<unknown>));
   }
 
   /**

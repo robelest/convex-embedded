@@ -1061,6 +1061,42 @@ describe("engine.create()", () => {
       expect(m.pendingCount()).toBeGreaterThanOrEqual(1);
       m.stop();
     });
+
+    it("blocks a queued entry on authorization failure", async () => {
+      const { embedded, localClient } = createMockEmbedded();
+      localClient.mutation.mockImplementation((path: string) => {
+        const routes: Record<string, unknown> = {
+          "_system:pendingPush": "pending-doc-1",
+          "_system:pendingBlock": null,
+        };
+        return Promise.resolve(routes[path] ?? { _id: "local-1" });
+      });
+
+      const remoteClient = createMockRemoteClient();
+      remoteClient.mutation.mockRejectedValue(new Error("forbidden"));
+
+      const m = engine.create({
+        embedded,
+        remoteClient,
+        tables: { tasks: tableConfig("resolve_ref") },
+      });
+
+      m.start();
+      await settle();
+
+      await m.mutation("tasks:create", { title: "Denied" });
+      await settle(100);
+
+      expect(localClient.mutation).toHaveBeenCalledWith(
+        "_system:pendingBlock",
+        {
+          id: "pending-doc-1",
+          reason: "authorizationDenied",
+        },
+      );
+      expect(m.pendingCount()).toBeGreaterThanOrEqual(1);
+      m.stop();
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -1119,7 +1155,7 @@ describe("engine.create()", () => {
       m.stop();
     });
 
-    it("coalesces duplicate online events into a single active sync cycle", async () => {
+    it("coalesces duplicate online events into a single active remote cycle", async () => {
       let resolveQuery!: (value: unknown[]) => void;
       const { embedded } = createMockEmbedded();
       const remoteClient = {

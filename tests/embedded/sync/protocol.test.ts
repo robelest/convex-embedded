@@ -119,7 +119,10 @@ describe("SyncProtocolHandler", () => {
   describe("ModifyQuerySet Add", () => {
     it("runs the query and returns result in modifications array", async () => {
       const { handler, executor } = createHandler();
-      executor.runQuery.mockResolvedValue([{ id: 1, name: "Alice" }]);
+      executor.runQuery.mockResolvedValue({
+        result: [{ id: 1, name: "Alice" }],
+        tablesRead: new Set<string>(),
+      });
 
       const messages = await handler.handleMessage("s1", {
         type: "ModifyQuerySet",
@@ -149,7 +152,10 @@ describe("SyncProtocolHandler", () => {
       expect(mod.value).toEqual([{ id: 1, name: "Alice" }]);
       expect(mod.logLines).toEqual([]);
 
-      expect(executor.runQuery).toHaveBeenCalledWith("users:list");
+      expect(executor.runQuery).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: "s1" }),
+        "users:list",
+      );
     });
 
     it("serializes query re-evaluation with later query-set changes", async () => {
@@ -243,9 +249,11 @@ describe("SyncProtocolHandler", () => {
         ],
       } as ClientMessage);
 
-      expect(executor.runQuery).toHaveBeenCalledWith("users:get", {
-        id: "123",
-      });
+      expect(executor.runQuery).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: "s1" }),
+        "users:get",
+        { id: "123" },
+      );
     });
 
     it("sets endVersion.querySet to newVersion from message", async () => {
@@ -434,7 +442,10 @@ describe("SyncProtocolHandler", () => {
   describe("Mutation success", () => {
     it("returns MutationResponse with success=true, result, and ts", async () => {
       const { handler, executor } = createHandler();
-      executor.runMutation.mockResolvedValue({ inserted: true });
+      executor.runMutation.mockResolvedValue({
+        result: { inserted: true },
+        tablesWritten: null,
+      });
 
       const messages = await handler.handleMessage("s1", {
         type: "Mutation",
@@ -466,9 +477,11 @@ describe("SyncProtocolHandler", () => {
         args: [{ name: "Bob" }],
       } as ClientMessage);
 
-      expect(executor.runMutation).toHaveBeenCalledWith("users:create", {
-        name: "Bob",
-      });
+      expect(executor.runMutation).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: "s1" }),
+        "users:create",
+        { name: "Bob" },
+      );
     });
   });
 

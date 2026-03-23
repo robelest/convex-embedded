@@ -93,6 +93,31 @@ function createRemoteSubscriptionErrorHandler(tableName: string) {
   };
 }
 
+function classifyReplayError(
+  error: Error,
+): "reauthRequired" | "authorizationDenied" | "scopeChanged" | "unknown" {
+  const message = error.message.toLowerCase();
+  if (
+    message.includes("auth") ||
+    message.includes("token") ||
+    message.includes("unauth")
+  ) {
+    return "reauthRequired";
+  }
+  if (
+    message.includes("forbidden") ||
+    message.includes("not authorized") ||
+    message.includes("permission") ||
+    message.includes("denied")
+  ) {
+    return "authorizationDenied";
+  }
+  if (message.includes("scope")) {
+    return "scopeChanged";
+  }
+  return "unknown";
+}
+
 function registerRemoteSubscription(input: {
   ingestDocuments: (
     table: string,
@@ -124,13 +149,13 @@ function registerRemoteSubscription(input: {
 /**
  * @internal
  *
- * Per-table sync configuration.
+ * Per-table remote configuration.
  *
  * - `resolve` — the Yjs CRDT catch-up query called on connect/reconnect
  *   to merge any state that diverged while offline.
- * - `query` — the standard Convex query that the sync engine subscribes to
+ * - `query` — the standard Convex query that the remote engine subscribes to
  *   on the remote while online. When the remote pushes new results the
- *   sync engine diffs them against local state and ingests the changes.
+ *   remote engine diffs them against local state and ingests the changes.
  */
 export interface TableConfig {
   /** The resolve query reference (from register() output). */
@@ -151,7 +176,7 @@ export interface TableConfig {
   /**
    * The schema {@link Definition} for this table (from `schema.define()`).
    *
-   * Required for the Yjs CRDT resolve path: the sync engine uses this to
+   * Required for the Yjs CRDT resolve path: the remote engine uses this to
    * encode local documents into Yjs state vectors, apply server diffs,
    * and materialize merged Yjs docs back to plain records.
    *
@@ -165,7 +190,7 @@ export interface TableConfig {
  * @internal
  *
  * The embedded client — provides both the `ConvexClient` for local
- * mutations and the `ingestDocuments` capability for remote → local sync.
+ * mutations and the `ingestDocuments` capability for remote → local remote.
  *
  * This matches the {@link EmbeddedClient} interface exported by
  * `@robelest/convex-embedded/browser`.
@@ -237,7 +262,7 @@ export interface EmbeddedClientLike {
 export interface EngineConfig {
   /**
    * The embedded client — receives all mutations first for instant
-   * local writes, and supports `ingestDocuments` for remote → local sync.
+   * local writes, and supports `ingestDocuments` for remote → local remote.
    */
   embedded: EmbeddedClientLike;
 
@@ -258,7 +283,7 @@ export interface EngineConfig {
   retryDelayMs?: number;
 
   /**
-   * Returns the active identity key for identity-scoped local sync state.
+   * Returns the active identity key for identity-scoped local remote state.
    */
   getIdentityKey?: () => string | null;
 }
@@ -320,7 +345,7 @@ export interface EngineInstance {
   getStatus(): EngineStatus;
 
   /**
-   * Proxy a mutation through the sync engine.
+   * Proxy a mutation through the remote engine.
    *
    * 1. Writes to the local embedded client (instant, always awaited).
    * 2. Persists to the pending queue for durability.
@@ -334,7 +359,7 @@ export interface EngineInstance {
   /** Manually trigger a resolve cycle (e.g., after coming back online). */
   resolveNow(): Promise<void>;
 
-  /** Re-hydrate identity-scoped state and resume sync for the active identity. */
+  /** Re-hydrate identity-scoped state and resume remote for the active identity. */
   reloadIdentity(): Promise<void>;
 
   /** Number of mutations waiting to be pushed to remote. */
@@ -695,6 +720,12 @@ function createEngine(config: EngineConfig): EngineInstance {
           Fx.gen(function* () {
             while (!pendingQueue.isEmpty && isOnline && !signal?.aborted) {
               const entry = pendingQueue.peek();
+              if (entry?.state === "blocked") {
+                log.warn(
+                  `sync: blocked pending entry for ${entry.ref}; halting replay`,
+                );
+                break;
+              }
               const route = getQueueEntryRoute({
                 entry,
                 hasLocalId: (localId) => idMap.hasLocalId(localId),
@@ -753,15 +784,22 @@ function createEngine(config: EngineConfig): EngineInstance {
                     },
                     err: (e) => e as Error,
                   }).pipe(
-                    Fx.inspect((err) =>
-                      Fx.sync(() =>
-                        log.warn(
-                          "sync: remote push failed, stopping queue processing",
-                          err,
-                        ),
-                      ),
+                    Fx.recover((err) =>
+                      Fx.from({
+                        ok: async () => {
+                          const reason = classifyReplayError(err as Error);
+                          if (reason !== "unknown" && entry) {
+                            await pendingQueue.block(entry, reason);
+                          }
+                          log.warn(
+                            "sync: remote push failed, stopping queue processing",
+                            err,
+                          );
+                          return false;
+                        },
+                        err: (cause) => cause as Error,
+                      }),
                     ),
-                    Fx.recover(() => Fx.succeed(false)),
                   ),
               });
 
@@ -1223,6 +1261,7 @@ function createEngine(config: EngineConfig): EngineInstance {
 
     async reloadIdentity(): Promise<void> {
       await hydrateIdentityState();
+      await pendingQueue.unblockAll();
 
       if (!started) {
         return;

@@ -438,6 +438,25 @@ describe("queryDirect", () => {
   });
 });
 
+describe("protocol auth", () => {
+  it("uses verifyToken hook when provided", async () => {
+    const identity = createTestIdentity({ subject: "verified" });
+    const runtime = new EmbeddedRuntime({
+      modules: { "./convex/_generated/api.ts": async () => ({}) },
+      verifyToken: async (token) => (token === "good" ? identity : null),
+    });
+
+    const auth = (runtime as any)._buildProtocolAuth();
+    await expect(auth.verifyToken("good")).resolves.toEqual({
+      identity,
+      identityKey: identity.tokenIdentifier,
+    });
+    await expect(auth.verifyToken("bad")).rejects.toThrow(/rejected/);
+
+    runtime.shutdown();
+  });
+});
+
 describe("mutationDirect", () => {
   it("runs a system function and commits", async () => {
     await runtime.hydrate();

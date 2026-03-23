@@ -592,6 +592,9 @@ export type DocumentIterator = (
   callback: (doc: StoredDocument) => void,
 ) => void;
 
+export type TableCountReader = (tableName: string) => number;
+export type SourceReader = (source: Source) => SourceEvaluation | null;
+
 /**
  * Stateful query engine. Manages active streaming queries and
  * evaluates them against documents provided by a callback.
@@ -603,6 +606,8 @@ export class QueryEngine {
   constructor(
     private _schema: ParsedSchema | null,
     private _iterateDocs: DocumentIterator,
+    private _countTable: TableCountReader = () => 0,
+    private _readSource: SourceReader = () => null,
   ) {}
 
   /** Update the document iterator (e.g. after a schema or docs change). */
@@ -692,17 +697,7 @@ export class QueryEngine {
   // -------------------------------------------------------------------------
 
   count(tableName: string): number {
-    const queryId = this.startQuery({
-      source: { type: "FullTableScan", tableName, order: "asc" },
-      operators: [],
-    });
-    let count = 0;
-    while (true) {
-      const { done } = this.queryNext(queryId);
-      if (done) break;
-      count += 1;
-    }
-    return count;
+    return this._countTable(tableName);
   }
 
   // -------------------------------------------------------------------------
@@ -763,6 +758,11 @@ export class QueryEngine {
   }
 
   private _evaluateSource(source: Source): SourceEvaluation {
+    const optimized = this._readSource(source);
+    if (optimized !== null) {
+      return optimized;
+    }
+
     return matchTag(source, "type", {
       FullTableScan: (current) => this._evaluateFullTableScanSource(current),
       IndexRange: (current) => this._evaluateIndexRangeSource(current),

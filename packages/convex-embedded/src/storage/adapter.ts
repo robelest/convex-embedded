@@ -90,7 +90,7 @@ export interface StorageAdapter {
   /**
    * Return persisted documents for a single table.
    *
-   * Used by cross-tab sync to incrementally re-read only the tables
+   * Used by cross-tab remote to incrementally re-read only the tables
    * that were written by another tab, rather than re-loading everything.
    *
    * Documents are stored with an associated `tableName`, so implementations

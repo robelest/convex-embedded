@@ -14,8 +14,14 @@ import type { GenericDocument } from "convex/server";
 import type { JSONValue, Value } from "convex/values";
 import { jsonToConvex } from "convex/values";
 
+import { compareValues } from "@/core/compare";
 import { QueryEngine } from "@/core/query-engine";
-import type { DocumentIterator } from "@/core/query-engine";
+import {
+  evaluateFieldPath,
+  type DocumentIterator,
+  type SourceReader,
+  type TableCountReader,
+} from "@/core/query-engine";
 import type { ParsedSchema } from "@/core/schema";
 import { validateValidator, validateSchemaDefinition } from "@/core/schema";
 import type {
@@ -38,6 +44,11 @@ type IdentityScopedDocument = StoredDocument & {
 export interface DatabaseCommitResult {
   timestamp: Timestamp;
   tablesWritten: Set<string>;
+  changes: Array<{
+    tableName: string;
+    before: StoredDocument | null;
+    after: StoredDocument | null;
+  }>;
   persisted: Promise<void>;
 }
 
@@ -90,6 +101,12 @@ export class Database {
 
   /** Blob storage keyed by `_storage` document ID. */
   private _blobStorage: Record<DocumentId, Blob> = {};
+
+  /** Committed document IDs grouped by table for faster per-table iteration. */
+  private _tableDocuments: Map<string, Set<string>> = new Map();
+
+  /** Committed index orderings keyed by `table.index`. */
+  private _indexDocuments: Map<string, string[]> = new Map();
 
   /**
    * Maps each document UUID to its table name.
@@ -162,8 +179,17 @@ export class Database {
     const iterateDocs: DocumentIterator = (tableName, callback) => {
       this._iterateDocs(tableName, callback);
     };
+    const countTable: TableCountReader = (tableName) =>
+      this.getDocumentsForTable(tableName).length;
+    const readSource: SourceReader = (source) =>
+      this._readOptimizedSource(source);
 
-    this.queryEngine = new QueryEngine(schema, iterateDocs);
+    this.queryEngine = new QueryEngine(
+      schema,
+      iterateDocs,
+      countTable,
+      readSource,
+    );
   }
 
   // -------------------------------------------------------------------------
@@ -214,8 +240,10 @@ export class Database {
       this._documents[doc._id] = doc;
       if (tableName) {
         this._idTableMap.set(doc._id as string, tableName);
+        this._addCommittedIdToTable(tableName, doc._id as string);
       }
     }
+    this._rebuildAllIndexes();
 
     // Restore metadata counters.
     if (meta !== null) {
@@ -252,14 +280,18 @@ export class Database {
       if (this._idTableMap.get(id) === tableName) {
         delete this._documents[id as DocumentId];
         this._idTableMap.delete(id);
+        this._removeCommittedIdFromTable(tableName, id);
       }
     }
+    this._rebuildTableIndexes(tableName);
 
     // Replace with what's in storage and rebuild map entries.
     for (const doc of docs) {
       this._documents[doc._id] = doc;
       this._idTableMap.set(doc._id as string, tableName);
+      this._addCommittedIdToTable(tableName, doc._id as string);
     }
+    this._rebuildTableIndexes(tableName);
 
     // Sync metadata counters so timestamps remain monotonic across tabs.
     if (meta !== null) {
@@ -316,12 +348,15 @@ export class Database {
 
     if (this._writes.length === 0) {
       // Outermost commit — apply writes to in-memory storage.
-      const { puts, deletes } = this._applyCommittedWrites(lastWrites);
+      const { puts, deletes, changes } = this._applyCommittedWrites(lastWrites);
 
       // Bump timestamp only if there were actual writes.
       const tablesWritten = new Set(this._tablesWritten);
       if (tablesWritten.size > 0) {
         this._timestamp += 1;
+        for (const tableName of tablesWritten) {
+          this._rebuildTableIndexes(tableName);
+        }
       }
       this._tablesWritten.clear();
 
@@ -334,7 +369,7 @@ export class Database {
         },
       });
 
-      return { timestamp: this._timestamp, tablesWritten, persisted };
+      return { timestamp: this._timestamp, tablesWritten, changes, persisted };
     }
 
     // Nested commit — merge writes into the parent level.
@@ -347,6 +382,7 @@ export class Database {
     return {
       timestamp: this._timestamp,
       tablesWritten: new Set(this._tablesWritten),
+      changes: [],
       persisted: Promise.resolve(),
     };
   }
@@ -622,7 +658,7 @@ export class Database {
    * Unlike {@link delete}, this method does **not** throw when the
    * document is missing — it silently returns `false`. This is useful
    * when syncing deletions from a remote source where the local state
-   * may already be out of sync.
+   * may already be out of remote.
    *
    * Must be called within an active transaction.
    */
@@ -770,6 +806,31 @@ export class Database {
     return this.queryEngine.count(tableName);
   }
 
+  getCommittedTableCount(tableName: string): number {
+    return this._tableDocuments.get(tableName)?.size ?? 0;
+  }
+
+  getIndexedDocuments(tableName: string, indexName: string): StoredDocument[] {
+    const indexKey = `${tableName}.${indexName}`;
+    const ids = this._indexDocuments.get(indexKey);
+    if (!ids) {
+      if (
+        indexName === "by_creation_time" ||
+        indexName === "by_creation_time_desc" ||
+        indexName === "by_id"
+      ) {
+        return [];
+      }
+      throw new Error(
+        `Cannot use index "${indexName}" for table "${tableName}" because it is not declared in the schema.`,
+      );
+    }
+    return ids
+      .map((id) => this._documents[id as DocumentId])
+      .filter((doc): doc is StoredDocument => doc !== undefined)
+      .map((doc) => this._stripIdentityScope(doc as IdentityScopedDocument));
+  }
+
   vectorSearch(
     tableAndIndexName: string,
     vector: number[],
@@ -881,28 +942,59 @@ export class Database {
   ): {
     puts: Array<{ doc: StoredDocument; tableName: string }>;
     deletes: string[];
+    changes: Array<{
+      tableName: string;
+      before: StoredDocument | null;
+      after: StoredDocument | null;
+    }>;
   } {
     return Object.entries(lastWrites).reduce(
       (acc, [id, write]) => {
         const docId = id as DocumentId;
+        const tableName = this._idTableMap.get(id) ?? "";
+        const before =
+          (this._documents[docId] as IdentityScopedDocument | undefined) ??
+          null;
 
         if (write === null) {
           delete this._documents[docId];
+          if (tableName !== undefined) {
+            this._removeCommittedIdFromTable(tableName, id);
+          }
           this._idTableMap.delete(id);
           acc.deletes.push(id);
+          if (tableName) {
+            acc.changes.push({
+              tableName,
+              before: before ? this._stripIdentityScope(before) : null,
+              after: null,
+            });
+          }
           return acc;
         }
 
         this._documents[docId] = write;
-        acc.puts.push({
-          doc: write,
-          tableName: this._idTableMap.get(id) ?? "",
-        });
+        if (tableName) {
+          this._addCommittedIdToTable(tableName, id);
+        }
+        acc.puts.push({ doc: write, tableName });
+        if (tableName) {
+          acc.changes.push({
+            tableName,
+            before: before ? this._stripIdentityScope(before) : null,
+            after: this._stripIdentityScope(write as IdentityScopedDocument),
+          });
+        }
         return acc;
       },
       {
         puts: [] as Array<{ doc: StoredDocument; tableName: string }>,
         deletes: [] as string[],
+        changes: [] as Array<{
+          tableName: string;
+          before: StoredDocument | null;
+          after: StoredDocument | null;
+        }>,
       },
     );
   }
@@ -930,8 +1022,7 @@ export class Database {
   ): void {
     const isInTable = (id: string) => this._idTableMap.get(id) === tableName;
 
-    // Collect all IDs that belong to the table (committed + staged).
-    const ids = new Set(Object.keys(this._documents).filter(isInTable));
+    const ids = new Set(this._tableDocuments.get(tableName) ?? []);
     for (let i = 0; i < this._writes.length; i++) {
       for (const id of Object.keys(this._writes[i]).filter(isInTable)) {
         ids.add(id);
@@ -1000,5 +1091,243 @@ export class Database {
   ): StoredDocument {
     const { [IDENTITY_SCOPE_FIELD]: _identityKey, ...rest } = document;
     return rest as StoredDocument;
+  }
+
+  private _addCommittedIdToTable(tableName: string, id: string): void {
+    let ids = this._tableDocuments.get(tableName);
+    if (!ids) {
+      ids = new Set();
+      this._tableDocuments.set(tableName, ids);
+    }
+    ids.add(id);
+  }
+
+  private _removeCommittedIdFromTable(tableName: string, id: string): void {
+    const ids = this._tableDocuments.get(tableName);
+    if (!ids) {
+      return;
+    }
+    ids.delete(id);
+    if (ids.size === 0) {
+      this._tableDocuments.delete(tableName);
+    }
+  }
+
+  private _readOptimizedSource(source: SerializedQuery["source"]): {
+    results: StoredDocument[];
+    fieldPathsToSortBy: string[];
+    order: "asc" | "desc";
+  } | null {
+    if (this._writes.some((writes) => Object.keys(writes).length > 0)) {
+      return null;
+    }
+
+    if (source.type === "FullTableScan") {
+      const indexName =
+        source.order === "desc" ? "by_creation_time_desc" : "by_creation_time";
+      return {
+        results: this.getIndexedDocuments(source.tableName, indexName),
+        fieldPathsToSortBy: [],
+        order: source.order ?? "asc",
+      };
+    }
+
+    if (source.type === "IndexRange") {
+      const [tableName, indexName] = source.indexName.split(".");
+      const orderedDocs = this.getIndexedDocuments(tableName, indexName);
+      const fields = this._getIndexDefinitions(tableName).find(
+        (entry) => entry.indexName === indexName,
+      )?.fields;
+
+      if (!fields) {
+        throw new Error(
+          `Cannot use index "${indexName}" for table "${tableName}" because it is not declared in the schema.`,
+        );
+      }
+
+      const lower = this._buildRangeBound(source.range, fields, "lower");
+      const upper = this._buildRangeBound(source.range, fields, "upper");
+      const start = lower
+        ? this._binarySearchLowerBound(orderedDocs, fields, lower)
+        : 0;
+      const end = upper
+        ? this._binarySearchUpperBound(orderedDocs, fields, upper)
+        : orderedDocs.length;
+      const filteredDocs = orderedDocs.slice(start, end).filter((doc) =>
+        source.range.every((filter) => {
+          const result = evaluateFieldPath(filter.fieldPath, doc);
+          const value = evaluateValue(filter.value);
+          return filter.type === "Eq"
+            ? compareValues(result, value) === 0
+            : filter.type === "Gt"
+              ? compareValues(result, value) > 0
+              : filter.type === "Gte"
+                ? compareValues(result, value) >= 0
+                : filter.type === "Lt"
+                  ? compareValues(result, value) < 0
+                  : compareValues(result, value) <= 0;
+        }),
+      );
+      return {
+        results:
+          source.order === "desc" ? [...filteredDocs].reverse() : filteredDocs,
+        fieldPathsToSortBy: [],
+        order: "asc",
+      };
+    }
+
+    return null;
+  }
+
+  private _rebuildAllIndexes(): void {
+    this._indexDocuments.clear();
+    for (const tableName of this._tableDocuments.keys()) {
+      this._rebuildTableIndexes(tableName);
+    }
+  }
+
+  private _rebuildTableIndexes(tableName: string): void {
+    const committedDocs = [...(this._tableDocuments.get(tableName) ?? [])]
+      .map((id) => this._documents[id as DocumentId])
+      .filter((doc): doc is StoredDocument => doc !== undefined);
+
+    for (const { indexName, fields } of this._getIndexDefinitions(tableName)) {
+      const sorted = [...committedDocs].sort((left, right) => {
+        const leftDoc = this._stripIdentityScope(
+          left as IdentityScopedDocument,
+        );
+        const rightDoc = this._stripIdentityScope(
+          right as IdentityScopedDocument,
+        );
+        for (const field of fields) {
+          const comparison = compareValues(
+            evaluateFieldPath(field, leftDoc),
+            evaluateFieldPath(field, rightDoc),
+          );
+          if (comparison !== 0) {
+            return indexName === "by_creation_time_desc"
+              ? -comparison
+              : comparison;
+          }
+        }
+        return 0;
+      });
+
+      this._indexDocuments.set(
+        `${tableName}.${indexName}`,
+        sorted.map((doc) => doc._id as string),
+      );
+    }
+  }
+
+  private _getIndexDefinitions(
+    tableName: string,
+  ): Array<{ indexName: string; fields: string[] }> {
+    const schemaIndexes =
+      this._schema?.tables.get(tableName)?.indexes.map((index) => ({
+        indexName: index.indexDescriptor,
+        fields: [...index.fields, "_creationTime", "_id"],
+      })) ?? [];
+
+    return [
+      { indexName: "by_creation_time", fields: ["_creationTime", "_id"] },
+      { indexName: "by_creation_time_desc", fields: ["_creationTime", "_id"] },
+      { indexName: "by_id", fields: ["_id"] },
+      ...schemaIndexes,
+    ];
+  }
+
+  private _buildRangeBound(
+    range: SerializedRangeExpression[],
+    fields: string[],
+    side: "lower" | "upper",
+  ): { values: Array<Value | undefined>; inclusive: boolean } | null {
+    const values: Array<Value | undefined> = [];
+    let inclusive = true;
+
+    for (const expression of range) {
+      const fieldIndex = fields.indexOf(expression.fieldPath);
+      if (fieldIndex === -1) {
+        continue;
+      }
+      const value = evaluateValue(expression.value);
+      if (expression.type === "Eq") {
+        values[fieldIndex] = value;
+        continue;
+      }
+      if (
+        side === "lower" &&
+        (expression.type === "Gt" || expression.type === "Gte")
+      ) {
+        values[fieldIndex] = value;
+        inclusive = expression.type === "Gte";
+      }
+      if (
+        side === "upper" &&
+        (expression.type === "Lt" || expression.type === "Lte")
+      ) {
+        values[fieldIndex] = value;
+        inclusive = expression.type === "Lte";
+      }
+    }
+
+    return values.length === 0 ? null : { values, inclusive };
+  }
+
+  private _compareDocToBound(
+    doc: StoredDocument,
+    fields: string[],
+    bound: { values: Array<Value | undefined> },
+  ): number {
+    for (let index = 0; index < bound.values.length; index++) {
+      const comparison = compareValues(
+        evaluateFieldPath(fields[index]!, doc),
+        bound.values[index],
+      );
+      if (comparison !== 0) {
+        return comparison;
+      }
+    }
+    return 0;
+  }
+
+  private _binarySearchLowerBound(
+    docs: StoredDocument[],
+    fields: string[],
+    bound: { values: Array<Value | undefined>; inclusive: boolean },
+  ): number {
+    let low = 0;
+    let high = docs.length;
+    while (low < high) {
+      const mid = (low + high) >> 1;
+      const comparison = this._compareDocToBound(docs[mid]!, fields, bound);
+      const moveRight = bound.inclusive ? comparison < 0 : comparison <= 0;
+      if (moveRight) {
+        low = mid + 1;
+      } else {
+        high = mid;
+      }
+    }
+    return low;
+  }
+
+  private _binarySearchUpperBound(
+    docs: StoredDocument[],
+    fields: string[],
+    bound: { values: Array<Value | undefined>; inclusive: boolean },
+  ): number {
+    let low = 0;
+    let high = docs.length;
+    while (low < high) {
+      const mid = (low + high) >> 1;
+      const comparison = this._compareDocToBound(docs[mid]!, fields, bound);
+      const keepLeft = bound.inclusive ? comparison > 0 : comparison >= 0;
+      if (keepLeft) {
+        high = mid;
+      } else {
+        low = mid + 1;
+      }
+    }
+    return low;
   }
 }

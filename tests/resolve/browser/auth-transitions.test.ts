@@ -91,15 +91,19 @@ const REMOTE_URL = "https://remote.example.convex.cloud";
 
 function createSyncModules() {
   const resolveExport = () => {};
-  Object.defineProperty(resolveExport, Symbol.for("convex-resolve:syncMeta"), {
-    value: {
-      __brand: "convex-resolve:syncMeta",
-      table: "tasks",
-      resolveExport: "resolve",
-      listExport: "list",
-      schema: undefined,
+  Object.defineProperty(
+    resolveExport,
+    Symbol.for("convex-embedded:remoteMeta"),
+    {
+      value: {
+        __brand: "convex-embedded:remoteMeta",
+        table: "tasks",
+        resolveExport: "resolve",
+        listExport: "list",
+        schema: undefined,
+      },
     },
-  });
+  );
 
   return {
     "./convex/_generated/api.ts": async () => ({}),
@@ -153,11 +157,11 @@ describe("auth state transitions", () => {
     }
   });
 
-  it("transitions authenticated -> offlineStale -> authenticated with sync events", async () => {
+  it("transitions authenticated -> offlineStale -> authenticated with remote events", async () => {
     const identity = createTestIdentity({ subject: "alice" });
     const client = createConvexClient({
       modules: createSyncModules(),
-      sync: { url: REMOTE_URL },
+      remote: { url: REMOTE_URL },
       auth: { getUserIdentity: async () => identity },
     });
     clientsToClose.push(client as any);
@@ -197,7 +201,7 @@ describe("auth state transitions", () => {
 
     const client = createConvexClient({
       modules: createSyncModules(),
-      sync: { url: REMOTE_URL },
+      remote: { url: REMOTE_URL },
       auth: {
         fetchToken,
         getUserIdentity: async () => identity,
@@ -231,7 +235,7 @@ describe("auth state transitions", () => {
 
     const client = createConvexClient({
       modules: createSyncModules(),
-      sync: { url: REMOTE_URL },
+      remote: { url: REMOTE_URL },
       auth: {
         fetchToken,
         getUserIdentity: async () => currentIdentity,
@@ -278,7 +282,7 @@ describe("auth state transitions", () => {
 
     const client = createConvexClient({
       modules: createSyncModules(),
-      sync: { url: REMOTE_URL },
+      remote: { url: REMOTE_URL },
       auth: { getUserIdentity: async () => alice },
     });
     clientsToClose.push(client as any);
@@ -311,7 +315,7 @@ describe("auth state transitions", () => {
 
     const client = createConvexClient({
       modules: createSyncModules(),
-      sync: { url: REMOTE_URL },
+      remote: { url: REMOTE_URL },
       auth: { getUserIdentity: async () => alice },
     });
     clientsToClose.push(client as any);

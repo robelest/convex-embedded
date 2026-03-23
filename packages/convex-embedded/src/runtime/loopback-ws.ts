@@ -171,7 +171,7 @@ export class LoopbackWebSocket {
    *
    * Triggers `onmessage` and any `addEventListener("message", ...)` listeners,
    * exactly as if the message were a response to a `send()` call. Used by the
-   * transport's `pushMessage` for cross-tab sync.
+   * transport's `pushMessage` for cross-tab remote.
    */
   deliverMessage(data: string): void {
     if (this.readyState !== OPEN) return;

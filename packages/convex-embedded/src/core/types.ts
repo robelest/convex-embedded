@@ -80,6 +80,25 @@ export type SerializedSearchFilter =
 
 export type QueryId = number;
 
+export type QueryDependency =
+  | {
+      type: "FullTableScan";
+      tableName: string;
+    }
+  | {
+      type: "IndexRange";
+      tableName: string;
+      indexName: string;
+      range: ReadonlyArray<SerializedRangeExpression>;
+      order: "asc" | "desc" | null;
+    }
+  | {
+      type: "Search";
+      tableName: string;
+      indexName: string;
+      filters: ReadonlyArray<SerializedSearchFilter>;
+    };
+
 // ---------------------------------------------------------------------------
 // Index types
 // ---------------------------------------------------------------------------

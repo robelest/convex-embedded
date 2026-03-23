@@ -18,10 +18,10 @@
  *   Only plain JSON data (documents, metadata) and `ArrayBuffer`s
  *   (blobs) cross the worker boundary.
  *
- * - **Cross-tab sync** uses `WriteFanout` (`BroadcastChannel`) plus
+ * - **Cross-tab propagation** uses `WriteFanout` (`BroadcastChannel`) plus
  *   a shared IndexedDB database name.
  *
- * - **Remote sync** (optional) uses the built-in Yjs CRDT-based resolve
+ * - **Remote connection** (optional) uses the built-in Yjs CRDT-based resolve
  *   engine that reconciles offline changes on reconnect, plus reactive
  *   query subscriptions for live updates.
  *
@@ -32,13 +32,13 @@
  * | {@link createConvexClient} | Factory | Create an embedded `ConvexClient` |
  * | {@link getAuthState} | Accessor | Read current embedded auth state |
  * | {@link subscribeAuthState} | Subscription | Observe embedded auth state changes |
- * | {@link getResolveState} | Accessor | Read current sync state |
- * | {@link subscribeResolveState} | Subscription | Observe sync state changes |
+ * | {@link getRemoteState} | Accessor | Read current remote state |
+ * | {@link subscribeRemoteState} | Subscription | Observe remote state changes |
  * | {@link AuthOptions} | Interface | Embedded auth configuration |
  * | {@link AuthState} | Type | Auth state discriminated union |
  * | {@link ClientOptions} | Interface | Options for the factory |
- * | {@link ResolveOptions} | Interface | Sync-specific options |
- * | {@link ResolveState} | Type | Sync state discriminated union |
+ * | {@link RemoteOptions} | Interface | Sync-specific options |
+ * | {@link RemoteState} | Type | Sync state discriminated union |
  *
  * @example
  * ```ts
@@ -46,7 +46,7 @@
  *
  * const client = createConvexClient({
  *   modules: import.meta.glob("./convex/*.ts"),
- *   sync: { url: "https://happy-otter-123.convex.cloud" },
+ *   remote: { url: "https://happy-otter-123.convex.cloud" },
  * });
  * ```
  *
@@ -64,7 +64,12 @@ import { openWaSqliteStorage } from "@/browser/wa-sqlite";
 import type { ConvexModule } from "@/kernel/module-loader";
 import { EmbeddedRuntime } from "@/runtime/embedded";
 import type { EmbeddedRuntimeOptions } from "@/runtime/embedded";
+import { SessionFanout } from "@/runtime/session-fanout";
 import { isRemoteOnly } from "@/shared/remote-only";
+import {
+  createEncryptedStorage,
+  type EncryptionOptions,
+} from "@/storage/encrypted";
 
 // Re-export preloading utilities (public).
 export {
@@ -80,10 +85,10 @@ export {
 // ---------------------------------------------------------------------------
 
 /**
- * Configuration for remote sync (resolve).
+ * Configuration for the remote Convex connection.
  *
- * When provided as the `sync` option to {@link createConvexClient}, the
- * client automatically syncs with the remote Convex deployment — mutations
+ * When provided as the `remote` option to {@link createConvexClient}, the
+ * client automatically connects to the remote Convex deployment — mutations
  * are local-first with durable queue and remote replay, and reactive
  * subscriptions keep the local database up-to-date with changes from
  * other clients.
@@ -105,7 +110,7 @@ export {
  * // Minimal — just a deployment URL
  * const client = createConvexClient({
  *   modules,
- *   sync: { url: "https://happy-otter-123.convex.cloud" },
+ *   remote: { url: "https://happy-otter-123.convex.cloud" },
  * });
  * ```
  *
@@ -114,7 +119,7 @@ export {
  * // Custom retry policy for unreliable networks
  * const client = createConvexClient({
  *   modules,
- *   sync: {
+ *   remote: {
  *     url: import.meta.env.CONVEX_URL,
  *     maxRetries: 5,
  *     retryDelayMs: 2000,
@@ -123,11 +128,11 @@ export {
  * ```
  *
  * @see {@link createConvexClient} — The factory that consumes this config.
- * @see {@link ResolveState} — Observable state of the sync engine.
+ * @see {@link RemoteState} — Observable state of the remote engine.
  *
  * @category Configuration
  */
-export interface ResolveOptions {
+export interface RemoteOptions {
   /**
    * URL of the remote Convex deployment.
    *
@@ -153,20 +158,21 @@ export interface ResolveOptions {
 }
 
 export type AuthTokenFetcher = Parameters<ConvexClient["setAuth"]>[0];
+export type { EncryptionOptions };
 
 export interface AuthOptions {
   /**
    * Optional token fetcher passed through to `client.setAuth(...)`.
    *
    * When provided here, `createConvexClient()` installs it automatically on
-   * both the embedded client and the remote sync client (if sync is enabled).
+   * both the embedded client and the remote Convex client (if `remote` is enabled).
    */
   fetchToken?: AuthTokenFetcher;
 
   /**
    * Optional bridge that returns the local embedded identity.
    *
-   * Use this to keep `ctx.auth.getUserIdentity()` in sync with your auth
+   * Use this to keep `ctx.auth.getUserIdentity()` aligned with your auth
    * provider. The returned identity is stored in-memory only.
    */
   getUserIdentity?: () => Promise<UserIdentity | null>;
@@ -176,6 +182,14 @@ export interface AuthOptions {
    * Defaults to `identity.tokenIdentifier ?? identity.subject`.
    */
   getIdentityKey?: (identity: UserIdentity | null) => string | null;
+
+  /**
+   * Optional verifier for tokens used by the embedded protocol.
+   *
+   * When provided, local protocol auth uses this hook instead of trusting any
+   * non-empty token paired with the current embedded identity.
+   */
+  verifyToken?: (token: string) => Promise<UserIdentity | null>;
 }
 
 export type AuthState =
@@ -197,13 +211,13 @@ export type AuthState =
  *
  * @remarks
  * The only required option is `modules` — everything else has sensible
- * defaults. Add `sync` to enable local-first mode with a remote Convex
+ * defaults. Add `remote` to enable local-first mode with a remote Convex
  * deployment; omit it for a purely local embedded database.
  *
  * **Module discovery**: The `modules` map must come from Vite's
  * `import.meta.glob` (lazy variant, not `{ eager: true }`). The
  * embedded runtime inspects each module's exports to find Convex
- * function definitions and — when sync is enabled — `__syncMeta`
+ * function definitions and — when remote is enabled — `remote metadata`
  * constants exported by `register()`.
  *
  * **Persistence**: By default, documents are persisted to IndexedDB
@@ -212,7 +226,7 @@ export type AuthState =
  *
  * @example
  * ```ts
- * // Minimal — local-only, no sync
+ * // Minimal — local-only, no remote
  * const client = createConvexClient({
  *   modules: import.meta.glob("./convex/*.ts"),
  * });
@@ -220,15 +234,15 @@ export type AuthState =
  *
  * @example
  * ```ts
- * // Local-first with remote sync
+ * // Local-first with remote
  * const client = createConvexClient({
  *   modules: import.meta.glob("./convex/*.ts"),
- *   sync: { url: import.meta.env.CONVEX_URL },
+ *   remote: { url: import.meta.env.CONVEX_URL },
  * });
  * ```
  *
  * @see {@link createConvexClient} — The factory that consumes these options.
- * @see {@link ResolveOptions} — Sync-specific configuration.
+ * @see {@link RemoteOptions} — Remote connection configuration.
  *
  * @category Configuration
  */
@@ -239,7 +253,7 @@ export interface ClientOptions {
    * Must be the return value of `import.meta.glob` **without**
    * `{ eager: true }` — each entry is a lazy `() => Promise<Module>`
    * loader. The runtime loads modules on demand during function
-   * execution and scans for `__syncMeta` exports during sync setup.
+   * execution and scans for `remote metadata` exports during remote setup.
    *
    * @example
    * ```ts
@@ -288,7 +302,7 @@ export interface ClientOptions {
   name?: string;
 
   /**
-   * Enable remote sync with a Convex deployment.
+   * Enable the remote Convex connection.
    *
    * @remarks
    * When provided, the client becomes **local-first**: mutations write
@@ -297,30 +311,33 @@ export interface ClientOptions {
    * keep local state fresh with changes from other clients. On reconnect
    * after offline, a CRDT resolve pass merges any state that diverged.
    *
-   * Sync is built into `@robelest/convex-embedded` — no separate
+   * Remote connectivity is built into `@robelest/convex-embedded` — no separate
    * dependency is required.
    *
-   * @see {@link ResolveOptions}
+   * @see {@link RemoteOptions}
    */
-  sync?: ResolveOptions;
+  remote?: RemoteOptions;
 
   /**
    * Optional auth configuration for the embedded client.
    *
-   * This is the preferred way to keep local embedded auth in sync with the
+   * This is the preferred way to keep local embedded auth in remote with the
    * remote Convex client's `setAuth(...)` flow.
    */
   auth?: AuthOptions;
+
+  /** Optional at-rest encryption for persisted local state. */
+  encryption?: Omit<EncryptionOptions, "getIdentityKey">;
 }
 
 /**
- * Describes the current resolve state of a client created with
+ * Describes the current remote state of a client created with
  * {@link createConvexClient}.
  *
- * The state machine transitions are:
+ * The remote state machine transitions are:
  *
  * ```
- *  idle → connecting → syncing → synced
+ *  idle -> connecting -> resolving -> ready
  *                        ↑         ↓
  *                     offline ←────┘
  *                        ↓
@@ -328,16 +345,16 @@ export interface ClientOptions {
  * ```
  *
  * @remarks
- * **`idle`** — Sync was not configured (no `sync` option), or the engine
+ * **`idle`** — Remote connectivity was not configured (no `remote` option), or the engine
  * has not started yet (module discovery still in progress).
  *
  * **`connecting`** — The remote `ConvexClient` is establishing its
  * WebSocket connection to the Convex deployment.
  *
- * **`syncing`** — The CRDT resolve pass is in progress. When available,
+ * **`resolving`** — The CRDT resolve pass is in progress. When available,
  * `progress` reports how many tables have been resolved so far.
  *
- * **`synced`** — All tables are resolved and reactive subscriptions are
+ * **`ready`** — All tables are resolved and reactive subscriptions are
  * active. This is the normal steady-state while online.
  *
  * **`offline`** — Network is unavailable. Mutations continue to work
@@ -350,35 +367,38 @@ export interface ClientOptions {
  *
  * @example
  * ```ts
- * const unsub = subscribeResolveState(client, (state) => {
+ * const unsub = subscribeRemoteState(client, (state) => {
  *   switch (state.status) {
- *     case "synced":  badge.textContent = "Online"; break;
+ *     case "ready":   badge.textContent = "Online"; break;
  *     case "offline": badge.textContent = "Offline"; break;
- *     case "syncing": badge.textContent = `Syncing ${state.progress?.completed ?? 0}/${state.progress?.total ?? "?"}...`; break;
+ *     case "resolving": badge.textContent = `Resolving ${state.progress?.completed ?? 0}/${state.progress?.total ?? "?"}...`; break;
  *     case "error":   badge.textContent = `Error: ${state.error?.message}`; break;
  *   }
  * });
  * ```
  *
- * @see {@link getResolveState} — Read the current state once.
- * @see {@link subscribeResolveState} — Subscribe to state transitions.
+ * @see {@link getRemoteState} — Read the current remote state once.
+ * @see {@link subscribeRemoteState} — Subscribe to state transitions.
  *
  * @category Type
  */
-export type ResolveState =
+export type RemoteState =
   | { status: "idle" }
   | { status: "connecting" }
-  | { status: "syncing"; progress?: { completed: number; total: number } }
-  | { status: "synced" }
+  | { status: "resolving"; progress?: { completed: number; total: number } }
+  | { status: "ready" }
   | { status: "offline" }
   | { status: "error"; error?: Error };
 
 interface AuthEntry {
   runtime: EmbeddedRuntime;
   getIdentityKey?: (identity: UserIdentity | null) => string | null;
+  getUserIdentitySource?: () => Promise<UserIdentity | null>;
+  currentAuthFetcher?: AuthTokenFetcher;
   getPendingCount: () => number;
   refreshSync?: () => Promise<void>;
   activeIdentityKey: string | null;
+  sessionFanout?: SessionFanout;
   state: AuthState;
   listeners: Set<(state: AuthState) => void>;
 }
@@ -415,11 +435,11 @@ type AuthIdentitySnapshot = {
  * From the outside, the returned client behaves identically to a normal
  * `ConvexClient` connected to a remote deployment.
  *
- * **Without `sync`**: Purely local. Queries and mutations run against
+ * **Without `remote`**: Purely local. Queries and mutations run against
  * an in-browser database persisted to IndexedDB via wa-sqlite. No
  * network traffic.
  *
- * **With `sync`**: Local-first with transparent remote sync:
+ * **With `remote`**: Local-first with a remote Convex deployment:
  * - Queries read from the local embedded database (instant, offline-capable).
  * - `client.mutation(...)` writes locally first (instant), then replays
  *   to the remote deployment via a durable queue.
@@ -429,8 +449,8 @@ type AuthIdentitySnapshot = {
  *   while offline.
  *
  * **Module auto-discovery**: Sync metadata is discovered automatically
- * from your Convex modules — any module that exports `__syncMeta` (from
- * `register()`) is enrolled for sync. No manual table configuration.
+ * from your Convex modules — any module that exports remote metadata (from
+ * `register()`) is enrolled for remote. No manual table configuration.
  *
  * **Lifecycle**: Call `client.close()` to tear down the runtime, worker,
  * resolve engine, and all subscriptions. In SvelteKit, do this in
@@ -445,7 +465,7 @@ type AuthIdentitySnapshot = {
  *
  * const client = createConvexClient({
  *   modules: import.meta.glob("./convex/*.ts"),
- *   sync: { url: import.meta.env.CONVEX_URL },
+ *   remote: { url: import.meta.env.CONVEX_URL },
  * });
  *
  * setConvexClientContext(client);
@@ -460,7 +480,7 @@ type AuthIdentitySnapshot = {
  *
  * const client = createConvexClient({
  *   modules: import.meta.glob("./convex/*.ts"),
- *   sync: { url: import.meta.env.CONVEX_URL },
+ *   remote: { url: import.meta.env.CONVEX_URL },
  * });
  *
  * function App() {
@@ -474,26 +494,27 @@ type AuthIdentitySnapshot = {
  *
  * @example
  * ```ts
- * // Local-only (no sync) — useful for prototyping or offline-only apps
+ * // Local-only (no remote) — useful for prototyping or offline-only apps
  * const client = createConvexClient({
  *   modules: import.meta.glob("./convex/*.ts"),
  * });
  * ```
  *
  * @param options - Client configuration. See {@link ClientOptions}.
- * @returns A standard `ConvexClient` instance. When `sync` is configured,
+ * @returns A standard `ConvexClient` instance. When `remote` is configured,
  *          `client.mutation()` is patched for local-first writes and
  *          `client.close()` tears down the resolve engine.
  *
  * @see {@link ClientOptions} — All available options.
- * @see {@link ResolveOptions} — Sync-specific configuration.
- * @see {@link getResolveState} — Read the sync state.
- * @see {@link subscribeResolveState} — Observe sync state changes.
+ * @see {@link RemoteOptions} — Remote connection configuration.
+ * @see {@link getRemoteState} — Read the remote state.
+ * @see {@link subscribeRemoteState} — Observe remote state changes.
  *
  * @category Factory
  */
 export function createConvexClient(options: ClientOptions): ConvexClient {
   const dbName = options.name ?? "convex-embedded";
+  const sessionFanout = new SessionFanout(`${dbName}:session`);
 
   const modules = options.modules as Record<
     string,
@@ -504,10 +525,16 @@ export function createConvexClient(options: ClientOptions): ConvexClient {
   const runtime = new EmbeddedRuntime({
     modules,
     schema: options.schema as EmbeddedRuntimeOptions["schema"],
+    verifyToken: options.auth?.verifyToken,
   });
 
   // 2. Set the hydration gate before creating transport/client
-  const storageReady = openStorage(runtime, dbName, options.workerUrl);
+  const storageReady = openStorage(
+    runtime,
+    dbName,
+    options.workerUrl,
+    options.encryption,
+  );
   runtime.setHydrationGate(storageReady);
 
   // 3. Create transport + client synchronously
@@ -526,17 +553,18 @@ export function createConvexClient(options: ClientOptions): ConvexClient {
     getPendingCount: () => 0,
     refreshSync: () => Promise.resolve(),
     activeIdentityKey: null,
+    sessionFanout,
     state: { status: "idle" },
     listeners: new Set(),
   };
   _authEntries.set(client, authEntry);
 
-  const resolveAttachment = options.sync
+  const resolveAttachment = options.remote
     ? _attachResolve(
         client,
         runtime,
         authEntry,
-        options.sync,
+        options.remote,
         modules,
         () => authEntry.activeIdentityKey,
       )
@@ -545,6 +573,7 @@ export function createConvexClient(options: ClientOptions): ConvexClient {
   authEntry.getPendingCount = () => resolveAttachment?.getPendingCount?.() ?? 0;
   authEntry.refreshSync = () =>
     resolveAttachment?.refresh?.() ?? Promise.resolve();
+  authEntry.getUserIdentitySource = options.auth?.getUserIdentity;
 
   void readStoredActiveIdentityKey(runtime)
     .then((identityKey) => {
@@ -561,6 +590,13 @@ export function createConvexClient(options: ClientOptions): ConvexClient {
     forwardSetAuth: resolveAttachment?.forwardSetAuth,
   });
 
+  const unsubscribeSessionFanout = sessionFanout.onNotification(() => {
+    Fx.detach(
+      () => refreshAuthFromSource(authEntry),
+      "[convex-embedded] session fanout:",
+    );
+  });
+
   const originalClose = client.close.bind(client);
   (client as any).close = async function patchedClose(): Promise<void> {
     _authEntries.delete(client);
@@ -568,6 +604,8 @@ export function createConvexClient(options: ClientOptions): ConvexClient {
       await resolveAttachment.close();
       _resolveEntries.delete(client);
     }
+    unsubscribeSessionFanout();
+    sessionFanout.close();
     runtime.shutdown();
     return originalClose();
   };
@@ -625,6 +663,22 @@ export function subscribeAuthState(
 }
 
 /**
+ * Force a refresh of the active embedded auth session.
+ *
+ * If an auth token fetcher is configured, this forces a token refresh and then
+ * reloads the current embedded identity namespace.
+ */
+export async function reauthenticate(client: ConvexClient): Promise<void> {
+  const entry = _authEntries.get(client);
+  if (!entry?.currentAuthFetcher) {
+    return;
+  }
+
+  await entry.currentAuthFetcher({ forceRefreshToken: true });
+  await refreshAuthFromSource(entry);
+}
+
+/**
  * Get the current embedded identity for a client.
  *
  * Returns `null` if the client was not created by {@link createConvexClient}
@@ -654,6 +708,14 @@ export function setAuthIdentity(
     return Promise.resolve();
   }
 
+  return applyAuthIdentity(entry, identity, true);
+}
+
+function applyAuthIdentity(
+  entry: AuthEntry,
+  identity: UserIdentity | null,
+  broadcast: boolean,
+): Promise<void> {
   const previous = getAuthIdentitySnapshot(entry.state);
   const identityKey =
     entry.getIdentityKey?.(identity) ?? getIdentityKey(identity);
@@ -661,6 +723,7 @@ export function setAuthIdentity(
     Fx.from({
       ok: async () => {
         entry.runtime.setIdentity(identity);
+        entry.runtime.setActiveIdentityKey(identityKey);
         await migrateAnonymousNamespaceIfNeeded(
           entry,
           previous.identityKey,
@@ -672,6 +735,9 @@ export function setAuthIdentity(
         if (identity === null) {
           notifyAuthListeners(entry, { status: "unauthenticated" });
           await entry.refreshSync?.();
+          if (broadcast) {
+            entry.sessionFanout?.notify({ type: "authChanged" });
+          }
           return;
         }
 
@@ -687,11 +753,17 @@ export function setAuthIdentity(
             identityKey,
           });
           await entry.refreshSync?.();
+          if (broadcast) {
+            entry.sessionFanout?.notify({ type: "authChanged" });
+          }
           return;
         }
 
         notifyAuthListeners(entry, toAuthenticatedState(identity, identityKey));
         await entry.refreshSync?.();
+        if (broadcast) {
+          entry.sessionFanout?.notify({ type: "authChanged" });
+        }
       },
       err: (err) => asError(err),
     }).pipe(
@@ -708,7 +780,7 @@ export function setAuthIdentity(
 /**
  * Clear the current embedded identity without deleting local data.
  *
- * Pending sync state remains persisted and identity-scoped for later reuse.
+ * Pending remote state remains persisted and identity-scoped for later reuse.
  *
  * @category Auth
  */
@@ -719,7 +791,7 @@ export function logout(client: ConvexClient): Promise<void> {
 /**
  * Switch the active embedded identity without deleting local data.
  *
- * If queued sync work exists for another identity, the auth state becomes
+ * If queued remote work exists for another identity, the auth state becomes
  * `identityMismatch` instead of silently replaying under the new identity.
  *
  * @category Auth
@@ -732,19 +804,19 @@ export function switchIdentity(
 }
 
 // ---------------------------------------------------------------------------
-// Resolve state accessors
+// Remote state accessors
 // ---------------------------------------------------------------------------
 
 /**
- * Get the current resolve state of a client.
+ * Get the current remote state of a client.
  *
  * Returns `{ status: "idle" }` if the client was created without
- * `sync`, if sync has not started yet, or if the client was not
+ * `remote`, if remote has not started yet, or if the client was not
  * created by {@link createConvexClient}.
  *
  * @remarks
  * This is a point-in-time read. For reactive UI updates, use
- * {@link subscribeResolveState} instead — it fires a callback on
+ * {@link subscribeRemoteState} instead — it fires a callback on
  * every state transition.
  *
  * The function uses a `WeakMap` lookup keyed on the client instance,
@@ -752,13 +824,13 @@ export function switchIdentity(
  *
  * @example
  * ```ts
- * import { createConvexClient, getResolveState } from "@robelest/convex-embedded/browser";
+ * import { createConvexClient, getRemoteState } from "@robelest/convex-embedded/browser";
  *
- * const client = createConvexClient({ modules, sync: { url } });
+ * const client = createConvexClient({ modules, remote: { url } });
  *
  * // Later, check state before performing an action
- * const state = getResolveState(client);
- * if (state.status === "synced") {
+ * const state = getRemoteState(client);
+ * if (state.status === "ready") {
  *   console.log("All tables are up to date");
  * }
  * ```
@@ -766,27 +838,27 @@ export function switchIdentity(
  * @example
  * ```ts
  * // Safe to call on any ConvexClient — returns idle for non-embedded clients
- * const state = getResolveState(someClient);
+ * const state = getRemoteState(someClient);
  * // state is { status: "idle" }
  * ```
  *
  * @param client - A `ConvexClient`, typically created by {@link createConvexClient}.
- * @returns The current {@link ResolveState}.
+ * @returns The current {@link RemoteState}.
  *
- * @see {@link subscribeResolveState} — Reactive alternative.
- * @see {@link ResolveState} — The state union type.
+ * @see {@link subscribeRemoteState} — Reactive alternative.
+ * @see {@link RemoteState} — The state union type.
  *
- * @category Resolve
+ * @category Remote
  */
-export function getResolveState(client: ConvexClient): ResolveState {
+export function getRemoteState(client: ConvexClient): RemoteState {
   return _resolveEntries.get(client)?.state ?? { status: "idle" };
 }
 
 /**
- * Subscribe to resolve state changes on a client.
+ * Subscribe to remote state changes on a client.
  *
- * The callback fires whenever the resolve state transitions (e.g.
- * `offline → syncing → synced`). Returns an unsubscribe function.
+ * The callback fires whenever the remote state transitions (e.g.
+ * `offline -> resolving -> ready`). Returns an unsubscribe function.
  *
  * @remarks
  * The callback is invoked **synchronously** on each state transition.
@@ -794,7 +866,7 @@ export function getResolveState(client: ConvexClient): ResolveState {
  * consider debouncing or batching inside the callback.
  *
  * Returns a **no-op unsubscribe** if the client was created without
- * `sync` or was not created by {@link createConvexClient}. This makes
+ * `remote` or was not created by {@link createConvexClient}. This makes
  * it safe to call unconditionally in framework lifecycle hooks.
  *
  * The subscription is automatically cleaned up when `client.close()`
@@ -804,44 +876,44 @@ export function getResolveState(client: ConvexClient): ResolveState {
  *
  * @example
  * ```ts
- * // Svelte — reactive sync status indicator
- * import { createConvexClient, subscribeResolveState } from "@robelest/convex-embedded/browser";
+ * // Svelte — reactive remote status indicator
+ * import { createConvexClient, subscribeRemoteState } from "@robelest/convex-embedded/browser";
  * import { onDestroy } from "svelte";
  *
- * const client = createConvexClient({ modules, sync: { url } });
- * let syncStatus = $state("idle");
+ * const client = createConvexClient({ modules, remote: { url } });
+ * let remoteStatus = $state("idle");
  *
- * const unsub = subscribeResolveState(client, (state) => {
- *   syncStatus = state.status;
+ * const unsub = subscribeRemoteState(client, (state) => {
+ *   remoteStatus = state.status;
  * });
  * onDestroy(unsub);
  * ```
  *
  * @example
  * ```ts
- * // React — sync status in a custom hook
- * function useSyncStatus(client: ConvexClient) {
- *   const [status, setStatus] = useState<ResolveState["status"]>("idle");
+ * // React — remote status in a custom hook
+ * function useRemoteStatus(client: ConvexClient) {
+ *   const [status, setStatus] = useState<RemoteState["status"]>("idle");
  *   useEffect(() => {
- *     return subscribeResolveState(client, (s) => setStatus(s.status));
+ *     return subscribeRemoteState(client, (s) => setStatus(s.status));
  *   }, [client]);
  *   return status;
  * }
  * ```
  *
  * @param client - A `ConvexClient`, typically created by {@link createConvexClient}.
- * @param callback - Called on each resolve state transition with the new
- *                   {@link ResolveState}.
+ * @param callback - Called on each remote state transition with the new
+ *                   {@link RemoteState}.
  * @returns An unsubscribe function. Call it to stop receiving updates.
  *
- * @see {@link getResolveState} — One-shot read of the current state.
- * @see {@link ResolveState} — The state union type.
+ * @see {@link getRemoteState} — One-shot read of the current state.
+ * @see {@link RemoteState} — The state union type.
  *
- * @category Resolve
+ * @category Remote
  */
-export function subscribeResolveState(
+export function subscribeRemoteState(
   client: ConvexClient,
-  callback: (state: ResolveState) => void,
+  callback: (state: RemoteState) => void,
 ): () => void {
   const entry = _resolveEntries.get(client);
   if (!entry) return () => {};
@@ -860,8 +932,8 @@ const _resolveEntries = new WeakMap<ConvexClient, ResolveEntry>();
 
 interface ResolveEntry {
   engine: EngineInstance | null;
-  state: ResolveState;
-  listeners: Set<(state: ResolveState) => void>;
+  state: RemoteState;
+  listeners: Set<(state: RemoteState) => void>;
   remoteOnlyRefs: Set<string>;
   discovery: Promise<void> | null;
   discoveryReady: boolean;
@@ -904,7 +976,7 @@ type SubscriptionRoute =
 type BrowserResolvePhase =
   | { _tag: "Idle" }
   | { _tag: "Syncing"; progress?: { completed: number; total: number } }
-  | { _tag: "Synced" }
+  | { _tag: "Ready" }
   | { _tag: "Offline" }
   | { _tag: "Error"; error: unknown };
 
@@ -1110,7 +1182,7 @@ function warnModuleLoadFailures(failures: ModuleLoadFailure[]): void {
   const [firstFailure] = failures;
 
   console.warn(
-    `[convex-embedded] ${failures.length} module(s) failed to load during sync discovery and were skipped: ${skipped}`,
+    `[convex-embedded] ${failures.length} module(s) failed to load during remote discovery and were skipped: ${skipped}`,
     firstFailure.error,
   );
 }
@@ -1139,7 +1211,7 @@ function scanModuleExports(
   accumulator: ReturnType<typeof createDiscoveryAccumulator>,
   modulesRoot: string | null,
 ): void {
-  const SYNC_META = Symbol.for("convex-resolve:syncMeta");
+  const REMOTE_META = Symbol.for("convex-embedded:remoteMeta");
   const RESOLVE_QUERY_META = Symbol.for("convex-embedded:resolveQueryMeta");
   const moduleName = getDiscoveryModuleName(path, modulesRoot);
   let syncMetaTagged = false;
@@ -1158,8 +1230,12 @@ function scanModuleExports(
       accumulator.remoteOnlyRefs.add(`${moduleName}:${exportName}`);
     }
 
-    const meta = exportValue[SYNC_META];
-    if (!syncMetaTagged && meta && meta.__brand === "convex-resolve:syncMeta") {
+    const meta = exportValue[REMOTE_META];
+    if (
+      !syncMetaTagged &&
+      meta &&
+      meta.__brand === "convex-embedded:remoteMeta"
+    ) {
       syncMetaTagged = true;
 
       accumulator.tables[meta.table] = {
@@ -1211,10 +1287,7 @@ function toDiscoveryResult(
       };
 }
 
-function notifyResolveListeners(
-  entry: ResolveEntry,
-  state: ResolveState,
-): void {
+function notifyResolveListeners(entry: ResolveEntry, state: RemoteState): void {
   entry.state = state;
   for (const cb of entry.listeners) {
     try {
@@ -1339,6 +1412,15 @@ async function migrateAnonymousNamespaceIfNeeded(
   await entry.runtime.migrateAnonymousDataToIdentity(nextIdentityKey);
 }
 
+async function refreshAuthFromSource(entry: AuthEntry): Promise<void> {
+  if (!entry.getUserIdentitySource) {
+    return;
+  }
+
+  const identity = await entry.getUserIdentitySource();
+  await applyAuthIdentity(entry, identity, false);
+}
+
 function wrapFetchToken(
   entry: AuthEntry,
   runtime: EmbeddedRuntime,
@@ -1364,6 +1446,7 @@ function wrapFetchToken(
         } else {
           notifyAuthListeners(entry, { status: "unauthenticated" });
         }
+        entry.sessionFanout?.notify({ type: "authChanged" });
         return token;
       }
 
@@ -1371,6 +1454,7 @@ function wrapFetchToken(
       const identityKey =
         getIdentityKeyForState?.(identity) ?? getIdentityKey(identity);
       runtime.setIdentity(identity);
+      runtime.setActiveIdentityKey(identityKey);
       await migrateAnonymousNamespaceIfNeeded(
         entry,
         previous.identityKey,
@@ -1388,6 +1472,7 @@ function wrapFetchToken(
       } else {
         notifyAuthListeners(entry, toAuthenticatedState(identity, identityKey));
       }
+      entry.sessionFanout?.notify({ type: "authChanged" });
       return token;
     } catch (err) {
       runtime.setIdentity(null);
@@ -1414,6 +1499,7 @@ function installIdentityBridge(
         getIdentityKeyForState?.(identity) ?? getIdentityKey(identity);
       entry.activeIdentityKey = identityKey;
       runtime.setIdentity(identity);
+      runtime.setActiveIdentityKey(identityKey);
       void writeStoredActiveIdentityKey(runtime, identityKey);
       notifyAuthListeners(
         entry,
@@ -1448,6 +1534,7 @@ function _installAuth(
       options.authOptions?.getUserIdentity,
       options.authOptions?.getIdentityKey,
     );
+    entry.currentAuthFetcher = wrappedFetchToken;
 
     originalSetAuth(wrappedFetchToken, onChange);
     options.forwardSetAuth?.(wrappedFetchToken, onChange);
@@ -1479,7 +1566,7 @@ function toResolvePhase(status: any): BrowserResolvePhase {
           }
         : undefined,
     }),
-    resolved: (): BrowserResolvePhase => ({ _tag: "Synced" }),
+    resolved: (): BrowserResolvePhase => ({ _tag: "Ready" }),
     error: (current: any): BrowserResolvePhase => ({
       _tag: "Error",
       error: current.error,
@@ -1494,16 +1581,16 @@ function toResolvePhase(status: any): BrowserResolvePhase {
   return handler(status);
 }
 
-function toResolveState(phase: BrowserResolvePhase): ResolveState {
+function toRemoteState(phase: BrowserResolvePhase): RemoteState {
   return matchTag(phase, "_tag", {
-    Idle: (): ResolveState => ({ status: "idle" }),
-    Syncing: (current): ResolveState => ({
-      status: "syncing",
+    Idle: (): RemoteState => ({ status: "idle" }),
+    Syncing: (current): RemoteState => ({
+      status: "resolving",
       progress: current.progress,
     }),
-    Synced: (): ResolveState => ({ status: "synced" }),
-    Offline: (): ResolveState => ({ status: "offline" }),
-    Error: (current): ResolveState => ({
+    Ready: (): RemoteState => ({ status: "ready" }),
+    Offline: (): RemoteState => ({ status: "offline" }),
+    Error: (current): RemoteState => ({
       status: "error",
       error: current.error,
     }),
@@ -1584,7 +1671,7 @@ async function _loadEngine(): Promise<any> {
 
 /**
  * @internal
- * Attach a resolve engine to a ConvexClient. Discovers sync metadata from
+ * Attach a resolve engine to a ConvexClient. Discovers remote metadata from
  * modules, creates the engine, patches client.mutation for local-first
  * writes, and starts the engine.
  */
@@ -1592,7 +1679,7 @@ function _attachResolve(
   client: ConvexClient,
   runtime: EmbeddedRuntime,
   authEntry: AuthEntry,
-  resolveOpts: ResolveOptions,
+  resolveOpts: RemoteOptions,
   modules: Record<string, () => Promise<ConvexModule>>,
   getIdentityKeyForSync: () => string | null,
 ): ResolveAttachment {
@@ -1626,7 +1713,7 @@ function _attachResolve(
     ) => Promise<unknown>,
   };
 
-  // Discover sync metadata will happen async after modules load.
+  // Discover remote metadata will happen async after modules load.
   // For now create with empty tables — will be populated before start.
   const entry: ResolveEntry = {
     engine: null,
@@ -1640,7 +1727,7 @@ function _attachResolve(
 
   _resolveEntries.set(client, entry);
 
-  // Discover sync metadata from modules, then create + start engine
+  // Discover remote metadata from modules, then create + start engine
   const discovery = _discoverAndStart(
     entry,
     authEntry,
@@ -1742,7 +1829,7 @@ function _attachResolve(
 
 /**
  * @internal
- * Scan loaded modules for __syncMeta exports, build TableConfig map,
+ * Scan loaded modules for remote metadata exports, build TableConfig map,
  * create the resolve engine, wire status listener, and start.
  */
 async function _discoverAndStart(
@@ -1759,7 +1846,7 @@ async function _discoverAndStart(
     ) => Promise<Array<Record<string, unknown>>>;
   },
   remoteClient: ConvexClient,
-  resolveOpts: ResolveOptions,
+  resolveOpts: RemoteOptions,
   modules: Record<string, () => Promise<ConvexModule>>,
   getIdentityKeyForSync: () => string | null,
 ): Promise<void> {
@@ -1810,7 +1897,7 @@ async function _discoverAndStart(
             warnModuleLoadFailures(current.moduleLoadFailures);
             if (entry.remoteOnlyRefs.size === 0) {
               console.warn(
-                "[convex-embedded] sync enabled but no sync metadata found in modules. " +
+                "[convex-embedded] remote enabled but no remote metadata found in modules. " +
                   "Make sure your Convex modules export `tasks.resolve` (for example `export const resolve = tasks.resolve`).",
               );
             }
@@ -1872,9 +1959,9 @@ async function _discoverAndStart(
   return Fx.run(setup);
 }
 
-/** @internal Map internal EngineStatus to public {@link ResolveState}. */
-function _mapStatus(s: any): ResolveState {
-  return Fx.pipe(s, toResolvePhase, toResolveState);
+/** @internal Map internal EngineStatus to public {@link RemoteState}. */
+function _mapStatus(s: any): RemoteState {
+  return Fx.pipe(s, toResolvePhase, toRemoteState);
 }
 
 // ---------------------------------------------------------------------------
@@ -1900,6 +1987,7 @@ function openStorage(
   runtime: EmbeddedRuntime,
   name: string,
   workerUrl?: URL | string,
+  encryption?: ClientOptions["encryption"],
 ): Promise<void> {
   const pipeline = Fx.gen(function* () {
     // Step 1: Compile the WASM module.
@@ -1917,10 +2005,17 @@ function openStorage(
     }
 
     // Step 2: Create the wa-sqlite storage adapter (worker init).
-    const storage = yield* Fx.from({
+    let storage = yield* Fx.from({
       ok: () => openWaSqliteStorage({ name, wasmModule, workerUrl }),
       err: (err) => err as Error,
     });
+
+    if (encryption) {
+      storage = createEncryptedStorage(storage, {
+        ...encryption,
+        getIdentityKey: () => runtime.getIdentityKey(),
+      });
+    }
 
     // Step 3: Attach the storage adapter to the database for persistence.
     runtime.db.setStorage(storage);

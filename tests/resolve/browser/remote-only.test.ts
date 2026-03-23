@@ -106,15 +106,19 @@ function createModules() {
 
 function createNestedModules() {
   const resolveExport = () => {};
-  Object.defineProperty(resolveExport, Symbol.for("convex-resolve:syncMeta"), {
-    value: {
-      __brand: "convex-resolve:syncMeta",
-      table: "messages",
-      resolveExport: "resolve",
-      listExport: "list",
-      schema: undefined,
+  Object.defineProperty(
+    resolveExport,
+    Symbol.for("convex-embedded:remoteMeta"),
+    {
+      value: {
+        __brand: "convex-embedded:remoteMeta",
+        table: "messages",
+        resolveExport: "resolve",
+        listExport: "list",
+        schema: undefined,
+      },
     },
-  });
+  );
 
   return {
     "./convex/_generated/api.ts": async () => ({}),
@@ -129,15 +133,19 @@ function createNestedModules() {
 function createDelayedSyncModules() {
   let resolveLoader!: (value: Record<string, unknown>) => void;
   const resolveExport = () => {};
-  Object.defineProperty(resolveExport, Symbol.for("convex-resolve:syncMeta"), {
-    value: {
-      __brand: "convex-resolve:syncMeta",
-      table: "tasks",
-      resolveExport: "resolve",
-      listExport: "list",
-      schema: undefined,
+  Object.defineProperty(
+    resolveExport,
+    Symbol.for("convex-embedded:remoteMeta"),
+    {
+      value: {
+        __brand: "convex-embedded:remoteMeta",
+        table: "tasks",
+        resolveExport: "resolve",
+        listExport: "list",
+        schema: undefined,
+      },
     },
-  });
+  );
 
   return {
     modules: {
@@ -154,15 +162,19 @@ function createDelayedSyncModules() {
 
 function createSyncModules() {
   const resolveExport = () => {};
-  Object.defineProperty(resolveExport, Symbol.for("convex-resolve:syncMeta"), {
-    value: {
-      __brand: "convex-resolve:syncMeta",
-      table: "tasks",
-      resolveExport: "resolve",
-      listExport: "list",
-      schema: undefined,
+  Object.defineProperty(
+    resolveExport,
+    Symbol.for("convex-embedded:remoteMeta"),
+    {
+      value: {
+        __brand: "convex-embedded:remoteMeta",
+        table: "tasks",
+        resolveExport: "resolve",
+        listExport: "list",
+        schema: undefined,
+      },
     },
-  });
+  );
 
   return {
     "./convex/_generated/api.ts": async () => ({}),
@@ -178,15 +190,19 @@ function createSyncModules() {
 
 function createScopedSyncModules() {
   const resolveExport = () => {};
-  Object.defineProperty(resolveExport, Symbol.for("convex-resolve:syncMeta"), {
-    value: {
-      __brand: "convex-resolve:syncMeta",
-      table: "tasks",
-      resolveExport: "resolve",
-      listExport: null,
-      schema: undefined,
+  Object.defineProperty(
+    resolveExport,
+    Symbol.for("convex-embedded:remoteMeta"),
+    {
+      value: {
+        __brand: "convex-embedded:remoteMeta",
+        table: "tasks",
+        resolveExport: "resolve",
+        listExport: null,
+        schema: undefined,
+      },
     },
-  });
+  );
 
   const listMine = () => [];
   Object.defineProperty(
@@ -258,7 +274,7 @@ describe("remoteOnly routing", () => {
   it("routes remoteOnly mutations to remote client", async () => {
     const client = createConvexClient({
       modules: createModules(),
-      sync: { url: REMOTE_URL },
+      remote: { url: REMOTE_URL },
     }) as any;
     clientsToClose.push(client);
 
@@ -277,7 +293,7 @@ describe("remoteOnly routing", () => {
   it("keeps non-remote mutations on local client", async () => {
     const client = createConvexClient({
       modules: createModules(),
-      sync: { url: REMOTE_URL },
+      remote: { url: REMOTE_URL },
     }) as any;
     clientsToClose.push(client);
 
@@ -298,7 +314,7 @@ describe("remoteOnly routing", () => {
   it("throws immediately when remoteOnly mutation is called offline", async () => {
     const client = createConvexClient({
       modules: createModules(),
-      sync: { url: REMOTE_URL },
+      remote: { url: REMOTE_URL },
     }) as any;
     clientsToClose.push(client);
 
@@ -326,7 +342,7 @@ describe("remoteOnly routing", () => {
   it("routes remoteOnly query and onUpdate subscription to remote", async () => {
     const client = createConvexClient({
       modules: createModules(),
-      sync: { url: REMOTE_URL },
+      remote: { url: REMOTE_URL },
     }) as any;
     clientsToClose.push(client);
 
@@ -356,7 +372,7 @@ describe("remoteOnly routing", () => {
   it("preserves nested module paths for remoteOnly routing", async () => {
     const client = createConvexClient({
       modules: createNestedModules(),
-      sync: { url: REMOTE_URL },
+      remote: { url: REMOTE_URL },
     }) as any;
     clientsToClose.push(client);
 
@@ -374,10 +390,10 @@ describe("remoteOnly routing", () => {
     });
   });
 
-  it("preserves nested module paths for sync table discovery", async () => {
+  it("preserves nested module paths for remote table discovery", async () => {
     const client = createConvexClient({
       modules: createNestedModules(),
-      sync: { url: REMOTE_URL },
+      remote: { url: REMOTE_URL },
     }) as any;
     clientsToClose.push(client);
 
@@ -396,10 +412,10 @@ describe("remoteOnly routing", () => {
     );
   });
 
-  it("uses explicit scoped sync queries when provided", async () => {
+  it("uses explicit scoped remote queries when provided", async () => {
     const client = createConvexClient({
       modules: createScopedSyncModules(),
-      sync: { url: REMOTE_URL },
+      remote: { url: REMOTE_URL },
     }) as any;
     clientsToClose.push(client);
 
@@ -425,7 +441,7 @@ describe("remoteOnly routing", () => {
   it("forwards setAuth to remote client", async () => {
     const client = createConvexClient({
       modules: createModules(),
-      sync: { url: REMOTE_URL },
+      remote: { url: REMOTE_URL },
     }) as any;
     clientsToClose.push(client);
 
@@ -449,7 +465,7 @@ describe("remoteOnly routing", () => {
     const delayed = createDelayedSyncModules();
     const client = createConvexClient({
       modules: delayed.modules as any,
-      sync: { url: REMOTE_URL },
+      remote: { url: REMOTE_URL },
     }) as any;
 
     await settle();
@@ -467,7 +483,7 @@ describe("remoteOnly routing", () => {
 
     const client = createConvexClient({
       modules: createSyncModules(),
-      sync: { url: REMOTE_URL },
+      remote: { url: REMOTE_URL },
     }) as any;
     clientsToClose.push(client);
 
@@ -482,7 +498,7 @@ describe("remoteOnly routing", () => {
     try {
       const client = createConvexClient({
         modules: createSyncModulesWithFailure(),
-        sync: { url: REMOTE_URL },
+        remote: { url: REMOTE_URL },
       }) as any;
       clientsToClose.push(client);
 
@@ -490,7 +506,7 @@ describe("remoteOnly routing", () => {
 
       expect(warnSpy).toHaveBeenCalledWith(
         expect.stringContaining(
-          "failed to load during sync discovery and were skipped",
+          "failed to load during remote discovery and were skipped",
         ),
         expect.any(Error),
       );
@@ -506,7 +522,7 @@ describe("remoteOnly routing", () => {
 
     const client = createConvexClient({
       modules: createSyncModules(),
-      sync: { url: REMOTE_URL },
+      remote: { url: REMOTE_URL },
     }) as any;
     clientsToClose.push(client);
 

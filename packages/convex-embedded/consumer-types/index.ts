@@ -12,17 +12,18 @@ import {
   getAuthIdentity,
   compileWasmModule,
   createConvexClient,
-  getResolveState,
+  getRemoteState,
   logout,
+  reauthenticate,
   setAuthIdentity,
   subscribeAuthState,
-  subscribeResolveState,
+  subscribeRemoteState,
   switchIdentity,
   type AuthOptions,
   type AuthState,
   type ClientOptions,
-  type ResolveOptions,
-  type ResolveState,
+  type RemoteOptions,
+  type RemoteState,
 } from "@robelest/convex-embedded/browser";
 import {
   IdMap,
@@ -67,17 +68,18 @@ type _BrowserSurface = {
   createConvexClient: typeof createConvexClient;
   getAuthIdentity: typeof getAuthIdentity;
   getAuthState: typeof getAuthState;
-  getResolveState: typeof getResolveState;
+  getRemoteState: typeof getRemoteState;
   logout: typeof logout;
+  reauthenticate: typeof reauthenticate;
   setAuthIdentity: typeof setAuthIdentity;
   subscribeAuthState: typeof subscribeAuthState;
-  subscribeResolveState: typeof subscribeResolveState;
+  subscribeRemoteState: typeof subscribeRemoteState;
   switchIdentity: typeof switchIdentity;
   authOptions: AuthOptions | null;
   authState: AuthState | null;
   clientOptions: ClientOptions | null;
-  resolveOptions: ResolveOptions | null;
-  resolveState: ResolveState | null;
+  remoteOptions: RemoteOptions | null;
+  remoteState: RemoteState | null;
 };
 
 type _ClientSurface = {
@@ -124,17 +126,18 @@ void (<_BrowserSurface>{
   createConvexClient,
   getAuthIdentity,
   getAuthState,
-  getResolveState,
+  getRemoteState,
   logout,
+  reauthenticate,
   setAuthIdentity,
   subscribeAuthState,
-  subscribeResolveState,
+  subscribeRemoteState,
   switchIdentity,
   authOptions: null,
   authState: null,
   clientOptions: null,
-  resolveOptions: null,
-  resolveState: null,
+  remoteOptions: null,
+  remoteState: null,
 });
 
 void (<_ClientSurface>{

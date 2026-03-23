@@ -108,7 +108,7 @@ export interface CrdtFieldDescriptor {
 }
 
 // ---------------------------------------------------------------------------
-// Resolve / sync types — wire format between client and server
+// Resolve / remote types — wire format between client and server
 // ---------------------------------------------------------------------------
 
 export interface ResolveRequest {

@@ -53,7 +53,7 @@ export default defineConfig([
     outExtensions: jsExtensions,
     alias: srcAlias,
   },
-  // Resolve client (browser) — sync engine
+  // Resolve client (browser) — remote engine
   {
     entry: { "client/index": "src/client/index.ts" },
     format: "esm",

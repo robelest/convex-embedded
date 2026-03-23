@@ -274,12 +274,14 @@ const pendingPush: SystemFunctionDef = {
       localResult,
       table,
       identityKey,
+      state,
     } = args as {
       ref: string;
       args: string;
       localResult: string;
       table: string;
       identityKey?: string | null;
+      state?: "pending" | "blocked";
     };
     const id = db.insert("_resolve_pending", {
       ref,
@@ -287,6 +289,7 @@ const pendingPush: SystemFunctionDef = {
       localResult,
       table,
       identityKey: identityKey ?? null,
+      state: state ?? "pending",
       createdAt: Date.now(),
     });
     return id as string;
@@ -327,6 +330,8 @@ const pendingGetAll: SystemFunctionDef = {
           localResult: (next.value as any).localResult,
           table: (next.value as any).table,
           identityKey: (next.value as any).identityKey,
+          state: (next.value as any).state,
+          blockedReason: (next.value as any).blockedReason,
           createdAt: (next.value as any).createdAt,
         });
       }
@@ -394,6 +399,59 @@ const pendingClear: SystemFunctionDef = {
 
     for (const id of ids) {
       db.delete("_resolve_pending", id);
+    }
+    return null;
+  },
+};
+
+const pendingBlock: SystemFunctionDef = {
+  type: "mutation",
+  handler: (db, args) => {
+    const { id, reason } = args as {
+      id: string;
+      reason: "reauthRequired" | "authorizationDenied" | "scopeChanged";
+    };
+    const doc = db.get("_resolve_pending", id as DocumentId);
+    if (doc !== null) {
+      db.patch("_resolve_pending", id as DocumentId, {
+        state: "blocked",
+        blockedReason: reason,
+      });
+    }
+    return null;
+  },
+};
+
+const pendingUnblockAll: SystemFunctionDef = {
+  type: "mutation",
+  handler: (db, args) => {
+    const { identityKey } = args as { identityKey?: string | null };
+    const ids: DocumentId[] = [];
+    const qid = db.startQuery({
+      source: {
+        type: "FullTableScan",
+        tableName: "_resolve_pending",
+        order: null,
+      },
+      operators: [],
+    });
+    let next = db.queryNext(qid);
+    while (!next.done) {
+      if (
+        next.value &&
+        matchesIdentityKey(next.value as any, identityKey ?? null)
+      ) {
+        ids.push(next.value._id as DocumentId);
+      }
+      next = db.queryNext(qid);
+    }
+    db.queryCleanup(qid);
+
+    for (const id of ids) {
+      db.patch("_resolve_pending", id, {
+        state: "pending",
+        blockedReason: { $undefined: true },
+      });
     }
     return null;
   },
@@ -516,6 +574,8 @@ export const SYSTEM_FUNCTIONS: Record<string, SystemFunctionDef> = {
   "_system:pendingGetAll": pendingGetAll,
   "_system:pendingRemove": pendingRemove,
   "_system:pendingClear": pendingClear,
+  "_system:pendingBlock": pendingBlock,
+  "_system:pendingUnblockAll": pendingUnblockAll,
   "_system:authStateSetActive": authStateSetActive,
   "_system:authStateGetActive": authStateGetActive,
   "_system:pendingListIdentityKeys": pendingListIdentityKeys,
@@ -535,6 +595,8 @@ export const SystemPaths = {
   pendingGetAll: "_system:pendingGetAll",
   pendingRemove: "_system:pendingRemove",
   pendingClear: "_system:pendingClear",
+  pendingBlock: "_system:pendingBlock",
+  pendingUnblockAll: "_system:pendingUnblockAll",
   authStateSetActive: "_system:authStateSetActive",
   authStateGetActive: "_system:authStateGetActive",
   pendingListIdentityKeys: "_system:pendingListIdentityKeys",

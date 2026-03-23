@@ -148,7 +148,7 @@ export interface Definition {
   getShape(version?: number): Record<string, unknown>;
   /** Get all CRDT field names and their types for the current version. */
   getCrdtFields(): Map<string, CrdtFieldDescriptor>;
-  /** Get field names that should be omitted from local sync. */
+  /** Get field names that should be omitted from local remote. */
   getOmittedFields(): string[];
 }
 

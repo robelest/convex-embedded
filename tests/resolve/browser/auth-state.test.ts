@@ -5,6 +5,7 @@ import {
   getAuthState,
   getAuthIdentity,
   logout,
+  reauthenticate,
   subscribeAuthState,
   switchIdentity,
 } from "@resolve/browser/index";
@@ -53,6 +54,36 @@ vi.mock("convex/browser", () => {
   };
 });
 
+class MockBroadcastChannel {
+  static instances: MockBroadcastChannel[] = [];
+  onmessage: ((ev: MessageEvent) => void) | null = null;
+  name: string;
+  private _closed = false;
+
+  constructor(name: string) {
+    this.name = name;
+    MockBroadcastChannel.instances.push(this);
+  }
+
+  postMessage(data: unknown): void {
+    if (this._closed) return;
+    for (const instance of MockBroadcastChannel.instances.filter(
+      (current) =>
+        current !== this && current.name === this.name && !current._closed,
+    )) {
+      instance.onmessage?.({ data } as MessageEvent);
+    }
+  }
+
+  close(): void {
+    this._closed = true;
+  }
+
+  static reset(): void {
+    MockBroadcastChannel.instances = [];
+  }
+}
+
 function createModules() {
   return {
     "./convex/_generated/api.ts": async () => ({}),
@@ -75,10 +106,13 @@ describe("auth state accessors", () => {
       __mock: { reset: () => void };
     };
     convexBrowser.__mock.reset();
+    MockBroadcastChannel.reset();
+    vi.stubGlobal("BroadcastChannel", MockBroadcastChannel);
   });
 
   afterEach(async () => {
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
     for (const client of clientsToClose.splice(0)) {
       await client.close();
     }
@@ -179,6 +213,10 @@ describe("auth state accessors", () => {
 
   it("supports custom identity keys", async () => {
     const identity = createTestIdentity({ subject: "carol" });
+    const setActiveIdentityKeySpy = vi.spyOn(
+      EmbeddedRuntime.prototype,
+      "setActiveIdentityKey",
+    );
 
     const client = createConvexClient({
       modules: createModules(),
@@ -197,6 +235,7 @@ describe("auth state accessors", () => {
       identity,
       identityKey: "workspace:carol",
     });
+    expect(setActiveIdentityKeySpy).toHaveBeenCalledWith("workspace:carol");
   });
 
   it("exposes the active embedded identity", async () => {
@@ -253,6 +292,51 @@ describe("auth state accessors", () => {
       status: "authenticated",
       identity: bob,
       identityKey: bob.tokenIdentifier,
+    });
+  });
+
+  it("reauthenticate forces a token refresh", async () => {
+    const identity = createTestIdentity({ subject: "frank" });
+    const fetchToken = vi.fn(async () => "token");
+
+    const client = createConvexClient({
+      modules: createModules(),
+      auth: {
+        fetchToken,
+        getUserIdentity: async () => identity,
+      },
+    });
+    clientsToClose.push(client as any);
+
+    await reauthenticate(client);
+
+    expect(fetchToken).toHaveBeenCalledWith({ forceRefreshToken: true });
+  });
+
+  it("propagates auth changes across tabs when getUserIdentity is configured", async () => {
+    let currentIdentity = createTestIdentity({ subject: "alice" });
+
+    const clientA = createConvexClient({
+      modules: createModules(),
+      name: "shared-app",
+      auth: { getUserIdentity: async () => currentIdentity },
+    });
+    const clientB = createConvexClient({
+      modules: createModules(),
+      name: "shared-app",
+      auth: { getUserIdentity: async () => currentIdentity },
+    });
+    clientsToClose.push(clientA as any, clientB as any);
+
+    await settle();
+    currentIdentity = createTestIdentity({ subject: "bob" });
+    await switchIdentity(clientA, currentIdentity);
+    await settle();
+
+    expect(getAuthState(clientB)).toEqual({
+      status: "authenticated",
+      identity: currentIdentity,
+      identityKey: currentIdentity.tokenIdentifier,
     });
   });
 });

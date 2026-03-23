@@ -393,7 +393,7 @@ function promise<A>(f: () => Promise<A>): Fx<A, never> {
  *
  * @example
  * ```ts
- * // Wrapping a remote query call with typed error mapping
+ * // Wrapping a query call with typed error mapping
  * const resolveTable = Fx.from({
  *   ok: () => remoteClient.query(tableConfig.resolve, { documents: [] }),
  *   err: (err) => err as Error,
@@ -2165,7 +2165,7 @@ function pipe(a: unknown, ...fns: Array<(x: unknown) => unknown>): unknown {
  * ```ts
  * import { Fx } from "@robelest/fx";
  *
- * // Fire-and-forget a remote mutation push
+ * // Fire-and-forget a mutation push
  * Fx.detach(
  *   () => Fx.run(
  *     Fx.from({

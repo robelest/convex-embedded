@@ -2,7 +2,7 @@
  * Main embedded runtime.
  *
  * Wires together all subsystems — database, module loader, UDF executor,
- * transaction manager, subscriptions, sync protocol, sessions, write fanout,
+ * transaction manager, subscriptions, remote protocol, sessions, write fanout,
  * auth, scheduler, and blob storage — into a single cohesive runtime that
  * ConvexClient can talk to via an in-memory transport.
  */
@@ -16,6 +16,7 @@ import { Database } from "@/core/database";
 import type { DatabaseCommitResult } from "@/core/database";
 import { parseSchema } from "@/core/schema";
 import type { ParsedSchema, SchemaExport } from "@/core/schema";
+import type { QueryDependency } from "@/core/types";
 import type { DocumentId, StoredDocument } from "@/core/types";
 import { ModuleLoader } from "@/kernel/module-loader";
 import type { ConvexModule, FunctionPath } from "@/kernel/module-loader";
@@ -98,6 +99,8 @@ export interface EmbeddedRuntimeOptions {
   schema?: SchemaExport;
   /** Optional durable storage backend. When omitted the runtime is purely in-memory. */
   storage?: StorageAdapter;
+  /** Optional verifier for embedded auth tokens. */
+  verifyToken?: (token: string) => Promise<UserIdentity | null>;
 }
 
 // ---------------------------------------------------------------------------
@@ -130,6 +133,9 @@ export class EmbeddedRuntime {
   readonly sessions: SessionManager;
   readonly writeFanout: WriteFanout;
   readonly auth: AuthResolver;
+  private readonly _verifyTokenHook:
+    | ((token: string) => Promise<UserIdentity | null>)
+    | null;
   readonly scheduler: SchedulerExecutor;
 
   private _schema: ParsedSchema | null;
@@ -154,6 +160,7 @@ export class EmbeddedRuntime {
     // 1. Parse schema (if provided) ----------------------------------------
     this._schema = options.schema ? parseSchema(options.schema) : null;
     this._storageAdapter = options.storage ?? null;
+    this._verifyTokenHook = options.verifyToken ?? null;
 
     // 2. Core database -----------------------------------------------------
     this.db = new Database(this._schema, options.storage);
@@ -317,6 +324,10 @@ export class EmbeddedRuntime {
     return this.auth.peekUserIdentity();
   }
 
+  getIdentityKey(): string | null {
+    return this.db.getActiveIdentityKey();
+  }
+
   async migrateAnonymousDataToIdentity(identityKey: string): Promise<void> {
     await this._hydrated;
 
@@ -335,7 +346,13 @@ export class EmbeddedRuntime {
       return;
     }
 
-    const updates = await this.syncProtocol.reEvaluateQueries();
+    const updates = await this.syncProtocol.reEvaluateQueries(
+      Array.from(tablesWritten).map((tableName) => ({
+        tableName,
+        before: null,
+        after: null,
+      })),
+    );
     await this._pushProtocolUpdates(updates);
   }
 
@@ -522,7 +539,13 @@ export class EmbeddedRuntime {
           );
 
           // 2. Re-evaluate all active queries.
-          const updates = await this.syncProtocol.reEvaluateQueries();
+          const updates = await this.syncProtocol.reEvaluateQueries(
+            Array.from(tablesWritten).map((tableName) => ({
+              tableName,
+              before: null,
+              after: null,
+            })),
+          );
 
           // 3. Push Transition messages to all connected loopback sockets.
           for (const [sessionId, messages] of updates) {
@@ -538,7 +561,7 @@ export class EmbeddedRuntime {
       }).pipe(
         Fx.inspect((err) =>
           Fx.sync(() =>
-            console.error("[convex-embedded] cross-tab sync failed:", err),
+            console.error("[convex-embedded] cross-tab remote failed:", err),
           ),
         ),
         Fx.recover(() => Fx.unit),
@@ -637,6 +660,18 @@ export class EmbeddedRuntime {
 
         onCommit({
           tablesWritten: new Set([table]),
+          changes: [
+            ...toUpsert.map((after) => ({
+              tableName: table,
+              before: localMap.get(after._id as string) ?? null,
+              after,
+            })),
+            ...toDelete.map((id) => ({
+              tableName: table,
+              before: localMap.get(id) ?? null,
+              after: null,
+            })),
+          ],
           persisted: Promise.resolve(),
           timestamp: db.timestamp,
         });
@@ -644,7 +679,9 @@ export class EmbeddedRuntime {
         // Re-evaluate all active queries and push Transition messages.
         yield* Fx.from({
           ok: async () => {
-            const updates = await syncProtocol.reEvaluateQueries();
+            const updates = await syncProtocol.reEvaluateQueries([
+              { tableName, before: null, after: null },
+            ]);
             await pushProtocolUpdates(updates);
           },
           err: (e) => e as Error,
@@ -936,25 +973,50 @@ export class EmbeddedRuntime {
    */
   private _buildProtocolExecutor(): ProtocolExecutor {
     return {
-      runQuery: async (udfPath: string, ...args: unknown[]) => {
+      runQuery: async (context, udfPath: string, ...args: unknown[]) => {
         const path = resolveFunctionPath({ name: udfPath });
         // args[0] is the convexToJson'd args object from the client
         const convexArgs = (args[0] ?? {}) as Record<string, unknown>;
         // _runUdf always returns JSON-serialisable values for queries
-        return (await this._runUdf("query", path, convexArgs)) as JSONValue;
+        const dependencies: QueryDependency[] = [];
+        const result = (await this._runWithTransactionLock(() =>
+          this.executor.executeQuery(path, convexArgs, {
+            holdsTransactionLock: true,
+            identity: context.identity,
+            identityKey: context.identityKey,
+            dependencies,
+          }),
+        )) as JSONValue;
+        const tablesRead = new Set(
+          dependencies.map((dependency) => dependency.tableName),
+        );
+        return { result, tablesRead, dependencies };
       },
 
-      runMutation: async (udfPath: string, ...args: unknown[]) => {
+      runMutation: async (context, udfPath: string, ...args: unknown[]) => {
         const path = resolveFunctionPath({ name: udfPath });
         const convexArgs = (args[0] ?? {}) as Record<string, unknown>;
-        const result = await this._runUdf("mutation", path, convexArgs);
-        return result as JSONValue;
+        const { result, commit } = await this._runWithTransactionLock(() =>
+          this.executor.executeMutation(path, convexArgs, {
+            holdsTransactionLock: true,
+            identity: context.identity,
+            identityKey: context.identityKey,
+          }),
+        );
+        this.onMutationCommit(commit);
+        return {
+          result: result as JSONValue,
+          tablesWritten: commit.tablesWritten,
+        };
       },
 
-      runAction: async (udfPath: string, ...args: unknown[]) => {
+      runAction: async (context, udfPath: string, ...args: unknown[]) => {
         const path = resolveFunctionPath({ name: udfPath });
         const convexArgs = (args[0] ?? {}) as Record<string, unknown>;
-        return (await this._runUdf("action", path, convexArgs)) as JSONValue;
+        return (await this.executor.executeAction(path, convexArgs, {
+          identity: context.identity,
+          identityKey: context.identityKey,
+        })) as JSONValue;
       },
     };
   }
@@ -970,6 +1032,17 @@ export class EmbeddedRuntime {
   private _buildProtocolAuth() {
     return {
       verifyToken: async (token: string) => {
+        if (this._verifyTokenHook) {
+          const verified = await this._verifyTokenHook(token);
+          if (!verified) {
+            throw new Error("Authentication token rejected");
+          }
+          return {
+            identity: verified,
+            identityKey: getIdentityKey(verified as UserIdentity | null),
+          };
+        }
+
         // In the embedded runtime, tokens are not cryptographically verified.
         // If an identity has been set via setIdentity(), return it.
         // Otherwise treat an empty/missing token as unauthenticated.
@@ -982,7 +1055,10 @@ export class EmbeddedRuntime {
             "No identity configured. Call runtime.setIdentity() first.",
           );
         }
-        return identity;
+        return {
+          identity,
+          identityKey: getIdentityKey(identity as UserIdentity | null),
+        };
       },
     };
   }

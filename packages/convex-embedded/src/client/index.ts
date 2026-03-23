@@ -1,7 +1,7 @@
 /**
  * convex-resolve/client
  *
- * Client-side entry point for sync internals.
+ * Client-side entry point for remote internals.
  *
  * Most users should use `createConvexClient()` from
  * `@robelest/convex-embedded/browser` instead of importing

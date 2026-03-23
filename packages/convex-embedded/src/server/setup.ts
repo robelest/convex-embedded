@@ -142,11 +142,11 @@ export function _resetRegistry(): void {
 }
 
 // ---------------------------------------------------------------------------
-// SYNC_META — cross-package discovery symbol (kept for backward compat)
+// REMOTE_META — cross-package discovery symbol
 // ---------------------------------------------------------------------------
 
 /**
- * Global symbol used to tag the `resolve` export with sync metadata.
+ * Global symbol used to tag the `resolve` export with remote metadata.
  *
  * @deprecated — The registry-based discovery in `embeddedTable()` +
  * `setup()` replaces symbol scanning. Kept for backward compatibility
@@ -154,7 +154,7 @@ export function _resetRegistry(): void {
  *
  * @internal
  */
-export const SYNC_META = Symbol.for("convex-resolve:syncMeta");
+export const REMOTE_META = Symbol.for("convex-embedded:remoteMeta");
 export const RESOLVE_QUERY_META = Symbol.for(
   "convex-embedded:resolveQueryMeta",
 );
@@ -178,8 +178,8 @@ export function remoteOnly<T>(fn: T): T {
  * @internal — consumed by the client-side resolve engine during
  * auto-discovery. App code never reads this directly.
  */
-export interface SyncMeta {
-  readonly __brand: "convex-resolve:syncMeta";
+export interface RemoteMeta {
+  readonly __brand: "convex-embedded:remoteMeta";
   readonly table: string;
   readonly schema: Definition;
   readonly resolveExport: string;
@@ -254,7 +254,7 @@ export interface EmbeddedTableHandle {
   readonly schema: Definition;
 
   /**
-   * The auto-generated resolve query. Tagged with {@link SYNC_META}.
+   * The auto-generated resolve query. Tagged with {@link REMOTE_META}.
    * After `setup()` runs this is a registered Convex query; before
    * `setup()` it is a raw `{ args, handler }` definition.
    */
@@ -604,16 +604,16 @@ export function embeddedTable(
     configurable: true,
   });
 
-  // Tag resolve with SyncMeta for backward-compatible symbol scanning.
+  // Tag resolve with RemoteMeta for remote discovery.
   function tagResolve(resolveObj: any): void {
-    Object.defineProperty(resolveObj, SYNC_META, {
+    Object.defineProperty(resolveObj, REMOTE_META, {
       value: {
-        __brand: "convex-resolve:syncMeta" as const,
+        __brand: "convex-embedded:remoteMeta" as const,
         table: tableName,
         schema: schemaDef,
         resolveExport: "resolve",
         listExport: null,
-      } satisfies SyncMeta,
+      } satisfies RemoteMeta,
       enumerable: false,
       configurable: false,
     });

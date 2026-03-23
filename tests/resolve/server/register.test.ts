@@ -5,7 +5,7 @@ import {
   setup,
   _resetRegistry,
   RESOLVE_QUERY_META,
-  SYNC_META,
+  REMOTE_META,
 } from "@resolve/server/setup";
 import { v } from "convex/values";
 import { describe, it, expect, vi, beforeEach } from "vite-plus/test";
@@ -63,40 +63,40 @@ describe("embeddedTable()", () => {
     expect(argsJson).toBeDefined();
   });
 
-  it("tags resolve with SYNC_META symbol", () => {
+  it("tags resolve with REMOTE_META symbol", () => {
     const name = uniqueTable();
     const tasks = embeddedTable(name, {
       title: registerField(v.string()),
     });
 
-    const meta = tasks.resolve[SYNC_META];
+    const meta = tasks.resolve[REMOTE_META];
     expect(meta).toBeDefined();
-    expect(meta.__brand).toBe("convex-resolve:syncMeta");
+    expect(meta.__brand).toBe("convex-embedded:remoteMeta");
     expect(meta.table).toBe(name);
     expect(meta.resolveExport).toBe("resolve");
   });
 
-  it("SYNC_META is accessible via Symbol.for (cross-package)", () => {
+  it("REMOTE_META is accessible via Symbol.for (cross-package)", () => {
     const name = uniqueTable();
     const tasks = embeddedTable(name, {
       title: registerField(v.string()),
     });
 
-    const crossPkgSymbol = Symbol.for("convex-resolve:syncMeta");
+    const crossPkgSymbol = Symbol.for("convex-embedded:remoteMeta");
     const meta = tasks.resolve[crossPkgSymbol];
     expect(meta).toBeDefined();
     expect(meta.table).toBe(name);
   });
 
-  it("SYNC_META is not enumerable", () => {
+  it("REMOTE_META is not enumerable", () => {
     const tasks = embeddedTable(uniqueTable(), {
       title: registerField(v.string()),
     });
 
-    expect(Object.keys(tasks.resolve)).not.toContain(SYNC_META.toString());
+    expect(Object.keys(tasks.resolve)).not.toContain(REMOTE_META.toString());
     const keys = [];
     for (const k in tasks.resolve) keys.push(k);
-    expect(keys).not.toContain(SYNC_META.toString());
+    expect(keys).not.toContain(REMOTE_META.toString());
   });
 
   it("remoteOnly() tags function exports with a symbol", () => {

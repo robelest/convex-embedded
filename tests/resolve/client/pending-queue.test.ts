@@ -116,6 +116,7 @@ describe("push()", () => {
       localResult: JSON.stringify("uuid-1"),
       table: "tasks",
       identityKey: "user:alice",
+      state: "pending",
     });
   });
 

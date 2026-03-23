@@ -15,12 +15,12 @@ export {
   remoteOnly,
   getTableRegistry,
   _resetRegistry,
-  SYNC_META,
+  REMOTE_META,
 } from "@/server/setup";
 export type {
   SetupConfig,
   EmbeddedTableHandle,
-  SyncMeta,
+  RemoteMeta,
 } from "@/server/setup";
 
 // Schema system — CRDT field types + versioning

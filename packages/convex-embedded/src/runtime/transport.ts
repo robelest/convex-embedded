@@ -84,7 +84,7 @@ export interface EmbeddedTransport {
   /**
    * Push a server-initiated message to all active WebSocket connections.
    *
-   * Used by cross-tab sync to deliver `Transition` messages containing
+   * Used by cross-tab remote to deliver `Transition` messages containing
    * re-evaluated query results after another tab writes to the shared
    * IndexedDB store.
    */

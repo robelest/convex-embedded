@@ -12,7 +12,6 @@
     "paths": {
       "@embedded/*": ["../packages/convex-embedded/src/*"],
       "@resolve/*": ["../packages/convex-embedded/src/*"],
-      "@fx/*": ["../packages/fx/src/*"],
       "@convex/*": ["../convex/*"]
     }
   },

@@ -1,6 +1,7 @@
 import { SyncProtocolHandler } from "@embedded/sync/protocol";
 import type { ClientMessage } from "@embedded/sync/protocol";
 import { SubscriptionManager } from "@embedded/sync/subscriptions";
+import { Cv } from "@robelest/fx/convex";
 import { ConvexError } from "convex/values";
 import { describe, it, expect, vi } from "vite-plus/test";
 
@@ -830,7 +831,7 @@ describe("SyncProtocolHandler", () => {
     it("query failure includes errorData when UDF throws ConvexError", async () => {
       const { handler, executor } = createHandler();
       executor.runQuery.mockRejectedValue(
-        new ConvexError({ code: "NOT_FOUND", id: "abc123" }),
+        Cv.error({ code: "NOT_FOUND", id: "abc123" }),
       );
 
       const messages = await handler.handleMessage("s1", {
@@ -902,7 +903,7 @@ describe("SyncProtocolHandler", () => {
     it("action failure includes errorData when UDF throws ConvexError", async () => {
       const { handler, executor } = createHandler();
       executor.runAction.mockRejectedValue(
-        new ConvexError({ reason: "rate_limited", retryAfter: 30 }),
+        Cv.error({ reason: "rate_limited", retryAfter: 30 }),
       );
 
       const messages = await handler.handleMessage("s1", {
@@ -944,7 +945,7 @@ describe("SyncProtocolHandler", () => {
         ],
         code: 422,
       };
-      executor.runMutation.mockRejectedValue(new ConvexError(nestedData));
+      executor.runMutation.mockRejectedValue(Cv.error(nestedData));
 
       const messages = await handler.handleMessage("s1", {
         type: "Mutation",

@@ -26,6 +26,10 @@ Before installing, make sure you have:
 
 ## 1. Install the Package
 
+`@robelest/convex-embedded` depends on the standalone `@robelest/fx` package
+internally. You do not need to install `@robelest/fx` separately unless you are
+also using its lower-level APIs directly in your own code.
+
 <Tabs>
   <TabItem label="npm">
 

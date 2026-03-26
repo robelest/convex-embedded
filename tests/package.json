@@ -9,7 +9,6 @@
     "test:coverage": "vp test --run --coverage",
     "test:consumer": "vp run --filter @robelest/convex-embedded build && vp test --run resolve/package-consumer.test.ts",
     "bench": "vp test bench tests/benchmarks",
-    "test:fx": "vp test --run fx",
     "test:embedded": "vp test --run embedded",
     "test:resolve": "vp test --run resolve",
     "test:integration": "vp test --run integration"
@@ -17,6 +16,7 @@
   "devDependencies": {
     "@edge-runtime/vm": "^5.0.0",
     "@robelest/convex-embedded": "workspace:*",
+    "@robelest/fx": "0.0.1-preview.4",
     "@types/node": "^25.5.0",
     "convex": "catalog:",
     "convex-test": "^0.0.36",

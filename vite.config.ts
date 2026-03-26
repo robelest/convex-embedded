@@ -7,7 +7,6 @@ const embeddedSrc = path.resolve(
   import.meta.dirname,
   "packages/convex-embedded/src",
 );
-const fxSrc = path.resolve(import.meta.dirname, "packages/fx/src");
 const convexApp = path.resolve(import.meta.dirname, "convex");
 
 export default defineConfig({
@@ -66,7 +65,7 @@ export default defineConfig({
     tasks: {
       "cache:build": {
         command:
-          "vp exec convex codegen --component-dir ./packages/convex-embedded/src/component && vp run --filter @robelest/fx build && vp run --filter @robelest/convex-embedded build",
+          "vp exec convex codegen --component-dir ./packages/convex-embedded/src/component && vp run --filter @robelest/convex-embedded build",
         cache: true,
         input: [
           "convex/**",
@@ -137,8 +136,6 @@ export default defineConfig({
     alias: {
       "@embedded": embeddedSrc,
       "@resolve": embeddedSrc,
-      "@fx": fxSrc,
-      "@robelest/fx": path.join(fxSrc, "index.ts"),
       "@robelest/convex-embedded/server": path.join(
         embeddedSrc,
         "server/index.ts",

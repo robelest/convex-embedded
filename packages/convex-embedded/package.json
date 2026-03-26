@@ -71,7 +71,7 @@
     "prepublishOnly": "vp run build && vp run typecheck:consumer"
   },
   "dependencies": {
-    "@robelest/fx": "workspace:*",
+    "@robelest/fx": "0.0.1-preview.4",
     "convex-helpers": "^0.1.0",
     "yjs": "^13.6.0"
   },

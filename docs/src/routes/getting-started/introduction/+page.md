@@ -28,6 +28,12 @@ mutations write locally first and replay to the remote Convex deployment in the
 background. A Yjs CRDT resolve pass automatically merges any state that diverged
 while offline.
 
+`convex-embedded` builds on
+[`@robelest/fx`](https://www.npmjs.com/package/@robelest/fx) for its internal
+effect system. `@robelest/fx` now lives in its own repository, so
+`convex-embedded` consumes it as a normal published dependency rather than as an
+in-repo workspace package.
+
 ## Key Features
 
 <CardGrid>

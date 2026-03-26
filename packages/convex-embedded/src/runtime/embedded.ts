@@ -8,6 +8,7 @@
  */
 
 import { Fx } from "@robelest/fx";
+import { Cv } from "@robelest/fx/convex";
 import type { JSONValue } from "convex/values";
 
 import { AuthResolver, getIdentityKey } from "@/auth/resolver";
@@ -1035,7 +1036,10 @@ export class EmbeddedRuntime {
         if (this._verifyTokenHook) {
           const verified = await this._verifyTokenHook(token);
           if (!verified) {
-            throw new Error("Authentication token rejected");
+            throw Cv.error({
+              code: "AUTH_TOKEN_REJECTED",
+              message: "Authentication token rejected",
+            });
           }
           return {
             identity: verified,
@@ -1047,13 +1051,18 @@ export class EmbeddedRuntime {
         // If an identity has been set via setIdentity(), return it.
         // Otherwise treat an empty/missing token as unauthenticated.
         if (!token) {
-          throw new Error("No authentication token provided");
+          throw Cv.error({
+            code: "AUTH_TOKEN_MISSING",
+            message: "No authentication token provided",
+          });
         }
         const identity = await this.auth.getUserIdentity();
         if (identity === null) {
-          throw new Error(
-            "No identity configured. Call runtime.setIdentity() first.",
-          );
+          throw Cv.error({
+            code: "AUTH_IDENTITY_MISSING",
+            message:
+              "No identity configured. Call runtime.setIdentity() first.",
+          });
         }
         return {
           identity,

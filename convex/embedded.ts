@@ -7,7 +7,7 @@
  * and queries are registered at definition time via
  * `mutationGeneric` / `queryGeneric`.
  */
-import { setup } from "@robelest/convex-embedded/server";
+import { setup } from "@robelest/convex-embedded/server/table";
 
 import { components } from "./_generated/api";
 

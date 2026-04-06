@@ -96,7 +96,6 @@ export type MigrationErrorHandler = (
 export interface SchemaDefinition {
   version: number;
   shape: Record<string, unknown>;
-  history?: Record<number, Record<string, unknown>>;
   defaults?: Record<string, unknown>;
 }
 

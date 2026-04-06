@@ -18,14 +18,13 @@ how to resolve them.
 **Problem**: Convex SDK guards against importing server functions in the browser
 to prevent accidental secret leakage.
 
-**Solution**: This is handled automatically by convex-embedded. The library sets
-`globalThis.__convexAllowFunctionsInBrowser = true` before any Convex modules
-are imported. The embedded runtime intentionally runs Convex functions
-client-side, so this guard is safely bypassed.
+**Solution**: This is handled automatically by convex-embedded when the client
+is created. The embedded runtime intentionally runs Convex functions
+client-side, so the library enables Convex's browser import flag before the
+runtime starts.
 
 If you see this error, it means your Convex function modules are being imported
-before `createConvexClient` is called. Ensure the
-`@robelest/convex-embedded/browser` module is imported first.
+before `createConvexClient(...)` is called.
 
 ## SSR errors
 
@@ -33,8 +32,11 @@ before `createConvexClient` is called. Ensure the
 `Worker is not defined`, or `WebAssembly is not defined` during server-side
 rendering.
 
-**Solution**: The embedded runtime requires browser APIs that do not exist in
-Node.js. You must disable SSR:
+**Solution**: Imports from `@robelest/convex-embedded/browser` are SSR-safe, but
+creating the browser client still requires browser APIs that do not exist in
+Node.js.
+
+If you want a client-only app, disable SSR:
 
 **SvelteKit**:
 
@@ -54,39 +56,38 @@ const client =
     : null;
 ```
 
-Or use dynamic imports to avoid loading the module on the server entirely.
+If you want SSR for the first route instead, build a replica on the server with
+`createReplica(...)`, render with `createEmbeddedRuntime({ replica })`, and only
+call `createConvexClient(...)` in the browser.
 
-## Module glob patterns
+## Module registry
 
 **Problem**: No Convex functions are found, or the runtime fails to load
 modules.
 
-**Solution**: The `modules` option must use Vite's lazy `import.meta.glob()`
-**without** `{ eager: true }`:
+**Solution**: The `modules` option must be a lazy ESM registry whose keys are
+canonical module ids and whose values are `() => Promise<Module>` loaders:
 
 ```ts
-// Correct -- lazy loading
-const modules = import.meta.glob("./convex/*.ts");
-
-// WRONG -- eager loading breaks the runtime
-const modules = import.meta.glob("./convex/*.ts", { eager: true });
+// Correct -- lazy ESM registry
+const modules = {
+  "./convex/tasks.ts": () => import("./convex/tasks"),
+  "./convex/users.ts": () => import("./convex/users"),
+};
 ```
 
 Each entry in the map must be a `() => Promise<Module>` function. The embedded
 runtime loads modules on demand during function execution and scans for
 `remote metadata` exports during remote setup.
 
-Also verify the glob pattern matches your file structure:
+Also verify the keys match your Convex module ids:
 
 ```ts
-// Matches all .ts files in ./convex/
-import.meta.glob("./convex/*.ts");
-
-// Matches specific files
-import.meta.glob(["./convex/tasks.ts", "./convex/users.ts"]);
-
-// Matches nested directories
-import.meta.glob("./convex/**/*.ts");
+const modules = {
+  "./convex/tasks.ts": () => import("./convex/tasks"),
+  "./convex/users.ts": () => import("./convex/users"),
+  "./convex/lib/helpers.ts": () => import("./convex/lib/helpers"),
+};
 ```
 
 ## Worker URL resolution
@@ -107,7 +108,7 @@ the `workerUrl` option:
 ```ts
 const client = createConvexClient({
   modules,
-  workerUrl: new URL("./path/to/wa-sqlite-worker.js", import.meta.url),
+  workerUrl: new URL("./path/to/worker.js", import.meta.url),
 });
 ```
 
@@ -184,8 +185,9 @@ shows `error` or stays in `resolving`.
    deployment URL exactly.
 2. **Auth token issues**: If the remote deployment requires authentication,
    ensure `auth.fetchToken` is configured and returning valid tokens.
-3. **Schema mismatch**: The local Convex functions must match what the remote
-   deployment expects. Redeploy your Convex functions if they have changed.
+3. **Schema or routing mismatch**: The local embedded functions and the remote
+   deployment must still agree on the relevant API shape. Redeploy your Convex
+   functions if they changed.
 4. **Network issues**: The resolve engine retries with exponential back-off.
    Check the `RemoteState` for error details:
 
@@ -196,6 +198,10 @@ subscribeRemoteState(client, (state) => {
   }
 });
 ```
+
+If replay is stuck after a crash or abandoned tab, remember that pending replay
+entries are now lease-based. Another processor can reclaim expired work after
+lease expiry; this is core behavior, not a browser-only workaround.
 
 ## Client not cleaning up properly
 

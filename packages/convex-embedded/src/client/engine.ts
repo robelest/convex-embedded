@@ -10,16 +10,18 @@
 
 import { Fx } from "@robelest/fx";
 import type { ConvexClient } from "convex/browser";
-import { makeFunctionReference } from "convex/server";
 import * as Y from "yjs";
 
-import { IdMap } from "@/client/id-map";
-import { PendingQueue } from "@/client/pending-queue";
-import type { PendingEntry } from "@/client/pending-queue";
+import { IdMap } from "@/client/ids";
+import { PendingQueue } from "@/client/pending";
+import type { PendingEntry } from "@/client/pending";
 import { materializeYjsDoc } from "@/client/schema";
-import { initYjsDoc } from "@/server/schema";
-import type { Definition } from "@/server/schema";
+import type { LocalExecutionRequest } from "@/runtime/embedded";
+import type { ConnectivityAdapter } from "@/runtime/platform";
+import { getFunctionName, makeFunctionReference } from "@/shared/function-refs";
 import { createLogger } from "@/shared/logger";
+import { initYjsDoc } from "@/shared/schema";
+import type { Definition } from "@/shared/schema";
 import type { EngineStatus, ResolveProgress } from "@/shared/types";
 
 const log = createLogger("resolve");
@@ -59,6 +61,15 @@ function createRemoteUpdateHandler(input: {
     table: string,
     documents: Array<Record<string, unknown>>,
   ) => Promise<void>;
+  getDocumentsForTable: (
+    table: string,
+  ) => Promise<Array<Record<string, unknown>>>;
+  getPendingEntries: () => readonly PendingEntry[];
+  getAliases: (id: string) => Set<string>;
+  bufferRemoteSnapshot: (
+    table: string,
+    docs: Array<Record<string, unknown>>,
+  ) => Promise<void>;
   schema: Definition;
   tableName: string;
 }) {
@@ -68,7 +79,18 @@ function createRemoteUpdateHandler(input: {
       () =>
         Fx.run(
           Fx.from({
-            ok: () => input.ingestDocuments(input.tableName, cleaned),
+            ok: async () => {
+              const hasPendingForTable = input
+                .getPendingEntries()
+                .some((entry) => entry.table === input.tableName);
+
+              if (!hasPendingForTable) {
+                await input.ingestDocuments(input.tableName, cleaned);
+                return;
+              }
+
+              await input.bufferRemoteSnapshot(input.tableName, cleaned);
+            },
             err: (e) => e as Error,
           }).pipe(
             Fx.inspect((err) =>
@@ -91,6 +113,79 @@ function createRemoteSubscriptionErrorHandler(tableName: string) {
   return (err: Error) => {
     log.error(`sync: remote subscription error for "${tableName}"`, err);
   };
+}
+
+type TableRemoteSyncState = {
+  bufferedSnapshot: Array<Record<string, unknown>> | null;
+  flushScheduled: boolean;
+  epoch: number;
+};
+
+function extractPendingLogicalId(entry: PendingEntry): string | null {
+  try {
+    const args = JSON.parse(entry.args) as { id?: unknown };
+    if (typeof args.id === "string") {
+      return args.id;
+    }
+
+    const localResult = JSON.parse(entry.localResult) as unknown;
+    return typeof localResult === "string" ? localResult : null;
+  } catch {
+    return null;
+  }
+}
+
+function projectRemoteSnapshot(input: {
+  localDocs: Array<Record<string, unknown>>;
+  remoteDocs: Array<Record<string, unknown>>;
+  pendingEntries: readonly PendingEntry[];
+  tableName: string;
+  getAliases: (id: string) => Set<string>;
+}): Array<Record<string, unknown>> {
+  const localById = new Map<string, Record<string, unknown>>();
+  for (const doc of input.localDocs) {
+    if (typeof doc._id === "string") {
+      localById.set(doc._id, doc);
+    }
+  }
+
+  const dirtyAliasKeys = new Set<string>();
+  for (const entry of input.pendingEntries) {
+    if (entry.table !== input.tableName) {
+      continue;
+    }
+    const logicalId = extractPendingLogicalId(entry);
+    if (!logicalId) {
+      continue;
+    }
+    for (const alias of input.getAliases(logicalId)) {
+      dirtyAliasKeys.add(alias);
+    }
+  }
+
+  if (dirtyAliasKeys.size === 0) {
+    return input.remoteDocs;
+  }
+
+  const projected = input.remoteDocs.filter((doc) => {
+    const id = doc._id;
+    return typeof id !== "string" || !dirtyAliasKeys.has(id);
+  });
+
+  const injected = new Set<string>();
+  for (const alias of dirtyAliasKeys) {
+    const localDoc = localById.get(alias);
+    if (!localDoc || typeof localDoc._id !== "string") {
+      continue;
+    }
+    if (injected.has(localDoc._id)) {
+      continue;
+    }
+    projected.push(localDoc);
+    injected.add(localDoc._id);
+  }
+
+  return projected;
 }
 
 function classifyReplayError(
@@ -118,10 +213,30 @@ function classifyReplayError(
   return "unknown";
 }
 
+function isAlreadyAppliedReplayError(
+  entry: PendingEntry,
+  error: Error,
+): boolean {
+  const message = error.message.toLowerCase();
+  return (
+    entry.ref.endsWith(":remove") &&
+    message.includes("delete on nonexistent document id")
+  );
+}
+
 function registerRemoteSubscription(input: {
   ingestDocuments: (
     table: string,
     documents: Array<Record<string, unknown>>,
+  ) => Promise<void>;
+  getDocumentsForTable: (
+    table: string,
+  ) => Promise<Array<Record<string, unknown>>>;
+  getPendingEntries: () => readonly PendingEntry[];
+  getAliases: (id: string) => Set<string>;
+  bufferRemoteSnapshot: (
+    table: string,
+    docs: Array<Record<string, unknown>>,
   ) => Promise<void>;
   onUnsubscribe: (unsub: () => void) => void;
   remoteClient: ConvexClient;
@@ -133,6 +248,10 @@ function registerRemoteSubscription(input: {
     input.tableConfig.resolveArgs?.() ?? {},
     createRemoteUpdateHandler({
       ingestDocuments: input.ingestDocuments,
+      getDocumentsForTable: input.getDocumentsForTable,
+      getPendingEntries: input.getPendingEntries,
+      getAliases: input.getAliases,
+      bufferRemoteSnapshot: input.bufferRemoteSnapshot,
       schema: input.tableConfig.schema,
       tableName: input.tableName,
     }),
@@ -211,51 +330,11 @@ export interface EmbeddedClientLike {
   getDocumentsForTable(table: string): Promise<Array<Record<string, unknown>>>;
 
   /**
-   * Execute a query directly against the embedded database, bypassing
-   * the ConvexClient subscription machinery.
+   * Unified local execution primitive.
    *
-   * When provided, IdMap and PendingQueue use this for hydration reads
-   * instead of `client.query()`. This avoids the `Invalid start version`
-   * bug caused by hydration subscriptions colliding with the app's
-   * `useQuery` version counter on the shared ConvexClient.
-   *
-   * Optional — when absent, hydration falls back to `client.query()`.
+   * Used for all runtime-first local execution, including system bookkeeping.
    */
-  queryDirect?(path: string, args: Record<string, unknown>): Promise<unknown>;
-
-  /**
-   * Execute a `_system:*` mutation directly against the embedded database,
-   * bypassing the ConvexClient session, version counter, and loopback
-   * WebSocket entirely.
-   *
-   * Used by IdMap and PendingQueue for internal bookkeeping writes
-   * (`_system:idMapSet`, `_system:pendingPush`, etc.). These writes must
-   * not produce Transition messages that race with app-query Transitions —
-   * doing so causes `Invalid start version` errors.
-   *
-   * The browser entry point binds this to `EmbeddedRuntime.mutationDirect`.
-   *
-   * Optional — when absent, falls back to `localClient.mutation()`.
-   */
-  mutationDirect?(
-    ref: unknown,
-    args: Record<string, unknown>,
-  ): Promise<unknown>;
-
-  /**
-   * Execute a user-facing mutation on the local ConvexClient, bypassing
-   * only the **patched** `client.mutation()` (to avoid infinite recursion)
-   * but still routing through the loopback WebSocket so `useQuery`
-   * reactivity fires.
-   *
-   * This is the original, unpatched `ConvexClient.mutation` captured
-   * before `patchedMutation` is installed.
-   *
-   * Used by `engine.mutation()` for the user's local write step.
-   *
-   * Optional — when absent, falls back to `localClient.mutation()`.
-   */
-  localMutation?(ref: unknown, args: Record<string, unknown>): Promise<unknown>;
+  executeLocal?(request: LocalExecutionRequest): Promise<unknown>;
 }
 
 /** @internal */
@@ -286,6 +365,18 @@ export interface EngineConfig {
    * Returns the active identity key for identity-scoped local remote state.
    */
   getIdentityKey?: () => string | null;
+
+  /** Optional platform connectivity adapter. */
+  connectivity?: ConnectivityAdapter;
+
+  /** Stable processor id used for replay ownership claims. */
+  processorId?: string;
+
+  /** Replay lease duration in ms for pending entry claims. */
+  leaseMs?: number;
+
+  /** Return the current queued payload version for a mutation ref. */
+  getReplayPayloadVersion?: (refName: string) => number;
 }
 
 type ChangeListener = (status: EngineStatus) => void;
@@ -434,7 +525,7 @@ function matchTag<
     [V in T[K] & string]: (value: Extract<T, Record<K, V>>) => unknown;
   },
 >(value: T, key: K, handlers: Handlers): ReturnType<Handlers[T[K] & string]> {
-  const handler = handlers[value[key] as T[K] & string] as (
+  const handler = handlers[value[key] as T[K] & string] as unknown as (
     current: T,
   ) => ReturnType<Handlers[T[K] & string]>;
   return handler(value);
@@ -493,6 +584,39 @@ function createHydrationAwareOnlineHandler(input: {
         input.handleOnline();
       }
     });
+  };
+}
+
+function getConnectivityAdapter(
+  connectivity?: ConnectivityAdapter,
+): ConnectivityAdapter {
+  if (connectivity) {
+    return connectivity;
+  }
+
+  return {
+    isOnline() {
+      const hasNavigator =
+        typeof globalThis !== "undefined" && "navigator" in globalThis;
+      const nav = hasNavigator
+        ? (globalThis as { navigator?: { onLine?: boolean } }).navigator
+        : undefined;
+      return nav?.onLine !== false;
+    },
+    onOnline(callback) {
+      if (typeof globalThis.addEventListener !== "function") {
+        return () => {};
+      }
+      globalThis.addEventListener("online", callback);
+      return () => globalThis.removeEventListener("online", callback);
+    },
+    onOffline(callback) {
+      if (typeof globalThis.addEventListener !== "function") {
+        return () => {};
+      }
+      globalThis.addEventListener("offline", callback);
+      return () => globalThis.removeEventListener("offline", callback);
+    },
   };
 }
 
@@ -624,22 +748,39 @@ function createEngine(config: EngineConfig): EngineInstance {
     maxRetries = 3,
     retryDelayMs = 1000,
     getIdentityKey,
+    processorId,
+    leaseMs = 30_000,
+    getReplayPayloadVersion,
   } = config;
 
   // Destructure the embedded client for convenience.
   const localClient = embedded.client;
   const ingestDocuments = embedded.ingestDocuments.bind(embedded);
   const getDocumentsForTable = embedded.getDocumentsForTable.bind(embedded);
-  const queryDirect = embedded.queryDirect?.bind(embedded);
-  // System mutation bypass — runs _system:* writes directly against the
-  // embedded database, bypassing the ConvexClient entirely. Used by
-  // IdMap and PendingQueue so their writes don't produce Transition
-  // messages that race with app-query Transitions.
-  const mutationDirect = embedded.mutationDirect?.bind(embedded);
-  // User mutation bypass — the original, unpatched ConvexClient.mutation.
-  // Routes through the loopback WebSocket (so useQuery updates) but avoids
-  // infinite recursion through patchedMutation.
-  const localMutation = embedded.localMutation?.bind(embedded);
+  const executeLocal = embedded.executeLocal?.bind(embedded);
+
+  const executeLocalQuery = executeLocal
+    ? (path: string, args: Record<string, unknown>) =>
+        executeLocal({ kind: "query", path, args })
+    : undefined;
+  const executeLocalMutationWithoutEffects = executeLocal
+    ? (path: string, args: Record<string, unknown>) =>
+        executeLocal({
+          kind: "mutation",
+          path,
+          args,
+          applyLocalEffects: false,
+        })
+    : undefined;
+  const executeLocalMutationWithEffects = executeLocal
+    ? (ref: unknown, args: Record<string, unknown>) =>
+        executeLocal({
+          kind: "mutation",
+          path: getFunctionName(ref as any),
+          args,
+          applyLocalEffects: true,
+        })
+    : undefined;
 
   const tableNames = Object.keys(tables);
 
@@ -649,21 +790,22 @@ function createEngine(config: EngineConfig): EngineInstance {
   let abortController: AbortController | null = null;
 
   // ID map and persistent pending queue.
-  // When queryDirect / mutationDirect are available, all reads and
-  // writes bypass the patched ConvexClient methods entirely —
-  // preventing infinite recursion through patchedMutation.
+  // When executeLocal is available, hydration and bookkeeping bypass the
+  // patched ConvexClient methods entirely, preventing version/transition races.
   const idMap = new IdMap(
     localClient,
-    queryDirect,
-    mutationDirect,
+    executeLocalQuery,
+    executeLocalMutationWithoutEffects,
     getIdentityKey,
   );
   const pendingQueue = new PendingQueue(
     localClient,
-    queryDirect,
-    mutationDirect,
+    executeLocalQuery,
+    executeLocalMutationWithoutEffects,
     getIdentityKey,
   );
+  const processorIdForReplay =
+    processorId ?? `processor_${Math.random().toString(36).slice(2)}`;
 
   // Track whether we believe we're online (based on network events)
   let isOnline = false;
@@ -671,13 +813,99 @@ function createEngine(config: EngineConfig): EngineInstance {
   // Serial queue processor state
   let queueProcessingPromise: Promise<void> | null = null;
   let syncCyclePromise: Promise<void> | null = null;
+  let activeEntry: PendingEntry | null = null;
 
   // Network event handlers
   let onOnline: (() => void) | null = null;
   let onOffline: (() => void) | null = null;
+  let cleanupOnlineListener: (() => void) | null = null;
+  let cleanupOfflineListener: (() => void) | null = null;
 
   // Active remote reactive subscriptions (unsubscribe functions)
   const remoteUnsubscribes: Array<() => void> = [];
+  const tableRemoteSyncState = new Map<string, TableRemoteSyncState>();
+
+  function getTableRemoteSyncState(tableName: string): TableRemoteSyncState {
+    let state = tableRemoteSyncState.get(tableName);
+    if (!state) {
+      state = { bufferedSnapshot: null, flushScheduled: false, epoch: 0 };
+      tableRemoteSyncState.set(tableName, state);
+    }
+    return state;
+  }
+
+  async function flushBufferedSnapshot(tableName: string): Promise<void> {
+    const state = getTableRemoteSyncState(tableName);
+    if (state.bufferedSnapshot === null) {
+      state.flushScheduled = false;
+      return;
+    }
+
+    const snapshot = state.bufferedSnapshot;
+    state.bufferedSnapshot = null;
+    state.flushScheduled = false;
+
+    const projected = projectRemoteSnapshot({
+      localDocs: await getDocumentsForTable(tableName),
+      remoteDocs: snapshot,
+      pendingEntries: pendingQueue.entries(),
+      tableName,
+      getAliases: (id) => idMap.getAliases(id),
+    });
+
+    await ingestDocuments(tableName, projected);
+
+    if (state.bufferedSnapshot !== null && !state.flushScheduled) {
+      state.flushScheduled = true;
+      Fx.detach(
+        () => flushBufferedSnapshot(tableName),
+        `[sync] flush ${tableName}:`,
+      );
+    }
+  }
+
+  async function bufferRemoteSnapshot(
+    tableName: string,
+    docs: Array<Record<string, unknown>>,
+  ): Promise<void> {
+    const state = getTableRemoteSyncState(tableName);
+    state.bufferedSnapshot = docs;
+    if (state.flushScheduled) {
+      return;
+    }
+
+    state.flushScheduled = true;
+    Fx.detach(
+      () => flushBufferedSnapshot(tableName),
+      `[sync] buffer ${tableName}:`,
+    );
+  }
+
+  function clearBufferedSnapshots(): void {
+    tableRemoteSyncState.clear();
+  }
+
+  function ensureReplayProcessing(): void {
+    if (!isOnline || pendingQueue.isEmpty) {
+      return;
+    }
+
+    Fx.detach(async () => {
+      await processQueue();
+
+      if (pendingQueue.isEmpty) {
+        for (const tableName of tableNames) {
+          void flushBufferedSnapshot(tableName);
+        }
+        if (remoteUnsubscribes.length === 0 && started) {
+          void runSyncCycle();
+        }
+        return;
+      }
+
+      stopRemoteSubscriptions();
+    }, "[sync] ensureReplayProcessing:");
+  }
 
   function emit(newStatus: EngineStatus) {
     status = newStatus;
@@ -707,6 +935,9 @@ function createEngine(config: EngineConfig): EngineInstance {
    */
   async function processQueue(signal?: AbortSignal): Promise<void> {
     if (queueProcessingPromise) return queueProcessingPromise;
+    if (pendingQueue.isEmpty) {
+      await pendingQueue.hydrate();
+    }
     if (pendingQueue.isEmpty) return;
 
     log.info(`sync: processing ${pendingQueue.length} queued mutation(s)`);
@@ -719,7 +950,14 @@ function createEngine(config: EngineConfig): EngineInstance {
         () =>
           Fx.gen(function* () {
             while (!pendingQueue.isEmpty && isOnline && !signal?.aborted) {
-              const entry = pendingQueue.peek();
+              const entry = yield* Fx.from({
+                ok: () => pendingQueue.claimNext(processorIdForReplay, leaseMs),
+                err: (e) => e as Error,
+              });
+              if (!entry) {
+                break;
+              }
+              activeEntry = entry;
               if (entry?.state === "blocked") {
                 log.warn(
                   `sync: blocked pending entry for ${entry.ref}; halting replay`,
@@ -737,7 +975,7 @@ function createEngine(config: EngineConfig): EngineInstance {
                 Stop: () => Fx.succeed(false),
                 DropMappedCreate: () =>
                   Fx.from({
-                    ok: () => pendingQueue.shift(),
+                    ok: () => pendingQueue.remove(entry, processorIdForReplay),
                     err: (e) => e as Error,
                   }).pipe(
                     Fx.tap(() =>
@@ -758,6 +996,11 @@ function createEngine(config: EngineConfig): EngineInstance {
                         unknown
                       >;
                       const translatedArgs = idMap.translateArgs(originalArgs);
+                      await pendingQueue.renewLease(
+                        entry,
+                        processorIdForReplay,
+                        leaseMs,
+                      );
                       const remoteResult = await (remoteClient as any).mutation(
                         ref,
                         translatedArgs,
@@ -775,7 +1018,8 @@ function createEngine(config: EngineConfig): EngineInstance {
                         );
                       }
 
-                      await pendingQueue.shift();
+                      await pendingQueue.remove(entry, processorIdForReplay);
+                      activeEntry = null;
 
                       log.debug(
                         `sync: pushed mutation to remote (table: ${entry!.table}, remaining: ${pendingQueue.length})`,
@@ -787,9 +1031,31 @@ function createEngine(config: EngineConfig): EngineInstance {
                     Fx.recover((err) =>
                       Fx.from({
                         ok: async () => {
+                          if (
+                            entry &&
+                            isAlreadyAppliedReplayError(entry, err as Error)
+                          ) {
+                            await pendingQueue.remove(
+                              entry,
+                              processorIdForReplay,
+                            );
+                            activeEntry = null;
+                            log.debug(
+                              `sync: dropping already-applied mutation (table: ${entry.table}, remaining: ${pendingQueue.length})`,
+                            );
+                            return true;
+                          }
+
                           const reason = classifyReplayError(err as Error);
                           if (reason !== "unknown" && entry) {
                             await pendingQueue.block(entry, reason);
+                            activeEntry = null;
+                          } else if (entry) {
+                            await pendingQueue.release(
+                              entry,
+                              processorIdForReplay,
+                            );
+                            activeEntry = null;
                           }
                           log.warn(
                             "sync: remote push failed, stopping queue processing",
@@ -1063,6 +1329,10 @@ function createEngine(config: EngineConfig): EngineInstance {
     for (const [tableName, tableConfig] of Object.entries(tables)) {
       registerRemoteSubscription({
         ingestDocuments,
+        getDocumentsForTable,
+        getPendingEntries: () => pendingQueue.entries(),
+        getAliases: (id) => idMap.getAliases(id),
+        bufferRemoteSnapshot,
         onUnsubscribe: (unsub) => remoteUnsubscribes.push(unsub),
         remoteClient,
         tableConfig,
@@ -1110,6 +1380,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     abortController?.abort();
     abortController = null;
     stopRemoteSubscriptions();
+    clearBufferedSnapshots();
     emit({ status: "offline" });
   }
 
@@ -1123,6 +1394,7 @@ function createEngine(config: EngineConfig): EngineInstance {
           Fx.sync(() => log.warn("sync: hydration failed", err)),
         ),
         Fx.recover(() => Fx.unit),
+        Fx.map(() => undefined as void),
       ),
     );
   }
@@ -1149,15 +1421,11 @@ function createEngine(config: EngineConfig): EngineInstance {
         isStarted: () => started,
       });
 
-      const hasNavigator =
-        typeof globalThis !== "undefined" && "navigator" in globalThis;
-      const nav = hasNavigator
-        ? (globalThis as { navigator?: { onLine?: boolean } }).navigator
-        : undefined;
+      const connectivity = getConnectivityAdapter(config.connectivity);
 
       const startRoute = getStartLifecycleRoute({
-        hasNavigator,
-        navigatorOnline: nav?.onLine,
+        hasNavigator: true,
+        navigatorOnline: connectivity?.isOnline(),
       });
 
       matchTag(startRoute, "_tag", {
@@ -1170,11 +1438,11 @@ function createEngine(config: EngineConfig): EngineInstance {
         },
       });
 
-      if (hasNavigator) {
+      if (connectivity.onOnline && connectivity.onOffline) {
         onOnline = runOnlineAfterHydration;
         onOffline = handleOffline;
-        globalThis.addEventListener("online", onOnline);
-        globalThis.addEventListener("offline", onOffline);
+        cleanupOnlineListener = connectivity.onOnline(onOnline);
+        cleanupOfflineListener = connectivity.onOffline(onOffline);
       }
     },
 
@@ -1186,11 +1454,22 @@ function createEngine(config: EngineConfig): EngineInstance {
 
       abortController?.abort();
       abortController = null;
+      if (activeEntry) {
+        const entry = activeEntry;
+        activeEntry = null;
+        Fx.detach(
+          () => pendingQueue.release(entry, processorIdForReplay),
+          "[sync] release pending claim:",
+        );
+      }
 
       stopRemoteSubscriptions();
+      clearBufferedSnapshots();
 
-      if (onOnline) globalThis.removeEventListener("online", onOnline);
-      if (onOffline) globalThis.removeEventListener("offline", onOffline);
+      cleanupOnlineListener?.();
+      cleanupOfflineListener?.();
+      cleanupOnlineListener = null;
+      cleanupOfflineListener = null;
       onOnline = null;
       onOffline = null;
 
@@ -1207,46 +1486,55 @@ function createEngine(config: EngineConfig): EngineInstance {
       return status;
     },
 
-    mutation(ref: unknown, args: Record<string, unknown>): Promise<unknown> {
-      // 1. Write to local embedded client first (instant).
-      // 2. Persist to pending queue for durability.
+    mutation(
+      ref: unknown,
+      args: Record<string, unknown>,
+      options?: { enqueueForReplay?: boolean },
+    ): Promise<unknown> {
+      // 1. Execute against the embedded runtime directly.
+      // 2. Optionally persist the result to the pending queue for replay.
       // 3. When online: kick the serial queue processor.
-      //
-      // Use localMutation when available — it calls the original,
-      // unpatched ConvexClient.mutation() which still routes through
-      // the loopback WebSocket (so useQuery reactivity fires) but
-      // avoids infinite recursion through patchedMutation.
-      //
-      // NOTE: This is NOT the same as mutationDirect, which bypasses
-      // the ConvexClient entirely. User mutations need reactivity.
-      const localMutate = localMutation
-        ? (r: unknown, a: Record<string, unknown>) => localMutation(r, a)
+      const enqueueForReplay = options?.enqueueForReplay ?? true;
+      const executeMutationLocally = executeLocalMutationWithEffects
+        ? executeLocalMutationWithEffects
         : (r: unknown, a: Record<string, unknown>) =>
             (localClient as any).mutation(r, a) as Promise<unknown>;
       return Fx.run(
         Fx.from({
-          ok: () => localMutate(ref, args),
+          ok: () => executeMutationLocally(ref, args),
           err: (e) => e as Error,
         }).pipe(
           Fx.tap((localResult) =>
-            Fx.from({
-              ok: async () => {
-                const table = inferTableFromRef(ref, tables);
-                await pendingQueue.push(ref, args, localResult, table);
+            enqueueForReplay
+              ? Fx.from({
+                  ok: async () => {
+                    const table = inferTableFromRef(ref, tables);
+                    await pendingQueue.push(
+                      ref,
+                      args,
+                      localResult,
+                      table,
+                      getReplayPayloadVersion?.(getFunctionName(ref as any)) ??
+                        1,
+                    );
 
-                if (isOnline) {
-                  stopRemoteSubscriptions();
-                  void runSyncCycle();
-                } else {
-                  log.debug("sync: offline — mutation queued for later push");
-                }
-              },
-              err: (e) => e as Error,
-            }).pipe(
-              Fx.inspect((err) =>
-                Fx.sync(() => log.warn("sync: failed to queue mutation", err)),
-              ),
-            ),
+                    if (isOnline) {
+                      ensureReplayProcessing();
+                    } else {
+                      log.debug(
+                        "sync: offline — mutation queued for later push",
+                      );
+                    }
+                  },
+                  err: (e) => e as Error,
+                }).pipe(
+                  Fx.inspect((err) =>
+                    Fx.sync(() =>
+                      log.warn("sync: failed to queue mutation", err),
+                    ),
+                  ),
+                )
+              : Fx.unit,
           ),
         ),
       );
@@ -1261,6 +1549,7 @@ function createEngine(config: EngineConfig): EngineInstance {
 
     async reloadIdentity(): Promise<void> {
       await hydrateIdentityState();
+      clearBufferedSnapshots();
       await pendingQueue.unblockAll();
 
       if (!started) {

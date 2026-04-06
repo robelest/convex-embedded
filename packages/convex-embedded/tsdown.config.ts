@@ -8,11 +8,13 @@ const srcAlias = { "@": resolve(import.meta.dirname, "src") };
 export default defineConfig([
   // Main embedded runtime (browser)
   {
-    entry: [
-      "src/index.ts",
-      "src/browser/index.ts",
-      "src/browser/wa-sqlite-worker.ts",
-    ],
+    entry: {
+      index: "src/index.ts",
+      "browser/index": "src/browser/index.ts",
+      react: "src/react.ts",
+      "expo/index": "src/expo/index.ts",
+      "browser/worker": "src/browser/sqlite/worker.ts",
+    },
     format: "esm",
     platform: "browser",
     dts: true,
@@ -25,7 +27,11 @@ export default defineConfig([
   },
   // Resolve server (node) — runs in Convex backend
   {
-    entry: { "server/index": "src/server/index.ts" },
+    entry: {
+      "server/index": "src/server/index.ts",
+      "server/table": "src/server/table.ts",
+      "server/fields": "src/server/fields.ts",
+    },
     format: "esm",
     outDir: "dist",
     dts: true,

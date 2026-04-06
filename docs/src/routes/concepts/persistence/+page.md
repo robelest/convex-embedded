@@ -12,9 +12,26 @@ description:
 
 # Persistence
 
-By default, `convex-embedded` persists all documents to IndexedDB using
-wa-sqlite compiled to WebAssembly. Data survives page refreshes and browser
-restarts. This page covers how the storage layer works and how to configure it.
+By default, `convex-embedded` persists documents to IndexedDB using wa-sqlite.
+This page starts with the parts you actually configure, then explains how the
+storage layer works.
+
+## What you configure
+
+```ts
+const client = createConvexClient({
+  modules,
+  name: "my-app-data",
+  workerUrl: new URL("./worker.js", import.meta.url),
+  encryption: myEncryptionHooks,
+});
+```
+
+The important browser-facing knobs are:
+
+- `name` for database sharing/isolation
+- `workerUrl` if your build pipeline moves the worker asset
+- `encryption` if you want persisted local state encrypted at rest
 
 ## wa-sqlite (Default)
 
@@ -69,6 +86,44 @@ worker via RPC:
 Each RPC call has a 15-second timeout. If the worker fails to respond, the
 promise rejects with a timeout error.
 
+## Browser Storage URLs (Alpha)
+
+When you use `createConvexClient()` in the browser, `convex-embedded` installs a
+browser storage surface on top of the persisted blob store.
+
+- `ctx.storage.getUrl(storageId)` returns a local `blob:` URL.
+- Repeated `getUrl()` calls for the same blob reuse the same object URL until
+  the stored blob changes or is deleted.
+- When the blob is deleted, the cached object URL is revoked and `getUrl()`
+  returns `null`.
+- `ctx.storage.generateUploadUrl()` returns a local upload URL that can be used
+  with normal browser `fetch(...)`.
+
+This keeps the DX aligned with standard Convex storage code while still using
+local browser-backed persistence under the hood.
+
+```ts
+const uploadUrl = await client.mutation(api.files.generateUploadUrl, {});
+
+const response = await fetch(uploadUrl, {
+  method: "POST",
+  headers: { "Content-Type": file.type },
+  body: file,
+});
+
+const { storageId } = await response.json();
+```
+
+### Alpha Semantics
+
+- Browser download URLs are `blob:` URLs for alpha.
+- Upload URLs are single-use and expire after a successful upload.
+- Upload URLs accept `POST` requests only.
+- The storage surface is implemented by the platform entry point (`/browser`),
+  not by `StorageAdapter` itself.
+- If a runtime has no platform storage surface installed, `getUrl()` and
+  `generateUploadUrl()` fail closed with a clear error.
+
 ## Database Naming
 
 The `name` option controls the IndexedDB database name:
@@ -86,7 +141,7 @@ Tabs that use the same `name` share the same underlying SQLite database in
 IndexedDB. This means:
 
 - A mutation in Tab A is persisted to IndexedDB.
-- Tab A broadcasts a `BroadcastChannel` message listing the written tables.
+- Tab A broadcasts a write notification listing the written tables.
 - Tab B receives the notification, re-reads the affected tables from IndexedDB,
   and updates its in-memory state.
 - Tab B's `ConvexClient` receives updated query results instantly.
@@ -106,9 +161,9 @@ account.
 
 ## Ephemeral Storage
 
-If no storage adapter is provided (and the wa-sqlite setup is skipped), the
-runtime operates as a **purely in-memory** database. All data is lost on page
-refresh.
+If no storage adapter is provided (or the storage layer is intentionally
+skipped), the runtime operates as a purely in-memory database. All data is lost
+on page refresh.
 
 This mode is primarily useful for testing or for transient UI state that does
 not need to persist. When `createConvexClient()` is called and the wa-sqlite

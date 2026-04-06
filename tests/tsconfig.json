@@ -10,11 +10,12 @@
     "noEmit": true,
     "lib": ["ES2022", "DOM"],
     "paths": {
+      "@/*": ["../packages/convex-embedded/src/*"],
       "@embedded/*": ["../packages/convex-embedded/src/*"],
       "@resolve/*": ["../packages/convex-embedded/src/*"],
       "@convex/*": ["../convex/*"]
     }
   },
-  "include": ["**/*.ts"],
+  "include": ["**/*.test.ts"],
   "exclude": ["node_modules"]
 }

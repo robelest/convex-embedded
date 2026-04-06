@@ -5,26 +5,38 @@
   "type": "module",
   "scripts": {
     "dev": "vp dev",
-    "build": "vp build",
-    "preview": "vp preview",
+    "build": "vp run --filter @robelest/convex-embedded build && vp build",
+    "deploy": "vp exec wrangler deploy",
+    "deploy:preview": "vp exec wrangler versions upload",
+    "preview": "vp exec wrangler dev .svelte-kit/cloudflare/_worker.js --port 4173",
     "prepare": "vp exec svelte-kit sync || true",
     "check": "vp exec svelte-kit sync && vp exec svelte-check --tsconfig ./tsconfig.json",
-    "check:watch": "vp exec svelte-kit sync && vp exec svelte-check --tsconfig ./tsconfig.json --watch"
+    "check:watch": "vp exec svelte-kit sync && vp exec svelte-check --tsconfig ./tsconfig.json --watch",
+    "gen": "vp exec wrangler types"
   },
   "dependencies": {
     "@robelest/convex-embedded": "workspace:*",
-    "convex": "^1.32.0",
-    "convex-svelte": "^0.0.12"
+    "@tiptap/core": "^3.21.0",
+    "@tiptap/extension-placeholder": "^3.21.0",
+    "@tiptap/html": "^3.21.0",
+    "@tiptap/starter-kit": "^3.21.0",
+    "convex": "catalog:",
+    "convex-svelte": "^0.0.12",
+    "phosphor-svelte": "^2.0.1",
+    "svelte-sonner": "^1.1.0"
   },
   "devDependencies": {
-    "@sveltejs/adapter-static": "^3.0.10",
+    "@sveltejs/adapter-cloudflare": "^7.2.8",
     "@sveltejs/kit": "^2.55.0",
     "@sveltejs/vite-plugin-svelte": "^7.0.0",
+    "@tailwindcss/vite": "^4.2.2",
     "@types/node": "^25.5.0",
     "svelte": "^5.53.11",
     "svelte-check": "^4.4.5",
+    "tailwindcss": "^4.2.2",
     "typescript": "^5.9.3",
     "vite": "catalog:",
-    "vite-plus": "catalog:"
+    "vite-plus": "catalog:",
+    "wrangler": "^4.80.0"
   }
 }

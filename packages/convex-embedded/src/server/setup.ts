@@ -78,16 +78,26 @@ import { defineTable, mutationGeneric, queryGeneric } from "convex/server";
 import { v } from "convex/values";
 import type { PropertyValidators, Validator } from "convex/values";
 
-import type { Definition } from "@/server/schema";
-import {
-  define,
-  isCrdtField,
-  encodeDocumentState,
-  computeDiff,
-  isDiffEmpty,
-} from "@/server/schema";
+import { markRoute } from "@/client/routing/metadata";
 import { createLogger } from "@/shared/logger";
-import { markRemoteOnly } from "@/shared/remote-only";
+import type { LocalTableMigrationStep } from "@/shared/migration-utils";
+import type { Definition } from "@/shared/schema";
+import { define, getCrdtType, isCrdtField } from "@/shared/schema";
+import {
+  REMOTE_META,
+  RESOLVE_QUERY_META,
+  PENDING_REPLAY_META,
+} from "@/shared/symbols";
+import type {
+  RemoteMeta,
+  ResolveQueryMeta,
+  PendingReplayMeta,
+  PendingReplayMigrationContext,
+  PendingReplayMigrationResult,
+  PendingReplayMigrationStep,
+  RouteMode,
+} from "@/shared/symbols";
+import { CrdtType } from "@/shared/types";
 
 const log = createLogger("setup");
 
@@ -142,54 +152,40 @@ export function _resetRegistry(): void {
 }
 
 // ---------------------------------------------------------------------------
-// REMOTE_META — cross-package discovery symbol
+// Re-export symbols and metadata types from shared
 // ---------------------------------------------------------------------------
 
-/**
- * Global symbol used to tag the `resolve` export with remote metadata.
- *
- * @deprecated — The registry-based discovery in `embeddedTable()` +
- * `setup()` replaces symbol scanning. Kept for backward compatibility
- * with existing deployed modules.
- *
- * @internal
- */
-export const REMOTE_META = Symbol.for("convex-embedded:remoteMeta");
-export const RESOLVE_QUERY_META = Symbol.for(
-  "convex-embedded:resolveQueryMeta",
-);
+export {
+  REMOTE_META,
+  RESOLVE_QUERY_META,
+  PENDING_REPLAY_META,
+} from "@/shared/symbols";
+export type {
+  RemoteMeta,
+  ResolveQueryMeta,
+  PendingReplayMeta,
+  PendingReplayMigrationContext,
+  PendingReplayMigrationResult,
+  PendingReplayMigrationStep,
+  RouteMode,
+} from "@/shared/symbols";
 
-export { REMOTE_ONLY } from "@/shared/remote-only";
-
 /**
- * Mark a function as remote-only.
+ * Route helpers for Convex function exports.
  *
- * A function wrapped with `remoteOnly()` is never executed in the local
- * embedded runtime. Browser routing sends calls directly to the remote
- * Convex client, and local execution paths reject if reached.
+ * The default policy for normal Convex exports is automatic routing: run
+ * locally when the embedded runtime supports the target, otherwise route
+ * remotely or fail closed.
+ * `localOnly()` forces local execution and fails if the runtime cannot safely
+ * execute the target. `remoteOnly()` forces remote execution.
  */
+export function localOnly<T>(fn: T): T {
+  return markRoute(fn, "local");
+}
+
+/** Force a Convex export to run only against the remote deployment. */
 export function remoteOnly<T>(fn: T): T {
-  return markRemoteOnly(fn);
-}
-
-/**
- * Sync metadata attached to the `resolve` export.
- *
- * @internal — consumed by the client-side resolve engine during
- * auto-discovery. App code never reads this directly.
- */
-export interface RemoteMeta {
-  readonly __brand: "convex-embedded:remoteMeta";
-  readonly table: string;
-  readonly schema: Definition;
-  readonly resolveExport: string;
-  readonly listExport: string | null;
-}
-
-export interface ResolveQueryMeta {
-  readonly __brand: "convex-embedded:resolveQueryMeta";
-  readonly table: string;
-  readonly getArgs?: () => Record<string, unknown>;
+  return markRoute(fn, "remote");
 }
 
 // ---------------------------------------------------------------------------
@@ -254,7 +250,7 @@ export interface EmbeddedTableHandle {
   readonly schema: Definition;
 
   /**
-   * The auto-generated resolve query. Tagged with {@link REMOTE_META}.
+   * The auto-generated resolve query. Tagged with the internal `REMOTE_META` marker.
    * After `setup()` runs this is a registered Convex query; before
    * `setup()` it is a raw `{ args, handler }` definition.
    */
@@ -352,7 +348,23 @@ type EmbeddedQueryBuilder = <
  * (from `v.string()`, etc.) are already validators.
  */
 function extractValidator(value: unknown): any {
-  if (isCrdtField(value)) return value.validator;
+  if (isCrdtField(value)) {
+    switch (getCrdtType(value)) {
+      case CrdtType.Prose:
+        return v.any();
+      case CrdtType.Register:
+        return value.validator;
+      case CrdtType.Counter:
+        return v.number();
+      case CrdtType.Set:
+        return v.array(value.validator as Validator<any, any, any>);
+      case CrdtType.Omitted:
+        return value.validator;
+      case CrdtType.Plain:
+      default:
+        return value.validator;
+    }
+  }
   return value;
 }
 
@@ -368,26 +380,38 @@ function extractValidator(value: unknown): any {
  * `.mutation()`, `.query()`, `.table`, and `.schema` patched on. Pass
  * it directly to `defineSchema()` — Convex sees a normal table.
  *
- * @param table - Table name (must match the key used in `defineSchema`).
+ * @param tableName - Table name (must match the key used in `defineSchema`).
  * @param shape - Field shape. Each value is either a CRDT descriptor
  *   (from `schema.*`) or a plain Convex validator (from `v.*`).
- * @param options - Optional version and history for migration support.
+ * @param options - Optional versioning and migration settings.
+ * @returns A `defineTable()`-compatible value with embedded-specific builders.
+ *
+ * @example
+ * ```ts
+ * export const tasks = embeddedTable("tasks", {
+ *   title: schema.register(v.string()),
+ *   body: schema.prose(),
+ *   done: v.boolean(),
+ * });
+ *
+ * export default defineSchema({ tasks });
+ * ```
  */
 export function embeddedTable(
   tableName: string,
   shape: Record<string, unknown>,
   options?: {
     version?: number;
-    history?: Record<number, Record<string, unknown>>;
     defaults?: Record<string, unknown>;
+    migrate?: Record<number, LocalTableMigrationStep>;
   },
 ): TableDefinition & EmbeddedTableHandle {
   // Build the Definition from the shape.
   const schemaDef = define({
     version: options?.version ?? 1,
     shape,
-    history: options?.history,
     defaults: options?.defaults,
+    migrate: options?.migrate,
   });
 
   // Extract raw validators for Convex's defineTable().
@@ -463,6 +487,7 @@ export function embeddedTable(
     await Fx.run(
       Fx.from({
         ok: async () => {
+          const { encodeDocumentState } = await import("@/shared/schema-yjs");
           const doc = await ctx.db.get(docId);
           if (!doc) {
             log.warn(
@@ -537,7 +562,9 @@ export function embeddedTable(
             }
 
             return Fx.from({
-              ok: () => {
+              ok: async () => {
+                const { computeDiff, isDiffEmpty } =
+                  await import("@/shared/schema-yjs");
                 const serverUpdate = new Uint8Array(latest.update);
                 const clientVector = new Uint8Array(vector);
                 const diff = computeDiff(serverUpdate, clientVector);
@@ -615,7 +642,7 @@ export function embeddedTable(
         listExport: null,
       } satisfies RemoteMeta,
       enumerable: false,
-      configurable: false,
+      configurable: true,
     });
   }
 
@@ -645,17 +672,21 @@ export function embeddedTable(
       args: ArgsArrayToObject<OneOrZeroArgs>,
       result: Awaited<ReturnValueForOptionalValidator<ReturnsValidator>>,
     ) => unknown;
+    replay?: {
+      version?: number;
+      migrate?: Record<number, PendingReplayMigrationStep>;
+    };
   }): RegisteredMutation<
     "public",
     ArgsArrayToObject<OneOrZeroArgs>,
     ReturnValueForOptionalValidator<ReturnsValidator>
   > {
-    const { args, returns, handler, remote } = def;
+    const { args, returns, handler, remote, replay } = def;
     const tupleArgs = (
       fnArgs: ArgsArrayToObject<OneOrZeroArgs>,
     ): OneOrZeroArgs => [fnArgs] as unknown as OneOrZeroArgs;
 
-    return mutationGeneric({
+    const mutation = mutationGeneric({
       args,
       ...(returns !== undefined ? { returns } : {}),
       handler: async (ctx: GenericMutationCtx<any>, fnArgs: any) => {
@@ -682,6 +713,18 @@ export function embeddedTable(
       ArgsArrayToObject<OneOrZeroArgs>,
       ReturnValueForOptionalValidator<ReturnsValidator>
     >;
+
+    Object.defineProperty(mutation, PENDING_REPLAY_META, {
+      value: {
+        __brand: "convex-embedded:pendingReplayMeta" as const,
+        version: replay?.version ?? 1,
+        migrate: replay?.migrate ?? {},
+      } satisfies PendingReplayMeta,
+      enumerable: false,
+      configurable: false,
+    });
+
+    return mutation;
   };
 
   // query()
@@ -803,6 +846,43 @@ export function embeddedTable(
 // ---------------------------------------------------------------------------
 
 /**
+ * Create the resolve query for an embedded table and tag it with sync metadata.
+ *
+ * Use this instead of accessing `table.resolve` directly — the returned value
+ * has a clean `RegisteredQuery` type that Convex's `FilterApi` can process.
+ *
+ * @example
+ * ```ts
+ * // convex/tasks.ts
+ * import { bindTable } from "@robelest/convex-embedded/server";
+ * import { tasks } from "./schema";
+ *
+ * export const bind = bindTable(tasks);
+ *
+ * export const list = tasks.query({ ... });
+ * ```
+ */
+export function bindTable(
+  table: EmbeddedTableHandle,
+): RegisteredQuery<"public", DefaultFunctionArgs, any> {
+  const resolveQuery = (table as any)._resolveRaw;
+  // Tag with REMOTE_META so the client runtime can discover sync config.
+  const REMOTE_META_SYM = Symbol.for("convex-embedded:remoteMeta");
+  Object.defineProperty(resolveQuery, REMOTE_META_SYM, {
+    value: {
+      __brand: "convex-embedded:remoteMeta" as const,
+      table: table.table,
+      schema: table.schema,
+      resolveExport: "bind",
+      listExport: null,
+    } satisfies RemoteMeta,
+    enumerable: false,
+    configurable: false,
+  });
+  return resolveQuery;
+}
+
+/**
  * Bind the component reference to all registered embedded tables.
  *
  * Call once per app in a dedicated file (e.g. `convex/embedded.ts`).
@@ -813,6 +893,7 @@ export function embeddedTable(
  * definition time.
  *
  * @param config - Component reference.
+ * @returns Nothing. The call exists for its side effects.
  *
  * @example
  * ```ts

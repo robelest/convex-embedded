@@ -17,16 +17,23 @@ description:
 
 # Introduction
 
-`@robelest/convex-embedded` is an embedded Convex runtime that runs entirely in
-the browser. It executes your existing Convex query and mutation functions
-locally against an in-browser SQLite database, giving your app instant reads,
-instant writes, and full offline support -- all without changing a single line
-of your Convex function code.
+`@robelest/convex-embedded` is an embedded Convex runtime for browser and Expo
+clients. It executes Convex queries, mutations, and actions locally against an
+embedded SQLite-backed database, giving your app instant reads, instant writes,
+and offline-capable behavior.
 
 When remote is enabled, the embedded runtime becomes a **local-first** engine:
 mutations write locally first and replay to the remote Convex deployment in the
 background. A Yjs CRDT resolve pass automatically merges any state that diverged
 while offline.
+
+The current architecture is explicitly layered:
+
+- core replay / resolve correctness lives in shared runtime code
+- browser-only concerns like worker bootstrapping and `BroadcastChannel`
+  transport stay behind platform adapters
+- route overrides (`localOnly()` / `remoteOnly()`) define alpha-safe execution
+  boundaries
 
 `convex-embedded` builds on
 [`@robelest/fx`](https://www.npmjs.com/package/@robelest/fx) for its internal
@@ -37,8 +44,8 @@ in-repo workspace package.
 ## Key Features
 
 <CardGrid>
-  <Card title="Zero Code Changes">
-    Your existing Convex queries and mutations run unmodified in the browser. The returned ConvexClient works with ConvexProvider, convex-svelte, and every Convex framework integration.
+  <Card title="Standard Convex Client">
+    The browser entry returns a standard ConvexClient. Use it directly or through framework adapters such as convex-svelte. For React hooks, use `@robelest/convex-embedded/react`.
   </Card>
   <Card title="Offline-First">
     Reads and writes work instantly with no network. Mutations queue locally and replay to the remote deployment when connectivity returns. The CRDT resolve engine merges divergent state automatically.
@@ -47,13 +54,13 @@ in-repo workspace package.
     Declarative field types -- register, prose, counter, set, and omit -- map to Yjs data structures for fine-grained conflict resolution. Rich text fields merge at the character level.
   </Card>
   <Card title="Cross-Tab Sync">
-    Tabs sharing the same IndexedDB database name receive instant updates via BroadcastChannel. Write in one tab, see the result in all others -- no server round-trip required.
+    Tabs sharing the same database name receive write and session notifications across contexts, while replay ownership stays in core via processor-scoped leases.
   </Card>
   <Card title="Persistent Storage">
     Documents persist to IndexedDB via wa-sqlite running in a Dedicated Worker. Data survives page refreshes and browser restarts.
   </Card>
   <Card title="Framework Agnostic">
-    Works with React, Svelte, Vue, or any framework that integrates with the standard Convex ConvexClient. No framework-specific wrapper needed.
+    The browser entry stays framework agnostic. The core SSR/bootstrap flow is driven by `createReplica`, `createEmbeddedRuntime`, and `createConvexClient` rather than a framework-specific wrapper.
   </Card>
 </CardGrid>
 
@@ -75,8 +82,6 @@ It is **not** the right choice when:
 - You need server-authoritative validation that cannot be replicated client-side
   (e.g., payment processing, access control that must be enforced server-side).
 - Your dataset is too large to fit in the browser's IndexedDB quota.
-- You do not use a Vite-based bundler (the module discovery relies on
-  `import.meta.glob`).
 
 ## Next Steps
 

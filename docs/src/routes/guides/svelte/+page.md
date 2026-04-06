@@ -10,9 +10,14 @@ description: Using convex-embedded with SvelteKit and convex-svelte.
 
 # Svelte Integration
 
-convex-embedded integrates with SvelteKit through the `convex-svelte` package.
-The embedded client is created in a layout component, provided via Svelte
-context, and consumed with `useQuery` and `useConvexClient` in pages.
+convex-embedded integrates with SvelteKit through `convex-svelte`. The practical
+client-only flow is: disable SSR, create the client in your layout, provide it
+once, and use the normal query/mutation helpers.
+
+If you want SSR for the initial route, the supported path is different: build a
+replica on the server with `createReplica(...)`, render against
+`createEmbeddedRuntime(...)`, and only create the browser client after
+hydration.
 
 ## Quick start
 
@@ -39,14 +44,14 @@ component tree via `setConvexClientContext`:
   import { setConvexClientContext } from "convex-svelte";
   import { createConvexClient, subscribeRemoteState } from "@robelest/convex-embedded/browser";
   import type { RemoteState } from "@robelest/convex-embedded/browser";
+  import { modules } from "../convex-modules";
   import { setContext } from "svelte";
 
   let { children } = $props();
 
-  const modules = import.meta.glob("./convex/*.ts");
-
   const client = createConvexClient({
     modules,
+    schema,
     name: "my-app",
     remote: { url: import.meta.env.CONVEX_URL },
   });
@@ -79,10 +84,23 @@ component tree via `setConvexClientContext`:
 ```
 
 The `import.meta.hot?.dispose` handler ensures the client is cleaned up during
-hot module replacement in development, preventing leaked workers and WebSocket
-connections.
+hot module replacement in development.
 
-### 3. Use queries and mutations in pages
+### 3. Use canonical module ids
+
+```ts
+// src/convex-modules.ts
+import type { ConvexModuleRegistry } from "@robelest/convex-embedded/browser";
+
+export const modules = {
+  "./convex/tasks.ts": () => import("../convex/tasks"),
+  "./convex/schema.ts": () => import("../convex/schema"),
+  "./convex/_generated/api.ts": () => import("../convex/_generated/api"),
+  "./convex/_generated/server.ts": () => import("../convex/_generated/server"),
+} satisfies ConvexModuleRegistry;
+```
+
+### 4. Use queries and mutations in pages
 
 In any page or component under the layout, use `useQuery` and `useConvexClient`
 from `convex-svelte`:
@@ -133,6 +151,22 @@ from `convex-svelte`:
 {/if}
 ```
 
+## Common options
+
+```ts
+const client = createConvexClient({
+  modules,
+  schema,
+  name: "my-app",
+  remote: { url: import.meta.env.CONVEX_URL },
+  auth: {
+    fetchToken: myTokenFetcher,
+    getUserIdentity: myIdentitySource,
+  },
+  encryption: myEncryptionHooks,
+});
+```
+
 ## Sync status indicator
 
 Share the resolve state via Svelte context and build a status badge:
@@ -151,7 +185,7 @@ Share the resolve state via Svelte context and build a status badge:
       case "offline":    return { text: "Offline",       color: "#f59e0b" };
       case "connecting": return { text: "Connecting...", color: "#3b82f6" };
       case "resolving":    return { text: "Resolving...",    color: "#3b82f6" };
-      case "ready":     return { text: "Ready",        color: "#10b981" };
+      case "resolved":  return { text: "Resolved",     color: "#10b981" };
       case "error":      return { text: "Sync error",    color: "#ef4444" };
     }
   });
@@ -172,7 +206,7 @@ purely local embedded database:
 
 ```ts
 const client = createConvexClient({
-  modules: import.meta.glob("./convex/*.ts"),
+  modules,
   name: "my-local-app",
 });
 ```
@@ -183,12 +217,22 @@ code.
 
 ## Key points
 
-- **SSR must be disabled** -- wa-sqlite requires `IndexedDB`, `Worker`, and
-  `WebAssembly`, which are not available during server-side rendering.
-- **Module glob must be lazy** -- Use `import.meta.glob("./convex/*.ts")`
-  without `{ eager: true }`. The runtime loads modules on demand.
+- **Client creation is browser-only** -- wa-sqlite still requires `IndexedDB`,
+  `Worker`, and `WebAssembly`. If you want SSR, use the replica bootstrap flow
+  instead of creating the client on the server.
+- **Modules must stay lazy** -- Use canonical module ids like
+  `"./convex/tasks.ts": () => import("./convex/tasks")`.
 - **Always clean up** -- Call `client.close()` in both `onDestroy` and
   `import.meta.hot?.dispose` to prevent leaked workers during development.
 - **Context pattern** -- Use `setConvexClientContext` from `convex-svelte` for
   the client, and Svelte's `setContext`/`getContext` for additional state like
   remote status.
+
+## What happens after setup
+
+After the client is created:
+
+- local queries run against the embedded runtime
+- local mutations commit immediately
+- browser-specific worker/session/write transport stays behind the browser entry
+- replay, leases, and resolve stay in shared core code

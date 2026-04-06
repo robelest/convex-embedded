@@ -13,14 +13,13 @@ import { Fx } from "@robelest/fx";
 import { convexToJson } from "convex/values";
 import type { JSONValue } from "convex/values";
 
-import { compareValues } from "@/core/compare";
-import { evaluateFieldPath } from "@/core/query-engine";
-import type {
-  QueryDependency,
-  SerializedRangeExpression,
-  StoredDocument,
-} from "@/core/types";
-import type { SubscriptionManager } from "@/sync/subscriptions";
+import type { QueryDependency, StoredDocument } from "@/runtime/db/types";
+import {
+  RuntimeProtocolQueryRegistry,
+  type ProtocolQueryRecord,
+  type RuntimeQueryObserver,
+} from "@/runtime/registry";
+import { encodeBase64 } from "@/shared/base64";
 
 // ---------------------------------------------------------------------------
 // Base64 helpers for LE-encoded u64 timestamps
@@ -40,7 +39,7 @@ function numberToEncodedU64(n: number): string {
     bytes[i] = val & 0xff;
     val = Math.floor(val / 256);
   }
-  return btoa(String.fromCharCode(...bytes));
+  return encodeBase64(bytes);
 }
 
 // ---------------------------------------------------------------------------
@@ -131,6 +130,10 @@ function authFailureResult(error: string) {
   return { _tag: "Failure" as const, error };
 }
 
+type AuthResult =
+  | ReturnType<typeof authSuccessResult>
+  | ReturnType<typeof authFailureResult>;
+
 function normalizeVerifiedIdentity(value: unknown): VerifiedIdentity {
   if (
     typeof value === "object" &&
@@ -143,44 +146,6 @@ function normalizeVerifiedIdentity(value: unknown): VerifiedIdentity {
   return { identity: value, identityKey: null };
 }
 
-function matchesRangeExpressions(
-  doc: StoredDocument,
-  range: ReadonlyArray<SerializedRangeExpression>,
-): boolean {
-  return range.every((filter) => {
-    const result = evaluateFieldPath(filter.fieldPath, doc);
-    const value = filter.value as unknown;
-    return filter.type === "Eq"
-      ? compareValues(result, value) === 0
-      : filter.type === "Gt"
-        ? compareValues(result, value) > 0
-        : filter.type === "Gte"
-          ? compareValues(result, value) >= 0
-          : filter.type === "Lt"
-            ? compareValues(result, value) < 0
-            : compareValues(result, value) <= 0;
-  });
-}
-
-function dependencyOverlapsChanges(
-  dependency: QueryDependency,
-  changes: ProtocolChange[],
-): boolean {
-  return changes.some(({ tableName, before, after }) => {
-    if (dependency.tableName !== tableName) {
-      return false;
-    }
-
-    if (dependency.type === "IndexRange") {
-      return [before, after].some(
-        (doc) => doc !== null && matchesRangeExpressions(doc, dependency.range),
-      );
-    }
-
-    return true;
-  });
-}
-
 function matchTag<
   T extends Record<K, string>,
   K extends keyof T & string,
@@ -188,7 +153,7 @@ function matchTag<
     [V in T[K] & string]: (value: Extract<T, Record<K, V>>) => unknown;
   },
 >(value: T, key: K, handlers: Handlers): ReturnType<Handlers[T[K] & string]> {
-  const handler = handlers[value[key] as T[K] & string] as (
+  const handler = handlers[value[key] as T[K] & string] as unknown as (
     current: T,
   ) => ReturnType<Handlers[T[K] & string]>;
   return handler(value);
@@ -345,23 +310,12 @@ interface ServerPing {
 // Session state tracked per-connection inside the handler
 // ---------------------------------------------------------------------------
 
-/** A tracked query subscription that can be re-evaluated after mutations. */
-interface ActiveQuery {
-  queryId: number;
-  udfPath: string;
-  args: JSONValue[];
-  tablesRead: Set<string>;
-  dependencies: QueryDependency[];
-}
-
 interface SessionState {
   /** Current state version for this session. */
   version: StateVersion;
   /** Auth identity set via Authenticate, if any. */
   identity: unknown;
   identityKey: string | null;
-  /** Active query subscriptions keyed by queryId. */
-  activeQueries: Map<number, ActiveQuery>;
 }
 
 // ---------------------------------------------------------------------------
@@ -399,7 +353,7 @@ export interface ProtocolAuth {
 export interface SyncProtocolHandlerOptions {
   /** Function executor for running queries, mutations, and actions. */
   executor: ProtocolExecutor;
-  subscriptions: SubscriptionManager;
+  queryStore: RuntimeProtocolQueryRegistry;
   /** Auth handler for token verification. */
   auth: ProtocolAuth;
 }
@@ -413,7 +367,7 @@ export interface SyncProtocolHandlerOptions {
  */
 export class SyncProtocolHandler {
   private _executor: ProtocolExecutor;
-  private _subscriptions: SubscriptionManager;
+  private _queryStore: RuntimeProtocolQueryRegistry;
   private _auth: ProtocolAuth;
 
   /** Per-session bookkeeping. */
@@ -427,7 +381,7 @@ export class SyncProtocolHandler {
 
   constructor(opts: SyncProtocolHandlerOptions) {
     this._executor = opts.executor;
-    this._subscriptions = opts.subscriptions;
+    this._queryStore = opts.queryStore;
     this._auth = opts.auth;
   }
 
@@ -442,7 +396,7 @@ export class SyncProtocolHandler {
     return this._withSessionLock(sessionId, async () => {
       console.debug("[convex-embedded:protocol]", message.type, sessionId);
       return Fx.run(
-        Fx.match(message, message.type, {
+        matchTag(message, "type", {
           Connect: (current) =>
             Fx.from({
               ok: () => this._handleConnect(sessionId, current),
@@ -501,39 +455,31 @@ export class SyncProtocolHandler {
     for (const sessionId of this._sessions.keys()) {
       await this._withSessionLock(sessionId, async () => {
         const session = this._sessions.get(sessionId);
-        if (!session || session.activeQueries.size === 0) return;
+        if (!session || !this._queryStore.hasQueries(sessionId)) return;
 
-        const relevantQueries = [...session.activeQueries.values()].filter(
-          (query) =>
-            affectedTables === undefined ||
-            query.dependencies.length === 0 ||
-            query.dependencies.some((dependency) =>
-              affectedChanges
-                ? dependencyOverlapsChanges(dependency, affectedChanges)
-                : affectedTables.has(dependency.tableName),
-            ),
+        const relevantQueries = this._queryStore.getRelevantObservers(
+          sessionId,
+          affectedTables,
+          affectedChanges,
         );
         if (relevantQueries.length === 0) return;
 
         const startVersion = { ...session.version };
 
         const evaluated = await Fx.run(
-          Fx.each(relevantQueries, (q) =>
-            this._evaluateQuery({
-              sessionId,
-              identity: session.identity,
-              identityKey: session.identityKey,
-              ...q,
+          Fx.each(relevantQueries, (observer) =>
+            Fx.from({
+              ok: () =>
+                this._refreshProtocolQueryObserver(
+                  sessionId,
+                  session,
+                  observer,
+                ),
+              err: (err) => err as Error,
             }),
           ),
         );
-        const modifications = evaluated.map(
-          ({ modification, tablesRead, dependencies }, index) => {
-            relevantQueries[index]!.tablesRead = tablesRead;
-            relevantQueries[index]!.dependencies = dependencies;
-            return modification;
-          },
-        );
+        const modifications = evaluated;
 
         session.version = {
           ...session.version,
@@ -555,6 +501,7 @@ export class SyncProtocolHandler {
   }
 
   removeSession(sessionId: string): void {
+    this._queryStore.clearSession(sessionId);
     this._sessions.delete(sessionId);
     this._sessionQueues.delete(sessionId);
   }
@@ -640,7 +587,6 @@ export class SyncProtocolHandler {
         version: { querySet: 0, ts: 0, identity: 0 },
         identity: null,
         identityKey: null,
-        activeQueries: new Map(),
       };
       this._sessions.set(sessionId, session);
     }
@@ -717,6 +663,56 @@ export class SyncProtocolHandler {
     );
   }
 
+  private _createProtocolQueryObserver(
+    sessionId: string,
+    session: SessionState,
+    query: ProtocolQueryRecord,
+  ): RuntimeQueryObserver<ProtocolQueryRecord> {
+    return this._queryStore.ensure(sessionId, query, async () => {
+      const evaluated = await Fx.run(
+        this._evaluateQuery({
+          sessionId,
+          identity: session.identity,
+          identityKey: session.identityKey,
+          ...query,
+        }),
+      );
+      query.tablesRead = evaluated.tablesRead;
+      query.dependencies = evaluated.dependencies;
+      return {
+        result: evaluated.modification,
+        tablesRead: evaluated.tablesRead,
+        dependencies: evaluated.dependencies,
+        logs:
+          "logLines" in evaluated.modification
+            ? evaluated.modification.logLines
+            : [],
+      };
+    });
+  }
+
+  private async _refreshProtocolQueryObserver(
+    sessionId: string,
+    session: SessionState,
+    observer: RuntimeQueryObserver<ProtocolQueryRecord>,
+  ): Promise<StateModification> {
+    const evaluated = await Fx.run(
+      this._evaluateQuery({
+        sessionId,
+        identity: session.identity,
+        identityKey: session.identityKey,
+        ...observer.meta,
+      }),
+    );
+    observer.meta.tablesRead = evaluated.tablesRead;
+    observer.meta.dependencies = evaluated.dependencies;
+    this._queryStore.track(sessionId, observer.meta.queryId, {
+      tablesRead: evaluated.tablesRead,
+      dependencies: evaluated.dependencies,
+    });
+    return evaluated.modification;
+  }
+
   /** Connect — acknowledge the session with an empty transition. */
   private _handleConnect(
     sessionId: string,
@@ -727,7 +723,7 @@ export class SyncProtocolHandler {
     // Reset to zero so the client can send a fresh ModifyQuerySet
     session.version = { querySet: 0, ts: 0, identity: 0 };
     session.identity = null;
-    session.activeQueries.clear();
+    this._queryStore.clearSession(sessionId);
 
     const version = encodeStateVersion(session.version);
     return [
@@ -758,7 +754,7 @@ export class SyncProtocolHandler {
     const startVersion = { ...session.version };
     const modifications = await Fx.run(
       Fx.each(message.modifications, (modification) =>
-        Fx.match(modification, modification.type, {
+        matchTag(modification, "type", {
           Add: (current) =>
             Fx.from({
               ok: async () => {
@@ -769,24 +765,22 @@ export class SyncProtocolHandler {
                   tablesRead: new Set<string>(),
                   dependencies: [] as QueryDependency[],
                 };
-                const evaluated = await Fx.run(
-                  this._evaluateQuery({
-                    sessionId,
-                    identity: session.identity,
-                    identityKey: session.identityKey,
-                    ...query,
-                  }),
+                const observer = this._createProtocolQueryObserver(
+                  sessionId,
+                  session,
+                  query,
                 );
-                query.tablesRead = evaluated.tablesRead;
-                query.dependencies = evaluated.dependencies;
-                session.activeQueries.set(current.queryId, query);
-                return evaluated.modification;
+                return this._refreshProtocolQueryObserver(
+                  sessionId,
+                  session,
+                  observer,
+                );
               },
               err: (err) => err as Error,
             }),
           Remove: (current) =>
             Fx.sync(() => {
-              session.activeQueries.delete(current.queryId);
+              this._queryStore.delete(sessionId, current.queryId);
               return null;
             }),
         }),
@@ -810,6 +804,7 @@ export class SyncProtocolHandler {
     const session = this._getOrCreateSession(sessionId);
 
     let writtenTables: Set<string> | null = new Set<string>();
+    let writtenChanges: ProtocolChange[] | null = null;
     const mutationResponse: ServerMessage = await Fx.run(
       Fx.attempt(
         () =>
@@ -823,17 +818,23 @@ export class SyncProtocolHandler {
             ...(message.args ?? []),
           ),
         (value): ServerMessage => {
-          const { result, tablesWritten } =
+          const { result, tablesWritten, changes } =
             typeof value === "object" &&
             value !== null &&
             "result" in value &&
             "tablesWritten" in value
-              ? (value as { result: JSONValue; tablesWritten: Set<string> })
+              ? (value as {
+                  result: JSONValue;
+                  tablesWritten: Set<string>;
+                  changes?: ProtocolChange[];
+                })
               : {
                   result: value as JSONValue,
                   tablesWritten: null as Set<string> | null,
+                  changes: null as ProtocolChange[] | null,
                 };
           writtenTables = tablesWritten;
+          writtenChanges = changes ?? null;
           return {
             type: "MutationResponse",
             requestId: message.requestId,
@@ -858,40 +859,32 @@ export class SyncProtocolHandler {
     );
 
     const transition =
-      session.activeQueries.size === 0 ||
+      !this._queryStore.hasQueries(sessionId) ||
       (writtenTables !== null && writtenTables.size === 0)
         ? null
         : await Fx.run(
             Fx.from({
               ok: async () => {
                 const startVersion = { ...session.version };
-                const relevantQueries = [
-                  ...session.activeQueries.values(),
-                ].filter(
-                  (query) =>
-                    writtenTables === null ||
-                    query.tablesRead.size === 0 ||
-                    [...query.tablesRead].some((table) =>
-                      writtenTables.has(table),
-                    ),
+                const relevantQueries = this._queryStore.getRelevantObservers(
+                  sessionId,
+                  writtenTables ?? undefined,
+                  writtenChanges,
                 );
                 const evaluated = await Fx.run(
-                  Fx.each(relevantQueries, (q) =>
-                    this._evaluateQuery({
-                      sessionId,
-                      identity: session.identity,
-                      identityKey: session.identityKey,
-                      ...q,
+                  Fx.each(relevantQueries, (observer) =>
+                    Fx.from({
+                      ok: () =>
+                        this._refreshProtocolQueryObserver(
+                          sessionId,
+                          session,
+                          observer,
+                        ),
+                      err: (err) => err as Error,
                     }),
                   ),
                 );
-                const modifications = evaluated.map(
-                  ({ modification }, index) => {
-                    relevantQueries[index]!.tablesRead =
-                      evaluated[index]!.tablesRead;
-                    return modification;
-                  },
-                );
+                const modifications = evaluated;
 
                 session.version = {
                   ...session.version,
@@ -967,8 +960,8 @@ export class SyncProtocolHandler {
       ];
     }
 
-    const authResult = await Fx.run(
-      Fx.match(message, message.tokenType, {
+    const authResult: AuthResult = await Fx.run(
+      matchTag(message, "tokenType", {
         None: () =>
           Fx.succeed(authSuccessResult({ identity: null, identityKey: null })),
         User: () =>
@@ -1007,9 +1000,9 @@ export class SyncProtocolHandler {
         };
         return [buildTransition(startVersion, session.version, [])];
       },
-      Failure: (current) => [
+      Failure: (current): ServerMessage[] => [
         {
-          type: "AuthError",
+          type: "AuthError" as const,
           error: current.error,
           baseVersion: message.baseVersion,
           authUpdateAttempted: true,

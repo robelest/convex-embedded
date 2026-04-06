@@ -140,10 +140,15 @@ export default defineConfig({
         embeddedSrc,
         "server/index.ts",
       ),
+      "@robelest/convex-embedded/server/table": path.join(
+        embeddedSrc,
+        "server/table.ts",
+      ),
       "@robelest/convex-embedded/client": path.join(
         embeddedSrc,
         "client/index.ts",
       ),
+      "@robelest/convex-embedded/react": path.join(embeddedSrc, "react.ts"),
       "@robelest/convex-embedded/convex.config": path.join(
         embeddedSrc,
         "component/convex.config.ts",

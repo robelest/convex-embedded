@@ -11,16 +11,24 @@
 // Core API — embeddedTable + setup
 export {
   embeddedTable,
+  bindTable,
   setup,
+  localOnly,
   remoteOnly,
   getTableRegistry,
   _resetRegistry,
   REMOTE_META,
+  PENDING_REPLAY_META,
 } from "@/server/setup";
 export type {
   SetupConfig,
   EmbeddedTableHandle,
   RemoteMeta,
+  RouteMode,
+  PendingReplayMeta,
+  PendingReplayMigrationContext,
+  PendingReplayMigrationResult,
+  PendingReplayMigrationStep,
 } from "@/server/setup";
 
 // Schema system — CRDT field types + versioning
@@ -35,12 +43,7 @@ export {
   createConflict,
   isCrdtField,
   getCrdtType,
-  initYjsDoc,
-  encodeDocumentState,
-  computeDiff,
-  mergeUpdate,
-  isDiffEmpty,
-} from "@/server/schema";
+} from "@/server/fields";
 export type {
   DefineOptions,
   Definition,
@@ -53,7 +56,13 @@ export type { ViewFilter } from "@/server/view";
 
 // Migration — local schema versioning
 export { migration, runMigrations } from "@/server/migration";
-export type { MigrationConfig } from "@/server/migration";
+export type {
+  MigrationConfig,
+  LocalMigrationAdapter,
+  LocalTableMigrationStep,
+  LocalTableMigrationContext,
+  LocalTableDocsApi,
+} from "@/server/migration";
 
 // Re-export shared types for convenience
 export type {

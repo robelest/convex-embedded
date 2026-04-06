@@ -24,7 +24,7 @@ type RemoteState =
   | { status: "idle" }
   | { status: "connecting" }
   | { status: "resolving"; progress?: { completed: number; total: number } }
-  | { status: "ready" }
+  | { status: "resolved" }
   | { status: "offline" }
   | { status: "error"; error?: Error };
 ```
@@ -96,7 +96,15 @@ const unsub = subscribeAuthState(client, (state) => {
 
 ## Migration errors
 
-When a local schema migration fails, the `MigrationErrorHandler` callback is
+Most apps now use the automatic startup migration pipeline driven by
+`embeddedTable(..., { migrate })` and mutation `replay` metadata. The low-level
+`MigrationErrorHandler` below still applies to the advanced/manual
+`runMigrations(ctx, config)` API.
+
+Automatic startup migrations are forward-only. If a newer local store is opened
+by an older app build, startup fails instead of attempting a downgrade.
+
+When a low-level local migration fails, the `MigrationErrorHandler` callback is
 invoked. This gives you control over how to recover.
 
 ### MigrationErrorHandler
@@ -174,14 +182,14 @@ await migration.run(ctx, {
 
 ### Module not found
 
-If `import.meta.glob` does not match any files, or a module path is incorrect,
-the embedded runtime will fail to load the module during function execution.
-This typically surfaces as an error in the mutation or query that references the
+If the `modules` registry is missing an entry, or a module id is incorrect, the
+embedded runtime will fail to load the module during function execution. This
+typically surfaces as an error in the mutation or query that references the
 missing function.
 
-**Fix**: Verify your glob pattern matches your Convex function files. For
-example, `import.meta.glob("./convex/*.ts")` matches all `.ts` files directly in
-the `./convex/` directory.
+**Fix**: Verify your registry keys match your canonical module ids. For example,
+use `"./convex/tasks.ts": () => import("./convex/tasks")` for `api.tasks.*`
+functions.
 
 ### Schema mismatch
 

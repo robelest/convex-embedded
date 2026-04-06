@@ -16,7 +16,7 @@
  * @packageDocumentation
  */
 
-import type { StoredDocument } from "@/core/types";
+import type { StoredDocument } from "@/runtime/db/types";
 
 // ---------------------------------------------------------------------------
 // Supporting types

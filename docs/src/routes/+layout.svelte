@@ -2,6 +2,7 @@
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 	import '../app.css';
+	import 'katex/dist/katex.min.css';
 	import Header from '$lib/components/docs/Header.svelte';
 	import Sidebar from '$lib/components/docs/Sidebar.svelte';
 	import MobileNav from '$lib/components/docs/MobileNav.svelte';

@@ -1,16 +1,20 @@
 import {
   AuthResolver,
   EmbeddedRuntime,
-  createEmbeddedConvex,
+  createEmbeddedClient,
+  createEmbeddedRuntime,
   createTestIdentity,
   createTransport,
   ephemeralStorage,
+  type EmbeddedClientOptions,
+  type EmbeddedPlatformAdapter,
   type EmbeddedRuntimeOptions,
 } from "@robelest/convex-embedded";
 import {
   getAuthState,
   getAuthIdentity,
   compileWasmModule,
+  createBrowserPlatformAdapter,
   createConvexClient,
   getRemoteState,
   logout,
@@ -26,7 +30,10 @@ import {
   type RemoteState,
 } from "@robelest/convex-embedded/browser";
 import {
+  createReplica,
   IdMap,
+  type CreateReplicaOptions,
+  type Replica,
   clientSchema,
   engine,
   runtime,
@@ -35,14 +42,21 @@ import {
 import embedded from "@robelest/convex-embedded/convex.config";
 import {
   CrdtType,
-  getConflict,
-  getCounterValue,
-  getSetMembers,
+  counter,
+  createConflict,
+  prose,
+  register as registerCrdt,
   schema,
+  set as setCrdt,
   type Conflict,
 } from "@robelest/convex-embedded/crdt";
 import {
+  createConvexReactClient,
+  wrapConvexBrowserClientForReact,
+} from "@robelest/convex-embedded/react";
+import {
   embeddedTable,
+  localOnly,
   migration,
   remoteOnly,
   setup,
@@ -51,20 +65,23 @@ import {
   type SetupConfig,
 } from "@robelest/convex-embedded/server";
 import { register } from "@robelest/convex-embedded/test";
-import "@robelest/convex-embedded/worker";
 
 type _RootSurface = {
   AuthResolver: typeof AuthResolver;
   EmbeddedRuntime: typeof EmbeddedRuntime;
-  createEmbeddedConvex: typeof createEmbeddedConvex;
+  createEmbeddedClient: typeof createEmbeddedClient;
+  createEmbeddedRuntime: typeof createEmbeddedRuntime;
   createTestIdentity: typeof createTestIdentity;
   createTransport: typeof createTransport;
   ephemeralStorage: typeof ephemeralStorage;
+  embeddedClientOptions: EmbeddedClientOptions | null;
+  embeddedPlatformAdapter: EmbeddedPlatformAdapter | null;
   runtimeOptions: EmbeddedRuntimeOptions | null;
 };
 
 type _BrowserSurface = {
   compileWasmModule: typeof compileWasmModule;
+  createBrowserPlatformAdapter: typeof createBrowserPlatformAdapter;
   createConvexClient: typeof createConvexClient;
   getAuthIdentity: typeof getAuthIdentity;
   getAuthState: typeof getAuthState;
@@ -82,26 +99,37 @@ type _BrowserSurface = {
   remoteState: RemoteState | null;
 };
 
+type _ReactSurface = {
+  createConvexReactClient: typeof createConvexReactClient;
+  wrapConvexBrowserClientForReact: typeof wrapConvexBrowserClientForReact;
+};
+
 type _ClientSurface = {
   IdMap: typeof IdMap;
+  createReplica: typeof createReplica;
   clientSchema: typeof clientSchema;
   engine: typeof engine;
   runtime: typeof runtime;
+  createReplicaOptions: CreateReplicaOptions | null;
   engineConfig: EngineConfig | null;
+  replica: Replica | null;
 };
 
 type _CrdtSurface = {
   CrdtType: typeof CrdtType;
-  getConflict: typeof getConflict;
-  getCounterValue: typeof getCounterValue;
-  getSetMembers: typeof getSetMembers;
+  counter: typeof counter;
+  createConflict: typeof createConflict;
+  prose: typeof prose;
+  register: typeof registerCrdt;
   schema: typeof schema;
+  set: typeof setCrdt;
   conflict: Conflict<unknown> | null;
 };
 
 type _ServerSurface = {
   embedded: typeof embedded;
   embeddedTable: typeof embeddedTable;
+  localOnly: typeof localOnly;
   migration: typeof migration;
   register: typeof register;
   remoteOnly: typeof remoteOnly;
@@ -114,15 +142,19 @@ type _ServerSurface = {
 void (<_RootSurface>{
   AuthResolver,
   EmbeddedRuntime,
-  createEmbeddedConvex,
+  createEmbeddedClient,
+  createEmbeddedRuntime,
   createTestIdentity,
   createTransport,
   ephemeralStorage,
+  embeddedClientOptions: null,
+  embeddedPlatformAdapter: null,
   runtimeOptions: null,
 });
 
 void (<_BrowserSurface>{
   compileWasmModule,
+  createBrowserPlatformAdapter,
   createConvexClient,
   getAuthIdentity,
   getAuthState,
@@ -140,26 +172,37 @@ void (<_BrowserSurface>{
   remoteState: null,
 });
 
+void (<_ReactSurface>{
+  createConvexReactClient,
+  wrapConvexBrowserClientForReact,
+});
+
 void (<_ClientSurface>{
   IdMap,
+  createReplica,
   clientSchema,
   engine,
   runtime,
+  createReplicaOptions: null,
   engineConfig: null,
+  replica: null,
 });
 
 void (<_CrdtSurface>{
   CrdtType,
-  getConflict,
-  getCounterValue,
-  getSetMembers,
+  counter,
+  createConflict,
+  prose,
+  register: registerCrdt,
   schema,
+  set: setCrdt,
   conflict: null,
 });
 
 void (<_ServerSurface>{
   embedded,
   embeddedTable,
+  localOnly,
   migration,
   register,
   remoteOnly,

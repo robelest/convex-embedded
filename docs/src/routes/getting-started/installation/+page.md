@@ -20,9 +20,7 @@ description: Install and configure @robelest/convex-embedded in your project.
 Before installing, make sure you have:
 
 - An existing **Convex project** (run `npx convex init` if you do not have one).
-- A **Vite-based bundler** (Vite, SvelteKit, Next.js with Turbopack, etc.) --
-  the embedded runtime uses `import.meta.glob` for module discovery.
-- **`convex` ^1.32.0** as a peer dependency.
+- **`convex` ^1.34.1** as a peer dependency.
 
 ## 1. Install the Package
 
@@ -57,13 +55,20 @@ bun add @robelest/convex-embedded
 ## 2. Install the Convex Component
 
 The CRDT remote engine uses a Convex component for server-side delta storage.
-Install it with:
+Register it in `convex/convex.config.ts`:
 
-```bash
-npx convex component add @robelest/convex-embedded
+```ts
+// convex/convex.config.ts
+import embedded from "@robelest/convex-embedded/convex.config";
+import { defineApp } from "convex/server";
+
+const app = defineApp();
+app.use(embedded);
+
+export default app;
 ```
 
-This registers the component in your `convex.config.ts` and makes
+After running `npx convex dev` or `npx convex codegen`, this makes
 `components.embedded` available in your generated API.
 
 ## Package Exports
@@ -71,17 +76,19 @@ This registers the component in your `convex.config.ts` and makes
 `@robelest/convex-embedded` ships multiple entry points so you only import what
 you need:
 
-| Export                                    | Environment    | Description                                                                                                                     |
-| ----------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `@robelest/convex-embedded/browser`       | Browser        | `createConvexClient` factory, `getRemoteState`, `subscribeRemoteState`, `getAuthState`, `subscribeAuthState`, preload utilities |
-| `@robelest/convex-embedded/server`        | Convex backend | `embeddedTable`, `setup`, `remoteOnly`                                                                                          |
-| `@robelest/convex-embedded/crdt`          | Convex backend | `schema` namespace (`register`, `prose`, `counter`, `set`, `omit`)                                                              |
-| `@robelest/convex-embedded/worker`        | Web Worker     | wa-sqlite worker entry point                                                                                                    |
-| `@robelest/convex-embedded/client`        | Browser        | Internal resolve engine (not part of the public API)                                                                            |
-| `@robelest/convex-embedded/convex.config` | Convex         | Component configuration                                                                                                         |
-| `@robelest/convex-embedded/test`          | Test           | Testing utilities                                                                                                               |
+| Export                                    | Environment     | Description                                                                                                                     |
+| ----------------------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `@robelest/convex-embedded/browser`       | Browser         | `createConvexClient` factory, `getRemoteState`, `subscribeRemoteState`, `getAuthState`, `subscribeAuthState`, preload utilities |
+| `@robelest/convex-embedded/react`         | React           | `createConvexReactClient` and React-compatible wrapping for `ConvexProvider`, `useQuery`, and `usePaginatedQuery`               |
+| `@robelest/convex-embedded/server`        | Convex backend  | `embeddedTable`, `setup`, `localOnly`, `remoteOnly`                                                                             |
+| `@robelest/convex-embedded/crdt`          | Convex backend  | `schema` namespace (`register`, `prose`, `counter`, `set`, `omit`)                                                              |
+| `@robelest/convex-embedded/client`        | Advanced client | Replica/bootstrap helpers such as `createReplica`                                                                               |
+| `@robelest/convex-embedded/convex.config` | Convex          | Component configuration                                                                                                         |
+| `@robelest/convex-embedded/test`          | Test            | Testing utilities                                                                                                               |
 
-Most applications only need `browser`, `server`, and `crdt`.
+Most applications only need `browser`, `server`, and `crdt`. Use `react` for
+React hook compatibility, and reach for `client` when you need SSR/bootstrap
+helpers such as `createReplica`.
 
 ## Next Steps
 

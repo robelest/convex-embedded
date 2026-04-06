@@ -2,7 +2,7 @@ import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
 
 /**
- * Component schema for convex-resolve.
+ * Component schema for convex-embedded.
  *
  * The `deltas` table stores full Yjs state snapshots recorded after each
  * mutation on a registered table. Each delta is a complete

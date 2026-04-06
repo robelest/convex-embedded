@@ -16,7 +16,7 @@ export function createConflict<T>(entries: ConflictEntry<T>[]): Conflict<T> {
     entries,
     latest(): T {
       if (entries.length === 0) {
-        throw new Error("convex-resolve: Cannot resolve empty conflict");
+        throw new Error("convex-embedded: Cannot resolve empty conflict");
       }
       let best = entries[0]!;
       for (let i = 1; i < entries.length; i++) {

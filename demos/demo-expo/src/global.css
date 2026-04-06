@@ -1,0 +1,38 @@
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/preflight.css" layer(base);
+@import "tailwindcss/utilities.css";
+
+@theme {
+  --color-accent-300: #e8a070;
+  --color-accent-400: #d4764a;
+  --color-accent-500: #c25d3a;
+  --color-accent-600: #a34a2a;
+
+  --color-warm-50: #fdfcfa;
+  --color-warm-100: #faf8f5;
+  --color-warm-200: #f5f2ed;
+  --color-warm-300: #e8e2d8;
+  --color-warm-400: #b5aea3;
+  --color-warm-500: #8c8780;
+  --color-warm-600: #6b665f;
+  --color-warm-700: #4a453e;
+  --color-warm-800: #2d2a26;
+  --color-warm-900: #1a1816;
+
+  --color-success: #16a34a;
+  --color-urgent: #991b1b;
+}
+
+@media android {
+  :root {
+    --font-mono: monospace;
+    --font-sans: normal;
+  }
+}
+
+@media ios {
+  :root {
+    --font-mono: ui-monospace;
+    --font-sans: system-ui;
+  }
+}

@@ -2,22 +2,25 @@
  * @robelest/convex-embedded
  *
  * Lightweight embedded Convex runtime for local-first applications.
- * Runs entirely in-memory — no network, no backend. Presents the
- * standard ConvexClient / ConvexReactClient API so existing Convex
- * apps can point at a local runtime with zero code changes.
+ * Runs locally in-memory and can be seeded from a remote-backed replica for
+ * SSR/bootstrap flows. The root package exposes framework-agnostic runtime and
+ * client primitives rather than a React-specific wrapper.
+ *
+ * The root package also exports the platform-agnostic client factory and
+ * platform adapter interfaces used by environment-specific wrappers.
  *
  * @example
  * ```ts
- * import { createEmbeddedConvex } from "@robelest/convex-embedded";
- * import { ConvexReactClient } from "convex/react";
+ * import { createEmbeddedRuntime } from "@robelest/convex-embedded";
+ * import { modules } from "./convex-modules";
  *
- * const embedded = createEmbeddedConvex({
- *   modules: import.meta.glob("./convex/** /*.ts"),
+ * const embedded = createEmbeddedRuntime({
+ *   modules,
  *   schema,
  * });
  *
  * const { url, webSocketConstructor } = embedded.createTransport();
- * const client = new ConvexReactClient(url, { webSocketConstructor });
+ * const client = new ConvexClient(url, { webSocketConstructor });
  * ```
  *
  * @packageDocumentation
@@ -38,7 +41,7 @@ export type { EmbeddedTransport } from "@/runtime/transport";
 export {
   LoopbackWebSocket,
   LoopbackWebSocketConstructor,
-} from "@/runtime/loopback-ws";
+} from "@/runtime/loopback";
 
 export type {
   LoopbackEvent,
@@ -46,9 +49,9 @@ export type {
   LoopbackMessageEvent,
   LoopbackCloseEvent,
   LoopbackErrorEvent,
-} from "@/runtime/loopback-ws";
+} from "@/runtime/loopback";
 
-export { WriteFanout } from "@/runtime/write-fanout";
+export type { ConvexModuleRegistry } from "@/kernel/modules";
 
 export { AuthResolver, createTestIdentity } from "@/auth/resolver";
 export type { UserIdentity } from "@/auth/resolver";
@@ -63,10 +66,25 @@ export { ephemeralStorage } from "@/storage/memory";
 
 export { SubscriptionManager } from "@/sync/subscriptions";
 
-export { SystemPaths } from "@/kernel/system-functions";
+export { SystemPaths } from "@/kernel/system";
+
+export type {
+  SessionBroadcast,
+  WriteBroadcast,
+  ConnectivityAdapter,
+  ProcessorIdentity,
+  EmbeddedPlatformAdapter,
+} from "@/runtime/platform";
+export { createNoopWriteBroadcast } from "@/runtime/platform";
+export type { EmbeddedCryptoProvider } from "@/runtime/crypto";
+export { createAmbientCryptoProvider } from "@/runtime/crypto";
+export {
+  createEmbeddedClient,
+  type EmbeddedClientOptions,
+} from "@/client/factory";
 
 // ---------------------------------------------------------------------------
-// Convenience factory
+// Runtime and client factories
 // ---------------------------------------------------------------------------
 
 import {
@@ -77,15 +95,19 @@ import {
 /**
  * Create an embedded Convex runtime.
  *
- * This is the primary entry point. Pass the result of
- * `import.meta.glob` pointing at your Convex modules, and optionally
- * your schema definition.
+ * This is the primary entry point. Pass a lazy ESM registry keyed by your
+ * Convex module ids, optionally your schema definition, and optionally a
+ * remote-backed replica for SSR/bootstrap.
  *
- * @param options.modules  Vite `import.meta.glob("./convex/** /*.ts")` record.
+ * @param options.modules  Lazy ESM registry keyed by canonical module id.
  * @param options.schema   Default export from your `convex/schema.ts`.
+ * @param options.replica  Optional replica created by `createReplica(...)`.
  * @returns An {@link EmbeddedRuntime} instance.
+ *
+ * @see createReplica
+ * @category Factory
  */
-export function createEmbeddedConvex(
+export function createEmbeddedRuntime(
   options: EmbeddedRuntimeOptions,
 ): EmbeddedRuntime {
   return new EmbeddedRuntime(options);

@@ -8,7 +8,14 @@
 
 import { Fx } from "@robelest/fx";
 
-import type { Database } from "@/core/database";
+import type { Database } from "@/runtime/db/database";
+import type { StoreMigrationManifest } from "@/runtime/migrations/types";
+
+export const SCHEDULED_FUNCTIONS_STORE_MIGRATIONS: StoreMigrationManifest = {
+  store: "scheduledFunctions",
+  scope: "global",
+  version: 1,
+};
 
 // ---------------------------------------------------------------------------
 // Types

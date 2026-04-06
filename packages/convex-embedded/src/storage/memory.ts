@@ -5,7 +5,7 @@
  * configured. Data lives only for the lifetime of the runtime.
  */
 
-import type { StoredDocument } from "@/core/types";
+import type { StoredDocument } from "@/runtime/db/types";
 import type {
   CommitBatch,
   DatabaseMeta,

@@ -1,25 +1,24 @@
 /**
  * Browser entry point for `@robelest/convex-embedded/browser`.
  *
- * Provides a single {@link createConvexClient} factory that sets up an
- * embedded Convex runtime and returns a standard `ConvexClient`. The
- * returned client is indistinguishable from a normal Convex client —
- * it works with `useQuery`, `ConvexProvider`, `convex-svelte`, and any
- * other Convex framework integration out of the box.
+ * Provides a browser-specific wrapper around the core embedded client
+ * factory. It wires the browser platform adapter into the core runtime and
+ * returns a standard `ConvexClient`. The returned client is framework agnostic:
+ * use it directly or through framework adapters such as `convex-svelte`.
  *
  * ## Architecture
  *
  * - **EmbeddedRuntime** runs on the **main thread** via a loopback
  *   WebSocket transport. This is required because Convex function
- *   modules (from `import.meta.glob`) contain non-cloneable `Function`
+ *   modules (from the lazy ESM registry) contain non-cloneable `Function`
  *   and `Proxy` objects that cannot cross a `postMessage` boundary.
  *
  * - **wa-sqlite** runs in a **Dedicated Worker** for persistence.
  *   Only plain JSON data (documents, metadata) and `ArrayBuffer`s
  *   (blobs) cross the worker boundary.
  *
- * - **Cross-tab propagation** uses `WriteFanout` (`BroadcastChannel`) plus
- *   a shared IndexedDB database name.
+ * - **Cross-context propagation** uses the browser platform broadcast layer
+ *   (`BroadcastChannel` / `storage` events) plus a shared IndexedDB name.
  *
  * - **Remote connection** (optional) uses the built-in Yjs CRDT-based resolve
  *   engine that reconciles offline changes on reconnect, plus reactive
@@ -29,7 +28,8 @@
  *
  * | Symbol | Kind | Description |
  * |--------|------|-------------|
- * | {@link createConvexClient} | Factory | Create an embedded `ConvexClient` |
+ * | {@link createConvexClient} | Factory | Create a browser-backed embedded `ConvexClient` |
+ * | {@link createBrowserPlatformAdapter} | Factory | Create the browser platform adapter |
  * | {@link getAuthState} | Accessor | Read current embedded auth state |
  * | {@link subscribeAuthState} | Subscription | Observe embedded auth state changes |
  * | {@link getRemoteState} | Accessor | Read current remote state |
@@ -43,9 +43,10 @@
  * @example
  * ```ts
  * import { createConvexClient } from "@robelest/convex-embedded/browser";
+ * import { modules } from "./convex-modules";
  *
  * const client = createConvexClient({
- *   modules: import.meta.glob("./convex/*.ts"),
+ *   modules,
  *   remote: { url: "https://happy-otter-123.convex.cloud" },
  * });
  * ```
@@ -53,23 +54,16 @@
  * @packageDocumentation
  */
 
-import { Fx } from "@robelest/fx";
 import { ConvexClient } from "convex/browser";
 import type { BaseConvexClientOptions } from "convex/browser";
-import { getFunctionName } from "convex/server";
 
-import { getIdentityKey, type UserIdentity } from "@/auth/resolver";
-import { compileWasmModule } from "@/browser/preload";
-import { openWaSqliteStorage } from "@/browser/wa-sqlite";
-import type { ConvexModule } from "@/kernel/module-loader";
-import { EmbeddedRuntime } from "@/runtime/embedded";
-import type { EmbeddedRuntimeOptions } from "@/runtime/embedded";
-import { SessionFanout } from "@/runtime/session-fanout";
-import { isRemoteOnly } from "@/shared/remote-only";
-import {
-  createEncryptedStorage,
-  type EncryptionOptions,
-} from "@/storage/encrypted";
+import { createBrowserPlatformAdapter } from "@/browser/platform";
+import { type AuthOptions, type AuthState } from "@/client/auth";
+import { createEmbeddedClient } from "@/client/factory";
+import { type RemoteOptions, type RemoteState } from "@/client/remote";
+import type { Replica } from "@/client/replica";
+import { type ConvexModuleRegistry } from "@/kernel/modules";
+import type { EncryptionOptions } from "@/storage/encrypted";
 
 // Re-export preloading utilities (public).
 export {
@@ -79,6 +73,7 @@ export {
   injectPreloadLinks,
   compileWasmModule,
 } from "@/browser/preload";
+export type { ConvexModuleRegistry } from "@/kernel/modules";
 
 // ---------------------------------------------------------------------------
 // Public interfaces & types
@@ -97,8 +92,7 @@ export {
  * **Naming**: "Resolve" refers to the CRDT-based reconciliation that
  * happens when a client reconnects after being offline. While online,
  * data flows through standard reactive query subscriptions — resolve is
- * only invoked for offline catch-up. The name aligns with the
- * `@robelest/convex-embedded` package (formerly `@robelest/convex-resolve`).
+ * only invoked for offline catch-up.
  *
  * **Retry behaviour**: Both `maxRetries` and `retryDelayMs` control
  * the retry policy for the Yjs CRDT resolve pass on reconnect (not for
@@ -132,79 +126,8 @@ export {
  *
  * @category Configuration
  */
-export interface RemoteOptions {
-  /**
-   * URL of the remote Convex deployment.
-   *
-   * This is the same URL used by `ConvexClient` in a standard (non-embedded)
-   * Convex app — typically from your Convex dashboard or `.env` file.
-   */
-  url: string;
-
-  /**
-   * Maximum retries for the CRDT resolve pass on reconnect.
-   *
-   * @default 3
-   */
-  maxRetries?: number;
-
-  /**
-   * Base delay between retries in milliseconds. Actual delays use
-   * exponential back-off with jitter starting from this value.
-   *
-   * @default 1000
-   */
-  retryDelayMs?: number;
-}
-
-export type AuthTokenFetcher = Parameters<ConvexClient["setAuth"]>[0];
 export type { EncryptionOptions };
-
-export interface AuthOptions {
-  /**
-   * Optional token fetcher passed through to `client.setAuth(...)`.
-   *
-   * When provided here, `createConvexClient()` installs it automatically on
-   * both the embedded client and the remote Convex client (if `remote` is enabled).
-   */
-  fetchToken?: AuthTokenFetcher;
-
-  /**
-   * Optional bridge that returns the local embedded identity.
-   *
-   * Use this to keep `ctx.auth.getUserIdentity()` aligned with your auth
-   * provider. The returned identity is stored in-memory only.
-   */
-  getUserIdentity?: () => Promise<UserIdentity | null>;
-
-  /**
-   * Override how identities are grouped for local auth/session state.
-   * Defaults to `identity.tokenIdentifier ?? identity.subject`.
-   */
-  getIdentityKey?: (identity: UserIdentity | null) => string | null;
-
-  /**
-   * Optional verifier for tokens used by the embedded protocol.
-   *
-   * When provided, local protocol auth uses this hook instead of trusting any
-   * non-empty token paired with the current embedded identity.
-   */
-  verifyToken?: (token: string) => Promise<UserIdentity | null>;
-}
-
-export type AuthState =
-  | { status: "idle" }
-  | { status: "refreshing" }
-  | { status: "unauthenticated" }
-  | { status: "authenticated"; identity?: UserIdentity; identityKey?: string }
-  | { status: "offlineStale"; identity?: UserIdentity; identityKey?: string }
-  | { status: "reauthRequired"; identity?: UserIdentity; identityKey?: string }
-  | {
-      status: "identityMismatch";
-      identity?: UserIdentity;
-      identityKey?: string;
-    }
-  | { status: "error"; error: Error };
+export type { AuthOptions, AuthState, RemoteOptions, RemoteState };
 
 /**
  * Options for {@link createConvexClient}.
@@ -214,9 +137,9 @@ export type AuthState =
  * defaults. Add `remote` to enable local-first mode with a remote Convex
  * deployment; omit it for a purely local embedded database.
  *
- * **Module discovery**: The `modules` map must come from Vite's
- * `import.meta.glob` (lazy variant, not `{ eager: true }`). The
- * embedded runtime inspects each module's exports to find Convex
+ * **Module discovery**: The `modules` map must be an enumerable lazy ESM
+ * registry keyed by canonical Convex module ids such as `tasks` or
+ * `lib/utils`. The embedded runtime inspects each module's exports to find Convex
  * function definitions and — when remote is enabled — `remote metadata`
  * constants exported by `register()`.
  *
@@ -228,7 +151,7 @@ export type AuthState =
  * ```ts
  * // Minimal — local-only, no remote
  * const client = createConvexClient({
- *   modules: import.meta.glob("./convex/*.ts"),
+ *   modules,
  * });
  * ```
  *
@@ -236,7 +159,7 @@ export type AuthState =
  * ```ts
  * // Local-first with remote
  * const client = createConvexClient({
- *   modules: import.meta.glob("./convex/*.ts"),
+ *   modules,
  *   remote: { url: import.meta.env.CONVEX_URL },
  * });
  * ```
@@ -248,19 +171,19 @@ export type AuthState =
  */
 export interface ClientOptions {
   /**
-   * Lazy module map pointing at your Convex functions.
+   * Lazy ESM registry pointing at your Convex functions.
    *
-   * Must be the return value of `import.meta.glob` **without**
-   * `{ eager: true }` — each entry is a lazy `() => Promise<Module>`
+   * Each key must be the canonical Convex module id (for example `tasks`
+   * or `lib/utils`) and each value must be a lazy `() => Promise<Module>`
    * loader. The runtime loads modules on demand during function
    * execution and scans for `remote metadata` exports during remote setup.
    *
    * @example
    * ```ts
-   * import.meta.glob("./convex/*.ts")
+   * import { modules } from "./convex-modules";
    * ```
    */
-  modules: Record<string, () => Promise<unknown>>;
+  modules: ConvexModuleRegistry;
 
   /**
    * Optional Convex schema definition (the default export from your
@@ -326,6 +249,15 @@ export interface ClientOptions {
    */
   auth?: AuthOptions;
 
+  /**
+   * Optional remote-backed replica used to seed the embedded database.
+   *
+   * This is the browser-side half of the SSR/bootstrap flow: build the replica
+   * on the server with `createReplica(...)`, serialize it into the page, then
+   * pass it here so the browser client starts warm.
+   */
+  replica?: Replica;
+
   /** Optional at-rest encryption for persisted local state. */
   encryption?: Omit<EncryptionOptions, "getIdentityKey">;
 }
@@ -354,7 +286,7 @@ export interface ClientOptions {
  * **`resolving`** — The CRDT resolve pass is in progress. When available,
  * `progress` reports how many tables have been resolved so far.
  *
- * **`ready`** — All tables are resolved and reactive subscriptions are
+ * **`resolved`** — All tables are resolved and reactive subscriptions are
  * active. This is the normal steady-state while online.
  *
  * **`offline`** — Network is unavailable. Mutations continue to work
@@ -369,7 +301,7 @@ export interface ClientOptions {
  * ```ts
  * const unsub = subscribeRemoteState(client, (state) => {
  *   switch (state.status) {
- *     case "ready":   badge.textContent = "Online"; break;
+ *     case "resolved": badge.textContent = "Online"; break;
  *     case "offline": badge.textContent = "Offline"; break;
  *     case "resolving": badge.textContent = `Resolving ${state.progress?.completed ?? 0}/${state.progress?.total ?? "?"}...`; break;
  *     case "error":   badge.textContent = `Error: ${state.error?.message}`; break;
@@ -382,41 +314,6 @@ export interface ClientOptions {
  *
  * @category Type
  */
-export type RemoteState =
-  | { status: "idle" }
-  | { status: "connecting" }
-  | { status: "resolving"; progress?: { completed: number; total: number } }
-  | { status: "ready" }
-  | { status: "offline" }
-  | { status: "error"; error?: Error };
-
-interface AuthEntry {
-  runtime: EmbeddedRuntime;
-  getIdentityKey?: (identity: UserIdentity | null) => string | null;
-  getUserIdentitySource?: () => Promise<UserIdentity | null>;
-  currentAuthFetcher?: AuthTokenFetcher;
-  getPendingCount: () => number;
-  refreshSync?: () => Promise<void>;
-  activeIdentityKey: string | null;
-  sessionFanout?: SessionFanout;
-  state: AuthState;
-  listeners: Set<(state: AuthState) => void>;
-}
-
-type AuthIdentitySnapshot = {
-  identity?: UserIdentity;
-  identityKey?: string;
-};
-
-// ---------------------------------------------------------------------------
-// Allow Convex server functions to be imported in the browser.
-// The SDK guards against this to prevent accidental secret leakage,
-// but the embedded runtime intentionally runs functions client-side.
-// This must be set before any Convex modules are imported.
-// ---------------------------------------------------------------------------
-
-(globalThis as Record<string, unknown>).__convexAllowFunctionsInBrowser = true;
-
 // ---------------------------------------------------------------------------
 // Factory
 // ---------------------------------------------------------------------------
@@ -425,11 +322,11 @@ type AuthIdentitySnapshot = {
  * Create a `ConvexClient` backed by the local embedded Convex runtime.
  *
  * Returns a standard {@link https://docs.convex.dev/api/classes/browser.ConvexClient | ConvexClient}
- * that works with `ConvexProvider`, `convex-svelte`, or any Convex
- * framework integration — no wrapper objects, no special mutation calls.
+ * for framework-agnostic browser usage. The browser entry does not add a
+ * React-specific client wrapper.
  *
  * @remarks
- * **How it works**: The factory creates an {@link EmbeddedRuntime} on the
+ * **How it works**: The factory creates an embedded runtime on the
  * main thread, connects it to a `ConvexClient` via a loopback WebSocket
  * transport, and initialises wa-sqlite persistence in a Dedicated Worker.
  * From the outside, the returned client behaves identically to a normal
@@ -464,7 +361,7 @@ type AuthIdentitySnapshot = {
  * import { onDestroy } from "svelte";
  *
  * const client = createConvexClient({
- *   modules: import.meta.glob("./convex/*.ts"),
+ *   modules,
  *   remote: { url: import.meta.env.CONVEX_URL },
  * });
  *
@@ -479,7 +376,7 @@ type AuthIdentitySnapshot = {
  * import { ConvexProvider } from "convex/react";
  *
  * const client = createConvexClient({
- *   modules: import.meta.glob("./convex/*.ts"),
+ *   modules,
  *   remote: { url: import.meta.env.CONVEX_URL },
  * });
  *
@@ -496,7 +393,7 @@ type AuthIdentitySnapshot = {
  * ```ts
  * // Local-only (no remote) — useful for prototyping or offline-only apps
  * const client = createConvexClient({
- *   modules: import.meta.glob("./convex/*.ts"),
+ *   modules,
  * });
  * ```
  *
@@ -513,1533 +410,45 @@ type AuthIdentitySnapshot = {
  * @category Factory
  */
 export function createConvexClient(options: ClientOptions): ConvexClient {
-  const dbName = options.name ?? "convex-embedded";
-  const sessionFanout = new SessionFanout(`${dbName}:session`);
-
-  const modules = options.modules as Record<
-    string,
-    () => Promise<ConvexModule>
-  >;
-
-  // 1. Create the runtime (in-memory, no storage yet)
-  const runtime = new EmbeddedRuntime({
-    modules,
-    schema: options.schema as EmbeddedRuntimeOptions["schema"],
-    verifyToken: options.auth?.verifyToken,
+  ensureConvexAllowFunctionsInBrowser();
+  const platform = createBrowserPlatformAdapter({
+    workerUrl: options.workerUrl,
   });
-
-  // 2. Set the hydration gate before creating transport/client
-  const storageReady = openStorage(
-    runtime,
-    dbName,
-    options.workerUrl,
-    options.encryption,
-  );
-  runtime.setHydrationGate(storageReady);
-
-  // 3. Create transport + client synchronously
-  const transport = runtime.createTransport();
-
-  const client = new ConvexClient(transport.url, {
-    ...options.clientOptions,
-    webSocketConstructor:
-      transport.webSocketConstructor as unknown as typeof WebSocket,
-    unsavedChangesWarning: false,
-  });
-
-  const authEntry: AuthEntry = {
-    runtime,
-    getIdentityKey: options.auth?.getIdentityKey,
-    getPendingCount: () => 0,
-    refreshSync: () => Promise.resolve(),
-    activeIdentityKey: null,
-    sessionFanout,
-    state: { status: "idle" },
-    listeners: new Set(),
-  };
-  _authEntries.set(client, authEntry);
-
-  const resolveAttachment = options.remote
-    ? _attachResolve(
-        client,
-        runtime,
-        authEntry,
-        options.remote,
-        modules,
-        () => authEntry.activeIdentityKey,
-      )
-    : null;
-
-  authEntry.getPendingCount = () => resolveAttachment?.getPendingCount?.() ?? 0;
-  authEntry.refreshSync = () =>
-    resolveAttachment?.refresh?.() ?? Promise.resolve();
-  authEntry.getUserIdentitySource = options.auth?.getUserIdentity;
-
-  void readStoredActiveIdentityKey(runtime)
-    .then((identityKey) => {
-      authEntry.activeIdentityKey = identityKey;
-      runtime.setActiveIdentityKey(identityKey);
-    })
-    .catch(() => {
-      authEntry.activeIdentityKey = null;
-      runtime.setActiveIdentityKey(null);
-    });
-
-  _installAuth(client, runtime, authEntry, {
-    authOptions: options.auth,
-    forwardSetAuth: resolveAttachment?.forwardSetAuth,
-  });
-
-  const unsubscribeSessionFanout = sessionFanout.onNotification(() => {
-    Fx.detach(
-      () => refreshAuthFromSource(authEntry),
-      "[convex-embedded] session fanout:",
-    );
-  });
-
-  const originalClose = client.close.bind(client);
-  (client as any).close = async function patchedClose(): Promise<void> {
-    _authEntries.delete(client);
-    if (resolveAttachment) {
-      await resolveAttachment.close();
-      _resolveEntries.delete(client);
-    }
-    unsubscribeSessionFanout();
-    sessionFanout.close();
-    runtime.shutdown();
-    return originalClose();
-  };
-
-  return client;
+  return createEmbeddedClient({ options, platform });
 }
 
-/**
- * Get the current embedded auth state of a client.
- *
- * Returns `{ status: "idle" }` if the client was not created by
- * {@link createConvexClient}.
- *
- * @remarks
- * This is a point-in-time read. For reactive updates, use
- * {@link subscribeAuthState} instead.
- *
- * @param client - A `ConvexClient`, typically created by {@link createConvexClient}.
- * @returns The current {@link AuthState}.
- *
- * @see {@link subscribeAuthState} - Reactive alternative.
- * @see {@link AuthState} - The state union type.
- *
- * @category Auth
- */
-export function getAuthState(client: ConvexClient): AuthState {
-  return _authEntries.get(client)?.state ?? { status: "idle" };
-}
+export { createBrowserPlatformAdapter } from "@/browser/platform";
 
-/**
- * Subscribe to embedded auth state changes on a client.
- *
- * The callback fires whenever the embedded auth state transitions.
- * Returns a no-op unsubscribe if the client was not created by
- * {@link createConvexClient}.
- *
- * @param client - A `ConvexClient`, typically created by {@link createConvexClient}.
- * @param callback - Called on each auth state transition with the new
- *                   {@link AuthState}.
- * @returns An unsubscribe function. Call it to stop receiving updates.
- *
- * @see {@link getAuthState} - One-shot read of the current state.
- * @see {@link AuthState} - The state union type.
- *
- * @category Auth
- */
-export function subscribeAuthState(
-  client: ConvexClient,
-  callback: (state: AuthState) => void,
-): () => void {
-  const entry = _authEntries.get(client);
-  if (!entry) return () => {};
-  entry.listeners.add(callback);
-  return () => entry.listeners.delete(callback);
-}
+export {
+  getAuthState,
+  subscribeAuthState,
+  reauthenticate,
+  getAuthIdentity,
+  setAuthIdentity,
+  logout,
+  switchIdentity,
+} from "@/client/auth";
 
-/**
- * Force a refresh of the active embedded auth session.
- *
- * If an auth token fetcher is configured, this forces a token refresh and then
- * reloads the current embedded identity namespace.
- */
-export async function reauthenticate(client: ConvexClient): Promise<void> {
-  const entry = _authEntries.get(client);
-  if (!entry?.currentAuthFetcher) {
-    return;
-  }
+export { getRemoteState, subscribeRemoteState } from "@/client/remote";
 
-  await entry.currentAuthFetcher({ forceRefreshToken: true });
-  await refreshAuthFromSource(entry);
-}
-
-/**
- * Get the current embedded identity for a client.
- *
- * Returns `null` if the client was not created by {@link createConvexClient}
- * or if no identity is currently active.
- *
- * @category Auth
- */
-export function getAuthIdentity(client: ConvexClient): UserIdentity | null {
-  return _authEntries.get(client)?.runtime.getIdentity() ?? null;
-}
-
-/**
- * Set the embedded identity for local auth-aware execution.
- *
- * This updates only the embedded runtime identity and auth state. It does not
- * install or replace the remote token fetcher; pair it with `client.setAuth(...)`
- * or `createConvexClient({ auth })` when you also need remote Convex auth.
- *
- * @category Auth
- */
-export function setAuthIdentity(
-  client: ConvexClient,
-  identity: UserIdentity | null,
-): Promise<void> {
-  const entry = _authEntries.get(client);
-  if (!entry) {
-    return Promise.resolve();
-  }
-
-  return applyAuthIdentity(entry, identity, true);
-}
-
-function applyAuthIdentity(
-  entry: AuthEntry,
-  identity: UserIdentity | null,
-  broadcast: boolean,
-): Promise<void> {
-  const previous = getAuthIdentitySnapshot(entry.state);
-  const identityKey =
-    entry.getIdentityKey?.(identity) ?? getIdentityKey(identity);
-  return Fx.run(
-    Fx.from({
-      ok: async () => {
-        entry.runtime.setIdentity(identity);
-        entry.runtime.setActiveIdentityKey(identityKey);
-        await migrateAnonymousNamespaceIfNeeded(
-          entry,
-          previous.identityKey,
-          identityKey,
-        );
-        entry.activeIdentityKey = identityKey;
-        await writeStoredActiveIdentityKey(entry.runtime, identityKey);
-
-        if (identity === null) {
-          notifyAuthListeners(entry, { status: "unauthenticated" });
-          await entry.refreshSync?.();
-          if (broadcast) {
-            entry.sessionFanout?.notify({ type: "authChanged" });
-          }
-          return;
-        }
-
-        if (
-          previous.identityKey &&
-          identityKey &&
-          previous.identityKey !== identityKey &&
-          (await hasInactivePendingIdentityWork(entry))
-        ) {
-          notifyAuthListeners(entry, {
-            status: "identityMismatch",
-            identity,
-            identityKey,
-          });
-          await entry.refreshSync?.();
-          if (broadcast) {
-            entry.sessionFanout?.notify({ type: "authChanged" });
-          }
-          return;
-        }
-
-        notifyAuthListeners(entry, toAuthenticatedState(identity, identityKey));
-        await entry.refreshSync?.();
-        if (broadcast) {
-          entry.sessionFanout?.notify({ type: "authChanged" });
-        }
-      },
-      err: (err) => asError(err),
-    }).pipe(
-      Fx.inspect((err) =>
-        Fx.sync(() => {
-          notifyAuthListeners(entry, { status: "error", error: err });
-        }),
-      ),
-      Fx.recover(() => Fx.unit),
-    ),
-  );
-}
-
-/**
- * Clear the current embedded identity without deleting local data.
- *
- * Pending remote state remains persisted and identity-scoped for later reuse.
- *
- * @category Auth
- */
-export function logout(client: ConvexClient): Promise<void> {
-  return setAuthIdentity(client, null);
-}
-
-/**
- * Switch the active embedded identity without deleting local data.
- *
- * If queued remote work exists for another identity, the auth state becomes
- * `identityMismatch` instead of silently replaying under the new identity.
- *
- * @category Auth
- */
-export function switchIdentity(
-  client: ConvexClient,
-  identity: UserIdentity,
-): Promise<void> {
-  return setAuthIdentity(client, identity);
-}
-
-// ---------------------------------------------------------------------------
-// Remote state accessors
-// ---------------------------------------------------------------------------
-
-/**
- * Get the current remote state of a client.
- *
- * Returns `{ status: "idle" }` if the client was created without
- * `remote`, if remote has not started yet, or if the client was not
- * created by {@link createConvexClient}.
- *
- * @remarks
- * This is a point-in-time read. For reactive UI updates, use
- * {@link subscribeRemoteState} instead — it fires a callback on
- * every state transition.
- *
- * The function uses a `WeakMap` lookup keyed on the client instance,
- * so it is O(1) and does not retain references to closed clients.
- *
- * @example
- * ```ts
- * import { createConvexClient, getRemoteState } from "@robelest/convex-embedded/browser";
- *
- * const client = createConvexClient({ modules, remote: { url } });
- *
- * // Later, check state before performing an action
- * const state = getRemoteState(client);
- * if (state.status === "ready") {
- *   console.log("All tables are up to date");
- * }
- * ```
- *
- * @example
- * ```ts
- * // Safe to call on any ConvexClient — returns idle for non-embedded clients
- * const state = getRemoteState(someClient);
- * // state is { status: "idle" }
- * ```
- *
- * @param client - A `ConvexClient`, typically created by {@link createConvexClient}.
- * @returns The current {@link RemoteState}.
- *
- * @see {@link subscribeRemoteState} — Reactive alternative.
- * @see {@link RemoteState} — The state union type.
- *
- * @category Remote
- */
-export function getRemoteState(client: ConvexClient): RemoteState {
-  return _resolveEntries.get(client)?.state ?? { status: "idle" };
-}
-
-/**
- * Subscribe to remote state changes on a client.
- *
- * The callback fires whenever the remote state transitions (e.g.
- * `offline -> resolving -> ready`). Returns an unsubscribe function.
- *
- * @remarks
- * The callback is invoked **synchronously** on each state transition.
- * If your callback performs expensive work (DOM updates, network calls),
- * consider debouncing or batching inside the callback.
- *
- * Returns a **no-op unsubscribe** if the client was created without
- * `remote` or was not created by {@link createConvexClient}. This makes
- * it safe to call unconditionally in framework lifecycle hooks.
- *
- * The subscription is automatically cleaned up when `client.close()`
- * is called — the `WeakMap` entry is deleted, and outstanding listeners
- * are dropped. You do not *need* to call the unsubscribe function on
- * close, but it is harmless to do so.
- *
- * @example
- * ```ts
- * // Svelte — reactive remote status indicator
- * import { createConvexClient, subscribeRemoteState } from "@robelest/convex-embedded/browser";
- * import { onDestroy } from "svelte";
- *
- * const client = createConvexClient({ modules, remote: { url } });
- * let remoteStatus = $state("idle");
- *
- * const unsub = subscribeRemoteState(client, (state) => {
- *   remoteStatus = state.status;
- * });
- * onDestroy(unsub);
- * ```
- *
- * @example
- * ```ts
- * // React — remote status in a custom hook
- * function useRemoteStatus(client: ConvexClient) {
- *   const [status, setStatus] = useState<RemoteState["status"]>("idle");
- *   useEffect(() => {
- *     return subscribeRemoteState(client, (s) => setStatus(s.status));
- *   }, [client]);
- *   return status;
- * }
- * ```
- *
- * @param client - A `ConvexClient`, typically created by {@link createConvexClient}.
- * @param callback - Called on each remote state transition with the new
- *                   {@link RemoteState}.
- * @returns An unsubscribe function. Call it to stop receiving updates.
- *
- * @see {@link getRemoteState} — One-shot read of the current state.
- * @see {@link RemoteState} — The state union type.
- *
- * @category Remote
- */
-export function subscribeRemoteState(
-  client: ConvexClient,
-  callback: (state: RemoteState) => void,
-): () => void {
-  const entry = _resolveEntries.get(client);
-  if (!entry) return () => {};
-  entry.listeners.add(callback);
-  return () => entry.listeners.delete(callback);
-}
-
-const _authEntries = new WeakMap<ConvexClient, AuthEntry>();
-
-// ---------------------------------------------------------------------------
-// Internal resolve wiring
-// ---------------------------------------------------------------------------
-
-/** @internal WeakMap associating clients with their resolve engine + state. */
-const _resolveEntries = new WeakMap<ConvexClient, ResolveEntry>();
-
-interface ResolveEntry {
-  engine: EngineInstance | null;
-  state: RemoteState;
-  listeners: Set<(state: RemoteState) => void>;
-  remoteOnlyRefs: Set<string>;
-  discovery: Promise<void> | null;
-  discoveryReady: boolean;
-  closed: boolean;
-}
-
-interface ModuleLoadFailure {
-  path: string;
-  error: Error;
-}
-
-type DiscoveryResult =
-  | {
-      _tag: "Closed";
-    }
-  | {
-      _tag: "Empty";
-      remoteOnlyRefs: Set<string>;
-      moduleLoadFailures: ModuleLoadFailure[];
-    }
-  | {
-      _tag: "Ready";
-      remoteOnlyRefs: Set<string>;
-      moduleLoadFailures: ModuleLoadFailure[];
-      tables: Record<
-        string,
-        { resolve: string; query: string; schema?: unknown }
-      >;
-    };
-
-type CallRoute =
-  | { _tag: "RemoteOnly"; refName: string }
-  | { _tag: "LocalEngine" }
-  | { _tag: "OriginalClient" };
-
-type SubscriptionRoute =
-  | { _tag: "RemoteOnly"; refName: string }
-  | { _tag: "OriginalClient" };
-
-type BrowserResolvePhase =
-  | { _tag: "Idle" }
-  | { _tag: "Syncing"; progress?: { completed: number; total: number } }
-  | { _tag: "Ready" }
-  | { _tag: "Offline" }
-  | { _tag: "Error"; error: unknown };
-
-/** @internal Resolve engine instance interface. */
-interface EngineInstance {
-  mutation(ref: any, args: any): Promise<any>;
-  on(event: string, cb: (status: any) => void): void;
-  resolveNow?(): Promise<void>;
-  start(): void;
-  stop(): void;
-  pendingCount?(): number;
-}
-
-interface ResolveAttachment {
-  forwardSetAuth: (...args: Parameters<ConvexClient["setAuth"]>) => void;
-  getPendingCount: () => number;
-  refresh: () => Promise<void>;
-  close: () => Promise<void>;
-}
-
-const SYS_AUTH_STATE_SET_ACTIVE = "_system:authStateSetActive";
-const SYS_AUTH_STATE_GET_ACTIVE = "_system:authStateGetActive";
-const SYS_PENDING_LIST_IDENTITY_KEYS = "_system:pendingListIdentityKeys";
-const SYS_IDENTITY_MOVE_ANONYMOUS = "_system:identityMoveAnonymousToIdentity";
-
-function matchTag<
-  T extends Record<K, string>,
-  K extends keyof T & string,
-  Handlers extends {
-    [V in T[K] & string]: (value: Extract<T, Record<K, V>>) => unknown;
-  },
->(value: T, key: K, handlers: Handlers): ReturnType<Handlers[T[K] & string]> {
-  const handler = handlers[value[key] as T[K] & string] as (
-    current: T,
-  ) => ReturnType<Handlers[T[K] & string]>;
-  return handler(value);
-}
-
-function getFunctionRefName(ref: unknown): string {
-  if (typeof ref !== "string" && typeof ref !== "object") {
-    return "";
-  }
-  if (ref === null) {
-    return "";
-  }
+function ensureConvexAllowFunctionsInBrowser(): void {
   try {
-    return getFunctionName(ref as any);
-  } catch {
-    return "";
-  }
-}
-
-function asError(err: unknown): Error {
-  if (err instanceof Error) {
-    return err;
-  }
-
-  if (typeof err === "string") {
-    return new Error(err);
-  }
-
-  if (typeof err === "number" || typeof err === "boolean") {
-    return new Error(`${err}`);
-  }
-
-  if (err === null || err === undefined) {
-    return new Error("unknown error");
-  }
-
-  try {
-    return new Error(JSON.stringify(err));
-  } catch {
-    return new Error("unknown error");
-  }
-}
-
-function isOffline(): boolean {
-  return typeof navigator !== "undefined" && navigator.onLine === false;
-}
-
-function remoteOnlyOfflineError(refName: string): Error {
-  const name = refName.length > 0 ? refName : "<unknown>";
-  return new Error(
-    `[convex-embedded] remoteOnly function "${name}" cannot run while offline.`,
-  );
-}
-
-function resolveCallRoute(
-  entry: ResolveEntry,
-  ref: unknown,
-  preferEngine: boolean,
-): CallRoute {
-  const refName = getFunctionRefName(ref);
-  return refName.length > 0 && entry.remoteOnlyRefs.has(refName)
-    ? { _tag: "RemoteOnly", refName }
-    : preferEngine && entry.engine
-      ? { _tag: "LocalEngine" }
-      : { _tag: "OriginalClient" };
-}
-
-function resolveSubscriptionRoute(
-  entry: ResolveEntry,
-  ref: unknown,
-): SubscriptionRoute {
-  const refName = getFunctionRefName(ref);
-  return refName.length > 0 && entry.remoteOnlyRefs.has(refName)
-    ? { _tag: "RemoteOnly", refName }
-    : { _tag: "OriginalClient" };
-}
-
-function ensureRemoteRouteOnline(refName: string): void {
-  if (!isOffline()) return;
-  throw remoteOnlyOfflineError(refName);
-}
-
-function deferUntilDiscovery<T>(
-  entry: ResolveEntry,
-  run: () => Promise<T>,
-): Promise<T> {
-  return Fx.run(
-    Fx.gen(function* () {
-      if (entry.discovery) {
-        yield* Fx.from({
-          ok: () => entry.discovery!,
-          err: (err) => err as Error,
-        });
-      }
-
-      return yield* Fx.from({
-        ok: run,
-        err: (err) => err as Error,
-      });
-    }),
-  );
-}
-
-function createSubscriptionFactory(
-  entry: ResolveEntry,
-  originalSubscribe: (...args: any[]) => any,
-  remoteSubscribe: (...args: any[]) => any,
-  errorArgIndex: number,
-) {
-  const subscribeWithRoute = (...args: any[]): any => {
-    const route = resolveSubscriptionRoute(entry, args[0]);
-    return matchTag(route, "_tag", {
-      OriginalClient: () => originalSubscribe(...args),
-      RemoteOnly: (current) => {
-        if (isOffline()) {
-          const err = remoteOnlyOfflineError(current.refName);
-          const onError = args[errorArgIndex];
-          if (typeof onError === "function") {
-            onError(err);
-            return createNoopUnsubscribe();
-          }
-          throw err;
-        }
-
-        return remoteSubscribe(...args);
-      },
-    });
-  };
-
-  return (...args: any[]): any => {
-    if (entry.discoveryReady) {
-      return subscribeWithRoute(...args);
-    }
-
-    const onInitError = args[errorArgIndex];
-
-    return deferSubscription(
-      () => deferUntilDiscovery(entry, async () => subscribeWithRoute(...args)),
-      typeof onInitError === "function" ? onInitError : undefined,
+    const target = globalThis as Record<string, unknown>;
+    const descriptor = Object.getOwnPropertyDescriptor(
+      target,
+      "__convexAllowFunctionsInBrowser",
     );
-  };
-}
 
-function createDiscoveryAccumulator(): {
-  remoteOnlyRefs: Set<string>;
-  tables: Record<
-    string,
-    {
-      resolve: string;
-      query: string;
-      resolveArgs?: () => Record<string, unknown>;
-      schema?: unknown;
-    }
-  >;
-  moduleLoadFailures: ModuleLoadFailure[];
-} {
-  return {
-    remoteOnlyRefs: new Set(),
-    tables: {},
-    moduleLoadFailures: [],
-  };
-}
-
-function warnModuleLoadFailures(failures: ModuleLoadFailure[]): void {
-  if (failures.length === 0) {
-    return;
-  }
-
-  const skipped = failures.map(({ path }) => path).join(", ");
-  const [firstFailure] = failures;
-
-  console.warn(
-    `[convex-embedded] ${failures.length} module(s) failed to load during remote discovery and were skipped: ${skipped}`,
-    firstFailure.error,
-  );
-}
-
-function findDiscoveryModulesRoot(modulePaths: string[]): string | null {
-  const generatedPath = modulePaths.find((path) => path.includes("_generated"));
-  return generatedPath
-    ? (generatedPath.split("_generated", 2)[0] ?? null)
-    : null;
-}
-
-function getDiscoveryModuleName(
-  path: string,
-  modulesRoot: string | null,
-): string {
-  const withoutExtension = path.replace(/\.[^.]+$/, "");
-  if (modulesRoot && withoutExtension.startsWith(modulesRoot)) {
-    return withoutExtension.slice(modulesRoot.length);
-  }
-  return withoutExtension.replace(/^.*\//, "");
-}
-
-function scanModuleExports(
-  path: string,
-  mod: ConvexModule,
-  accumulator: ReturnType<typeof createDiscoveryAccumulator>,
-  modulesRoot: string | null,
-): void {
-  const REMOTE_META = Symbol.for("convex-embedded:remoteMeta");
-  const RESOLVE_QUERY_META = Symbol.for("convex-embedded:resolveQueryMeta");
-  const moduleName = getDiscoveryModuleName(path, modulesRoot);
-  let syncMetaTagged = false;
-
-  for (const [exportName, exportValue] of Object.entries(
-    mod as Record<string, any>,
-  )) {
-    if (
-      !exportValue ||
-      (typeof exportValue !== "object" && typeof exportValue !== "function")
-    ) {
-      continue;
-    }
-
-    if (isRemoteOnly(exportValue)) {
-      accumulator.remoteOnlyRefs.add(`${moduleName}:${exportName}`);
-    }
-
-    const meta = exportValue[REMOTE_META];
-    if (
-      !syncMetaTagged &&
-      meta &&
-      meta.__brand === "convex-embedded:remoteMeta"
-    ) {
-      syncMetaTagged = true;
-
-      accumulator.tables[meta.table] = {
-        resolve: `${moduleName}:${meta.resolveExport}`,
-        query: meta.listExport
-          ? `${moduleName}:${meta.listExport}`
-          : `${moduleName}:list`,
-        schema: meta.schema,
-      };
-    }
-
-    const resolveQueryMeta = exportValue[RESOLVE_QUERY_META];
-    if (
-      resolveQueryMeta &&
-      resolveQueryMeta.__brand === "convex-embedded:resolveQueryMeta"
-    ) {
-      accumulator.tables[resolveQueryMeta.table] = {
-        ...(accumulator.tables[resolveQueryMeta.table] ?? {
-          resolve: `${moduleName}:resolve`,
-          query: `${moduleName}:list`,
-          schema: undefined,
-        }),
-        query: `${moduleName}:${exportName}`,
-        resolveArgs: resolveQueryMeta.getArgs,
-      };
-    }
-  }
-}
-
-function toDiscoveryResult(
-  entry: ResolveEntry,
-  accumulator: ReturnType<typeof createDiscoveryAccumulator>,
-): DiscoveryResult {
-  if (entry.closed) {
-    return { _tag: "Closed" };
-  }
-
-  return Object.keys(accumulator.tables).length === 0
-    ? {
-        _tag: "Empty",
-        remoteOnlyRefs: accumulator.remoteOnlyRefs,
-        moduleLoadFailures: accumulator.moduleLoadFailures,
-      }
-    : {
-        _tag: "Ready",
-        remoteOnlyRefs: accumulator.remoteOnlyRefs,
-        moduleLoadFailures: accumulator.moduleLoadFailures,
-        tables: accumulator.tables,
-      };
-}
-
-function notifyResolveListeners(entry: ResolveEntry, state: RemoteState): void {
-  entry.state = state;
-  for (const cb of entry.listeners) {
-    try {
-      cb(state);
-    } catch {
-      /* listener error */
-    }
-  }
-}
-
-function notifyAuthListeners(entry: AuthEntry, state: AuthState): void {
-  entry.state = state;
-  for (const cb of entry.listeners) {
-    try {
-      cb(state);
-    } catch {
-      /* listener error */
-    }
-  }
-}
-
-function getAuthIdentitySnapshot(state: AuthState): AuthIdentitySnapshot {
-  switch (state.status) {
-    case "authenticated":
-    case "offlineStale":
-    case "reauthRequired":
-    case "identityMismatch":
-      return {
-        identity: state.identity,
-        identityKey: state.identityKey,
-      };
-    default:
-      return {};
-  }
-}
-
-function setOfflineStaleIfNeeded(entry: AuthEntry): void {
-  if (entry.state.status !== "authenticated") {
-    return;
-  }
-
-  notifyAuthListeners(entry, {
-    status: "offlineStale",
-    identity: entry.state.identity,
-    identityKey: entry.state.identityKey,
-  });
-}
-
-function restoreAuthenticatedIfNeeded(entry: AuthEntry): void {
-  if (entry.state.status !== "offlineStale") {
-    return;
-  }
-
-  notifyAuthListeners(entry, {
-    status: "authenticated",
-    identity: entry.state.identity,
-    identityKey: entry.state.identityKey,
-  });
-}
-
-function toAuthenticatedState(
-  identity: UserIdentity | null,
-  identityKey: string | null,
-): AuthState {
-  return identity
-    ? {
-        status: "authenticated",
-        identity,
-        identityKey: identityKey ?? undefined,
-      }
-    : { status: "authenticated" };
-}
-
-async function readStoredActiveIdentityKey(
-  runtime: EmbeddedRuntime,
-): Promise<string | null> {
-  const value = await runtime.queryDirect(SYS_AUTH_STATE_GET_ACTIVE, {});
-  return typeof value === "string" ? value : null;
-}
-
-async function writeStoredActiveIdentityKey(
-  runtime: EmbeddedRuntime,
-  identityKey: string | null,
-): Promise<void> {
-  await runtime.mutationDirect(SYS_AUTH_STATE_SET_ACTIVE, {
-    activeIdentityKey: identityKey,
-  });
-}
-
-async function listPendingIdentityKeys(
-  runtime: EmbeddedRuntime,
-): Promise<string[]> {
-  const value = await runtime.queryDirect(SYS_PENDING_LIST_IDENTITY_KEYS, {});
-  return Array.isArray(value)
-    ? value.filter((entry): entry is string => typeof entry === "string")
-    : [];
-}
-
-async function hasInactivePendingIdentityWork(
-  entry: AuthEntry,
-): Promise<boolean> {
-  const activeIdentityKey = entry.activeIdentityKey;
-  const keys = await listPendingIdentityKeys(entry.runtime);
-  return keys.some((key) => key !== activeIdentityKey);
-}
-
-async function migrateAnonymousNamespaceIfNeeded(
-  entry: AuthEntry,
-  previousIdentityKey: string | undefined,
-  nextIdentityKey: string | null,
-): Promise<void> {
-  if (previousIdentityKey !== null && previousIdentityKey !== undefined) {
-    return;
-  }
-  if (nextIdentityKey === null) {
-    return;
-  }
-
-  await entry.runtime.mutationDirect(SYS_IDENTITY_MOVE_ANONYMOUS, {
-    identityKey: nextIdentityKey,
-  });
-  await entry.runtime.migrateAnonymousDataToIdentity(nextIdentityKey);
-}
-
-async function refreshAuthFromSource(entry: AuthEntry): Promise<void> {
-  if (!entry.getUserIdentitySource) {
-    return;
-  }
-
-  const identity = await entry.getUserIdentitySource();
-  await applyAuthIdentity(entry, identity, false);
-}
-
-function wrapFetchToken(
-  entry: AuthEntry,
-  runtime: EmbeddedRuntime,
-  fetchToken: AuthTokenFetcher,
-  getUserIdentity?: () => Promise<UserIdentity | null>,
-  getIdentityKeyForState?: (identity: UserIdentity | null) => string | null,
-): AuthTokenFetcher {
-  return async (args) => {
-    const previous = getAuthIdentitySnapshot(entry.state);
-    notifyAuthListeners(entry, { status: "refreshing" });
-
-    try {
-      const token = await fetchToken(args);
-
-      if (token === null || token === undefined) {
-        runtime.setIdentity(null);
-        if (previous.identityKey) {
-          notifyAuthListeners(entry, {
-            status: "reauthRequired",
-            identity: previous.identity,
-            identityKey: previous.identityKey,
-          });
-        } else {
-          notifyAuthListeners(entry, { status: "unauthenticated" });
-        }
-        entry.sessionFanout?.notify({ type: "authChanged" });
-        return token;
-      }
-
-      const identity = getUserIdentity ? await getUserIdentity() : null;
-      const identityKey =
-        getIdentityKeyForState?.(identity) ?? getIdentityKey(identity);
-      runtime.setIdentity(identity);
-      runtime.setActiveIdentityKey(identityKey);
-      await migrateAnonymousNamespaceIfNeeded(
-        entry,
-        previous.identityKey,
-        identityKey,
-      );
-      entry.activeIdentityKey = identityKey;
-      await writeStoredActiveIdentityKey(runtime, identityKey);
-
-      if (await hasInactivePendingIdentityWork(entry)) {
-        notifyAuthListeners(entry, {
-          status: "identityMismatch",
-          identity: identity ?? undefined,
-          identityKey,
-        });
-      } else {
-        notifyAuthListeners(entry, toAuthenticatedState(identity, identityKey));
-      }
-      entry.sessionFanout?.notify({ type: "authChanged" });
-      return token;
-    } catch (err) {
-      runtime.setIdentity(null);
-      notifyAuthListeners(entry, { status: "error", error: asError(err) });
-      throw err;
-    }
-  };
-}
-
-function installIdentityBridge(
-  entry: AuthEntry,
-  runtime: EmbeddedRuntime,
-  getUserIdentity?: () => Promise<UserIdentity | null>,
-  getIdentityKeyForState?: (identity: UserIdentity | null) => string | null,
-): void {
-  if (!getUserIdentity) {
-    return;
-  }
-
-  notifyAuthListeners(entry, { status: "refreshing" });
-  void getUserIdentity()
-    .then((identity) => {
-      const identityKey =
-        getIdentityKeyForState?.(identity) ?? getIdentityKey(identity);
-      entry.activeIdentityKey = identityKey;
-      runtime.setIdentity(identity);
-      runtime.setActiveIdentityKey(identityKey);
-      void writeStoredActiveIdentityKey(runtime, identityKey);
-      notifyAuthListeners(
-        entry,
-        identity
-          ? toAuthenticatedState(identity, identityKey)
-          : { status: "unauthenticated" },
-      );
-    })
-    .catch((err) => {
-      runtime.setIdentity(null);
-      notifyAuthListeners(entry, { status: "error", error: asError(err) });
-    });
-}
-
-function _installAuth(
-  client: ConvexClient,
-  runtime: EmbeddedRuntime,
-  entry: AuthEntry,
-  options: {
-    authOptions?: AuthOptions;
-    forwardSetAuth?: (...args: Parameters<ConvexClient["setAuth"]>) => void;
-  },
-): void {
-  const originalSetAuth = client.setAuth.bind(client);
-
-  (client as any).setAuth = (...args: Parameters<typeof client.setAuth>) => {
-    const [fetchToken, onChange] = args;
-    const wrappedFetchToken = wrapFetchToken(
-      entry,
-      runtime,
-      fetchToken,
-      options.authOptions?.getUserIdentity,
-      options.authOptions?.getIdentityKey,
-    );
-    entry.currentAuthFetcher = wrappedFetchToken;
-
-    originalSetAuth(wrappedFetchToken, onChange);
-    options.forwardSetAuth?.(wrappedFetchToken, onChange);
-  };
-
-  if (options.authOptions?.fetchToken) {
-    (client as any).setAuth(options.authOptions.fetchToken);
-    return;
-  }
-
-  installIdentityBridge(
-    entry,
-    runtime,
-    options.authOptions?.getUserIdentity,
-    options.authOptions?.getIdentityKey,
-  );
-}
-
-function toResolvePhase(status: any): BrowserResolvePhase {
-  if (!status) return { _tag: "Idle" };
-
-  const handlers = {
-    resolving: (current: any): BrowserResolvePhase => ({
-      _tag: "Syncing",
-      progress: current.progress
-        ? {
-            completed: current.progress.completed,
-            total: current.progress.total,
-          }
-        : undefined,
-    }),
-    resolved: (): BrowserResolvePhase => ({ _tag: "Ready" }),
-    error: (current: any): BrowserResolvePhase => ({
-      _tag: "Error",
-      error: current.error,
-    }),
-    offline: (): BrowserResolvePhase => ({ _tag: "Offline" }),
-    idle: (): BrowserResolvePhase => ({ _tag: "Idle" }),
-  } as const;
-
-  const handler =
-    handlers[(status.status as keyof typeof handlers) ?? "idle"] ??
-    handlers.idle;
-  return handler(status);
-}
-
-function toRemoteState(phase: BrowserResolvePhase): RemoteState {
-  return matchTag(phase, "_tag", {
-    Idle: (): RemoteState => ({ status: "idle" }),
-    Syncing: (current): RemoteState => ({
-      status: "resolving",
-      progress: current.progress,
-    }),
-    Ready: (): RemoteState => ({ status: "ready" }),
-    Offline: (): RemoteState => ({ status: "offline" }),
-    Error: (current): RemoteState => ({
-      status: "error",
-      error: current.error,
-    }),
-  });
-}
-
-function createNoopUnsubscribe(): any {
-  const noop = (() => {}) as any;
-  noop.unsubscribe = noop;
-  noop.getCurrentValue = () => undefined;
-  return noop;
-}
-
-function deferSubscription(
-  factory: () => Promise<any>,
-  onInitError?: (error: Error) => void,
-): any {
-  let inner: any = null;
-  let cancelled = false;
-
-  const unsubscribe = (() => {
-    cancelled = true;
-    if (typeof inner === "function") {
-      inner();
-    } else if (inner && typeof inner.unsubscribe === "function") {
-      inner.unsubscribe();
-    }
-  }) as any;
-
-  unsubscribe.unsubscribe = unsubscribe;
-  unsubscribe.getCurrentValue = () => {
-    if (inner && typeof inner.getCurrentValue === "function") {
-      return inner.getCurrentValue();
-    }
-    return undefined;
-  };
-
-  void factory()
-    .then((actual) => {
-      if (cancelled) {
-        if (typeof actual === "function") {
-          actual();
-        } else if (actual && typeof actual.unsubscribe === "function") {
-          actual.unsubscribe();
-        }
-        return;
-      }
-      inner = actual;
-    })
-    .catch((err) => {
-      const error = asError(err);
-      if (onInitError) {
-        try {
-          onInitError(error);
-          return;
-        } catch {
-          /* listener error */
-        }
-      }
-      console.error(
-        "[convex-embedded] failed to initialize subscription",
-        error,
-      );
-    });
-
-  return unsubscribe;
-}
-
-/**
- * @internal
- * Load the resolve engine (now co-located after singularity merge).
- */
-async function _loadEngine(): Promise<any> {
-  // Engine now lives inside convex-embedded (singularity merge)
-  const { engine } = await import("@/client/engine");
-  return engine;
-}
-
-/**
- * @internal
- * Attach a resolve engine to a ConvexClient. Discovers remote metadata from
- * modules, creates the engine, patches client.mutation for local-first
- * writes, and starts the engine.
- */
-function _attachResolve(
-  client: ConvexClient,
-  runtime: EmbeddedRuntime,
-  authEntry: AuthEntry,
-  resolveOpts: RemoteOptions,
-  modules: Record<string, () => Promise<ConvexModule>>,
-  getIdentityKeyForSync: () => string | null,
-): ResolveAttachment {
-  const remoteClient = new ConvexClient(resolveOpts.url);
-
-  // Capture the original, unpatched mutation BEFORE we patch it below.
-  // The engine calls this for local writes — if it called the patched
-  // version, it would recurse infinitely (patched → engine → patched → …).
-  const originalMutation = client.mutation.bind(client);
-  const originalQuery = client.query.bind(client);
-  const originalAction = client.action.bind(client);
-  const originalOnUpdate = client.onUpdate.bind(client);
-  const originalOnPaginatedUpdate =
-    client.onPaginatedUpdate_experimental?.bind(client);
-
-  const embedded = {
-    client,
-    ingestDocuments: runtime.ingestDocuments.bind(runtime),
-    getDocumentsForTable: runtime.getDocumentsForTable.bind(runtime),
-    queryDirect: runtime.queryDirect.bind(runtime),
-    // System bypass — runs _system:* mutations (IdMap, PendingQueue)
-    // directly against the embedded database, completely bypassing the
-    // ConvexClient session/version counter. Prevents Transition races.
-    mutationDirect: runtime.mutationDirect.bind(runtime),
-    // User bypass — the original, unpatched ConvexClient.mutation().
-    // Still routes through the loopback WebSocket (so useQuery updates)
-    // but avoids infinite recursion through patchedMutation.
-    localMutation: originalMutation as (
-      ref: unknown,
-      args: Record<string, unknown>,
-    ) => Promise<unknown>,
-  };
-
-  // Discover remote metadata will happen async after modules load.
-  // For now create with empty tables — will be populated before start.
-  const entry: ResolveEntry = {
-    engine: null,
-    state: { status: "idle" },
-    listeners: new Set(),
-    remoteOnlyRefs: new Set(),
-    discovery: null,
-    discoveryReady: false,
-    closed: false,
-  };
-
-  _resolveEntries.set(client, entry);
-
-  // Discover remote metadata from modules, then create + start engine
-  const discovery = _discoverAndStart(
-    entry,
-    authEntry,
-    embedded,
-    remoteClient,
-    resolveOpts,
-    modules,
-    getIdentityKeyForSync,
-  ).finally(() => {
-    entry.discoveryReady = true;
-  });
-  void discovery.catch(() => {});
-  entry.discovery = discovery;
-
-  // Patch client.mutation for local-first writes
-  (client as any).mutation = async function patchedMutation(
-    ...args: Parameters<typeof client.mutation>
-  ): Promise<any> {
-    return deferUntilDiscovery(entry, async () => {
-      const route = resolveCallRoute(entry, args[0], true);
-
-      return matchTag(route, "_tag", {
-        RemoteOnly: (current) => {
-          ensureRemoteRouteOnline(current.refName);
-          return (remoteClient as any).mutation(...args);
-        },
-        LocalEngine: () =>
-          entry.engine!.mutation(args[0], (args[1] ?? {}) as any),
-        OriginalClient: () => originalMutation(...args),
-      });
-    });
-  };
-
-  (client as any).query = async function patchedQuery(
-    ...args: Parameters<typeof client.query>
-  ): Promise<any> {
-    return deferUntilDiscovery(entry, async () => {
-      const route = resolveCallRoute(entry, args[0], false);
-
-      return matchTag(route, "_tag", {
-        RemoteOnly: (current) => {
-          ensureRemoteRouteOnline(current.refName);
-          return (remoteClient as any).query(...args);
-        },
-        LocalEngine: () => originalQuery(...args),
-        OriginalClient: () => originalQuery(...args),
-      });
-    });
-  };
-
-  (client as any).action = async function patchedAction(
-    ...args: Parameters<typeof client.action>
-  ): Promise<any> {
-    return deferUntilDiscovery(entry, async () => {
-      const route = resolveCallRoute(entry, args[0], false);
-
-      return matchTag(route, "_tag", {
-        RemoteOnly: (current) => {
-          ensureRemoteRouteOnline(current.refName);
-          return (remoteClient as any).action(...args);
-        },
-        LocalEngine: () => originalAction(...args),
-        OriginalClient: () => originalAction(...args),
-      });
-    });
-  };
-
-  (client as any).onUpdate = createSubscriptionFactory(
-    entry,
-    originalOnUpdate as (...args: any[]) => any,
-    (remoteClient as any).onUpdate.bind(remoteClient),
-    3,
-  );
-
-  if (originalOnPaginatedUpdate) {
-    (client as any).onPaginatedUpdate_experimental = createSubscriptionFactory(
-      entry,
-      originalOnPaginatedUpdate as (...args: any[]) => any,
-      (remoteClient as any).onPaginatedUpdate_experimental.bind(remoteClient),
-      4,
-    );
-  }
-
-  return {
-    forwardSetAuth: (...args) => {
-      (remoteClient as any).setAuth(...args);
-    },
-    getPendingCount: () => entry.engine?.pendingCount?.() ?? 0,
-    refresh: () => entry.engine?.reloadIdentity?.() ?? Promise.resolve(),
-    close: async () => {
-      entry.closed = true;
-      if (entry.engine) {
-        entry.engine.stop();
-      }
-      await remoteClient.close();
-    },
-  };
-}
-
-/**
- * @internal
- * Scan loaded modules for remote metadata exports, build TableConfig map,
- * create the resolve engine, wire status listener, and start.
- */
-async function _discoverAndStart(
-  entry: ResolveEntry,
-  authEntry: AuthEntry,
-  embedded: {
-    client: ConvexClient;
-    ingestDocuments: (
-      table: string,
-      documents: Array<Record<string, unknown>>,
-    ) => Promise<void>;
-    getDocumentsForTable: (
-      table: string,
-    ) => Promise<Array<Record<string, unknown>>>;
-  },
-  remoteClient: ConvexClient,
-  resolveOpts: RemoteOptions,
-  modules: Record<string, () => Promise<ConvexModule>>,
-  getIdentityKeyForSync: () => string | null,
-): Promise<void> {
-  const setup = Fx.gen(function* () {
-    const engineFactory = yield* Fx.from({
-      ok: _loadEngine,
-      err: (err) => err as Error,
-    });
-    if (!engineFactory || entry.closed) return;
-
-    const discovered = yield* Fx.from({
-      ok: async () => {
-        const accumulator = createDiscoveryAccumulator();
-        const modulesRoot = findDiscoveryModulesRoot(Object.keys(modules));
-
-        await Fx.run(
-          Fx.each(Object.entries(modules), ([path, loader]) =>
-            Fx.from({
-              ok: async () => {
-                if (entry.closed || path.includes("_generated")) return;
-                try {
-                  const mod = await loader();
-                  if (entry.closed) return;
-                  scanModuleExports(path, mod, accumulator, modulesRoot);
-                } catch (err) {
-                  accumulator.moduleLoadFailures.push({
-                    path,
-                    error: asError(err),
-                  });
-                }
-              },
-              err: (err) => err as Error,
-            }),
-          ),
-        );
-
-        return toDiscoveryResult(entry, accumulator);
-      },
-      err: (err) => err as Error,
-    });
-
-    return yield* Fx.from({
-      ok: async () => {
-        matchTag(discovered, "_tag", {
-          Closed: () => undefined,
-          Empty: (current) => {
-            entry.remoteOnlyRefs = current.remoteOnlyRefs;
-            warnModuleLoadFailures(current.moduleLoadFailures);
-            if (entry.remoteOnlyRefs.size === 0) {
-              console.warn(
-                "[convex-embedded] remote enabled but no remote metadata found in modules. " +
-                  "Make sure your Convex modules export `tasks.resolve` (for example `export const resolve = tasks.resolve`).",
-              );
-            }
-          },
-          Ready: (current) => {
-            entry.remoteOnlyRefs = current.remoteOnlyRefs;
-            warnModuleLoadFailures(current.moduleLoadFailures);
-            const engine: EngineInstance = engineFactory.create({
-              embedded,
-              remoteClient,
-              tables: current.tables,
-              maxRetries: resolveOpts.maxRetries,
-              retryDelayMs: resolveOpts.retryDelayMs,
-              getIdentityKey: getIdentityKeyForSync,
-            });
-
-            if (entry.closed) {
-              engine.stop();
-              return;
-            }
-
-            entry.engine = engine;
-            engine.on("change", (monitorStatus: any) => {
-              if (entry.closed) return;
-              notifyResolveListeners(entry, _mapStatus(monitorStatus));
-
-              if (monitorStatus?.status === "offline") {
-                setOfflineStaleIfNeeded(authEntry);
-                return;
-              }
-
-              if (
-                monitorStatus?.status === "resolving" ||
-                monitorStatus?.status === "resolved"
-              ) {
-                restoreAuthenticatedIfNeeded(authEntry);
-              }
-            });
-            engine.start();
-          },
-        });
-      },
-      err: (err) => err as Error,
-    });
-  }).pipe(
-    Fx.inspect((err) =>
-      Fx.sync(() => {
-        if (entry.closed) return;
-        const error =
-          err instanceof Error
-            ? err
-            : new Error(String(err ?? "unknown error"));
-        console.error("[convex-embedded] resolve setup failed", error);
-        notifyResolveListeners(entry, { status: "error", error });
-      }),
-    ),
-  );
-
-  return Fx.run(setup);
-}
-
-/** @internal Map internal EngineStatus to public {@link RemoteState}. */
-function _mapStatus(s: any): RemoteState {
-  return Fx.pipe(s, toResolvePhase, toRemoteState);
-}
-
-// ---------------------------------------------------------------------------
-// Storage initialisation (internal)
-// ---------------------------------------------------------------------------
-
-/**
- * Initialise wa-sqlite storage and hydrate the database.
- *
- * This promise is used as the hydration gate — `handleMessage()` in the
- * runtime awaits it before processing any ConvexClient messages. This
- * ensures queries run against data loaded from IndexedDB, not an empty
- * in-memory database.
- *
- * If WASM compilation or worker init fails, the promise still resolves
- * (the runtime continues as in-memory-only, no persistence).
- *
- * Uses `Fx.gen` to compose the 4-step pipeline (compile WASM →
- * create wa-sqlite storage → attach to database → hydrate) with an
- * `Fx.recover` fallback to in-memory.
- */
-function openStorage(
-  runtime: EmbeddedRuntime,
-  name: string,
-  workerUrl?: URL | string,
-  encryption?: ClientOptions["encryption"],
-): Promise<void> {
-  const pipeline = Fx.gen(function* () {
-    // Step 1: Compile the WASM module.
-    const wasmModule = yield* Fx.from({
-      ok: () => compileWasmModule(),
-      err: (err) => err as Error,
-    });
-
-    if (!wasmModule) {
-      // SSR or non-browser environment — skip persistence.
-      console.debug(
-        "[convex-embedded] WASM not available, skipping persistence",
-      );
+    if (descriptor?.writable === false && descriptor.set === undefined) {
       return;
     }
 
-    // Step 2: Create the wa-sqlite storage adapter (worker init).
-    let storage = yield* Fx.from({
-      ok: () => openWaSqliteStorage({ name, wasmModule, workerUrl }),
-      err: (err) => err as Error,
+    Object.defineProperty(target, "__convexAllowFunctionsInBrowser", {
+      value: true,
+      writable: true,
+      configurable: true,
     });
-
-    if (encryption) {
-      storage = createEncryptedStorage(storage, {
-        ...encryption,
-        getIdentityKey: () => runtime.getIdentityKey(),
-      });
-    }
-
-    // Step 3: Attach the storage adapter to the database for persistence.
-    runtime.db.setStorage(storage);
-
-    // Step 4: Hydrate — load all persisted documents, metadata, and blobs
-    // from IndexedDB into the in-memory database.
-    yield* Fx.from({
-      ok: () => runtime.db.hydrate(),
-      err: (err) => err as Error,
-    });
-
-    console.debug("[convex-embedded] wa-sqlite storage ready");
-  });
-
-  // Catch all errors — the runtime falls back to in-memory.
-  const safe = pipeline.pipe(
-    Fx.recover(() =>
-      Fx.sync(() => {
-        console.error(
-          "[convex-embedded] wa-sqlite storage init failed, continuing in-memory",
-        );
-      }),
-    ),
-  );
-
-  return Fx.run(safe);
+  } catch {
+    // Best effort only: this flag only suppresses Convex's browser import guard.
+  }
 }

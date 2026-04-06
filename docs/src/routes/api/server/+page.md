@@ -11,28 +11,71 @@ description: Server-side setup with embeddedTable and configuration.
 # Server API
 
 The server entry point (`@robelest/convex-embedded/server`) provides the core
-primitives for declaring ready tables, binding the embedded component, scoping
-queries with views, and running local schema migrations.
+primitives for declaring embedded tables, binding the embedded component,
+scoping queries with views, and declaring local migration metadata.
 
 ```ts
 import {
   embeddedTable,
   setup,
+  localOnly,
   remoteOnly,
   view,
-  migration,
-  runMigrations,
   getTableRegistry,
 } from "@robelest/convex-embedded/server";
 ```
+
+## API layers
+
+| Layer             | Use                                                        | Purpose                                      |
+| ----------------- | ---------------------------------------------------------- | -------------------------------------------- |
+| table definition  | `embeddedTable(...)`                                       | declares an embedded synced table            |
+| synced exports    | `table.query(...)`, `table.mutation(...)`, `table.resolve` | builds local-first synced functions          |
+| execution control | `localOnly(...)`, `remoteOnly(...)`                        | forces local-only or remote-only execution   |
+| component binding | `setup({ component })`                                     | binds delta storage / resolve component refs |
+| extras            | `view.*`                                                   | query scoping utilities                      |
+
+## Most common usage
+
+```ts
+export const tasks = embeddedTable("tasks", {
+  title: schema.register(v.string()),
+  body: schema.prose(),
+  remoteAttachmentId: schema.omit(v.string()),
+  done: v.boolean(),
+});
+
+export const resolve = tasks.resolve;
+
+export const create = tasks.mutation({
+  args: { title: v.string(), body: v.string() },
+  handler: async (ctx, args) => await ctx.db.insert("tasks", args),
+  remote: async (_ctx, _args, taskId) => {
+    await sendTaskCreatedWebhook(taskId);
+  },
+});
+
+export const list = tasks.query({
+  args: {},
+  handler: async (ctx) => await ctx.db.query("tasks").collect(),
+  resolve: { args: () => ({}) },
+});
+```
+
+Use this page to answer:
+
+- how do I export `resolve`?
+- how do I mark a field remote-only?
+- when do I use `remote:`?
+- when do I use `localOnly()` or `remoteOnly()`?
 
 ---
 
 ## `embeddedTable(name, shape, options?)`
 
-Declares a ready table at schema-definition time. The return value is both a
-valid `TableDefinition` (from `defineTable`) that can be passed directly to
-`defineSchema()` **and** an `EmbeddedTableHandle` with `.mutation()`,
+Declares an embedded synced table at schema-definition time. The return value is
+both a valid `TableDefinition` (from `defineTable`) that can be passed directly
+to `defineSchema()` **and** an `EmbeddedTableHandle` with `.mutation()`,
 `.query()`, and `.resolve` members for building per-table Convex functions.
 
 ```ts
@@ -41,8 +84,8 @@ function embeddedTable(
   shape: Record<string, unknown>,
   options?: {
     version?: number;
-    history?: Record<number, Record<string, unknown>>;
     defaults?: Record<string, unknown>;
+    migrate?: Record<number, LocalTableMigrationStep>;
   },
 ): TableDefinition & EmbeddedTableHandle;
 ```
@@ -51,12 +94,19 @@ function embeddedTable(
 | ------------------ | ----------------------------------------- | ------------ | ---------------------------------------------------------- |
 | `tableName`        | `string`                                  | **required** | Table name. Must match the key used in `defineSchema()`.   |
 | `shape`            | `Record<string, unknown>`                 | **required** | CRDT descriptors (`schema.*`) or plain validators (`v.*`). |
-| `options.version`  | `number`                                  | `1`          | Current schema version for migration support.              |
-| `options.history`  | `Record<number, Record<string, unknown>>` | `{}`         | Previous version shapes keyed by version number.           |
-| `options.defaults` | `Record<string, unknown>`                 | `{}`         | Default values for fields added in the current version.    |
+| `options.version`  | `number`                                  | `1`          | Current local schema version.                              |
+| `options.defaults` | `Record<string, unknown>`                 | `{}`         | Default values for additive changes.                       |
+| `options.migrate`  | `Record<number, LocalTableMigrationStep>` | `{}`         | Forward-only local document migration steps by version.    |
 
 Each call registers the table in a module-level registry (read by `setup()` and
 `getTableRegistry()`).
+
+The current alpha model is explicit:
+
+- `localOnly()` means local or fail
+- `remoteOnly()` means remote or fail
+- top-level component refs remote-route by default
+- nested/local component execution is rejected with structured errors
 
 ### `EmbeddedTableHandle`
 
@@ -91,12 +141,27 @@ tasks.mutation({
   remote: async (ctx, args, result) => {
     // e.g. send a notification, update analytics
   },
+  replay: {
+    version: 2,
+    migrate: {
+      2: async ({ args, localResult }) => ({
+        args: { ...args, priority: "medium" },
+        localResult,
+      }),
+    },
+  },
 });
 ```
 
 The `remote:` callback receives the mutation context, the original args, and the
 return value of `handler`. It only executes when the mutation runs on the remote
 Convex server (not in the local embedded runtime).
+
+Use `remote:` when the main mutation should stay local-first but you still need
+server-only follow-up behavior.
+
+Use `replay:` when queued offline mutations need forward-only payload upgrades
+before replay.
 
 ### `.query(definition)`
 
@@ -132,6 +197,8 @@ never call it directly:
 // convex/tasks.ts
 export const resolve = tasks.resolve;
 ```
+
+This export is what allows the sync engine to discover the table's resolve path.
 
 ### Example: `convex/schema.ts`
 
@@ -230,12 +297,26 @@ setup({ component: components.embedded });
 
 ---
 
-## `remoteOnly(fn)`
+## Execution control
 
-Marks a Convex function as remote-only. A function wrapped with `remoteOnly()`
-is never executed in the local embedded runtime. Browser routing sends calls
-directly to the remote Convex client, and local execution paths reject if
-reached.
+Explicit routing helpers for Convex function exports.
+
+```ts
+import { localOnly, remoteOnly } from "@robelest/convex-embedded/server";
+```
+
+### `localOnly(fn)`
+
+Forces local execution. If the embedded runtime cannot safely execute the
+target, the call throws instead of silently routing remote.
+
+```ts
+function localOnly<T>(fn: T): T;
+```
+
+### `remoteOnly(fn)`
+
+Forces remote execution. If the client is offline, calls fail immediately.
 
 ```ts
 function remoteOnly<T>(fn: T): T;
@@ -243,13 +324,13 @@ function remoteOnly<T>(fn: T): T;
 
 ```ts
 import { remoteOnly } from "@robelest/convex-embedded/server";
-import { mutation } from "./_generated/server";
+import { action } from "./_generated/server";
+import { v } from "convex/values";
 
 export const sendEmail = remoteOnly(
-  mutation({
+  action({
     args: { to: v.string(), subject: v.string() },
-    handler: async (ctx, args) => {
-      // This only runs on the remote server
+    handler: async (_ctx, args) => {
       await sendEmailViaProvider(args.to, args.subject);
     },
   }),
@@ -261,7 +342,7 @@ export const sendEmail = remoteOnly(
 ## `view`
 
 Query scoping utilities. Views are standalone helpers that compose into your own
-queries to filter results based on auth state or custom logic.
+queries to scope results based on auth state and indexed ownership.
 
 ```ts
 import { view } from "@robelest/convex-embedded/server";
@@ -285,27 +366,19 @@ function authenticated(): ViewFilter;
 
 ### `view.ownership(options)`
 
-Filters to rows where the specified field matches the current user's ID
-(`identity.subject ?? identity.tokenIdentifier`). Unauthenticated callers see
-nothing (empty result set).
+Scopes rows through an index where the specified field matches the current
+user's ID (`identity.subject ?? identity.tokenIdentifier`). Unauthenticated
+callers scope to `null`, which should yield no rows when the owner field stores
+non-null auth identifiers.
 
 ```ts
-function ownership(options: { owner: string }): ViewFilter;
+function ownership(options: { index: string; field: string }): ViewFilter;
 ```
 
-| Parameter       | Type     | Description                                                       |
-| --------------- | -------- | ----------------------------------------------------------------- |
-| `options.owner` | `string` | The field name on the document that contains the owner's user ID. |
-
-### `view.filter(fn)`
-
-Custom filter view. Accepts a function `(ctx, query) => filteredQuery`.
-
-```ts
-function filter<Ctx, Q>(
-  fn: (ctx: Ctx, query: Q) => Q | Promise<Q>,
-): ViewFilter<Ctx, Q>;
-```
+| Parameter       | Type     | Description                                               |
+| --------------- | -------- | --------------------------------------------------------- |
+| `options.index` | `string` | The index name used to scope the query.                   |
+| `options.field` | `string` | The indexed field name that contains the owner's user ID. |
 
 ### `ViewFilter` interface
 
@@ -324,7 +397,7 @@ export const myTasks = query({
   args: {},
   handler: async (ctx) => {
     return await view
-      .ownership({ owner: "userId" })
+      .ownership({ index: "by_user_id", field: "userId" })
       .apply(ctx, ctx.db.query("tasks"))
       .collect();
   },
@@ -333,85 +406,18 @@ export const myTasks = query({
 
 ---
 
-## `migration(config)` / `runMigrations(ctx, config)`
+## Automatic local migrations
 
-Local schema versioning for embedded tables. Tracks which schema version each
-local embedded runtime instance is on, diffs against the current app version,
-and runs user-supplied migration functions in sequence.
+Local migrations are now driven by:
 
-This handles **local device migrations** -- distinct from
-`@convex-dev/migrations` which handles remote data backfills.
+1. `embeddedTable(..., { version, defaults, migrate })` for document shape
+2. mutation `replay` metadata for queued offline payloads
 
-### `MigrationConfig`
+These run automatically during embedded client startup before queue hydration
+and remote sync begin.
 
-```ts
-interface MigrationConfig {
-  table: string;
-  schema: Definition;
-  migrations?: Record<number, FunctionReference<"mutation">>;
-  onMigrationError?: MigrationErrorHandler;
-}
-```
-
-| Field              | Type                                            | Description                                                     |
-| ------------------ | ----------------------------------------------- | --------------------------------------------------------------- |
-| `table`            | `string`                                        | Table name being migrated.                                      |
-| `schema`           | `Definition`                                    | Current schema definition (from `embeddedTable().schema`).      |
-| `migrations`       | `Record<number, FunctionReference<"mutation">>` | Per-version migration functions keyed by target version number. |
-| `onMigrationError` | `MigrationErrorHandler`                         | Error handler when a migration step fails.                      |
-
-### `runMigrations(ctx, config)`
-
-Checks the current schema version and runs any pending migrations. Returns
-`true` if migrations were run, `false` if already up to date. Should be called
-during app startup, before rendering.
-
-```ts
-async function runMigrations(
-  ctx: MutationCtx,
-  config: MigrationConfig,
-): Promise<boolean>;
-```
-
-### `MigrationErrorHandler`
-
-```ts
-type MigrationErrorHandler = (
-  error: Error,
-  ctx: RecoveryContext,
-) => Promise<RecoveryAction>;
-```
-
-### `RecoveryContext`
-
-```ts
-interface RecoveryContext {
-  canResetSafely: boolean;
-  currentVersion: number;
-  targetVersion: number;
-}
-```
-
-### `RecoveryAction`
-
-```ts
-type RecoveryAction =
-  | { action: "reset" } // Wipe local data and set version to target
-  | { action: "keep-old-schema" } // Don't update version, limp along
-  | { action: "retry" } // Retry migration on next startup
-  | { action: "custom"; handler: () => Promise<void> };
-```
-
-### `migration` namespace
-
-The `migration` object provides a convenience wrapper:
-
-```ts
-const migration = {
-  run: runMigrations,
-  VERSION_TABLE: "_resolve_schema_versions",
-};
-```
+The lower-level `runMigrations(ctx, config)` helper still exists as an advanced
+API, but it is no longer the primary app-facing workflow.
 
 ---
 

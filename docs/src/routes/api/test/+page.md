@@ -49,9 +49,8 @@ import { convexTest } from "convex-test";
 import { describe, it, expect } from "vitest";
 import { register } from "@robelest/convex-embedded/test";
 import { api } from "./convex/_generated/api";
+import { modules } from "./convex-modules";
 import schema from "./convex/schema";
-
-const modules = import.meta.glob("./convex/**/*.ts");
 
 describe("tasks", () => {
   it("should create and list tasks", async () => {
@@ -85,9 +84,8 @@ import { convexTest } from "convex-test";
 import { describe, it, expect, beforeEach } from "vitest";
 import { register } from "@robelest/convex-embedded/test";
 import { api } from "./convex/_generated/api";
+import { modules } from "./convex-modules";
 import schema from "./convex/schema";
-
-const modules = import.meta.glob("./convex/**/*.ts");
 
 describe("embedded tasks", () => {
   let t: ReturnType<typeof convexTest>;
@@ -151,5 +149,5 @@ describe("embedded tasks", () => {
 - The `name` parameter defaults to `"embedded"`, which matches the standard
   component installation name in `convex.config.ts`. If you installed the
   component under a different name, pass that name explicitly.
-- The test utilities use `import.meta.glob` to load the embedded component's
-  internal modules. This requires a Vite-compatible test runner (e.g. Vitest).
+- The test utilities ship with their own internal lazy module registry for the
+  embedded component. No Vite-specific module globbing is required.

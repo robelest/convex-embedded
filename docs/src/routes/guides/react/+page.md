@@ -10,23 +10,26 @@ description: Using convex-embedded with React and ConvexProvider.
 
 # React Integration
 
-convex-embedded returns a standard `ConvexClient` from the Convex SDK. This
-means you can use it with `ConvexProvider`, `useQuery`, `useMutation`, and every
-other React hook from `convex/react` without any wrapper or adapter.
+For React, use `@robelest/convex-embedded/react`. It creates a
+`ConvexReactClient`-compatible wrapper on top of the embedded browser client, so
+you can use `ConvexProvider`, `useQuery`, `useMutation`, and `usePaginatedQuery`
+normally.
 
 ## Quick start
 
 ### 1. Create the client
 
-Create the embedded client at module scope (outside any component) so it is
-instantiated once:
+Create the embedded React client at module scope (outside any component) so it
+is instantiated once:
 
 ```ts
 // src/convex-client.ts
-import { createConvexClient } from "@robelest/convex-embedded/browser";
+import { createConvexReactClient } from "@robelest/convex-embedded/react";
+import { modules } from "./convex-modules";
 
-export const client = createConvexClient({
-  modules: import.meta.glob("./convex/*.ts"),
+export const client = createConvexReactClient({
+  modules,
+  name: "my-app",
   remote: { url: import.meta.env.CONVEX_URL },
 });
 ```
@@ -34,8 +37,8 @@ export const client = createConvexClient({
 If you only need a local-only database with no remote, omit the `remote` option:
 
 ```ts
-export const client = createConvexClient({
-  modules: import.meta.glob("./convex/*.ts"),
+export const client = createConvexReactClient({
+  modules,
 });
 ```
 
@@ -90,8 +93,40 @@ export function TaskList() {
 ```
 
 Mutations write to the local embedded database instantly. When `remote` is
-configured, they are also replayed to the remote Convex deployment in the
-background.
+configured, replay / resolve / subscriptions happen behind the same standard
+client.
+
+## Recommended module registry shape
+
+Use canonical module ids, not shorthand names:
+
+```ts
+// src/convex-modules.ts
+import type { ConvexModuleRegistry } from "@robelest/convex-embedded/browser";
+
+export const modules = {
+  "./convex/tasks.ts": () => import("../convex/tasks"),
+  "./convex/schema.ts": () => import("../convex/schema"),
+  "./convex/_generated/api.ts": () => import("../convex/_generated/api"),
+  "./convex/_generated/server.ts": () => import("../convex/_generated/server"),
+} satisfies ConvexModuleRegistry;
+```
+
+## Common options
+
+```ts
+const client = createConvexReactClient({
+  modules,
+  schema,
+  name: "my-app",
+  remote: { url: import.meta.env.CONVEX_URL },
+  auth: {
+    fetchToken: myTokenFetcher,
+    getUserIdentity: myIdentitySource,
+  },
+  encryption: myEncryptionHooks,
+});
+```
 
 ## Lifecycle and cleanup
 
@@ -106,12 +141,13 @@ inside a component, use `useEffect`:
 ```tsx
 import { useEffect, useState } from "react";
 import { ConvexProvider } from "convex/react";
-import { createConvexClient } from "@robelest/convex-embedded/browser";
+import { createConvexReactClient } from "@robelest/convex-embedded/react";
+import { modules } from "./convex-modules";
 
 function EmbeddedProvider({ children }: { children: React.ReactNode }) {
   const [client] = useState(() =>
-    createConvexClient({
-      modules: import.meta.glob("./convex/*.ts"),
+    createConvexReactClient({
+      modules,
       remote: { url: import.meta.env.CONVEX_URL },
     }),
   );
@@ -135,10 +171,10 @@ import { useEffect, useState } from "react";
 import {
   subscribeRemoteState,
   type RemoteState,
-} from "@robelest/convex-embedded/browser";
-import type { ConvexClient } from "convex/browser";
+} from "@robelest/convex-embedded/react";
+import type { ConvexReactClient } from "convex/react";
 
-function useRemoteStatus(client: ConvexClient) {
+function useRemoteStatus(client: ConvexReactClient) {
   const [status, setStatus] = useState<RemoteState["status"]>("idle");
 
   useEffect(() => {
@@ -151,6 +187,9 @@ function useRemoteStatus(client: ConvexClient) {
 
 ## SSR considerations
 
+The generic browser entry remains framework agnostic and returns a plain
+`ConvexClient`. For React hooks, use `@robelest/convex-embedded/react`.
+
 convex-embedded requires browser APIs (IndexedDB, WebAssembly, Worker). If you
 are using a framework with server-side rendering (Next.js, Remix, etc.), you
 must ensure the client is only created in the browser:
@@ -158,15 +197,27 @@ must ensure the client is only created in the browser:
 ```ts
 const client =
   typeof window !== "undefined"
-    ? createConvexClient({
-        modules: import.meta.glob("./convex/*.ts"),
+    ? createConvexReactClient({
+        modules,
         remote: { url: import.meta.env.CONVEX_URL },
       })
     : null;
 ```
 
-Or use dynamic imports / lazy initialization in a `useEffect` to avoid importing
-the module on the server at all.
+Imports are now SSR-safe, so the React entry can be imported on the server. Only
+`createConvexReactClient(...)` remains browser-only. For server-rendered
+startup, use `createReplica(...)` from `@robelest/convex-embedded/client` plus
+`createEmbeddedRuntime(...)` from the root package.
+
+## What happens after setup
+
+After the client is created:
+
+- local queries read from the embedded runtime
+- local mutations commit instantly
+- cross-tab updates flow through the browser write/session broadcasts
+- when remote is enabled, replay ownership and resolve stay in the shared core
+  engine rather than React-specific code
 
 ## Complete example
 
@@ -175,15 +226,16 @@ the module on the server at all.
 import { ConvexProvider } from "convex/react";
 import { useQuery, useMutation } from "convex/react";
 import {
-  createConvexClient,
+  createConvexReactClient,
   subscribeRemoteState,
-} from "@robelest/convex-embedded/browser";
-import type { RemoteState } from "@robelest/convex-embedded/browser";
+} from "@robelest/convex-embedded/react";
+import type { RemoteState } from "@robelest/convex-embedded/react";
 import { api } from "./convex/_generated/api";
+import { modules } from "./convex-modules";
 import { useEffect, useState } from "react";
 
-const client = createConvexClient({
-  modules: import.meta.glob("./convex/*.ts"),
+const client = createConvexReactClient({
+  modules,
   remote: { url: import.meta.env.CONVEX_URL },
 });
 
@@ -198,7 +250,7 @@ function SyncBadge() {
     idle: "Local only",
     connecting: "Connecting...",
     resolving: "Resolving...",
-    ready: "Ready",
+    resolved: "Resolved",
     offline: "Offline",
     error: "Sync error",
   };

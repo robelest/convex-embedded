@@ -21,9 +21,10 @@ Pass an `auth` object to `createConvexClient`:
 
 ```ts
 import { createConvexClient } from "@robelest/convex-embedded/browser";
+import { modules } from "./convex-modules";
 
 const client = createConvexClient({
-  modules: import.meta.glob("./convex/*.ts"),
+  modules,
   remote: { url: import.meta.env.CONVEX_URL },
   auth: {
     fetchToken: myTokenFetcher,
@@ -174,22 +175,30 @@ import { switchIdentity } from "@robelest/convex-embedded/browser";
 await switchIdentity(client, newUserIdentity);
 ```
 
-## Cross-tab session remote
+## Cross-tab auth sync
 
 Auth state changes are automatically broadcast to other tabs sharing the same
-database name via `SessionFanout` (uses `BroadcastChannel`). When one tab logs
-in or out, other tabs refresh their auth state automatically.
+database name via the session broadcast transport. When one tab logs in or out,
+other tabs refresh their auth state automatically.
+
+This is transport-level browser behavior layered on top of core auth logic:
+
+- core auth state lives in the shared client/runtime layer
+- browser provides the session broadcast transport
+- identity mismatch and replay-blocking rules are core behavior, not
+  browser-only behavior
 
 ## Example: Clerk integration
 
 ```ts
 import { createConvexClient } from "@robelest/convex-embedded/browser";
 import { useAuth } from "@clerk/clerk-react";
+import { modules } from "./convex-modules";
 
 const { getToken, isSignedIn } = useAuth();
 
 const client = createConvexClient({
-  modules: import.meta.glob("./convex/*.ts"),
+  modules,
   remote: { url: import.meta.env.CONVEX_URL },
   auth: {
     fetchToken: async ({ forceRefreshToken }) => {
@@ -218,7 +227,7 @@ const client = createConvexClient({
 
 ```ts
 const client = createConvexClient({
-  modules: import.meta.glob("./convex/*.ts"),
+  modules,
   auth: {
     getUserIdentity: async () => {
       const session = getMyAppSession();

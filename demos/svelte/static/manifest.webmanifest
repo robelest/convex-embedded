@@ -1,0 +1,24 @@
+{
+  "name": "convex-embedded Demo",
+  "short_name": "Embedded",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#fdfcfa",
+  "theme_color": "#c25d3a",
+  "description": "A local-first issue tracker demo built with convex-embedded.",
+  "icons": [
+    {
+      "src": "/app-icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    },
+    {
+      "src": "/app-icon-maskable.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "maskable"
+    }
+  ]
+}

@@ -10,6 +10,22 @@ description: Configuring remote for local-first mode with convex-embedded.
 
 # Remote Configuration
 
+Use `remote` when you want local-first behavior backed by a remote Convex
+deployment.
+
+Start with the usable API shape first:
+
+```ts
+const client = createConvexClient({
+  modules,
+  remote: {
+    url: import.meta.env.CONVEX_URL,
+    maxRetries: 3,
+    retryDelayMs: 1000,
+  },
+});
+```
+
 convex-embedded supports two modes of operation:
 
 - **Local-only** -- no `remote` option. Data lives entirely in the browser's
@@ -25,9 +41,10 @@ Pass a `remote` object to `createConvexClient` to enable remote connection:
 
 ```ts
 import { createConvexClient } from "@robelest/convex-embedded/browser";
+import { modules } from "./convex-modules";
 
 const client = createConvexClient({
-  modules: import.meta.glob("./convex/*.ts"),
+  modules,
   remote: {
     url: "https://happy-otter-123.convex.cloud",
     maxRetries: 3,
@@ -48,7 +65,7 @@ For unreliable networks, increase the retry budget:
 
 ```ts
 const client = createConvexClient({
-  modules: import.meta.glob("./convex/*.ts"),
+  modules,
   remote: {
     url: import.meta.env.CONVEX_URL,
     maxRetries: 5,
@@ -67,12 +84,22 @@ made:
 
 ```ts
 const client = createConvexClient({
-  modules: import.meta.glob("./convex/*.ts"),
+  modules,
 });
 ```
 
 You can switch from local-only to local-first later by adding the `remote`
 option. Existing local data will be ready on the next resolve pass.
+
+## What `remote` actually enables
+
+With `remote` enabled:
+
+- mutations still commit locally first
+- replay happens through the shared pending queue
+- replay entries are claimed with processor-scoped leases
+- reconnect runs table-by-table Yjs resolve
+- remote subscriptions start only after replay/resolve ordering is safe
 
 ## Sync state machine
 
@@ -83,8 +110,8 @@ stateDiagram-v2
     [*] --> idle
     idle --> connecting
     connecting --> resolving
-    resolving --> ready
-    ready --> offline
+    resolving --> resolved
+    resolved --> offline
     offline --> resolving
     offline --> error : after max retries
     error --> resolving : connectivity change
@@ -95,7 +122,7 @@ stateDiagram-v2
 | `idle`       | Sync was not configured, or the engine has not started yet (module discovery in progress).                                                                     |
 | `connecting` | The remote `ConvexClient` is establishing its WebSocket connection.                                                                                            |
 | `resolving`  | The CRDT resolve pass is in progress. The `progress` field reports completed/total tables.                                                                     |
-| `ready`      | All tables are resolved and reactive subscriptions are active. Normal steady state while online.                                                               |
+| `resolved`   | All tables are resolved and reactive subscriptions are active. Normal steady state while online.                                                               |
 | `offline`    | Network is unavailable. Mutations continue to work locally and are queued for replay. The engine re-resolves automatically when connectivity returns.          |
 | `error`      | The resolve pass failed after exhausting retries. The `error` property contains the underlying `Error`. Recovery is attempted on the next connectivity change. |
 
@@ -107,7 +134,7 @@ stateDiagram-v2
 import { getRemoteState } from "@robelest/convex-embedded/browser";
 
 const state = getRemoteState(client);
-if (state.status === "ready") {
+if (state.status === "resolved") {
   console.log("All tables are up to date");
 }
 ```
@@ -119,7 +146,7 @@ import { subscribeRemoteState } from "@robelest/convex-embedded/browser";
 
 const unsub = subscribeRemoteState(client, (state) => {
   switch (state.status) {
-    case "ready":
+    case "resolved":
       badge.textContent = "Online";
       break;
     case "offline":
@@ -158,7 +185,7 @@ Here is a complete status badge component (Svelte example):
       case "offline":    return { text: "Offline",       color: "#f59e0b", bg: "#fffbeb" };
       case "connecting": return { text: "Connecting...", color: "#3b82f6", bg: "#eff6ff" };
       case "resolving":    return { text: "Resolving...",    color: "#3b82f6", bg: "#eff6ff" };
-      case "ready":     return { text: "Ready",        color: "#10b981", bg: "#ecfdf5" };
+      case "resolved":  return { text: "Resolved",     color: "#10b981", bg: "#ecfdf5" };
       case "error":      return { text: "Sync error",    color: "#ef4444", bg: "#fef2f2" };
     }
   });
@@ -198,7 +225,7 @@ function SyncBadge({ client }: { client: ConvexClient }) {
     idle: { text: "Local only", color: "#9ca3af" },
     connecting: { text: "Connecting...", color: "#3b82f6" },
     resolving: { text: "Resolving...", color: "#3b82f6" },
-    ready: { text: "Ready", color: "#10b981" },
+    resolved: { text: "Resolved", color: "#10b981" },
     offline: { text: "Offline", color: "#f59e0b" },
     error: { text: "Sync error", color: "#ef4444" },
   };
@@ -216,7 +243,6 @@ function SyncBadge({ client }: { client: ConvexClient }) {
 
 ## Module auto-discovery
 
-When remote is enabled, the embedded runtime automatically scans your Convex
-modules for `remote metadata` exports (produced by `register()`). Tables with
-remote metadata are enrolled for remote. Tables without it remain local-only. No
-manual table configuration is needed.
+When remote is enabled, the client scans your lazy module registry for embedded
+table resolve metadata. Tables with resolve metadata are enrolled for resolve
+and remote subscriptions. Tables without it stay outside the embedded sync flow.

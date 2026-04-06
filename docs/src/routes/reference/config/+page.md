@@ -11,7 +11,8 @@ description:
 
 # Configuration
 
-This page documents every option accepted by `createConvexClient`.
+This page documents the current browser-facing configuration surface exposed by
+`createConvexClient`.
 
 ## ClientOptions
 
@@ -21,15 +22,46 @@ import { createConvexClient } from "@robelest/convex-embedded/browser";
 const client = createConvexClient(options: ClientOptions);
 ```
 
-| Option          | Type                                     | Default             | Description                                      |
-| --------------- | ---------------------------------------- | ------------------- | ------------------------------------------------ |
-| `modules`       | `Record<string, () => Promise<unknown>>` | _required_          | From `import.meta.glob()`. No `{ eager: true }`. |
-| `schema`        | `unknown`                                | `undefined`         | Default export from `convex/schema.ts`.          |
-| `clientOptions` | `Partial<BaseConvexClientOptions>`       | `undefined`         | Forwarded to `ConvexClient`.                     |
-| `workerUrl`     | `URL \| string`                          | auto-resolved       | wa-sqlite worker URL. Rarely needed.             |
-| `name`          | `string`                                 | `"convex-embedded"` | IndexedDB database name. Shared across tabs.     |
-| `remote`        | `RemoteOptions`                          | `undefined`         | Enable remote. Omit for local-only.              |
-| `auth`          | `AuthOptions`                            | `undefined`         | Auth and identity configuration.                 |
+| Option          | Type                                     | Default             | Description                                                                    |
+| --------------- | ---------------------------------------- | ------------------- | ------------------------------------------------------------------------------ |
+| `modules`       | `Record<string, () => Promise<unknown>>` | _required_          | Lazy ESM registry keyed by canonical module id.                                |
+| `schema`        | `unknown`                                | `undefined`         | Default export from `convex/schema.ts`.                                        |
+| `clientOptions` | `Partial<BaseConvexClientOptions>`       | `undefined`         | Forwarded to `ConvexClient`.                                                   |
+| `workerUrl`     | `URL \| string`                          | auto-resolved       | wa-sqlite worker URL. Rarely needed.                                           |
+| `name`          | `string`                                 | `"convex-embedded"` | IndexedDB database name. Shared across tabs.                                   |
+| `remote`        | `RemoteOptions`                          | `undefined`         | Enable remote. Omit for local-only.                                            |
+| `auth`          | `AuthOptions`                            | `undefined`         | Auth and identity configuration.                                               |
+| `replica`       | `Replica`                                | `undefined`         | Initial embedded table data created by `createReplica(...)` for SSR/bootstrap. |
+| `encryption`    | `EncryptionOptions`                      | `undefined`         | Encrypt persisted local state at rest.                                         |
+
+## Replica bootstrap
+
+To render on the server and start the browser client warm, build a replica from
+`@robelest/convex-embedded/client` and pass it into both the runtime and the
+browser client:
+
+```ts
+import { createEmbeddedRuntime } from "@robelest/convex-embedded";
+import { createReplica } from "@robelest/convex-embedded/client";
+import { createConvexClient } from "@robelest/convex-embedded/browser";
+
+const replica = await createReplica({
+  modules,
+  url: process.env.CONVEX_URL!,
+  token,
+});
+
+const runtime = createEmbeddedRuntime({ modules, schema, replica });
+const client = createConvexClient({
+  modules,
+  schema,
+  remote: { url },
+  replica,
+});
+```
+
+The browser import is SSR-safe, but `createConvexClient(...)` is still a
+browser-only step.
 
 ## RemoteOptions
 
@@ -75,6 +107,64 @@ const client = createConvexClient({
 | `getIdentityKey`  | `(identity: UserIdentity \| null) => string \| null` | `tokenIdentifier ?? subject` | Groups identities for local state.   |
 | `verifyToken`     | `(token: string) => Promise<UserIdentity \| null>`   | `undefined`                  | Verifies embedded protocol tokens.   |
 
+## EncryptionOptions
+
+Pass `encryption` when you want persisted local state to be encrypted at rest.
+
+```ts
+const client = createConvexClient({
+  modules,
+  encryption: {
+    getActiveKey: async ({ identityKey }) => ({
+      keyId: identityKey ?? "anon",
+      key: await loadKey(identityKey),
+    }),
+    getKey: async ({ keyId }) => await loadStoredKey(keyId),
+    getIdentityKey: async () => currentIdentityKey(),
+  },
+});
+```
+
+Current shape:
+
+<table>
+  <thead>
+    <tr>
+      <th>Option</th>
+      <th>Type</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><code>getActiveKey</code></td>
+      <td><code>(identityKey) =&gt; Promise&lt;active key&gt;</code></td>
+      <td>Returns the active encryption key for new writes.</td>
+    </tr>
+    <tr>
+      <td><code>getKey</code></td>
+      <td><code>(keyId, identityKey) =&gt; Promise&lt;stored key&gt;</code></td>
+      <td>Returns a previously-used key for reads.</td>
+    </tr>
+    <tr>
+      <td><code>getIdentityKey</code></td>
+      <td><code>() =&gt; Promise&lt;string | null&gt; | string | null</code></td>
+      <td>Identity-aware key partitioning hook.</td>
+    </tr>
+  </tbody>
+</table>
+
+Exact signatures:
+
+```ts
+getActiveKey: ({ identityKey }) =>
+  Promise<{ keyId: string; key: CryptoKey | Uint8Array }>;
+
+getKey: ({ keyId, identityKey }) => Promise<CryptoKey | Uint8Array>;
+
+getIdentityKey: () => Promise<string | null> | string | null;
+```
+
 ## RemoteState
 
 The `RemoteState` type describes the current remote state. Read it with
@@ -86,7 +176,7 @@ type RemoteState =
   | { status: "idle" }
   | { status: "connecting" }
   | { status: "resolving"; progress?: { completed: number; total: number } }
-  | { status: "ready" }
+  | { status: "resolved" }
   | { status: "offline" }
   | { status: "error"; error?: Error };
 ```
@@ -118,7 +208,7 @@ type AuthState =
 
 ```ts
 const client = createConvexClient({
-  modules: import.meta.glob("./convex/*.ts"),
+  modules,
 });
 ```
 
@@ -126,7 +216,7 @@ const client = createConvexClient({
 
 ```ts
 const client = createConvexClient({
-  modules: import.meta.glob("./convex/*.ts"),
+  modules,
   remote: { url: import.meta.env.CONVEX_URL },
 });
 ```
@@ -135,7 +225,7 @@ const client = createConvexClient({
 
 ```ts
 const client = createConvexClient({
-  modules: import.meta.glob("./convex/*.ts"),
+  modules,
   schema,
   name: "my-app-production",
   remote: {
@@ -149,5 +239,6 @@ const client = createConvexClient({
     getIdentityKey: (identity) => identity?.email ?? null,
     verifyToken: myTokenVerifier,
   },
+  encryption: myEncryptionHooks,
 });
 ```

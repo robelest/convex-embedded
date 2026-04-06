@@ -1,6 +1,8 @@
 ---
 title: Migration Guide
-description: Schema evolution and data migration in convex-embedded.
+description:
+  Forward-only local migrations for tables, queued mutations, and persisted
+  metadata.
 ---
 
 <svelte:head>
@@ -10,215 +12,218 @@ description: Schema evolution and data migration in convex-embedded.
 
 # Migration Guide
 
-convex-embedded includes a local schema versioning and migration system. This
-handles evolving your local embedded database schema as your app changes --
-distinct from remote Convex migrations, which handle server-side data backfills.
+`convex-embedded` includes a **forward-only local migration system** for device
+data. It upgrades persisted embedded state before queue hydration, replay, or
+remote resolve begins.
+
+This is separate from remote Convex migrations like `@convex-dev/migrations`,
+which handle server-side data backfills.
 
 ## Overview
 
-The migration system:
+On startup, the embedded client now does this automatically:
 
-1. Tracks which schema version each table is on (stored in a
-   `_resolve_schema_versions` table).
-2. Compares the stored version against the current app version.
-3. Runs migration functions in sequence to bring the local data up to date.
-4. Applies default values for new fields when no explicit migration function is
-   provided.
+1. Hydrates the local store.
+2. Restores the active identity.
+3. Discovers queued replay migration metadata from your Convex modules.
+4. Runs forward-only local migrations.
+5. Hydrates the ID map and pending queue.
+6. Starts replay, resolve, and remote subscriptions.
 
-## Defining a versioned schema
+You do not manually call `migration.run()` during normal app startup anymore.
 
-Use `schema.define()` to create a versioned schema definition:
+## What gets migrated
+
+The local migration pipeline covers:
+
+1. Embedded table documents via `embeddedTable(..., { migrate })`
+2. Queued mutation payloads and local results via mutation `replay` metadata
+3. Persisted store metadata such as:
+   - `_resolve_pending`
+   - `_resolve_id_map`
+   - `_resolve_auth_state`
+   - `_scheduled_functions`
+   - `_storage` metadata
+
+## Core rule
+
+Local migrations are **forward-only**.
+
+If a newer local store version is opened by an older app build, startup fails
+instead of attempting a downgrade.
+
+## Table document migrations
+
+Declare table schema versions directly on `embeddedTable()`:
 
 ```ts
-import { schema } from "@robelest/convex-embedded/server";
+import { embeddedTable, schema } from "@robelest/convex-embedded/server";
 import { v } from "convex/values";
 
-const taskSchema = schema.define({
-  version: 2,
-  shape: {
+export const tasks = embeddedTable(
+  "tasks",
+  {
     title: schema.register(v.string()),
-    body: schema.register(v.string()),
-    priority: schema.register(v.number()), // new in v2
+    body: schema.prose(),
+    priority: schema.register(v.string()),
   },
-  history: {
-    1: {
-      title: schema.register(v.string()),
-      body: schema.register(v.string()),
+  {
+    version: 2,
+    defaults: {
+      priority: "medium",
+    },
+    migrate: {
+      2: async ({ docs }) => {
+        await docs.patchMissing({ priority: "medium" });
+      },
     },
   },
-  defaults: {
-    priority: 0, // default value for the new field
-  },
-});
+);
 ```
 
-### DefineOptions
+### `embeddedTable(..., options)` migration fields
 
-| Field      | Type                                      | Description                                                                                                                           |
-| ---------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `version`  | `number`                                  | Current schema version number.                                                                                                        |
-| `shape`    | `Record<string, unknown>`                 | Current field shape. Fields can be plain Convex validators or CRDT field descriptors (`schema.register()`, `schema.counter()`, etc.). |
-| `history`  | `Record<number, Record<string, unknown>>` | Previous version shapes, keyed by version number. Used to understand what changed between versions.                                   |
-| `defaults` | `Record<string, unknown>`                 | Default values for fields added in the current version. Applied to existing documents that lack the new fields.                       |
+| Field      | Type                                      | Description                                                           |
+| ---------- | ----------------------------------------- | --------------------------------------------------------------------- |
+| `version`  | `number`                                  | Current local table schema version.                                   |
+| `defaults` | `Record<string, unknown>`                 | Default values for additive changes when no explicit step is needed.  |
+| `migrate`  | `Record<number, LocalTableMigrationStep>` | Forward-only document migration steps keyed by target version number. |
 
-## CRDT field types
+### `LocalTableMigrationStep`
 
-The schema module provides CRDT field type constructors that map to Yjs data
-structures:
-
-| Constructor                  | Yjs Structure   | Description                                                                                                                      |
-| ---------------------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `schema.register(validator)` | `Y.Map`         | Multi-value register with conflict tracking. Concurrent writes produce a `Conflict` that can be resolved with a custom function. |
-| `schema.prose()`             | `Y.XmlFragment` | Rich text field with character-level CRDT merge. Use with ProseMirror or TipTap bindings.                                        |
-| `schema.counter()`           | `Y.Array`       | Append-only array of increments. Materialized value is the sum of all deltas.                                                    |
-| `schema.set(validator)`      | `Y.Map`         | Add-wins set. Key presence equals membership. Yjs add-wins semantics handle concurrent add/remove.                               |
-| `schema.omit(validator)`     | --              | Marks a field as remote-only. It exists on the remote Convex backend but is stripped from local remote payloads.                 |
-
-### Register with custom conflict resolution
+Each step migrates the table **into** its target version.
 
 ```ts
-const priceField = schema.register(v.number(), {
-  resolve: (conflict) => {
-    // Pick the highest price on conflict
-    return Math.max(...conflict.values);
-  },
-});
+type LocalTableMigrationStep = (
+  ctx: LocalTableMigrationContext,
+) => Promise<void> | void;
 ```
 
-The `Conflict` object provides:
-
 ```ts
-interface Conflict<T> {
-  values: T[]; // All concurrent values, unordered
-  entries: ConflictEntry<T>[]; // Per-entry metadata (clientId, timestamp)
-  latest(): T; // Value with the highest timestamp (default)
-  byClient(id: string): T | undefined; // Value from a specific client
+interface LocalTableMigrationContext {
+  table: string;
+  fromVersion: number;
+  toVersion: number;
+  targetVersion: number;
+  schema: Definition;
+  docs: LocalTableDocsApi;
 }
 ```
 
-## Running migrations
-
-Use `migration.run()` during app startup to apply pending migrations before
-rendering:
+### `docs` helpers
 
 ```ts
-import { migration } from "@robelest/convex-embedded/server";
-
-await migration.run(ctx, {
-  table: "tasks",
-  schema: taskSchema,
-  migrations: {
-    2: api.tasks.migrateV2,
-  },
-  onMigrationError: async (error, recoveryCtx) => {
-    console.error("Migration failed:", error.message);
-    return { action: "retry" };
-  },
-});
+interface LocalTableDocsApi {
+  all(): Promise<Array<Record<string, unknown>>>;
+  patchMissing(fields: Record<string, unknown>): Promise<number>;
+  patch(id: unknown, fields: Record<string, unknown>): Promise<void>;
+  replace(id: unknown, fields: Record<string, unknown>): Promise<void>;
+  delete(id: unknown): Promise<void>;
+  modify(
+    transform: (
+      doc: Record<string, unknown>,
+    ) =>
+      | Record<string, unknown>
+      | null
+      | void
+      | Promise<Record<string, unknown> | null | void>,
+  ): Promise<number>;
+}
 ```
 
-### MigrationConfig
-
-| Field              | Type                                            | Description                                                                                                    |
-| ------------------ | ----------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `table`            | `string`                                        | Table name being migrated.                                                                                     |
-| `schema`           | `Definition`                                    | Current schema definition from `schema.define()`.                                                              |
-| `migrations`       | `Record<number, FunctionReference<"mutation">>` | Per-version migration functions, keyed by target version number. Each function is a Convex mutation reference. |
-| `onMigrationError` | `MigrationErrorHandler`                         | Error handler when a migration step fails. Returns a `RecoveryAction`.                                         |
-
-### How migration steps work
-
-For each version from `storedVersion + 1` to `targetVersion`:
-
-1. If a migration function exists for that version, it is executed via
-   `ctx.runMutation(fn, {})`.
-2. If no migration function exists, defaults from `schema.defaults` are applied
-   to all documents that lack the new fields.
-3. The stored version is updated to the completed version number.
-
-If the stored version is `null` (first run), it is initialized to version 1.
-
-## Example: adding a field
-
-Suppose you have a `tasks` table at version 1 with `title` and `body` fields,
-and you want to add a `priority` field.
-
-### Step 1: Update the schema definition
+### Example: semantic transform
 
 ```ts
-const taskSchema = schema.define({
-  version: 2,
-  shape: {
-    title: schema.register(v.string()),
-    body: schema.register(v.string()),
-    priority: schema.register(v.number()),
+migrate: {
+  3: async ({ docs }) => {
+    await docs.modify((doc) => {
+      const legacy = typeof doc.status === "string" ? doc.status : "todo";
+      return {
+        ...doc,
+        status: legacy === "open" ? "todo" : legacy,
+      };
+    });
   },
-  history: {
-    1: {
-      title: schema.register(v.string()),
-      body: schema.register(v.string()),
+}
+```
+
+## Queued mutation replay migrations
+
+Offline writes are persisted in `_resolve_pending`. Each queued entry stores a
+`payloadVersion`, and startup upgrades queued args/local results before replay.
+
+Attach replay migration metadata to the mutation export itself:
+
+```ts
+export const create = tasks.mutation({
+  args: { title: v.string() },
+  handler: async (ctx, args) => {
+    return await ctx.db.insert("tasks", {
+      title: args.title,
+      priority: "medium",
+    });
+  },
+  replay: {
+    version: 2,
+    migrate: {
+      2: async ({ args, localResult }) => ({
+        args: { ...args, priority: "medium" },
+        localResult,
+      }),
     },
   },
-  defaults: {
-    priority: 0,
-  },
 });
 ```
 
-### Step 2: Run migrations on startup
+### Replay metadata shape
 
 ```ts
-// In your app initialization
-await migration.run(ctx, {
-  table: "tasks",
-  schema: taskSchema,
-});
-```
-
-Since no explicit migration function is provided for version 2, the runner
-automatically applies the `defaults` -- patching all existing task documents
-with `priority: 0`.
-
-### Step 3: Custom migration (optional)
-
-If you need more complex migration logic (data transformation, conditional
-updates), provide a mutation function:
-
-```ts
-// convex/tasks.ts
-export const migrateV2 = mutation({
-  handler: async (ctx) => {
-    const tasks = await ctx.db.query("tasks").collect();
-    for (const task of tasks) {
-      // Set priority based on existing data
-      const priority = task.title.startsWith("[URGENT]") ? 1 : 0;
-      await ctx.db.patch(task._id, { priority });
-    }
-  },
-});
+replay?: {
+  version?: number;
+  migrate?: Record<number, PendingReplayMigrationStep>;
+}
 ```
 
 ```ts
-await migration.run(ctx, {
-  table: "tasks",
-  schema: taskSchema,
-  migrations: {
-    2: api.tasks.migrateV2,
-  },
-});
+type PendingReplayMigrationStep = (
+  ctx: PendingReplayMigrationContext,
+) => Promise<PendingReplayMigrationResult> | PendingReplayMigrationResult;
 ```
 
-## Recovery actions
+```ts
+interface PendingReplayMigrationContext {
+  ref: string;
+  fromVersion: number;
+  toVersion: number;
+  args: Record<string, unknown>;
+  localResult: unknown;
+}
 
-When a migration fails and `onMigrationError` is provided, you must return a
-`RecoveryAction`:
+interface PendingReplayMigrationResult {
+  args: Record<string, unknown>;
+  localResult: unknown;
+}
+```
 
-| Action                                               | Behavior                                                                                                |
-| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `{ action: "reset" }`                                | Wipe all local data for the table and set the version to the target. Data will be reloaded from remote. |
-| `{ action: "keep-old-schema" }`                      | Keep the old version. The app runs with the stale shape until next startup.                             |
-| `{ action: "retry" }`                                | Do nothing now. The migration retries on next app startup.                                              |
-| `{ action: "custom", handler: () => Promise<void> }` | Run a custom async handler for manual data fixups.                                                      |
+Use replay migrations when you change:
 
-See the [Error Handling](/reference/errors) page for more details on
-`RecoveryAction` and `MigrationErrorHandler`.
+1. mutation arg shapes
+2. local create result semantics
+3. queued payload defaults required for replay
+
+## Advanced API
+
+The lower-level `runMigrations(ctx, config)` helper still exists, but it is now
+an advanced/manual API used by the runtime bootstrap and tests. For normal app
+code, prefer `embeddedTable(..., { migrate })` and mutation `replay` metadata.
+
+## Recovery and errors
+
+Migration recovery hooks still exist in the low-level API, but the product model
+is now stricter:
+
+1. migrations are forward-only
+2. newer local data on an older app build is an error
+3. normal app code should treat startup migration failures as blocking
+
+See [Error Handling](/reference/errors) for the low-level recovery types.

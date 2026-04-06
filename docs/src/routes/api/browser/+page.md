@@ -12,8 +12,9 @@ description: Client-side API for creating and using embedded Convex.
 
 The browser entry point (`@robelest/convex-embedded/browser`) provides a single
 factory function that creates a standard `ConvexClient` backed by a local
-embedded Convex runtime. The returned client is fully compatible with
-`ConvexProvider`, `convex-svelte`, and any other Convex framework integration.
+embedded Convex runtime. The returned client is framework agnostic. Use it
+directly or through adapters such as `convex-svelte`. For React hooks, use the
+dedicated `@robelest/convex-embedded/react` entry.
 
 ```ts
 import {
@@ -39,8 +40,9 @@ function createConvexClient(options: ClientOptions): ConvexClient;
 
 The factory creates an `EmbeddedRuntime` on the main thread, connects it to a
 `ConvexClient` via a loopback WebSocket transport, and initializes wa-sqlite
-persistence in a Dedicated Worker. The returned client behaves identically to a
-normal `ConvexClient` connected to a remote deployment.
+persistence in a Dedicated Worker. The returned client behaves like a standard
+`ConvexClient`, but uses the embedded runtime as its local execution and sync
+layer.
 
 **Without `remote`**: Purely local. Queries and mutations run against an
 in-browser database persisted to IndexedDB via wa-sqlite. No network traffic.
@@ -52,14 +54,14 @@ subscriptions on the remote keep local state fresh with changes from other
 clients. On reconnect, a Yjs CRDT resolve pass merges any state that diverged
 while offline.
 
-Call `client.close()` to tear down the runtime, worker, resolve engine, and all
-subscriptions.
+Call `client.close()` to tear down the runtime, worker, resolve engine, remote
+client, and platform broadcasts.
 
 ### Local-only example
 
 ```ts
 const client = createConvexClient({
-  modules: import.meta.glob("./convex/*.ts"),
+  modules,
 });
 ```
 
@@ -67,7 +69,7 @@ const client = createConvexClient({
 
 ```ts
 const client = createConvexClient({
-  modules: import.meta.glob("./convex/*.ts"),
+  modules,
   remote: { url: "https://happy-otter-123.convex.cloud" },
 });
 ```
@@ -78,9 +80,10 @@ const client = createConvexClient({
 import { createConvexClient } from "@robelest/convex-embedded/browser";
 import { setConvexClientContext } from "convex-svelte";
 import { onDestroy } from "svelte";
+import { modules } from "../convex-modules";
 
 const client = createConvexClient({
-  modules: import.meta.glob("./convex/*.ts"),
+  modules,
   remote: { url: import.meta.env.CONVEX_URL },
 });
 
@@ -88,24 +91,26 @@ setConvexClientContext(client);
 onDestroy(() => client.close());
 ```
 
-### React example
+### SSR bootstrap example
 
-```tsx
+```ts
+import { createEmbeddedRuntime } from "@robelest/convex-embedded";
+import { createReplica } from "@robelest/convex-embedded/client";
 import { createConvexClient } from "@robelest/convex-embedded/browser";
-import { ConvexProvider } from "convex/react";
 
-const client = createConvexClient({
-  modules: import.meta.glob("./convex/*.ts"),
-  remote: { url: import.meta.env.CONVEX_URL },
+const replica = await createReplica({
+  modules,
+  url: process.env.CONVEX_URL!,
 });
 
-function App() {
-  return (
-    <ConvexProvider client={client}>
-      <MyApp />
-    </ConvexProvider>
-  );
-}
+const runtime = createEmbeddedRuntime({ modules, schema, replica });
+const firstPage = await runtime.paginate(
+  api.tasks.list,
+  {},
+  { initialNumItems: 20 },
+);
+
+const client = createConvexClient({ modules, schema, replica });
 ```
 
 ---
@@ -126,18 +131,29 @@ interface ClientOptions {
   name?: string;
   remote?: RemoteOptions;
   auth?: AuthOptions;
+  replica?: Replica;
 }
 ```
 
-| Field           | Type                                         | Default             | Description                                      |
-| --------------- | -------------------------------------------- | ------------------- | ------------------------------------------------ |
-| `modules`       | `Record<string, () => Promise<unknown>>`     | **required**        | From `import.meta.glob()`. No `{ eager: true }`. |
-| `schema`        | `unknown`                                    | `undefined`         | Default export from `convex/schema.ts`.          |
-| `clientOptions` | `Omit<Partial<...>, "webSocketConstructor">` | `undefined`         | Forwarded to `ConvexClient`.                     |
-| `workerUrl`     | `URL \| string`                              | auto-resolved       | wa-sqlite worker URL. Rarely needed.             |
-| `name`          | `string`                                     | `"convex-embedded"` | IndexedDB database name. Shared across tabs.     |
-| `remote`        | `RemoteOptions`                              | `undefined`         | Enable remote. Omit for local-only.              |
-| `auth`          | `AuthOptions`                                | `undefined`         | Auth configuration.                              |
+| Field           | Type                                         | Default             | Description                                            |
+| --------------- | -------------------------------------------- | ------------------- | ------------------------------------------------------ |
+| `modules`       | `Record<string, () => Promise<unknown>>`     | **required**        | Lazy ESM registry keyed by canonical module id.        |
+| `schema`        | `unknown`                                    | `undefined`         | Default export from `convex/schema.ts`.                |
+| `clientOptions` | `Omit<Partial<...>, "webSocketConstructor">` | `undefined`         | Forwarded to `ConvexClient`.                           |
+| `workerUrl`     | `URL \| string`                              | auto-resolved       | wa-sqlite worker URL. Rarely needed.                   |
+| `name`          | `string`                                     | `"convex-embedded"` | IndexedDB database name. Shared across tabs.           |
+| `remote`        | `RemoteOptions`                              | `undefined`         | Enable remote. Omit for local-only.                    |
+| `auth`          | `AuthOptions`                                | `undefined`         | Auth configuration.                                    |
+| `replica`       | `Replica`                                    | `undefined`         | Initial remote-backed embedded data for SSR/bootstrap. |
+| `encryption`    | `EncryptionOptions`                          | `undefined`         | Encrypt persisted local state at rest.                 |
+
+### Current architecture notes
+
+- browser-only concerns stay behind the browser platform adapter
+- auth/session transport is browser-specific, but auth state transitions stay in
+  core
+- replay ownership is core behavior and now uses processor-scoped leases
+- the browser only supplies processor identity and transport plumbing
 
 ---
 
@@ -215,7 +231,7 @@ type RemoteState =
   | { status: "idle" }
   | { status: "connecting" }
   | { status: "resolving"; progress?: { completed: number; total: number } }
-  | { status: "ready" }
+  | { status: "resolved" }
   | { status: "offline" }
   | { status: "error"; error?: Error };
 ```
@@ -225,7 +241,7 @@ type RemoteState =
 | `idle`       | Sync was not configured (no `remote` option), or the engine has not started yet.                                                                  |
 | `connecting` | The remote `ConvexClient` is establishing its WebSocket connection.                                                                               |
 | `resolving`  | The CRDT resolve pass is in progress. `progress` reports tables resolved so far.                                                                  |
-| `ready`      | All tables are resolved and reactive subscriptions are active. Normal steady-state while online.                                                  |
+| `resolved`   | All tables are resolved and reactive subscriptions are active. Normal steady-state while online.                                                  |
 | `offline`    | Network is unavailable. Mutations continue to work locally with queued replay. The engine re-resolves automatically when connectivity returns.    |
 | `error`      | The resolve pass failed after exhausting retries. `error` contains the underlying `Error`. Recovery is attempted on the next connectivity change. |
 
@@ -236,8 +252,8 @@ stateDiagram-v2
     [*] --> idle
     idle --> connecting
     connecting --> resolving
-    resolving --> ready
-    ready --> offline
+    resolving --> resolved
+    resolved --> offline
     offline --> resolving
     offline --> error : after max retries
     error --> resolving : connectivity change
@@ -293,7 +309,7 @@ remote has not started yet, or if the client was not created by
 
 ```ts
 const state = getRemoteState(client);
-if (state.status === "ready") {
+if (state.status === "resolved") {
   console.log("All tables are up to date");
 }
 ```
@@ -319,7 +335,7 @@ unsubscribe if the client was created without `remote` or was not created by
 ```ts
 const unsub = subscribeRemoteState(client, (state) => {
   switch (state.status) {
-    case "ready":
+    case "resolved":
       badge.textContent = "Online";
       break;
     case "offline":
@@ -356,6 +372,12 @@ function subscribeAuthState(
 `getAuthState` returns `{ status: "idle" }` if the client was not created by
 `createConvexClient`. `subscribeAuthState` returns a no-op unsubscribe in the
 same case.
+
+The underlying auth internals are layered like this:
+
+- browser supplies session/auth transport
+- shared client/runtime code owns auth state transitions
+- `ctx.auth.getUserIdentity()` continues to work inside local execution
 
 ---
 

@@ -10,33 +10,46 @@
   "scripts": {
     "test": "vp run cache:test",
     "test:coverage": "vp test --run --coverage",
+    "bench": "vp test bench tests/benchmarks",
+    "bench:query-engine": "vp test bench tests/benchmarks/query-engine.bench.ts",
+    "bench:platform": "vp test bench tests/benchmarks/platform.bench.ts",
+    "bench:reactivity": "vp test bench tests/benchmarks/reactivity.bench.ts",
     "build": "vp run cache:build",
     "build:embedded": "vp exec convex codegen --component-dir ./packages/convex-embedded/src/component && vp run --filter @robelest/convex-embedded build",
+    "build:demo": "vp run --filter demo-svelte build",
     "publish:embedded": "vp pm publish --filter @robelest/convex-embedded --access public",
     "typecheck": "vp run --filter @robelest/convex-embedded typecheck",
     "typecheck:embedded": "vp run --filter @robelest/convex-embedded typecheck",
     "lint": "vp lint",
+    "deploy:docs": "vp run --filter docs build && vpx wrangler pages deploy ./docs/build --project-name=convex-embedded",
     "lint:fix": "vp lint --fix",
     "fmt": "vp fmt .",
     "fmt:check": "vp fmt --check .",
     "check": "vp run cache:check",
+    "deploy:demo": "vp exec convex deploy --cmd 'vp run build:demo' --cmd-url-env-var-name CONVEX_URL && vp run --filter demo-svelte deploy",
     "dev:convex": "vp exec convex dev",
     "dev:svelte": "vp run --filter demo-svelte dev",
     "prepare": "vp config"
   },
   "dependencies": {
+    "@ai-sdk/openai": "^3.0.48",
+    "@convex-dev/agent": "^0.6.1",
+    "ai": "^6.0.141",
     "convex": "catalog:"
   },
   "devDependencies": {
     "@convex-dev/action-retrier": "^0.3.0",
     "@robelest/convex-embedded": "workspace:*",
-    "@typescript/native-preview": "7.0.0-dev.20260313.1",
+    "@typescript/native-preview": "7.0.0-dev.20260326.1",
     "vite": "catalog:",
-    "vite-plus": "catalog:"
+    "vite-plus": "catalog:",
+    "wrangler": "^4.80.0"
   },
   "packageManager": "pnpm@10.32.1",
   "pnpm": {
     "overrides": {
+      "react": "19.1.0",
+      "react-dom": "19.2.0",
       "vite": "catalog:",
       "vitest": "catalog:"
     },

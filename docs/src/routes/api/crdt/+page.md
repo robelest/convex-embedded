@@ -14,6 +14,36 @@ The CRDT entry point (`@robelest/convex-embedded/crdt`) provides field
 constructors for defining ready data shapes and runtime helpers for reading CRDT
 state from Yjs documents.
 
+## Which field helper should I use?
+
+| Field helper           | Use when                                     | Merge behavior               | Stored locally |
+| ---------------------- | -------------------------------------------- | ---------------------------- | -------------- |
+| `schema.register(v.*)` | one logical value can be edited concurrently | register conflict resolution | yes            |
+| `schema.prose()`       | rich collaborative text                      | Yjs XML fragment merge       | yes            |
+| `schema.counter()`     | additive changes matter more than overwrite  | summed increments            | yes            |
+| `schema.set(v.*)`      | membership should be add-wins                | add-wins set                 | yes            |
+| `schema.omit(v.*)`     | field must stay remote-only                  | omitted from embedded sync   | no             |
+| plain `v.*`            | simple synced field                          | last-write-wins              | yes            |
+
+## Common embedded shape
+
+```ts
+export const tasks = embeddedTable("tasks", {
+  title: schema.register(v.string()),
+  body: schema.prose(),
+  votes: schema.counter(),
+  tags: schema.set(v.string()),
+  remoteAttachmentId: schema.omit(v.string()),
+  done: v.boolean(),
+});
+```
+
+The important distinction is:
+
+- `schema.*` fields get special merge/omit behavior
+- plain `v.*` fields still sync as part of the embedded table, but use simple
+  last-write-wins semantics
+
 Field constructors are used inside `embeddedTable()` shape definitions. Each
 maps to a Yjs data structure that enables automatic conflict-free merging across
 clients and offline sessions.
@@ -167,8 +197,14 @@ function set<T>(validator: Validator<T, any, any>): CrdtFieldDescriptor;
 
 Marks a field as remote-only. It exists on the remote Convex backend but is
 stripped from every payload sent to the local embedded runtime. Only needed on
-ready tables -- tables without `register()` are never ready and stay on remote
-by default.
+embedded synced tables. Tables outside the embedded sync path already stay
+remote-only by default.
+
+Use this for:
+
+- large remote-only metadata
+- sensitive server-side ids
+- fields the browser should never persist locally
 
 ```ts
 function omit<T>(validator: Validator<T, any, any>): CrdtFieldDescriptor;
@@ -195,17 +231,17 @@ function define(options: DefineOptions): Definition;
 interface DefineOptions {
   version: number;
   shape: Record<string, unknown>;
-  history?: Record<number, Record<string, unknown>>;
   defaults?: Record<string, unknown>;
+  migrate?: Record<number, LocalTableMigrationStep>;
 }
 ```
 
-| Field      | Type                                      | Default      | Description                                                         |
-| ---------- | ----------------------------------------- | ------------ | ------------------------------------------------------------------- |
-| `version`  | `number`                                  | **required** | Current schema version number.                                      |
-| `shape`    | `Record<string, unknown>`                 | **required** | Current field shape (mix of CRDT descriptors and plain validators). |
-| `history`  | `Record<number, Record<string, unknown>>` | `{}`         | Previous version shapes keyed by version number.                    |
-| `defaults` | `Record<string, unknown>`                 | `{}`         | Default values for fields added in the current version.             |
+| Field      | Type                                      | Default      | Description                                                          |
+| ---------- | ----------------------------------------- | ------------ | -------------------------------------------------------------------- |
+| `version`  | `number`                                  | **required** | Current schema version number.                                       |
+| `shape`    | `Record<string, unknown>`                 | **required** | Current field shape (mix of CRDT descriptors and plain validators).  |
+| `defaults` | `Record<string, unknown>`                 | `{}`         | Default values for additive changes.                                 |
+| `migrate`  | `Record<number, LocalTableMigrationStep>` | `{}`         | Forward-only local document migration steps keyed by target version. |
 
 #### `Definition`
 
@@ -213,19 +249,20 @@ interface DefineOptions {
 interface Definition {
   version: number;
   shape: Record<string, unknown>;
-  history: Record<number, Record<string, unknown>>;
   defaults: Record<string, unknown>;
-  getShape(version?: number): Record<string, unknown>;
+  migrate: Record<number, LocalTableMigrationStep>;
+  getShape(): Record<string, unknown>;
   getCrdtFields(): Map<string, CrdtFieldDescriptor>;
   getOmittedFields(): string[];
 }
 ```
 
-| Member               | Description                                                                    |
-| -------------------- | ------------------------------------------------------------------------------ |
-| `getShape(version?)` | Get field descriptors for a specific version. Defaults to the current version. |
-| `getCrdtFields()`    | Get all CRDT field names and their descriptors for the current version.        |
-| `getOmittedFields()` | Get field names that should be omitted from local remote.                      |
+| Member               | Description                                                              |
+| -------------------- | ------------------------------------------------------------------------ |
+| `migrate`            | Forward-only local table migration steps keyed by target version number. |
+| `getShape()`         | Get the current field shape.                                             |
+| `getCrdtFields()`    | Get all CRDT field names and their descriptors for the current version.  |
+| `getOmittedFields()` | Get field names that should be omitted from local remote.                |
 
 ---
 

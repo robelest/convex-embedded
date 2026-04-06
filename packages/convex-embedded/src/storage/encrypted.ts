@@ -1,4 +1,6 @@
-import type { StoredDocument } from "@/core/types";
+import type { EmbeddedCryptoProvider } from "@/runtime/crypto";
+import type { StoredDocument } from "@/runtime/db/types";
+import { decodeBase64, encodeBase64 } from "@/shared/base64";
 import type {
   CommitBatch,
   StorageAdapter,
@@ -7,15 +9,16 @@ import type {
 
 type KeyMaterial = {
   keyId: string;
-  key: CryptoKey;
+  key: unknown;
 };
 
 export interface EncryptionOptions {
+  crypto: EmbeddedCryptoProvider;
   getActiveKey: (ctx: { identityKey: string | null }) => Promise<KeyMaterial>;
   getKey: (ctx: {
     keyId: string;
     identityKey: string | null;
-  }) => Promise<CryptoKey | null>;
+  }) => Promise<unknown>;
   getIdentityKey: () => string | null;
 }
 
@@ -33,58 +36,35 @@ type EncryptedStoredDocument = {
   __encrypted: EncryptedEnvelope;
 };
 
-function toBase64(bytes: Uint8Array): string {
-  if (typeof btoa !== "function") {
-    throw new Error("Base64 encoding is unavailable in this runtime");
-  }
-
-  let binary = "";
-  const chunkSize = 0x8000;
-  for (let index = 0; index < bytes.length; index += chunkSize) {
-    const chunk = bytes.subarray(index, index + chunkSize);
-    binary += String.fromCharCode(...chunk);
-  }
-  return btoa(binary);
-}
-
-function fromBase64(value: string): Uint8Array {
-  if (typeof atob !== "function") {
-    throw new Error("Base64 decoding is unavailable in this runtime");
-  }
-  return Uint8Array.from(atob(value), (char) => char.charCodeAt(0));
-}
-
 async function encryptJson(
   value: unknown,
   keyMaterial: KeyMaterial,
   identityKey: string | null,
+  crypto: EmbeddedCryptoProvider,
 ): Promise<EncryptedEnvelope> {
   const nonce = crypto.getRandomValues(new Uint8Array(12));
   const plaintext = new TextEncoder().encode(JSON.stringify(value));
-  const ciphertext = await crypto.subtle.encrypt(
-    {
-      name: "AES-GCM",
-      iv: nonce,
-      additionalData: new TextEncoder().encode(identityKey ?? "anonymous"),
-    },
-    keyMaterial.key,
+  const ciphertext = await crypto.encryptAesGcm({
+    key: keyMaterial.key,
     plaintext,
-  );
+    nonce,
+    additionalData: new TextEncoder().encode(identityKey ?? "anonymous"),
+  });
 
   return {
     version: 1,
     keyId: keyMaterial.keyId,
     identityKey,
-    nonce: toBase64(nonce),
-    ciphertext: toBase64(new Uint8Array(ciphertext)),
+    nonce: encodeBase64(nonce),
+    ciphertext: encodeBase64(ciphertext),
   };
 }
 
 async function decryptJson<T>(
   envelope: EncryptedEnvelope,
-  getKey: EncryptionOptions["getKey"],
+  options: EncryptionOptions,
 ): Promise<T> {
-  const key = await getKey({
+  const key = await options.getKey({
     keyId: envelope.keyId,
     identityKey: envelope.identityKey,
   });
@@ -92,17 +72,14 @@ async function decryptJson<T>(
     throw new Error(`Missing encryption key for ${envelope.keyId}`);
   }
 
-  const plaintext = await crypto.subtle.decrypt(
-    {
-      name: "AES-GCM",
-      iv: fromBase64(envelope.nonce),
-      additionalData: new TextEncoder().encode(
-        envelope.identityKey ?? "anonymous",
-      ),
-    },
+  const plaintext = await options.crypto.decryptAesGcm({
     key,
-    fromBase64(envelope.ciphertext),
-  );
+    nonce: decodeBase64(envelope.nonce),
+    ciphertext: decodeBase64(envelope.ciphertext),
+    additionalData: new TextEncoder().encode(
+      envelope.identityKey ?? "anonymous",
+    ),
+  });
 
   return JSON.parse(new TextDecoder().decode(plaintext)) as T;
 }
@@ -116,7 +93,12 @@ async function encryptDocument(
   return {
     _id: String(doc._id),
     _creationTime: doc._creationTime,
-    __encrypted: await encryptJson(doc, keyMaterial, identityKey),
+    __encrypted: await encryptJson(
+      doc,
+      keyMaterial,
+      identityKey,
+      options.crypto,
+    ),
   };
 }
 
@@ -128,7 +110,7 @@ async function decryptDocument(
   if (!encrypted) {
     return doc;
   }
-  return decryptJson<StoredDocument>(encrypted, options.getKey);
+  return decryptJson<StoredDocument>(encrypted, options);
 }
 
 export function createEncryptedStorage(
@@ -159,7 +141,7 @@ export function createEncryptedStorage(
         entries.map(async ({ id, blob }) => {
           const text = await blob.text();
           const envelope = JSON.parse(text) as EncryptedEnvelope;
-          const bytes = await decryptJson<number[]>(envelope, options.getKey);
+          const bytes = await decryptJson<number[]>(envelope, options);
           return { id, blob: new Blob([Uint8Array.from(bytes)]) };
         }),
       );
@@ -187,12 +169,15 @@ export function createEncryptedStorage(
         Array.from(new Uint8Array(buffer)),
         keyMaterial,
         options.getIdentityKey(),
+        options.crypto,
       );
       await storage.storeBlob(id, new Blob([JSON.stringify(envelope)]));
     },
 
     deleteBlob: (id: string) => storage.deleteBlob(id),
     clear: () => storage.clear(),
-    close: () => storage.close?.(),
+    close: async () => {
+      await storage.close?.();
+    },
   };
 }

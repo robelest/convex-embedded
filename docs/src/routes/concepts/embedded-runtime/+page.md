@@ -41,9 +41,9 @@ this.db = new Database(this._schema, options.storage);
 
 ## Module Loader
 
-The `ModuleLoader` lazily resolves Convex function modules from the
-`import.meta.glob` map provided at construction time. Modules are loaded on
-demand during function execution -- not eagerly at startup.
+The `ModuleLoader` lazily resolves Convex function modules from the lazy ESM
+registry provided at construction time. Modules are loaded on demand during
+function execution -- not eagerly at startup.
 
 Each module is expected to export registered Convex functions (`query`,
 `mutation`, `action`) created via `queryGeneric`, `mutationGeneric`, or the

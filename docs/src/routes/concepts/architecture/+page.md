@@ -11,9 +11,9 @@ description:
 
 # Architecture
 
-`convex-embedded` is composed of several cooperating layers: an in-browser
-runtime, a loopback transport, a persistence worker, cross-tab fanout, and an
-optional remote engine. This page explains how they connect.
+`convex-embedded` is composed of several cooperating layers: a main-thread
+runtime, a loopback transport, a persistence worker, platform fanout adapters,
+and an optional remote sync engine. This page explains how they connect.
 
 ## Main-Thread Runtime
 
@@ -28,19 +28,17 @@ flowchart TB
     Runtime --> Auth["AuthResolver"]
 ```
 
-The `EmbeddedRuntime` runs on the **main thread**. This is a deliberate
-architectural choice: Convex function modules (loaded via `import.meta.glob`)
-contain non-cloneable `Function` and `Proxy` objects that cannot cross a
-`postMessage` boundary to a Web Worker.
+The `EmbeddedRuntime` runs on the **main thread**. This is deliberate: Convex
+function modules in the lazy ESM registry contain non-cloneable `Function` and
+`Proxy` values that cannot cross a worker boundary.
 
 The runtime creates a loopback WebSocket transport that `ConvexClient` connects
 to. From the SDK's perspective, it is talking to a real Convex deployment over
 WebSocket. In reality, messages are routed to the `SyncProtocolHandler` in the
 same thread via an in-memory message queue.
 
-The loopback transport includes a ping/pong keepalive mechanism matching the
-real Convex wire protocol, so the SDK's connection health tracking works
-correctly.
+The loopback transport mirrors the Convex wire shape closely enough that the SDK
+still sees a normal client connection.
 
 ## wa-sqlite in a Dedicated Worker
 
@@ -68,11 +66,33 @@ response.
 The `WebAssembly.Module` is compiled once (via `compileWasmModule()`) and
 transferred to the worker at init time, avoiding a second download.
 
+## Platform Adapters
+
+```mermaid
+flowchart LR
+    Core[Core runtime + engine] --> Platform[EmbeddedPlatformAdapter]
+    Platform --> Storage[storage surface]
+    Platform --> Session[session broadcast]
+    Platform --> Write[write broadcast]
+    Platform --> Net[connectivity]
+    Platform --> Proc[processor identity]
+```
+
+The current architecture keeps correctness in shared/core code and pushes
+environment-specific behavior behind adapters.
+
+Examples:
+
+- persistence worker setup is browser-specific
+- `BroadcastChannel` transport is browser-specific
+- processor identity generation is platform-specific
+- replay leases, queue state, and resolve ordering are core behavior
+
 ## Cross-Tab Sync
 
 ```mermaid
 flowchart LR
-    A["Tab A<br/>WriteFanout"] -- "BroadcastChannel" --> B["Tab B<br/>WriteFanout"]
+    A["Tab A<br/>Write broadcast"] -- "BroadcastChannel" --> B["Tab B<br/>Write broadcast"]
     A --> IDB["Shared IndexedDB"]
     B --> IDB
 ```
@@ -81,16 +101,16 @@ When multiple tabs share the same `name` (the IndexedDB database name passed to
 `createConvexClient`), they all read and write to the same underlying SQLite
 database.
 
-After a mutation commits and the write is persisted to IndexedDB, the
-`WriteFanout` broadcasts a `BroadcastChannel` message listing the tables that
-changed. Other tabs receive this notification and:
+After a mutation commits and the write is persisted to IndexedDB, the write
+broadcast broadcasts a message listing the tables that changed. Other tabs
+receive this notification and:
 
 1. Re-read the affected tables from IndexedDB into their in-memory database.
 2. Re-evaluate all active query subscriptions.
 3. Push `Transition` messages through their loopback WebSocket so the
    `ConvexClient` sees updated results instantly.
 
-This gives cross-tab reactivity without any server round-trip.
+This gives cross-tab reactivity without a server round-trip.
 
 ## Remote Sync (Optional)
 
@@ -106,7 +126,7 @@ second `ConvexClient` pointed at the remote Convex deployment. This enables:
 
 ### Reactive Subscriptions
 
-For each ready table, the engine subscribes to a remote query (e.g.,
+For each embedded synced table, the engine subscribes to a remote query (e.g.,
 `api.tasks.list`). When the remote pushes new results, the engine diffs them
 against local state and calls `ingestDocuments()` to apply changes within a
 transaction.
@@ -118,9 +138,25 @@ When `client.mutation(api.tasks.create, args)` is called, the patched mutation:
 1. Writes locally first (instant, always succeeds).
 2. Pushes the mutation to a durable `PendingQueue` backed by the embedded
    database.
-3. When online, the queue drains serially: each mutation is forwarded to the
-   remote `ConvexClient` with ID translation (local IDs mapped to remote IDs via
-   the `IdMap`).
+3. When online, the queue drains serially. Each replay entry is claimed with a
+   processor-scoped lease before the engine forwards it to the remote
+   `ConvexClient`.
+4. On success, the engine removes the owned entry. On transient failure, it
+   releases the entry back to `pending`. On blocked failure, it clears ownership
+   and marks the entry `blocked`.
+
+### Replay Lease Ownership
+
+Replay correctness is now core runtime behavior.
+
+- pending entries carry `owner` and `leaseExpiresAt`
+- active replay renews the lease while it works
+- `stop()` releases any actively owned entry
+- a crashed or abandoned processor can be recovered after lease expiry by a
+  different processor
+
+The browser only supplies processor identity. It does not define replay
+correctness semantics.
 
 ### CRDT Resolve on Reconnect
 
@@ -144,7 +180,7 @@ Call `client.close()` to tear down all resources:
 
 - The loopback WebSocket connections are closed (clearing ping intervals).
 - The scheduler is shut down and pending timers are cleared.
-- The `WriteFanout` BroadcastChannel is closed.
+- The write/session broadcast transports are closed.
 - The wa-sqlite worker is terminated.
 - If remote is active, the remote `ConvexClient` is closed and all subscriptions
   are unsubscribed.

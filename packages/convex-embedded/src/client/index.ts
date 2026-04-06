@@ -1,11 +1,12 @@
 /**
- * convex-resolve/client
+ * convex-embedded/client
  *
- * Client-side entry point for remote internals.
+ * Advanced client entry point for embedded sync and startup helpers.
  *
  * Most users should use `createConvexClient()` from
- * `@robelest/convex-embedded/browser` instead of importing
- * from this module directly.
+ * `@robelest/convex-embedded/browser` instead of importing from this module
+ * directly. Import from `@robelest/convex-embedded/client` when you need
+ * advanced bootstrap helpers such as replica creation.
  *
  * @packageDocumentation
  */
@@ -21,27 +22,42 @@ export type {
   EmbeddedClientLike,
 } from "@/client/engine";
 
-// Backwards-compat re-export (deprecated)
-/** @internal @deprecated Use engine instead. */
-export { monitor } from "@/client/monitor";
-/** @internal @deprecated */
-export type { MonitorConfig, MonitorInstance } from "@/client/monitor";
-
 // Runtime — creates ConvexClient over embedded transport
 /** @internal */
 export { runtime } from "@/client/runtime";
 /** @internal */
 export type { EmbeddedTransport, RuntimeInstance } from "@/client/runtime";
 
+/**
+ * Build a remote-backed replica for SSR/bootstrap flows.
+ *
+ * See {@link CreateReplicaOptions} for configuration and {@link Replica} for
+ * the returned artifact shape.
+ *
+ * @see CreateReplicaOptions
+ * @see Replica
+ * @category Factory
+ */
+export { createReplica } from "@/client/replica";
+
+/**
+ * Serializable replica artifact and creation options used by
+ * `createReplica(...)`.
+ *
+ * @see createReplica
+ * @category Type
+ */
+export type { CreateReplicaOptions, Replica } from "@/client/replica";
+
 // ID Map — local UUID ↔ remote Convex ID translation
 /** @internal */
-export { IdMap } from "@/client/id-map";
+export { IdMap } from "@/client/ids";
 
 // Pending Queue — persistent mutation queue
 /** @internal */
-export { PendingQueue } from "@/client/pending-queue";
+export { PendingQueue } from "@/client/pending";
 /** @internal */
-export type { PendingEntry } from "@/client/pending-queue";
+export type { PendingEntry } from "@/client/pending";
 
 // Schema — client-side CRDT field helpers
 /** @internal */

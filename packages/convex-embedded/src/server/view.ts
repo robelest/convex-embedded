@@ -1,15 +1,15 @@
 /**
  * View utilities for scoping query results.
  *
- * Views are standalone helpers — not part of register().
+ * Views are standalone helpers -- not part of register().
  * The app composes them into its own queries:
  *
- *   import { view } from 'convex-resolve/server';
+ *   import { view } from '@robelest/convex-embedded/server';
  *
  *   export const list = query({
  *     args: {},
  *     handler: async (ctx) => {
- *       return await view.ownership({ owner: 'userId' })
+ *       return await view.ownership({ index: 'by_user_id', field: 'userId' })
  *         .apply(ctx, ctx.db.query('tasks'))
  *         .collect();
  *     },
@@ -24,11 +24,6 @@ export interface ViewFilter<Ctx = unknown, Q = unknown> {
   /** Apply this view's filter to a query. Returns the filtered query. */
   apply(ctx: Ctx, query: Q): Q | Promise<Q>;
 }
-
-type FilterFn<Ctx = unknown, Q = unknown> = (
-  ctx: Ctx,
-  query: Q,
-) => Q | Promise<Q>;
 
 // ---------------------------------------------------------------------------
 // Presets
@@ -61,7 +56,7 @@ function authenticated(): ViewFilter {
       const identity = await ctx.auth?.getUserIdentity();
       if (!identity) {
         throw new Error(
-          "convex-resolve: view.authenticated() requires a logged-in user",
+          "convex-embedded: view.authenticated() requires a logged-in user",
         );
       }
       return query;
@@ -70,11 +65,12 @@ function authenticated(): ViewFilter {
 }
 
 /**
- * Filters to rows where the `owner` field matches the current user's ID.
- * Unauthenticated callers see nothing (empty result set).
+ * Scopes rows through an index where the owner field matches the current
+ * user's ID. Unauthenticated callers scope to `null`, which should yield no
+ * rows when the owner field stores non-null auth identifiers.
  */
-function ownership(options: { owner: string }): ViewFilter {
-  const { owner } = options;
+function ownership(options: { index: string; field: string }): ViewFilter {
+  const { index, field } = options;
 
   return {
     async apply(
@@ -86,39 +82,19 @@ function ownership(options: { owner: string }): ViewFilter {
           } | null>;
         };
       },
-      query: { filter(predicate: (q: unknown) => unknown): unknown },
+      query: {
+        withIndex(indexName: string, builder: (q: unknown) => unknown): unknown;
+      },
     ) {
       const identity = await ctx.auth.getUserIdentity();
-      if (!identity) {
-        // Return a query that will produce no results
-        // by filtering on an impossible condition
-        return query.filter((q: unknown) =>
-          (q as { eq(a: unknown, b: unknown): unknown }).eq(true, false),
-        );
-      }
+      const userId = identity?.subject ?? identity?.tokenIdentifier ?? null;
 
-      const userId = identity.subject ?? identity.tokenIdentifier;
-
-      return query.filter((q: unknown) => {
+      return query.withIndex(index, (q: unknown) => {
         const qb = q as {
-          eq(a: unknown, b: unknown): unknown;
-          field(name: string): unknown;
+          eq(fieldName: string, value: unknown): unknown;
         };
-        return qb.eq(qb.field(owner), userId);
+        return qb.eq(field, userId);
       });
-    },
-  };
-}
-
-/**
- * Custom filter view. Accepts a function (ctx, query) => filteredQuery.
- */
-function filter<Ctx = unknown, Q = unknown>(
-  fn: FilterFn<Ctx, Q>,
-): ViewFilter<Ctx, Q> {
-  return {
-    apply(ctx: Ctx, query: Q): Q | Promise<Q> {
-      return fn(ctx, query);
     },
   };
 }
@@ -131,5 +107,4 @@ export const view = {
   public: publicView,
   authenticated,
   ownership,
-  filter,
 };

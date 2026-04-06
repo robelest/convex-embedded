@@ -14,7 +14,7 @@
 
 import { Fx } from "@robelest/fx";
 
-import type { DocumentId, Timestamp } from "@/core/types";
+import type { DocumentId, Timestamp } from "@/runtime/db/types";
 
 // ---------------------------------------------------------------------------
 // TransactionDatabase — the interface OccTransaction expects

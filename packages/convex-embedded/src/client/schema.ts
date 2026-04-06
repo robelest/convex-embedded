@@ -10,9 +10,10 @@
  */
 import * as Y from "yjs";
 
-import type { Definition } from "@/server/schema";
-import { getCrdtType } from "@/server/schema";
+import { proseContentToPlainText, yDocToProseContent } from "@/crdt/prose";
 import { createConflict } from "@/shared/conflict";
+import type { Definition } from "@/shared/schema";
+import { getCrdtType } from "@/shared/schema";
 import { CrdtType } from "@/shared/types";
 import type { Conflict, ConflictEntry } from "@/shared/types";
 
@@ -25,21 +26,26 @@ import type { Conflict, ConflictEntry } from "@/shared/types";
  * Returns the text content of the Y.XmlFragment.
  */
 export function extractProseText(doc: Y.Doc, fieldName: string): string {
-  const xml = doc.getXmlFragment(fieldName);
-  return xmlFragmentToText(xml);
-}
-
-function xmlFragmentToText(fragment: Y.XmlFragment): string {
-  let text = "";
-  for (let i = 0; i < fragment.length; i++) {
-    const child = fragment.get(i);
-    if (child instanceof Y.XmlText) {
-      text += child.toString();
-    } else if (child instanceof Y.XmlElement) {
-      text += xmlFragmentToText(child as unknown as Y.XmlFragment);
+  const collectText = (node: any): string => {
+    if (node instanceof Y.XmlText) {
+      return node.toString();
     }
-  }
-  return text;
+
+    if (typeof node?.toArray === "function") {
+      return node
+        .toArray()
+        .map((child: unknown) => collectText(child))
+        .join("");
+    }
+
+    return "";
+  };
+
+  const fragment = doc.getXmlFragment(fieldName);
+  const text = collectText(fragment).trim();
+  return text.length > 0
+    ? text
+    : proseContentToPlainText(yDocToProseContent(doc, fieldName));
 }
 
 /**
@@ -227,7 +233,7 @@ export function materializeYjsDoc(
     }
 
     if (crdtType === CrdtType.Prose) {
-      result[key] = extractProseText(doc, key);
+      result[key] = proseContentToPlainText(yDocToProseContent(doc, key));
     } else if (crdtType === CrdtType.Register) {
       const resolver = (fieldDef as any)?.resolve as
         | ((c: Conflict<unknown>) => unknown)

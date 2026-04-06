@@ -1,7 +1,7 @@
 /**
- * CRDT field constructors and runtime read helpers.
+ * CRDT field constructors and runtime access.
  *
- * Use field constructors inside `embeddedTable()` shape definitions:
+ * Schema constructors for `embeddedTable()` definitions:
  *
  *   import { schema } from "@robelest/convex-embedded/crdt";
  *
@@ -10,63 +10,67 @@
  *     body:  schema.prose(),
  *     votes: schema.counter(),
  *     tags:  schema.set(v.string()),
- *     secret: schema.omit(v.string()),
  *   });
  *
- * Use runtime helpers to read CRDT state from Yjs documents:
+ * Runtime field access for reading/subscribing to CRDT fields:
  *
- *   import { getConflict, getCounterValue, getSetMembers } from "@robelest/convex-embedded/crdt";
+ *   import { prose, register } from "@robelest/convex-embedded/crdt";
+ *
+ *   const handle = await prose.open(client, { table: "tasks", id, field: "body" });
+ *   const text = handle.getText();
  *
  * @packageDocumentation
  */
 
 // ---------------------------------------------------------------------------
-// Field constructors (schema.* namespace)
+// Schema constructors
 // ---------------------------------------------------------------------------
 
-export {
-  schema,
-  prose,
-  register,
-  counter,
-  set,
-  omit,
-  define,
-  createConflict,
-  isCrdtField,
-  getCrdtType,
-  initYjsDoc,
-  encodeDocumentState,
-  computeDiff,
-  mergeUpdate,
-  isDiffEmpty,
-} from "@/server/schema";
+export { schema, omit, createConflict } from "@/server/schema";
+export type { RegisterOptions } from "@/server/schema";
+
+// ---------------------------------------------------------------------------
+// Field runtime access
+// ---------------------------------------------------------------------------
 
 export type {
-  DefineOptions,
-  Definition,
-  RegisterOptions,
-} from "@/server/schema";
+  FieldRef,
+  ProseHandle,
+  RegisterHandle,
+  SetHandle,
+  CounterHandle,
+} from "@/crdt/fields";
+
+import { openCounter, openProse, openRegister, openSet } from "@/crdt/fields";
+import {
+  createEmptyProseContent,
+  normalizeProseContent,
+  proseContentToPlainText,
+} from "@/crdt/prose";
+
+export const prose = {
+  open: openProse,
+  empty: createEmptyProseContent,
+  normalize: normalizeProseContent,
+  text: proseContentToPlainText,
+} as const;
+
+export const register = {
+  open: openRegister,
+} as const;
+
+export const set = {
+  open: openSet,
+} as const;
+
+export const counter = {
+  open: openCounter,
+} as const;
+
+export type { ProseContent } from "@/crdt/prose";
 
 // ---------------------------------------------------------------------------
-// Runtime read helpers
-// ---------------------------------------------------------------------------
-
-export {
-  getRegisterConflict as getConflict,
-  getCounterValue,
-  getSetMembers,
-  resolveRegister,
-  extractProseText,
-  createEmptyDoc,
-  encodeStateVector,
-  applyUpdate,
-  encodeState,
-  materializeYjsDoc,
-} from "@/client/schema";
-
-// ---------------------------------------------------------------------------
-// Shared types
+// Types
 // ---------------------------------------------------------------------------
 
 export type {

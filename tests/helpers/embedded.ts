@@ -40,12 +40,14 @@
  * @packageDocumentation
  */
 
-import { Database } from "@embedded/core/database";
-import type { ParsedSchema } from "@embedded/core/schema";
-import { ModuleLoader } from "@embedded/kernel/module-loader";
-import type { FunctionPath } from "@embedded/kernel/module-loader";
-import { resolveFunctionPath } from "@embedded/kernel/module-loader";
-import { UdfExecutor } from "@embedded/kernel/udf-executor";
+import {
+  ModuleLoader,
+  resolveFunctionPath,
+  type FunctionPath,
+} from "../../packages/convex-embedded/src/kernel/modules";
+import { UdfExecutor } from "../../packages/convex-embedded/src/kernel/udf";
+import { Database } from "../../packages/convex-embedded/src/runtime/db/database";
+import type { ParsedSchema } from "../../packages/convex-embedded/src/runtime/db/schema";
 
 // ---------------------------------------------------------------------------
 // Simple test function wrappers
@@ -151,14 +153,10 @@ export function embeddedTest(
   const schema = options.schema ?? null;
   const db = new Database(schema);
 
-  // ---- Build glob record from inline modules ----
+  // ---- Build lazy module registry from inline modules ----
   //
-  // The ModuleLoader expects an `import.meta.glob`-style record where
-  // keys are file paths and values are lazy loaders. It also requires a
-  // `_generated` entry so that `findModulesRoot` can determine the prefix.
-  //
-  // We group entries by the module name (the part before ":") and
-  // synthesise a `_generated/api.ts` entry for the root detection.
+  // The ModuleLoader expects keys to be canonical Convex module ids
+  // (the part before ":") and values to be lazy loaders.
 
   const modulesByPath = new Map<string, Record<string, any>>();
 
@@ -173,16 +171,13 @@ export function embeddedTest(
     modulesByPath.get(modulePath)![exportName] = fn;
   }
 
-  const globRecord: Record<string, () => Promise<any>> = {
-    // Sentinel entry so `findModulesRoot` can locate the root.
-    "./_generated/api.ts": () => Promise.resolve({}),
-  };
+  const moduleRegistry: Record<string, () => Promise<any>> = {};
 
   for (const [modulePath, exports] of modulesByPath) {
-    globRecord[`./${modulePath}.ts`] = () => Promise.resolve(exports);
+    moduleRegistry[modulePath] = () => Promise.resolve(exports);
   }
 
-  const moduleLoader = new ModuleLoader(globRecord);
+  const moduleLoader = new ModuleLoader(moduleRegistry);
 
   // ---- Create executor ----
   //

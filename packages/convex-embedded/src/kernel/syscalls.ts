@@ -1,4 +1,5 @@
 import { Fx } from "@robelest/fx";
+import { Cv } from "@robelest/fx/convex";
 /**
  * Syscall routers for the embedded Convex runtime.
  *
@@ -10,20 +11,34 @@ import { Fx } from "@robelest/fx";
  * Ported from convex-test, refactored to accept explicit db/runner
  * parameters instead of relying on globals.
  */
-import type { Value } from "convex/values";
+import type { JSONValue, Value } from "convex/values";
 import { convexToJson, jsonToConvex } from "convex/values";
 
-import type { Database } from "@/core/database";
+import type { FunctionPath } from "@/kernel/modules";
+import { resolveFunctionPath, createFunctionHandle } from "@/kernel/modules";
+import {
+  blobShaBase64,
+  createAmbientCryptoProvider,
+  type EmbeddedCryptoProvider,
+} from "@/runtime/crypto";
+import type { Database } from "@/runtime/db/database";
 import type {
   DocumentId,
   QueryDependency,
   SerializedQuery,
-} from "@/core/types";
-import type { FunctionPath } from "@/kernel/module-loader";
+  VectorSearchExpression,
+} from "@/runtime/db/types";
+import type { StoreMigrationManifest } from "@/runtime/migrations/types";
 import {
-  resolveFunctionPath,
-  createFunctionHandle,
-} from "@/kernel/module-loader";
+  missingStorageSurfaceError,
+  type StorageSurface,
+} from "@/runtime/storage";
+
+export const STORAGE_METADATA_STORE_MIGRATIONS: StoreMigrationManifest = {
+  store: "storageMetadata",
+  scope: "global",
+  version: 1,
+};
 
 // ---------------------------------------------------------------------------
 // RunUdfFn — the callback used to invoke nested queries/mutations/actions
@@ -55,13 +70,6 @@ type JsSyscallHandler = (args: Record<string, unknown>) => Promise<unknown>;
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-async function blobSha(blob: Blob): Promise<string> {
-  const arrayBuffer = await blob.arrayBuffer();
-  const hashBuffer = await crypto.subtle.digest("SHA-256", arrayBuffer);
-  const hashArray = new Uint8Array(hashBuffer);
-  return btoa(String.fromCharCode(...hashArray));
-}
 
 function decodeJsonSyscall(op: string, jsonArgs: string): TaggedJsonSyscall {
   return {
@@ -112,26 +120,23 @@ function extractQueryDependencies(query: unknown): QueryDependency[] {
   return [];
 }
 
-function unsupportedSyncSyscall(op: string): never {
-  throw new Error(`\`convex-embedded\` does not support syscall: "${op}"`);
-}
-
-function unsupportedAsyncSyscall(op: string): never {
-  throw new Error(
-    `\`convex-embedded\` does not support async syscall: "${op}"`,
-  );
-}
-
-function unsupportedJsSyscall(op: string): never {
-  throw new Error(`\`convex-embedded\` does not support js syscall: "${op}"`);
-}
-
 function dispatchSyncSyscall(
   request: TaggedJsonSyscall,
   handlers: Record<string, SyncSyscallHandler>,
 ): string {
   const handler = handlers[request.op];
-  return handler ? handler(request.args) : unsupportedSyncSyscall(request.op);
+  if (handler) {
+    return handler(request.args);
+  }
+
+  throw Cv.error({
+    code: "LOCAL_SYSCALL_UNSUPPORTED",
+    message:
+      `[convex-embedded] Local execution does not support syscall "${request.op}" in alpha. ` +
+      "Use route.remote() or mark the caller remoteOnly().",
+    op: request.op,
+    kind: "sync",
+  });
 }
 
 async function dispatchAsyncSyscall(
@@ -139,9 +144,18 @@ async function dispatchAsyncSyscall(
   handlers: Record<string, AsyncSyscallHandler>,
 ): Promise<string> {
   const handler = handlers[request.op];
-  return handler
-    ? await handler(request.args)
-    : unsupportedAsyncSyscall(request.op);
+  if (handler) {
+    return await handler(request.args);
+  }
+
+  throw Cv.error({
+    code: "LOCAL_SYSCALL_UNSUPPORTED",
+    message:
+      `[convex-embedded] Local execution does not support async syscall "${request.op}" in alpha. ` +
+      "Use route.remote() or mark the caller remoteOnly().",
+    op: request.op,
+    kind: "async",
+  });
 }
 
 async function dispatchJsSyscall(
@@ -149,9 +163,18 @@ async function dispatchJsSyscall(
   handlers: Record<string, JsSyscallHandler>,
 ): Promise<unknown> {
   const handler = handlers[request.op];
-  return handler
-    ? await handler(request.args)
-    : unsupportedJsSyscall(request.op);
+  if (handler) {
+    return await handler(request.args);
+  }
+
+  throw Cv.error({
+    code: "LOCAL_SYSCALL_UNSUPPORTED",
+    message:
+      `[convex-embedded] Local execution does not support js syscall "${request.op}" in alpha. ` +
+      "Use route.remote() or mark the caller remoteOnly().",
+    op: request.op,
+    kind: "js",
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -176,10 +199,12 @@ export function createSyncSyscall(
       for (const dependency of extractQueryDependencies(query)) {
         options?.onDependency?.(dependency);
       }
-      const queryId = db.startQuery(query);
+      const queryId = db.startQuery(query as SerializedQuery);
       return JSON.stringify({ queryId });
     },
-    "1.0/queryCleanup": () => {
+    "1.0/queryCleanup": (args) => {
+      const { queryId } = args as { queryId: number };
+      db.queryCleanup(queryId);
       return JSON.stringify({});
     },
     "1.0/db/normalizeId": (args) => {
@@ -214,6 +239,7 @@ export function createAsyncSyscall(
   runUdf: RunUdfFn,
   options?: {
     getIdentity?: () => Promise<unknown>;
+    getStorageSurface?: () => StorageSurface | null;
     /**
      * Optional set of active timer IDs. When provided, `setTimeout` calls
      * from the `1.0/schedule` syscall register their timer IDs here so the
@@ -232,8 +258,8 @@ export function createAsyncSyscall(
       ts: tsInSecs,
     } = args as {
       name?: string;
-      reference?: unknown;
-      functionHandle?: unknown;
+      reference?: string;
+      functionHandle?: string;
       args: unknown;
       ts: number;
     };
@@ -242,7 +268,10 @@ export function createAsyncSyscall(
       reference,
       functionHandle,
     });
-    const parsedArgs = jsonToConvex(fnArgs) as Record<string, unknown>;
+    const parsedArgs = jsonToConvex(fnArgs as JSONValue) as Record<
+      string,
+      unknown
+    >;
     const jobId = db.insert("_scheduled_functions", {
       args: [parsedArgs],
       name: functionPath.udfPath,
@@ -344,7 +373,9 @@ export function createAsyncSyscall(
 
   const cancelJobHandler: AsyncSyscallHandler = async (args) => {
     const { id } = args as { id: string };
-    db.patch("_scheduled_functions", id, { state: { kind: "canceled" } });
+    db.patch("_scheduled_functions", id as DocumentId, {
+      state: { kind: "canceled" },
+    });
     return JSON.stringify({});
   };
 
@@ -364,7 +395,7 @@ export function createAsyncSyscall(
     "1.0/get": async (args) => {
       const { table, id } = args as { table: string; id: string };
       options?.onDependency?.({ type: "FullTableScan", tableName: table });
-      const doc = db.get(table, id);
+      const doc = db.get(table, id as DocumentId);
       return JSON.stringify(convexToJson(doc));
     },
     "1.0/queryStreamNext": async (args) => {
@@ -392,7 +423,7 @@ export function createAsyncSyscall(
       const { table, value } = args as { table: string; value: unknown };
       const _id = db.insert(
         table,
-        jsonToConvex(value) as Record<string, unknown>,
+        jsonToConvex(value as JSONValue) as Record<string, unknown>,
       );
       return JSON.stringify({ _id });
     },
@@ -402,7 +433,7 @@ export function createAsyncSyscall(
         id: string;
         value: Record<string, unknown>;
       };
-      db.patch(table, id, value);
+      db.patch(table, id as DocumentId, value);
       return JSON.stringify({});
     },
     "1.0/replace": async (args) => {
@@ -411,30 +442,18 @@ export function createAsyncSyscall(
         id: string;
         value: Record<string, unknown>;
       };
-      db.replace(table, id, value);
+      db.replace(table, id as DocumentId, value);
       return JSON.stringify({});
     },
     "1.0/remove": async (args) => {
       const { table, id } = args as { table: string; id: string };
-      db.delete(table, id);
+      db.delete(table, id as DocumentId);
       return JSON.stringify({});
     },
     "1.0/count": async (args) => {
       const { table } = args as { table: string };
       options?.onDependency?.({ type: "FullTableScan", tableName: table });
-      const queryId = db.startQuery({
-        source: { type: "FullTableScan", tableName: table, order: "asc" },
-        operators: [],
-      });
-      let count = 0;
-      while (true) {
-        const result = db.queryNext(queryId);
-        if (result.done) {
-          break;
-        }
-        count += 1;
-      }
-      return JSON.stringify(count);
+      return JSON.stringify(db.count(table));
     },
     "1.0/getUserIdentity": async () => {
       if (options?.getIdentity) {
@@ -456,7 +475,7 @@ export function createAsyncSyscall(
       } = args as {
         query: {
           indexName: string;
-          limit: number;
+          limit?: number;
           vector: number[];
           expressions: unknown;
         };
@@ -464,15 +483,14 @@ export function createAsyncSyscall(
       const results = db.vectorSearch(
         indexName,
         vector,
-        expressions === null ? [] : [expressions as any],
+        (expressions as VectorSearchExpression | null) ?? null,
         limit,
       );
       options?.onDependency?.({
-        type: "IndexRange",
+        type: "VectorSearch",
         tableName: indexName.split(".")[0] ?? indexName,
         indexName: indexName.split(".")[1] ?? indexName,
-        range: expressions === null ? [] : ([expressions] as any),
-        order: "desc",
+        filter: (expressions as VectorSearchExpression | null) ?? null,
       });
       return JSON.stringify(convexToJson({ results }));
     },
@@ -486,11 +504,14 @@ export function createAsyncSyscall(
       } = args as {
         udfType: string;
         name?: string;
-        reference?: unknown;
-        functionHandle?: unknown;
+        reference?: string;
+        functionHandle?: string;
         args: unknown;
       };
-      const udfArgs = jsonToConvex(udfArgsJson) as Record<string, unknown>;
+      const udfArgs = jsonToConvex(udfArgsJson as JSONValue) as Record<
+        string,
+        unknown
+      >;
       const functionPath = resolveFunctionPath({
         name,
         reference,
@@ -504,15 +525,19 @@ export function createAsyncSyscall(
         const result = await runUdf("mutation", functionPath, udfArgs);
         return JSON.stringify(convexToJson(result as Value));
       }
-      throw new Error(
-        `\`convex-embedded\` does not support udf type: "${udfType}"`,
-      );
+      throw Cv.error({
+        code: "NESTED_UDF_TYPE_UNSUPPORTED",
+        message:
+          `[convex-embedded] Local execution does not support nested udf type "${udfType}" in alpha. ` +
+          "Use route.remote() or mark the caller remoteOnly().",
+        udfType,
+      });
     },
     "1.0/createFunctionHandle": async (args) => {
       const { name, reference, functionHandle } = args as {
         name?: string;
-        reference?: unknown;
-        functionHandle?: unknown;
+        reference?: string;
+        functionHandle?: string;
       };
       const functionPath = resolveFunctionPath({
         name,
@@ -524,31 +549,34 @@ export function createAsyncSyscall(
     },
     "1.0/storageDelete": async (args) => {
       const { storageId } = args as { storageId: string };
-      db.delete("_storage", storageId);
+      db.delete("_storage", storageId as DocumentId);
       db.deleteBlob(storageId);
       return JSON.stringify({});
     },
     "1.0/storageGetUrl": async (args) => {
       const { storageId } = args as { storageId: string };
-      const metadata = db.get("_storage", storageId);
+      const metadata = db.get("_storage", storageId as DocumentId);
       if (metadata === null) {
         return JSON.stringify(null);
       }
-      const { sha256 } = metadata;
-      const url =
-        "https://some-deployment.convex.cloud/api/storage/" +
-        (sha256 as string);
+      const surface = options?.getStorageSurface?.();
+      if (surface === null || surface === undefined) {
+        throw missingStorageSurfaceError("getUrl");
+      }
+      const url = await surface.getUrl(storageId);
       return JSON.stringify(convexToJson(url));
     },
     "1.0/storageGenerateUploadUrl": async () => {
-      const url =
-        "https://some-deployment.convex.cloud/api/storage/upload?token=" +
-        Math.random();
+      const surface = options?.getStorageSurface?.();
+      if (surface === null || surface === undefined) {
+        throw missingStorageSurfaceError("generateUploadUrl");
+      }
+      const url = await surface.generateUploadUrl();
       return JSON.stringify(convexToJson(url));
     },
     "1.0/storageGetMetadata": async (args) => {
       const { storageId } = args as { storageId: string };
-      const doc = db.get("_storage", storageId);
+      const doc = db.get("_storage", storageId as DocumentId);
       if (doc === null) {
         return JSON.stringify(null);
       }
@@ -580,13 +608,14 @@ export function createAsyncSyscall(
  */
 export function createJsSyscall(
   db: Database,
+  crypto: EmbeddedCryptoProvider = createAmbientCryptoProvider(),
 ): (op: string, args: Record<string, unknown>) => Promise<unknown> {
   const handlers: Record<string, JsSyscallHandler> = {
     "storage/storeBlob": async (args) => {
       const { blob } = args as { blob: Blob };
       const storageId = db.insert("_storage", {
         size: blob.size,
-        sha256: await blobSha(blob),
+        sha256: await blobShaBase64(blob, crypto),
         contentType: blob.type || undefined,
       });
       db.storeFile(storageId, blob);

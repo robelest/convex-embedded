@@ -58,7 +58,7 @@ import {
   embeddedTable,
   localOnly,
   migration,
-  remoteOnly,
+  route,
   setup,
   view,
   type EmbeddedTableHandle,
@@ -132,7 +132,7 @@ type _ServerSurface = {
   localOnly: typeof localOnly;
   migration: typeof migration;
   register: typeof register;
-  remoteOnly: typeof remoteOnly;
+  route: typeof route;
   setup: typeof setup;
   view: typeof view;
   setupConfig: SetupConfig | null;
@@ -205,7 +205,7 @@ void (<_ServerSurface>{
   localOnly,
   migration,
   register,
-  remoteOnly,
+  route,
   setup,
   view,
   setupConfig: null,

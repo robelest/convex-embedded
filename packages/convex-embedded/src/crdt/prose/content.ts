@@ -1,7 +1,15 @@
+export type ProseMark = {
+  type: string;
+  attrs?: Record<string, unknown>;
+};
+
 export type ProseContent = {
   type: string;
   content?: ProseContent[];
   text?: string;
+  attrs?: Record<string, unknown>;
+  marks?: ProseMark[];
+  [key: string]: unknown;
 };
 
 export function createEmptyProseContent(): ProseContent {

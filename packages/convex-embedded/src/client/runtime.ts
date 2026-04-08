@@ -86,6 +86,25 @@ function create(transport: EmbeddedTransport): RuntimeInstance {
   };
 }
 
+/**
+ * Namespace for constructing clients from embedded runtime transports.
+ *
+ * Use this helper when you already have an embedded transport and only need a
+ * thin wrapper that can instantiate framework-specific Convex clients against
+ * that transport.
+ *
+ * @example
+ * ```ts
+ * const transport = embedded.createTransport();
+ * const rt = runtime.create({
+ *   clientUrl: transport.url,
+ *   webSocketConstructor: transport.webSocketConstructor,
+ * });
+ * ```
+ *
+ * @see EmbeddedTransport
+ * @see RuntimeInstance
+ */
 // ---------------------------------------------------------------------------
 // Export
 // ---------------------------------------------------------------------------

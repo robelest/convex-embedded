@@ -154,7 +154,12 @@ export function createBrowserStorageSurface(
             log.debug(
               `received upload body for token ${token} (${blob.size} bytes, ${blob.type || "unknown type"})`,
             );
-            const storageId = await runtime.storeUploadedBlob(blob);
+            const storageId = await runtime.storeUploadedBlobWithMetadata(
+              blob,
+              {
+                uploadSourceRef: runtime.consumeUploadUrlSource(token),
+              },
+            );
             uploadSurfaces.delete(token);
             log.info(
               `completed local upload for token ${token} -> ${storageId}`,

@@ -26,6 +26,9 @@ export const RESOLVE_QUERY_META = Symbol.for(
 export const PENDING_REPLAY_META = Symbol.for(
   "convex-embedded:pendingReplayMeta",
 );
+export const STORAGE_UPLOAD_URL_META = Symbol.for(
+  "convex-embedded:storageUploadUrlMeta",
+);
 
 // ---------------------------------------------------------------------------
 // RouteMode
@@ -90,4 +93,8 @@ export interface PendingReplayMeta {
   readonly __brand: "convex-embedded:pendingReplayMeta";
   readonly version: number;
   readonly migrate: Record<number, PendingReplayMigrationStep>;
+}
+
+export interface StorageUploadUrlMeta {
+  readonly __brand: "convex-embedded:storageUploadUrlMeta";
 }

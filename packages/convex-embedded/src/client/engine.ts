@@ -56,6 +56,159 @@ function stripOmittedFields(
   });
 }
 
+function unwrapSchemaField(field: unknown): unknown {
+  if (
+    typeof field === "object" &&
+    field !== null &&
+    "validator" in field &&
+    typeof (field as { validator?: unknown }).validator !== "undefined"
+  ) {
+    return (field as { validator: unknown }).validator;
+  }
+  return field;
+}
+
+function toErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  if (error == null) return "unknown error";
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return "unknown error";
+  }
+}
+
+function rewriteKnownIdsResult(
+  value: unknown,
+  field: unknown,
+  localId: string,
+  remoteId: string,
+): { value: unknown; changed: boolean } {
+  const validator = unwrapSchemaField(field) as
+    | {
+        kind?: string;
+        element?: unknown;
+        fields?: Record<string, unknown>;
+        members?: unknown[];
+        value?: unknown;
+      }
+    | undefined;
+
+  if (!validator || value === null || typeof value === "undefined") {
+    return { value, changed: false };
+  }
+
+  switch (validator.kind) {
+    case "id":
+      return value === localId
+        ? { value: remoteId, changed: true }
+        : { value, changed: false };
+    case "array": {
+      if (!Array.isArray(value)) {
+        return { value, changed: false };
+      }
+      let changed = false;
+      const next = value.map((entry) => {
+        const rewritten = rewriteKnownIdsResult(
+          entry,
+          validator.element,
+          localId,
+          remoteId,
+        );
+        changed = changed || rewritten.changed;
+        return rewritten.value;
+      });
+      return { value: changed ? next : value, changed };
+    }
+    case "object": {
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        return { value, changed: false };
+      }
+      let changed = false;
+      const next = Object.fromEntries(
+        Object.entries(value).map(([key, entryValue]) => {
+          const rewritten = rewriteKnownIdsResult(
+            entryValue,
+            validator.fields?.[key],
+            localId,
+            remoteId,
+          );
+          changed = changed || rewritten.changed;
+          return [key, rewritten.value];
+        }),
+      );
+      return { value: changed ? next : value, changed };
+    }
+    case "union": {
+      for (const member of validator.members ?? []) {
+        const rewritten = rewriteKnownIdsResult(
+          value,
+          member,
+          localId,
+          remoteId,
+        );
+        if (rewritten.changed) {
+          return rewritten;
+        }
+      }
+      return { value, changed: false };
+    }
+    case "record": {
+      if (typeof value !== "object" || value === null || Array.isArray(value)) {
+        return { value, changed: false };
+      }
+      let changed = false;
+      const next = Object.fromEntries(
+        Object.entries(value).map(([key, entryValue]) => {
+          const rewritten = rewriteKnownIdsResult(
+            entryValue,
+            validator.value,
+            localId,
+            remoteId,
+          );
+          changed = changed || rewritten.changed;
+          return [key, rewritten.value];
+        }),
+      );
+      return { value: changed ? next : value, changed };
+    }
+    default:
+      return { value, changed: false };
+  }
+}
+
+function rewriteKnownIds(
+  value: unknown,
+  field: unknown,
+  localId: string,
+  remoteId: string,
+): unknown {
+  return rewriteKnownIdsResult(value, field, localId, remoteId).value;
+}
+
+function rewriteDocumentToCanonical(input: {
+  doc: Record<string, unknown>;
+  schema: Definition;
+  localId: string;
+  remoteId: string;
+  rewriteOwnId: boolean;
+}): Record<string, unknown> {
+  const next: Record<string, unknown> = { ...input.doc };
+  for (const [fieldName, field] of Object.entries(input.schema.getShape())) {
+    next[fieldName] = rewriteKnownIds(
+      next[fieldName],
+      field,
+      input.localId,
+      input.remoteId,
+    );
+  }
+  if (input.rewriteOwnId && next._id === input.localId) {
+    next._id = input.remoteId;
+  }
+  return next;
+}
+
 function createRemoteUpdateHandler(input: {
   ingestDocuments: (
     table: string,
@@ -70,11 +223,16 @@ function createRemoteUpdateHandler(input: {
     table: string,
     docs: Array<Record<string, unknown>>,
   ) => Promise<void>;
+  translateRemoteSnapshotToLocal: (
+    docs: Array<Record<string, unknown>>,
+  ) => Array<Record<string, unknown>>;
   schema: Definition;
   tableName: string;
 }) {
   return (remoteDocs: Array<Record<string, unknown>>) => {
-    const cleaned = stripOmittedFields(input.schema, remoteDocs);
+    const cleaned = input.translateRemoteSnapshotToLocal(
+      stripOmittedFields(input.schema, remoteDocs),
+    );
     Fx.detach(
       () =>
         Fx.run(
@@ -85,7 +243,11 @@ function createRemoteUpdateHandler(input: {
                 .some((entry) => entry.table === input.tableName);
 
               if (!hasPendingForTable) {
-                await input.ingestDocuments(input.tableName, cleaned);
+                try {
+                  await input.ingestDocuments(input.tableName, cleaned);
+                } catch {
+                  await input.bufferRemoteSnapshot(input.tableName, cleaned);
+                }
                 return;
               }
 
@@ -119,7 +281,13 @@ type TableRemoteSyncState = {
   bufferedSnapshot: Array<Record<string, unknown>> | null;
   flushScheduled: boolean;
   epoch: number;
+  retryTimer: ReturnType<typeof setTimeout> | null;
+  retryCount: number;
 };
+
+const MAX_BUFFERED_SNAPSHOT_RETRIES = 8;
+const BUFFERED_SNAPSHOT_RETRY_BASE_MS = 25;
+const BUFFERED_SNAPSHOT_RETRY_MAX_MS = 1000;
 
 function extractPendingLogicalId(entry: PendingEntry): string | null {
   try {
@@ -130,9 +298,48 @@ function extractPendingLogicalId(entry: PendingEntry): string | null {
 
     const localResult = JSON.parse(entry.localResult) as unknown;
     return typeof localResult === "string" ? localResult : null;
-  } catch {
+  } catch (error) {
+    log.warn("sync: failed to parse pending entry identity", error, {
+      ref: entry.ref,
+      table: entry.table,
+      entryId: entry._id,
+    });
     return null;
   }
+}
+
+class ReplayLeaseLostError extends Error {
+  constructor(entry: PendingEntry) {
+    super(
+      `[convex-embedded] Lost replay lease for pending entry ${entry._id} (${entry.ref}).`,
+    );
+    this.name = "ReplayLeaseLostError";
+  }
+}
+
+function parseErrorMetadata(error: Error): {
+  code?: string;
+  message: string;
+} {
+  const fallback = error.message ?? String(error);
+  try {
+    const parsed = JSON.parse(fallback) as {
+      code?: unknown;
+      message?: unknown;
+    };
+    if (parsed && typeof parsed === "object") {
+      return {
+        code: typeof parsed.code === "string" ? parsed.code : undefined,
+        message:
+          typeof parsed.message === "string"
+            ? parsed.message.toLowerCase()
+            : fallback.toLowerCase(),
+      };
+    }
+  } catch {
+    // Ignore non-JSON errors and fall back to string matching below.
+  }
+  return { message: fallback.toLowerCase() };
 }
 
 function projectRemoteSnapshot(input: {
@@ -191,7 +398,13 @@ function projectRemoteSnapshot(input: {
 function classifyReplayError(
   error: Error,
 ): "reauthRequired" | "authorizationDenied" | "scopeChanged" | "unknown" {
-  const message = error.message.toLowerCase();
+  const { code, message } = parseErrorMetadata(error);
+  if (code === "UNAUTHENTICATED") {
+    return "reauthRequired";
+  }
+  if (code === "FORBIDDEN") {
+    return "authorizationDenied";
+  }
   if (
     message.includes("auth") ||
     message.includes("token") ||
@@ -217,11 +430,72 @@ function isAlreadyAppliedReplayError(
   entry: PendingEntry,
   error: Error,
 ): boolean {
-  const message = error.message.toLowerCase();
+  const { code, message } = parseErrorMetadata(error);
   return (
     entry.ref.endsWith(":remove") &&
-    message.includes("delete on nonexistent document id")
+    (code === "DOCUMENT_NOT_FOUND" ||
+      message.includes("delete on nonexistent document id"))
   );
+}
+
+function startReplayLeaseHeartbeat(input: {
+  entry: PendingEntry;
+  renew: () => Promise<boolean>;
+  leaseMs: number;
+}) {
+  const intervalMs = Math.max(1_000, Math.floor(input.leaseMs / 3));
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let rejectLost!: (error: Error) => void;
+  const lost = new Promise<never>((_, reject) => {
+    rejectLost = reject;
+  });
+  lost.catch(() => undefined);
+
+  const schedule = () => {
+    timer = setTimeout(() => {
+      timer = null;
+      void (async () => {
+        if (stopped) {
+          return;
+        }
+        try {
+          const renewed = await input.renew();
+          if (stopped) {
+            return;
+          }
+          if (!renewed) {
+            stopped = true;
+            rejectLost(new ReplayLeaseLostError(input.entry));
+            return;
+          }
+          schedule();
+        } catch (error) {
+          if (stopped) {
+            return;
+          }
+          stopped = true;
+          rejectLost(
+            error instanceof Error ? error : new Error(toErrorMessage(error)),
+          );
+        }
+      })();
+    }, intervalMs);
+  };
+
+  schedule();
+
+  return {
+    race<T>(operation: Promise<T>): Promise<T> {
+      return Promise.race([operation, lost]);
+    },
+    stop() {
+      stopped = true;
+      if (timer !== null) {
+        clearTimeout(timer);
+      }
+    },
+  };
 }
 
 function registerRemoteSubscription(input: {
@@ -238,6 +512,9 @@ function registerRemoteSubscription(input: {
     table: string,
     docs: Array<Record<string, unknown>>,
   ) => Promise<void>;
+  translateRemoteSnapshotToLocal: (
+    docs: Array<Record<string, unknown>>,
+  ) => Array<Record<string, unknown>>;
   onUnsubscribe: (unsub: () => void) => void;
   remoteClient: ConvexClient;
   tableConfig: TableConfig;
@@ -252,6 +529,7 @@ function registerRemoteSubscription(input: {
       getPendingEntries: input.getPendingEntries,
       getAliases: input.getAliases,
       bufferRemoteSnapshot: input.bufferRemoteSnapshot,
+      translateRemoteSnapshotToLocal: input.translateRemoteSnapshotToLocal,
       schema: input.tableConfig.schema,
       tableName: input.tableName,
     }),
@@ -329,12 +607,26 @@ export interface EmbeddedClientLike {
    */
   getDocumentsForTable(table: string): Promise<Array<Record<string, unknown>>>;
 
+  /** Check whether a local document ID is currently present in the runtime. */
+  hasLocalDocumentId?(id: string): boolean;
+
   /**
    * Unified local execution primitive.
    *
    * Used for all runtime-first local execution, including system bookkeeping.
    */
   executeLocal?(request: LocalExecutionRequest): Promise<unknown>;
+
+  /** Read a locally stored blob by `_storage` id. */
+  getStorageBlob?(storageId: string): Promise<Blob | null>;
+
+  /** Read local `_storage` metadata by `_storage` id. */
+  getStorageMetadata?(
+    storageId: string,
+  ): Promise<Record<string, unknown> | null>;
+
+  /** Associate a local upload URL token with the mutation that produced it. */
+  registerUploadUrlSource?(uploadUrl: string, refName: string): void;
 }
 
 /** @internal */
@@ -354,6 +646,9 @@ export interface EngineConfig {
 
   /** Table configurations keyed by table name. */
   tables: Record<string, TableConfig>;
+
+  /** Optional remote mutation reference that returns a one-shot upload URL. */
+  uploadUrlRef?: unknown;
 
   /** Maximum number of retries for resolve calls (default: 3). */
   maxRetries?: number;
@@ -405,9 +700,15 @@ type ResolveDocument = {
   vector: ArrayBuffer;
 };
 
+type ResolveArgs = {
+  documents: Array<ResolveDocument>;
+  scopeArgs?: Record<string, unknown>;
+};
+
 type ResolveResultRow = {
   docId: string;
   diff?: ArrayBuffer;
+  document?: Record<string, unknown>;
 };
 
 type PreparedResolveInput = {
@@ -419,6 +720,12 @@ type PreparedResolveInput = {
 type MergeResolveOutput = {
   diffCount: number;
   mergedDocs: Array<Record<string, unknown>>;
+};
+
+type StorageDependency = {
+  localStorageId: string;
+  metadata: Record<string, unknown>;
+  blob: Blob;
 };
 
 /** @internal */
@@ -498,14 +805,7 @@ function inferTableFromRef(
   ref: unknown,
   tables: Record<string, TableConfig>,
 ): string {
-  // Try to extract the UDF path from a function reference object.
-  // Convex SDK function references have a `name` property like "tasks:create".
-  const name =
-    typeof ref === "string"
-      ? ref
-      : typeof ref === "object" && ref !== null && "name" in ref
-        ? String((ref as Record<string, unknown>).name)
-        : "";
+  const name = getFunctionName(ref as any);
 
   // Extract module name (before the colon) and check if it's a known table.
   const moduleName = name.split(":")[0] ?? "";
@@ -626,6 +926,98 @@ function toArrayBuffer(data: Uint8Array): ArrayBuffer {
   return buf;
 }
 
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function isUuidLike(value: string): boolean {
+  return UUID_PATTERN.test(value);
+}
+
+function isLocalUploadUrl(value: unknown): value is string {
+  if (typeof value !== "string") {
+    return false;
+  }
+
+  try {
+    const url = new URL(value, "http://convex-embedded.local");
+    return url.pathname.startsWith("/__convex_embedded/upload/");
+  } catch {
+    return false;
+  }
+}
+
+function collectCandidateStorageIds(
+  value: unknown,
+  seen = new Set<string>(),
+): Set<string> {
+  if (typeof value === "string") {
+    if (isUuidLike(value)) {
+      seen.add(value);
+    }
+    return seen;
+  }
+
+  if (Array.isArray(value)) {
+    value.forEach((entry) => collectCandidateStorageIds(entry, seen));
+    return seen;
+  }
+
+  if (
+    value instanceof ArrayBuffer ||
+    value instanceof Uint8Array ||
+    value === null ||
+    typeof value !== "object"
+  ) {
+    return seen;
+  }
+
+  Object.values(value).forEach((entry) =>
+    collectCandidateStorageIds(entry, seen),
+  );
+  return seen;
+}
+
+async function uploadBlobToRemote(input: {
+  remoteClient: ConvexClient;
+  uploadUrlRef: unknown;
+  blob: Blob;
+  contentType?: string;
+}) {
+  const uploadUrl = (await (input.remoteClient as any).mutation(
+    input.uploadUrlRef,
+    {},
+  )) as string;
+
+  if (typeof uploadUrl !== "string" || uploadUrl.length === 0) {
+    throw new Error(
+      "[convex-embedded] remote upload URL mutation did not return a URL string.",
+    );
+  }
+
+  const response = await fetch(uploadUrl, {
+    method: "POST",
+    headers: input.contentType
+      ? { "Content-Type": input.contentType }
+      : undefined,
+    body: input.blob,
+  });
+
+  const payload = (await response.json()) as {
+    storageId?: unknown;
+    error?: unknown;
+  };
+
+  if (!response.ok || typeof payload.storageId !== "string") {
+    throw new Error(
+      typeof payload.error === "string"
+        ? payload.error
+        : `[convex-embedded] remote blob upload failed with status ${response.status}.`,
+    );
+  }
+
+  return payload.storageId;
+}
+
 function prepareResolveInput(
   schemaDef: Definition,
   localDocs: Array<Record<string, unknown>>,
@@ -676,11 +1068,18 @@ function mergeResolveResult(input: {
   resolveResult: Array<ResolveResultRow>;
   schemaDef: Definition;
   tableName: string;
+  translateRemoteDocument: (
+    document: Record<string, unknown>,
+  ) => Record<string, unknown>;
 }): MergeResolveOutput {
   return input.resolveResult.reduce<MergeResolveOutput>(
-    (acc, { docId, diff }) => {
+    (acc, { docId, diff, document }) => {
       const entry = input.localYjsMap.get(docId);
       if (!entry) {
+        if (document) {
+          acc.mergedDocs.push(input.translateRemoteDocument(document));
+          return acc;
+        }
         log.warn(
           `sync: resolve returned diff for unknown doc "${docId}" in "${input.tableName}"`,
         );
@@ -695,7 +1094,7 @@ function mergeResolveResult(input: {
       const materialized = materializeYjsDoc(input.schemaDef, entry.yjsDoc);
       materialized._id = entry.localDoc._id;
       materialized._creationTime = entry.localDoc._creationTime;
-      acc.mergedDocs.push(materialized);
+      acc.mergedDocs.push(input.translateRemoteDocument(materialized));
       return acc;
     },
     { diffCount: 0, mergedDocs: [] },
@@ -730,6 +1129,7 @@ function getQueueEntryRoute(input: {
 
   const localResult = JSON.parse(input.entry.localResult);
   return input.entry.ref.endsWith(":create") &&
+    input.entry.hydrated === true &&
     typeof localResult === "string" &&
     input.hasLocalId(localResult)
     ? { _tag: "DropMappedCreate", localResult }
@@ -745,6 +1145,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     embedded,
     remoteClient,
     tables,
+    uploadUrlRef,
     maxRetries = 3,
     retryDelayMs = 1000,
     getIdentityKey,
@@ -758,6 +1159,10 @@ function createEngine(config: EngineConfig): EngineInstance {
   const ingestDocuments = embedded.ingestDocuments.bind(embedded);
   const getDocumentsForTable = embedded.getDocumentsForTable.bind(embedded);
   const executeLocal = embedded.executeLocal?.bind(embedded);
+  const getStorageBlob = embedded.getStorageBlob?.bind(embedded);
+  const getStorageMetadata = embedded.getStorageMetadata?.bind(embedded);
+  const registerUploadUrlSource =
+    embedded.registerUploadUrlSource?.bind(embedded);
 
   const executeLocalQuery = executeLocal
     ? (path: string, args: Record<string, unknown>) =>
@@ -797,6 +1202,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     executeLocalQuery,
     executeLocalMutationWithoutEffects,
     getIdentityKey,
+    (id) => embedded.hasLocalDocumentId?.(id) ?? false,
   );
   const pendingQueue = new PendingQueue(
     localClient,
@@ -812,6 +1218,7 @@ function createEngine(config: EngineConfig): EngineInstance {
 
   // Serial queue processor state
   let queueProcessingPromise: Promise<void> | null = null;
+  let queueProcessingRequestedWhileActive = false;
   let syncCyclePromise: Promise<void> | null = null;
   let activeEntry: PendingEntry | null = null;
 
@@ -828,10 +1235,78 @@ function createEngine(config: EngineConfig): EngineInstance {
   function getTableRemoteSyncState(tableName: string): TableRemoteSyncState {
     let state = tableRemoteSyncState.get(tableName);
     if (!state) {
-      state = { bufferedSnapshot: null, flushScheduled: false, epoch: 0 };
+      state = {
+        bufferedSnapshot: null,
+        flushScheduled: false,
+        epoch: 0,
+        retryTimer: null,
+        retryCount: 0,
+      };
       tableRemoteSyncState.set(tableName, state);
     }
     return state;
+  }
+
+  async function canonicalizeMappedCreate(input: {
+    localId: string;
+    remoteId: string;
+    tableName: string;
+  }): Promise<void> {
+    const orderedTableNames = [
+      input.tableName,
+      ...tableNames.filter((candidate) => candidate !== input.tableName),
+    ];
+
+    for (const currentTableName of orderedTableNames) {
+      const schema = tables[currentTableName]?.schema;
+      if (!schema) {
+        continue;
+      }
+
+      const currentDocs = await getDocumentsForTable(currentTableName);
+      const rewrittenDocs = currentDocs.map((doc) =>
+        rewriteDocumentToCanonical({
+          doc,
+          schema,
+          localId: input.localId,
+          remoteId: input.remoteId,
+          rewriteOwnId: currentTableName === input.tableName,
+        }),
+      );
+
+      const changed = rewrittenDocs.some(
+        (doc, index) => doc !== currentDocs[index],
+      );
+      if (!changed) {
+        continue;
+      }
+
+      await ingestDocuments(currentTableName, rewrittenDocs);
+    }
+  }
+
+  function scheduleBufferedSnapshotFlush(tableName: string, delayMs = 0): void {
+    const state = getTableRemoteSyncState(tableName);
+    if (state.flushScheduled) {
+      return;
+    }
+
+    state.flushScheduled = true;
+    if (delayMs > 0) {
+      if (state.retryTimer !== null) {
+        clearTimeout(state.retryTimer);
+      }
+      state.retryTimer = setTimeout(() => {
+        state.retryTimer = null;
+        void flushBufferedSnapshot(tableName);
+      }, delayMs);
+      return;
+    }
+
+    Fx.detach(
+      () => flushBufferedSnapshot(tableName),
+      `[sync] flush ${tableName}:`,
+    );
   }
 
   async function flushBufferedSnapshot(tableName: string): Promise<void> {
@@ -853,14 +1328,36 @@ function createEngine(config: EngineConfig): EngineInstance {
       getAliases: (id) => idMap.getAliases(id),
     });
 
-    await ingestDocuments(tableName, projected);
+    try {
+      await ingestDocuments(tableName, projected);
+      state.retryCount = 0;
+    } catch (error) {
+      state.bufferedSnapshot = snapshot;
+      state.flushScheduled = false;
+
+      if (state.retryCount >= MAX_BUFFERED_SNAPSHOT_RETRIES) {
+        log.error(
+          `sync: giving up buffered snapshot ingest for "${tableName}" after ${state.retryCount} retries`,
+          error,
+        );
+        return;
+      }
+
+      state.retryCount += 1;
+      const delayMs = Math.min(
+        BUFFERED_SNAPSHOT_RETRY_BASE_MS * 2 ** (state.retryCount - 1),
+        BUFFERED_SNAPSHOT_RETRY_MAX_MS,
+      );
+      scheduleBufferedSnapshotFlush(tableName, delayMs);
+      log.warn(
+        `sync: delayed buffered snapshot ingest for "${tableName}" (retry ${state.retryCount}/${MAX_BUFFERED_SNAPSHOT_RETRIES})`,
+        error,
+      );
+      return;
+    }
 
     if (state.bufferedSnapshot !== null && !state.flushScheduled) {
-      state.flushScheduled = true;
-      Fx.detach(
-        () => flushBufferedSnapshot(tableName),
-        `[sync] flush ${tableName}:`,
-      );
+      scheduleBufferedSnapshotFlush(tableName);
     }
   }
 
@@ -870,18 +1367,17 @@ function createEngine(config: EngineConfig): EngineInstance {
   ): Promise<void> {
     const state = getTableRemoteSyncState(tableName);
     state.bufferedSnapshot = docs;
-    if (state.flushScheduled) {
-      return;
-    }
-
-    state.flushScheduled = true;
-    Fx.detach(
-      () => flushBufferedSnapshot(tableName),
-      `[sync] buffer ${tableName}:`,
-    );
+    state.retryCount = 0;
+    scheduleBufferedSnapshotFlush(tableName);
   }
 
   function clearBufferedSnapshots(): void {
+    for (const state of tableRemoteSyncState.values()) {
+      if (state.retryTimer !== null) {
+        clearTimeout(state.retryTimer);
+      }
+      state.retryCount = 0;
+    }
     tableRemoteSyncState.clear();
   }
 
@@ -918,6 +1414,109 @@ function createEngine(config: EngineConfig): EngineInstance {
     }
   }
 
+  async function collectUnmappedStorageDependencies(
+    args: Record<string, unknown>,
+  ): Promise<StorageDependency[]> {
+    if (!getStorageBlob || !getStorageMetadata) {
+      return [];
+    }
+
+    const dependencies: StorageDependency[] = [];
+    for (const candidate of collectCandidateStorageIds(args)) {
+      if (idMap.getRemoteId(candidate) !== null) {
+        continue;
+      }
+
+      const metadata = await getStorageMetadata(candidate);
+      if (metadata === null) {
+        continue;
+      }
+
+      const blob = await getStorageBlob(candidate);
+      if (blob === null) {
+        throw new Error(
+          `[convex-embedded] Missing local blob data for storage id ${candidate}.`,
+        );
+      }
+
+      dependencies.push({
+        localStorageId: candidate,
+        metadata,
+        blob,
+      });
+    }
+
+    return dependencies;
+  }
+
+  async function ensureRemoteStorageMappings(
+    entry: PendingEntry,
+    args: Record<string, unknown>,
+  ): Promise<void> {
+    const dependencies = await collectUnmappedStorageDependencies(args);
+    if (dependencies.length === 0) {
+      return;
+    }
+
+    for (const dependency of dependencies) {
+      const dependencyUploadUrlRef =
+        typeof dependency.metadata.uploadSourceRef === "string"
+          ? dependency.metadata.uploadSourceRef
+          : uploadUrlRef;
+
+      if (
+        dependencyUploadUrlRef === undefined ||
+        dependencyUploadUrlRef === null
+      ) {
+        throw new Error(
+          "[convex-embedded] Pending mutation references local storage blobs but no remote upload URL function is configured or discoverable.",
+        );
+      }
+
+      const uploadRef =
+        typeof dependencyUploadUrlRef === "string"
+          ? makeFunctionReference<"mutation">(dependencyUploadUrlRef)
+          : dependencyUploadUrlRef;
+
+      const leaseHeld = await pendingQueue.renewLease(
+        entry,
+        processorIdForReplay,
+        leaseMs,
+      );
+      if (!leaseHeld) {
+        if (entry.hydrated === true) {
+          throw new ReplayLeaseLostError(entry);
+        }
+        log.warn(
+          `sync: continuing upload replay for current-session entry after lease renewal miss (${entry._id})`,
+        );
+      }
+      const heartbeat = startReplayLeaseHeartbeat({
+        entry,
+        renew: () =>
+          pendingQueue.renewLease(entry, processorIdForReplay, leaseMs),
+        leaseMs,
+      });
+      let remoteStorageId: string;
+      try {
+        remoteStorageId = await heartbeat.race(
+          uploadBlobToRemote({
+            remoteClient,
+            uploadUrlRef: uploadRef,
+            blob: dependency.blob,
+            contentType:
+              typeof dependency.metadata.contentType === "string"
+                ? dependency.metadata.contentType
+                : dependency.blob.type || undefined,
+          }),
+        );
+      } finally {
+        heartbeat.stop();
+      }
+      await idMap.set(dependency.localStorageId, remoteStorageId, "_storage");
+    }
+  }
+
   // -------------------------------------------------------------------------
   // Serial queue processor — processes pending mutations one at a time
   // -------------------------------------------------------------------------
@@ -934,7 +1533,10 @@ function createEngine(config: EngineConfig): EngineInstance {
    * On failure, the entry stays in the queue for retry on next cycle.
    */
   async function processQueue(signal?: AbortSignal): Promise<void> {
-    if (queueProcessingPromise) return queueProcessingPromise;
+    if (queueProcessingPromise) {
+      queueProcessingRequestedWhileActive = true;
+      return queueProcessingPromise;
+    }
     if (pendingQueue.isEmpty) {
       await pendingQueue.hydrate();
     }
@@ -949,127 +1551,197 @@ function createEngine(config: EngineConfig): EngineInstance {
         // Use: process entries
         () =>
           Fx.gen(function* () {
-            while (!pendingQueue.isEmpty && isOnline && !signal?.aborted) {
-              const entry = yield* Fx.from({
-                ok: () => pendingQueue.claimNext(processorIdForReplay, leaseMs),
-                err: (e) => e as Error,
-              });
-              if (!entry) {
-                break;
-              }
-              activeEntry = entry;
-              if (entry?.state === "blocked") {
-                log.warn(
-                  `sync: blocked pending entry for ${entry.ref}; halting replay`,
-                );
-                break;
-              }
-              const route = getQueueEntryRoute({
-                entry,
-                hasLocalId: (localId) => idMap.hasLocalId(localId),
-                isOnline,
-                signal,
-              });
+            while (isOnline && !signal?.aborted) {
+              queueProcessingRequestedWhileActive = false;
 
-              const shouldContinue = yield* matchTag(route, "_tag", {
-                Stop: () => Fx.succeed(false),
-                DropMappedCreate: () =>
-                  Fx.from({
-                    ok: () => pendingQueue.remove(entry, processorIdForReplay),
-                    err: (e) => e as Error,
-                  }).pipe(
-                    Fx.tap(() =>
-                      Fx.sync(() => {
-                        log.debug(
-                          `sync: dropping already-mapped create mutation (remaining: ${pendingQueue.length})`,
-                        );
-                      }),
+              while (!pendingQueue.isEmpty && isOnline && !signal?.aborted) {
+                const entry = yield* Fx.from({
+                  ok: () =>
+                    pendingQueue.claimNext(processorIdForReplay, leaseMs),
+                  err: (e) => e as Error,
+                });
+                if (!entry) {
+                  break;
+                }
+                activeEntry = entry;
+                if (entry?.state === "blocked") {
+                  log.warn(
+                    `sync: blocked pending entry for ${entry.ref}; halting replay`,
+                  );
+                  break;
+                }
+                const route = getQueueEntryRoute({
+                  entry,
+                  hasLocalId: (localId) => idMap.hasLocalId(localId),
+                  isOnline,
+                  signal,
+                });
+
+                const shouldContinue = yield* matchTag(route, "_tag", {
+                  Stop: () => Fx.succeed(false),
+                  DropMappedCreate: () =>
+                    Fx.from({
+                      ok: () =>
+                        pendingQueue.remove(entry, processorIdForReplay),
+                      err: (e) => e as Error,
+                    }).pipe(
+                      Fx.tap(() =>
+                        Fx.sync(() => {
+                          log.debug(
+                            `sync: dropping already-mapped create mutation (remaining: ${pendingQueue.length})`,
+                          );
+                        }),
+                      ),
+                      Fx.map(() => true),
                     ),
-                    Fx.map(() => true),
-                  ),
-                Push: (current) =>
-                  Fx.from({
-                    ok: async () => {
-                      const ref = makeFunctionReference<"mutation">(entry!.ref);
-                      const originalArgs = JSON.parse(entry!.args) as Record<
-                        string,
-                        unknown
-                      >;
-                      const translatedArgs = idMap.translateArgs(originalArgs);
-                      await pendingQueue.renewLease(
-                        entry,
-                        processorIdForReplay,
-                        leaseMs,
-                      );
-                      const remoteResult = await (remoteClient as any).mutation(
-                        ref,
-                        translatedArgs,
-                      );
-
-                      if (
-                        typeof current.localResult === "string" &&
-                        typeof remoteResult === "string" &&
-                        current.localResult !== remoteResult
-                      ) {
-                        await idMap.set(
-                          current.localResult,
-                          remoteResult,
-                          entry!.table,
+                  Push: (current) =>
+                    Fx.from({
+                      ok: async () => {
+                        const ref = makeFunctionReference<"mutation">(
+                          entry!.ref,
                         );
-                      }
-
-                      await pendingQueue.remove(entry, processorIdForReplay);
-                      activeEntry = null;
-
-                      log.debug(
-                        `sync: pushed mutation to remote (table: ${entry!.table}, remaining: ${pendingQueue.length})`,
-                      );
-                      return true;
-                    },
-                    err: (e) => e as Error,
-                  }).pipe(
-                    Fx.recover((err) =>
-                      Fx.from({
-                        ok: async () => {
-                          if (
-                            entry &&
-                            isAlreadyAppliedReplayError(entry, err as Error)
-                          ) {
-                            await pendingQueue.remove(
-                              entry,
-                              processorIdForReplay,
-                            );
+                        const originalArgs = JSON.parse(entry!.args) as Record<
+                          string,
+                          unknown
+                        >;
+                        await ensureRemoteStorageMappings(entry, originalArgs);
+                        const translatedArgs =
+                          idMap.translateArgs(originalArgs);
+                        const leaseHeld = await pendingQueue.renewLease(
+                          entry,
+                          processorIdForReplay,
+                          leaseMs,
+                        );
+                        if (!leaseHeld) {
+                          if (entry.hydrated === true) {
                             activeEntry = null;
-                            log.debug(
-                              `sync: dropping already-applied mutation (table: ${entry.table}, remaining: ${pendingQueue.length})`,
+                            log.warn(
+                              `sync: lost replay lease before remote push (table: ${entry!.table})`,
                             );
-                            return true;
-                          }
-
-                          const reason = classifyReplayError(err as Error);
-                          if (reason !== "unknown" && entry) {
-                            await pendingQueue.block(entry, reason);
-                            activeEntry = null;
-                          } else if (entry) {
-                            await pendingQueue.release(
-                              entry,
-                              processorIdForReplay,
-                            );
-                            activeEntry = null;
+                            return false;
                           }
                           log.warn(
-                            "sync: remote push failed, stopping queue processing",
-                            err,
+                            `sync: continuing replay for current-session entry after lease renewal miss (table: ${entry!.table})`,
                           );
-                          return false;
-                        },
-                        err: (cause) => cause as Error,
-                      }),
-                    ),
-                  ),
-              });
+                        }
+                        const heartbeat = startReplayLeaseHeartbeat({
+                          entry,
+                          renew: () =>
+                            pendingQueue.renewLease(
+                              entry,
+                              processorIdForReplay,
+                              leaseMs,
+                            ),
+                          leaseMs,
+                        });
+                        let remoteResult: unknown;
+                        try {
+                          remoteResult = await heartbeat.race(
+                            (remoteClient as any).mutation(ref, translatedArgs),
+                          );
+                        } finally {
+                          heartbeat.stop();
+                        }
 
-              if (!shouldContinue) break;
+                        if (
+                          typeof current.localResult === "string" &&
+                          typeof remoteResult === "string" &&
+                          current.localResult !== remoteResult
+                        ) {
+                          await idMap.set(
+                            current.localResult,
+                            remoteResult,
+                            entry!.table,
+                          );
+                          await pendingQueue.remove(
+                            entry,
+                            processorIdForReplay,
+                          );
+                          activeEntry = null;
+                          await canonicalizeMappedCreate({
+                            localId: current.localResult,
+                            remoteId: remoteResult,
+                            tableName: entry!.table,
+                          });
+                        } else {
+                          await pendingQueue.remove(
+                            entry,
+                            processorIdForReplay,
+                          );
+                          activeEntry = null;
+                        }
+
+                        log.debug(
+                          `sync: pushed mutation to remote (table: ${entry!.table}, remaining: ${pendingQueue.length})`,
+                        );
+                        return true;
+                      },
+                      err: (e) => e as Error,
+                    }).pipe(
+                      Fx.recover((err) =>
+                        Fx.from({
+                          ok: async () => {
+                            if (
+                              entry &&
+                              isAlreadyAppliedReplayError(entry, err as Error)
+                            ) {
+                              await pendingQueue.remove(
+                                entry,
+                                processorIdForReplay,
+                              );
+                              activeEntry = null;
+                              log.debug(
+                                `sync: dropping already-applied mutation (table: ${entry.table}, remaining: ${pendingQueue.length})`,
+                              );
+                              return true;
+                            }
+
+                            if (err instanceof ReplayLeaseLostError) {
+                              activeEntry = null;
+                              log.warn(
+                                `sync: replay lease lost while processing ${entry?.ref ?? "unknown entry"}`,
+                              );
+                              return false;
+                            }
+
+                            const reason = classifyReplayError(err as Error);
+                            if (reason !== "unknown" && entry) {
+                              await pendingQueue.block(entry, reason);
+                              activeEntry = null;
+                            } else if (entry) {
+                              await pendingQueue.release(
+                                entry,
+                                processorIdForReplay,
+                              );
+                              activeEntry = null;
+                            }
+                            log.warn(
+                              "sync: remote push failed, stopping queue processing",
+                              err,
+                            );
+                            return false;
+                          },
+                          err: (cause) => cause as Error,
+                        }),
+                      ),
+                    ),
+                });
+
+                if (!shouldContinue) break;
+              }
+
+              if (
+                !queueProcessingRequestedWhileActive ||
+                pendingQueue.isEmpty ||
+                !isOnline ||
+                signal?.aborted
+              ) {
+                break;
+              }
+
+              log.debug(
+                `sync: continuing queue processing after concurrent enqueue (remaining: ${pendingQueue.length})`,
+              );
             }
           }),
         // Release: no-op, queueProcessingPromise is cleared in finally()
@@ -1259,7 +1931,10 @@ function createEngine(config: EngineConfig): EngineInstance {
           ok: () =>
             (remoteClient as any).query(tableConfig.resolve, {
               documents: resolveDocuments,
-            }) as Promise<Array<ResolveResultRow>>,
+              ...(tableConfig.resolveArgs
+                ? { scopeArgs: tableConfig.resolveArgs() }
+                : {}),
+            } satisfies ResolveArgs) as Promise<Array<ResolveResultRow>>,
           err: (err) => err as Error,
         });
       }).pipe(
@@ -1285,6 +1960,8 @@ function createEngine(config: EngineConfig): EngineInstance {
         resolveResult,
         schemaDef,
         tableName,
+        translateRemoteDocument: (document) =>
+          stripOmittedFields(schemaDef, [document])[0] ?? document,
       });
 
       // ------------------------------------------------------------------
@@ -1333,6 +2010,7 @@ function createEngine(config: EngineConfig): EngineInstance {
         getPendingEntries: () => pendingQueue.entries(),
         getAliases: (id) => idMap.getAliases(id),
         bufferRemoteSnapshot,
+        translateRemoteSnapshotToLocal: (docs) => docs,
         onUnsubscribe: (unsub) => remoteUnsubscribes.push(unsub),
         remoteClient,
         tableConfig,
@@ -1493,7 +2171,8 @@ function createEngine(config: EngineConfig): EngineInstance {
     ): Promise<unknown> {
       // 1. Execute against the embedded runtime directly.
       // 2. Optionally persist the result to the pending queue for replay.
-      // 3. When online: kick the serial queue processor.
+      // 3. When online: creates wait for replay so the caller observes the
+      //    stable remote ID instead of a provisional local ID.
       const enqueueForReplay = options?.enqueueForReplay ?? true;
       const executeMutationLocally = executeLocalMutationWithEffects
         ? executeLocalMutationWithEffects
@@ -1501,42 +2180,49 @@ function createEngine(config: EngineConfig): EngineInstance {
             (localClient as any).mutation(r, a) as Promise<unknown>;
       return Fx.run(
         Fx.from({
-          ok: () => executeMutationLocally(ref, args),
-          err: (e) => e as Error,
-        }).pipe(
-          Fx.tap((localResult) =>
-            enqueueForReplay
-              ? Fx.from({
-                  ok: async () => {
-                    const table = inferTableFromRef(ref, tables);
-                    await pendingQueue.push(
-                      ref,
-                      args,
-                      localResult,
-                      table,
-                      getReplayPayloadVersion?.(getFunctionName(ref as any)) ??
-                        1,
-                    );
+          ok: async () => {
+            const refName = getFunctionName(ref as any);
+            const localArgs = idMap.translateRemoteIdsToLocal(args);
+            const localResult = await executeMutationLocally(ref, localArgs);
 
-                    if (isOnline) {
-                      ensureReplayProcessing();
-                    } else {
-                      log.debug(
-                        "sync: offline — mutation queued for later push",
-                      );
-                    }
-                  },
-                  err: (e) => e as Error,
-                }).pipe(
-                  Fx.inspect((err) =>
-                    Fx.sync(() =>
-                      log.warn("sync: failed to queue mutation", err),
-                    ),
-                  ),
-                )
-              : Fx.unit,
-          ),
-        ),
+            if (isLocalUploadUrl(localResult)) {
+              registerUploadUrlSource?.(localResult, refName);
+              return localResult;
+            }
+
+            if (enqueueForReplay) {
+              try {
+                const table = inferTableFromRef(ref, tables);
+                await pendingQueue.push(
+                  ref,
+                  args,
+                  localResult,
+                  table,
+                  getReplayPayloadVersion?.(refName) ?? 1,
+                );
+
+                if (isOnline) {
+                  if (
+                    refName.endsWith(":create") &&
+                    typeof localResult === "string"
+                  ) {
+                    await processQueue();
+                  } else {
+                    ensureReplayProcessing();
+                  }
+                } else {
+                  log.debug("sync: offline — mutation queued for later push");
+                }
+              } catch (err) {
+                log.warn("sync: failed to queue mutation", err);
+                throw err;
+              }
+            }
+
+            return idMap.translateResult(localResult);
+          },
+          err: (e) => e as Error,
+        }),
       );
     },
 

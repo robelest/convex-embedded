@@ -1,7 +1,10 @@
 import path from "path";
 
+import { config as loadDotenv } from "dotenv";
 import type { Plugin } from "vite-plus";
 import { defineConfig } from "vite-plus";
+
+loadDotenv({ path: path.resolve(import.meta.dirname, ".env.local") });
 
 const embeddedSrc = path.resolve(
   import.meta.dirname,
@@ -136,13 +139,21 @@ export default defineConfig({
     alias: {
       "@embedded": embeddedSrc,
       "@resolve": embeddedSrc,
-      "@robelest/convex-embedded/server": path.join(
+      "@robelest/convex-embedded/server/schema": path.join(
         embeddedSrc,
-        "server/index.ts",
+        "server/schema.ts",
       ),
       "@robelest/convex-embedded/server/table": path.join(
         embeddedSrc,
         "server/table.ts",
+      ),
+      "@robelest/convex-embedded/server/fields": path.join(
+        embeddedSrc,
+        "server/fields.ts",
+      ),
+      "@robelest/convex-embedded/server": path.join(
+        embeddedSrc,
+        "server/index.ts",
       ),
       "@robelest/convex-embedded/client": path.join(
         embeddedSrc,

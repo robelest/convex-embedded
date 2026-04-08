@@ -564,12 +564,17 @@ describe("Pending Queue", () => {
     const before = pending[0]?.leaseExpiresAt as number;
 
     db.startTransaction();
-    SYSTEM_FUNCTIONS[SystemPaths.pendingRenewLease].handler(db, {
-      id,
-      owner: "processor-a",
-      leaseMs: 5_000,
-    });
+    const renewed = SYSTEM_FUNCTIONS[SystemPaths.pendingRenewLease].handler(
+      db,
+      {
+        id,
+        owner: "processor-a",
+        leaseMs: 5_000,
+      },
+    );
     db.commit();
+
+    expect(renewed).toBe(true);
 
     db.startTransaction();
     pending = SYSTEM_FUNCTIONS[SystemPaths.pendingGetAll].handler(db, {
@@ -578,6 +583,36 @@ describe("Pending Queue", () => {
     db.rollbackWrites();
 
     expect((pending[0]?.leaseExpiresAt as number) > before).toBe(true);
+  });
+
+  it("pendingRenewLease returns false for a non-owner", () => {
+    db.startTransaction();
+    const id = SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, {
+      ...sampleEntry,
+      identityKey: "user:a",
+    }) as string;
+    db.commit();
+
+    db.startTransaction();
+    SYSTEM_FUNCTIONS[SystemPaths.pendingClaimNext].handler(db, {
+      identityKey: "user:a",
+      owner: "processor-a",
+      leaseMs: 100,
+    });
+    db.commit();
+
+    db.startTransaction();
+    const renewed = SYSTEM_FUNCTIONS[SystemPaths.pendingRenewLease].handler(
+      db,
+      {
+        id,
+        owner: "processor-b",
+        leaseMs: 5_000,
+      },
+    );
+    db.commit();
+
+    expect(renewed).toBe(false);
   });
 
   it("pendingRelease clears processing ownership and lease", () => {

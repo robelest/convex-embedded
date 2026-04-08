@@ -16,8 +16,8 @@
  *
  *   import { prose, register } from "@robelest/convex-embedded/crdt";
  *
- *   const handle = await prose.open(client, { table: "tasks", id, field: "body" });
- *   const text = handle.getText();
+ *   const handle = await prose.open(client, tasks.field(id, "body"));
+ *   const text = handle.text();
  *
  * @packageDocumentation
  */
@@ -33,8 +33,8 @@ export type { RegisterOptions } from "@/server/schema";
 // Field runtime access
 // ---------------------------------------------------------------------------
 
+export type { FieldRef } from "@/shared/types";
 export type {
-  FieldRef,
   ProseHandle,
   RegisterHandle,
   SetHandle,

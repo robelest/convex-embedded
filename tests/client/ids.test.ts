@@ -262,21 +262,21 @@ describe("IdMap", () => {
 
     it("deep-walks nested objects", () => {
       const result = idMap.translateArgs({
-        outer: { inner: { ref: "local-2" } },
+        outer: { inner: { issueId: "local-2" } },
       });
 
       expect(result).toEqual({
-        outer: { inner: { ref: "remote-2" } },
+        outer: { inner: { issueId: "remote-2" } },
       });
     });
 
     it("deep-walks arrays", () => {
       const result = idMap.translateArgs({
-        ids: ["local-1", "local-2", "unrelated"],
+        issueIds: ["local-1", "local-2", "unrelated"],
       });
 
       expect(result).toEqual({
-        ids: ["remote-1", "remote-2", "unrelated"],
+        issueIds: ["remote-1", "remote-2", "unrelated"],
       });
     });
 
@@ -295,12 +295,27 @@ describe("IdMap", () => {
     });
 
     it("returns a new object (does not mutate original)", () => {
-      const original = { ref: "local-1", nested: { ref: "local-2" } };
+      const original = {
+        issueId: "local-1",
+        nested: { assigneeId: "local-2" },
+      };
       const result = idMap.translateArgs(original);
 
       expect(result).not.toBe(original);
-      expect(original.ref).toBe("local-1");
-      expect((original.nested as any).ref).toBe("local-2");
+      expect(original.issueId).toBe("local-1");
+      expect((original.nested as any).assigneeId).toBe("local-2");
+    });
+
+    it("does not rewrite non-id string fields that happen to match local ids", () => {
+      const result = idMap.translateArgs({
+        title: "local-1",
+        nested: { note: "local-2" },
+      });
+
+      expect(result).toEqual({
+        title: "local-1",
+        nested: { note: "local-2" },
+      });
     });
 
     it("handles empty args", () => {

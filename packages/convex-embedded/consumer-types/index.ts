@@ -59,10 +59,8 @@ import {
   localOnly,
   migration,
   remoteOnly,
-  setup,
   view,
   type EmbeddedTableHandle,
-  type SetupConfig,
 } from "@robelest/convex-embedded/server";
 import { register } from "@robelest/convex-embedded/test";
 
@@ -133,9 +131,7 @@ type _ServerSurface = {
   migration: typeof migration;
   register: typeof register;
   remoteOnly: typeof remoteOnly;
-  setup: typeof setup;
   view: typeof view;
-  setupConfig: SetupConfig | null;
   tableHandle: EmbeddedTableHandle | null;
 };
 
@@ -206,8 +202,6 @@ void (<_ServerSurface>{
   migration,
   register,
   remoteOnly,
-  setup,
   view,
-  setupConfig: null,
   tableHandle: null,
 });

@@ -1,13 +1,13 @@
 import { bindTable } from "@robelest/convex-embedded/server";
 import { ConvexError, v } from "convex/values";
 
-import type { Id } from "./_generated/dataModel";
+import { components } from "./_generated/api";
 import { prose } from "./prose";
 import { issues } from "./schema";
 import { issuePriority, issueStatus } from "./validators";
 import { DEFAULT_USER_ID, isOpenIssue, userSummary } from "./workspace";
 
-export const bind = bindTable(issues);
+export const bind = bindTable(issues, components.embedded);
 
 export const list = issues.query({
   args: {},
@@ -30,7 +30,7 @@ export const forProject = issues.query({
 
     return {
       issues: sorted.map((issue) => ({
-        issueId: issue._id as Id<"issues">,
+        _id: issue._id,
         identifier: `${project.identifier}-${issue.number}`,
         number: issue.number,
         title: issue.title,

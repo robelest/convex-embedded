@@ -1,3 +1,4 @@
+import { Fx } from "@robelest/fx";
 import type { ConvexClient } from "convex/browser";
 
 import type { UserIdentity } from "@/auth/resolver";
@@ -73,8 +74,20 @@ export async function reauthenticate(client: ConvexClient): Promise<void> {
     return;
   }
 
-  await entry.currentAuthFetcher({ forceRefreshToken: true });
-  await refreshAuthFromSource(entry);
+  await Fx.run(
+    Fx.from({
+      ok: () => entry.currentAuthFetcher!({ forceRefreshToken: true }),
+      err: (error) => error as Error,
+    }).pipe(
+      Fx.chain(() =>
+        Fx.from({
+          ok: () => refreshAuthFromSource(entry),
+          err: (error) => error as Error,
+        }),
+      ),
+      Fx.map(() => undefined as void),
+    ),
+  );
 }
 
 export function getAuthIdentity(client: ConvexClient): UserIdentity | null {
@@ -90,7 +103,12 @@ export function setAuthIdentity(
     return Promise.resolve();
   }
 
-  return applyAuthIdentity(entry, identity, true);
+  return Fx.run(
+    Fx.from({
+      ok: () => applyAuthIdentity(entry, identity, true),
+      err: (error) => error as Error,
+    }),
+  );
 }
 
 export function logout(client: ConvexClient): Promise<void> {

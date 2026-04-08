@@ -69,6 +69,8 @@ export interface PendingEntry {
   leaseExpiresAt?: number;
   /** Optional blocked replay reason. */
   blockedReason?: "reauthRequired" | "authorizationDenied" | "scopeChanged";
+  /** True when this entry was loaded from persistence during hydrate. */
+  hydrated?: boolean;
 }
 
 export class PendingQueuePersistenceError extends Error {
@@ -253,6 +255,7 @@ export class PendingQueue {
                 (e.blockedReason as
                   | PendingEntry["blockedReason"]
                   | undefined) ?? undefined,
+              hydrated: true,
             }));
             log.info(
               `pending-queue: hydrated ${this._entries.length} entry/entries`,
@@ -326,7 +329,7 @@ export class PendingQueue {
       }).pipe(
         Fx.tap((id) =>
           Fx.sync(() => {
-            this._entries.push({ _id: id, ...serialized });
+            this._entries.push({ _id: id, ...serialized, hydrated: false });
             log.debug(
               `pending-queue: pushed entry (table: ${table}, queue size: ${this._entries.length})`,
             );
@@ -338,6 +341,7 @@ export class PendingQueue {
             const ephemeralEntry = {
               _id: `ephemeral_${Date.now()}`,
               ...serialized,
+              hydrated: false,
             };
             // Keep an in-memory fallback for this session, but surface that
             // durability has been lost so callers can react explicitly.
@@ -511,15 +515,15 @@ export class PendingQueue {
     entry: PendingEntry,
     owner: string,
     leaseMs = 30_000,
-  ): Promise<void> {
+  ): Promise<boolean> {
     entry.owner = owner;
     entry.leaseExpiresAt = Date.now() + leaseMs;
 
     if (entry._id.startsWith("ephemeral_")) {
-      return;
+      return true;
     }
 
-    await (this._mutationFn
+    const renewed = (await (this._mutationFn
       ? this._mutationFn(SYS_PENDING_RENEW_LEASE, {
           id: entry._id,
           owner,
@@ -529,7 +533,18 @@ export class PendingQueue {
           id: entry._id,
           owner,
           leaseMs,
-        }) as Promise<unknown>));
+        }) as Promise<unknown>))) as boolean | null;
+
+    if (!renewed) {
+      await this.hydrate();
+      const reacquired = await this.claimNext(owner, leaseMs);
+      if (reacquired?._id === entry._id) {
+        Object.assign(entry, reacquired);
+        return true;
+      }
+      return false;
+    }
+    return true;
   }
 
   async release(entry: PendingEntry, owner?: string): Promise<void> {

@@ -53,13 +53,21 @@ function authenticated(): ViewFilter {
       },
       query: unknown,
     ) {
-      const identity = await ctx.auth?.getUserIdentity();
-      if (!identity) {
-        throw new Error(
-          "convex-embedded: view.authenticated() requires a logged-in user",
-        );
-      }
-      return query;
+      return Fx.run(
+        Fx.from({
+          ok: () => ctx.auth?.getUserIdentity(),
+          err: (error) => error as Error,
+        }).pipe(
+          Fx.map((identity) => {
+            if (!identity) {
+              throw new Error(
+                "convex-embedded: view.authenticated() requires a logged-in user",
+              );
+            }
+            return query;
+          }),
+        ),
+      );
     },
   };
 }
@@ -86,15 +94,24 @@ function ownership(options: { index: string; field: string }): ViewFilter {
         withIndex(indexName: string, builder: (q: unknown) => unknown): unknown;
       },
     ) {
-      const identity = await ctx.auth.getUserIdentity();
-      const userId = identity?.subject ?? identity?.tokenIdentifier ?? null;
+      return Fx.run(
+        Fx.from({
+          ok: () => ctx.auth.getUserIdentity(),
+          err: (error) => error as Error,
+        }).pipe(
+          Fx.map((identity) => {
+            const userId =
+              identity?.subject ?? identity?.tokenIdentifier ?? null;
 
-      return query.withIndex(index, (q: unknown) => {
-        const qb = q as {
-          eq(fieldName: string, value: unknown): unknown;
-        };
-        return qb.eq(field, userId);
-      });
+            return query.withIndex(index, (q: unknown) => {
+              const qb = q as {
+                eq(fieldName: string, value: unknown): unknown;
+              };
+              return qb.eq(field, userId);
+            });
+          }),
+        ),
+      );
     },
   };
 }
@@ -108,3 +125,4 @@ export const view = {
   authenticated,
   ownership,
 };
+import { Fx } from "@robelest/fx";

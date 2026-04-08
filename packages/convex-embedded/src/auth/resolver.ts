@@ -1,3 +1,5 @@
+import { Fx } from "@robelest/fx";
+
 /**
  * Simple identity injection for testing / local development.
  *
@@ -58,7 +60,7 @@ export class AuthResolver {
    * `ctx.auth.getUserIdentity()` in the Convex runtime.
    */
   async getUserIdentity(): Promise<UserIdentity | null> {
-    return this._identity;
+    return Fx.run(Fx.sync(() => this._identity));
   }
 
   /**

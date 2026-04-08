@@ -1,0 +1,226 @@
+import { afterEach, describe, expect, it } from "vite-plus/test";
+
+import { api } from "../../convex/_generated/api";
+import type { Id } from "../../convex/_generated/dataModel";
+import { DEMO_WORKSPACE_ID } from "../../convex/workspace";
+import {
+  createLiveClient,
+  pollUntil,
+  type TestConnectivityController,
+  uniqueSuffix,
+  waitForResolved,
+} from "../helpers/live";
+
+const CONVEX_URL = process.env.CONVEX_URL;
+const maybeDescribe = CONVEX_URL ? describe : describe.skip;
+
+type LiveClient = Awaited<ReturnType<typeof createLiveClient>>["client"] & {
+  close(): Promise<void>;
+};
+
+async function createProjectAndIssue(client: LiveClient) {
+  const suffix = uniqueSuffix("merge");
+  const projectId = await client.mutation(api.projects.create, {
+    workspaceId: DEMO_WORKSPACE_ID,
+    name: `Merge ${suffix}`,
+    identifier: suffix.slice(-6).toUpperCase(),
+    description: `Merge seed ${suffix}`,
+  });
+  const issueId = await client.mutation(api.issues.create, {
+    projectId,
+    title: `Issue ${suffix}`,
+  });
+  return { projectId, issueId, suffix };
+}
+
+async function waitForIssueProjection(
+  client: LiveClient,
+  projectId: Id<"projects">,
+  issueId: Id<"issues">,
+) {
+  return await pollUntil({
+    read: async () =>
+      (await client.query(api.issues.forProject, { projectId })) as {
+        issues: Array<{
+          _id: Id<"issues">;
+          title: string;
+          status: string;
+          priority: string;
+        }>;
+      },
+    accept: (result) => result.issues.some((issue) => issue._id === issueId),
+    timeoutMs: 40_000,
+    intervalMs: 250,
+  });
+}
+
+async function waitForCommentsBodies(
+  client: LiveClient,
+  issueId: Id<"issues">,
+  expectedBodies: string[],
+) {
+  return await pollUntil({
+    read: async () =>
+      (await client.query(api.comments.forIssue, { issueId })) as Array<{
+        body: string;
+      }>,
+    accept: (comments) => {
+      const bodies = new Set(comments.map((comment) => comment.body));
+      return expectedBodies.every((body) => bodies.has(body));
+    },
+    timeoutMs: 40_000,
+    intervalMs: 250,
+  });
+}
+
+maybeDescribe("live multi-client merge", () => {
+  const clientsToClose: LiveClient[] = [];
+  const connectivities: TestConnectivityController[] = [];
+
+  afterEach(async () => {
+    for (const connectivity of connectivities.splice(0)) {
+      connectivity.close();
+    }
+    for (const client of clientsToClose.splice(0)) {
+      await client.close();
+    }
+  });
+
+  it("converges across three live clients after mixed offline and online writes", async () => {
+    const clientAEntry = createLiveClient({
+      name: uniqueSuffix("merge-a"),
+      remoteUrl: CONVEX_URL!,
+    });
+    const clientBEntry = createLiveClient({
+      name: uniqueSuffix("merge-b"),
+      remoteUrl: CONVEX_URL!,
+    });
+    const clientCEntry = createLiveClient({
+      name: uniqueSuffix("merge-c"),
+      remoteUrl: CONVEX_URL!,
+    });
+
+    clientsToClose.push(
+      clientAEntry.client as LiveClient,
+      clientBEntry.client as LiveClient,
+      clientCEntry.client as LiveClient,
+    );
+    connectivities.push(
+      clientAEntry.connectivity,
+      clientBEntry.connectivity,
+      clientCEntry.connectivity,
+    );
+
+    await Promise.all([
+      waitForResolved(clientAEntry.client),
+      waitForResolved(clientBEntry.client),
+      waitForResolved(clientCEntry.client),
+    ]);
+
+    const { projectId, issueId, suffix } = await createProjectAndIssue(
+      clientAEntry.client as LiveClient,
+    );
+
+    await Promise.all([
+      waitForIssueProjection(
+        clientAEntry.client as LiveClient,
+        projectId,
+        issueId,
+      ),
+      waitForIssueProjection(
+        clientBEntry.client as LiveClient,
+        projectId,
+        issueId,
+      ),
+      waitForIssueProjection(
+        clientCEntry.client as LiveClient,
+        projectId,
+        issueId,
+      ),
+    ]);
+
+    clientAEntry.connectivity.setOnline(false);
+    await clientAEntry.client.mutation(api.issues.update, {
+      issueId,
+      status: "in_progress",
+    });
+    const bodies = [
+      `merge-a-${suffix}`,
+      `merge-b-${suffix}`,
+      `merge-c-${suffix}`,
+    ];
+    await clientAEntry.client.mutation(api.comments.create, {
+      issueId,
+      body: bodies[0],
+    });
+
+    await clientBEntry.client.mutation(api.issues.update, {
+      issueId,
+      priority: "high",
+    });
+    await clientBEntry.client.mutation(api.comments.create, {
+      issueId,
+      body: bodies[1],
+    });
+
+    await clientCEntry.client.mutation(api.issues.update, {
+      issueId,
+      title: `Merged title ${suffix}`,
+    });
+    await clientCEntry.client.mutation(api.comments.create, {
+      issueId,
+      body: bodies[2],
+    });
+
+    clientAEntry.connectivity.setOnline(true);
+    await Promise.all([
+      waitForResolved(clientAEntry.client, 40_000),
+      waitForResolved(clientBEntry.client, 40_000),
+      waitForResolved(clientCEntry.client, 40_000),
+    ]);
+
+    const [issuesA, issuesB, issuesC] = await Promise.all([
+      waitForIssueProjection(
+        clientAEntry.client as LiveClient,
+        projectId,
+        issueId,
+      ),
+      waitForIssueProjection(
+        clientBEntry.client as LiveClient,
+        projectId,
+        issueId,
+      ),
+      waitForIssueProjection(
+        clientCEntry.client as LiveClient,
+        projectId,
+        issueId,
+      ),
+    ]);
+
+    const issueA = issuesA.issues.find((issue) => issue._id === issueId)!;
+    const issueB = issuesB.issues.find((issue) => issue._id === issueId)!;
+    const issueC = issuesC.issues.find((issue) => issue._id === issueId)!;
+
+    expect(issueA).toMatchObject({
+      title: `Merged title ${suffix}`,
+      status: "in_progress",
+      priority: "high",
+    });
+    expect(issueB).toMatchObject({
+      title: `Merged title ${suffix}`,
+      status: "in_progress",
+      priority: "high",
+    });
+    expect(issueC).toMatchObject({
+      title: `Merged title ${suffix}`,
+      status: "in_progress",
+      priority: "high",
+    });
+
+    await Promise.all([
+      waitForCommentsBodies(clientAEntry.client as LiveClient, issueId, bodies),
+      waitForCommentsBodies(clientBEntry.client as LiveClient, issueId, bodies),
+      waitForCommentsBodies(clientCEntry.client as LiveClient, issueId, bodies),
+    ]);
+  }, 90_000);
+});

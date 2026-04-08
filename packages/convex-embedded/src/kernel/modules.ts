@@ -1,3 +1,5 @@
+import { Fx } from "@robelest/fx";
+
 /**
  * Module resolution for Convex functions from lazy ESM module registries.
  *
@@ -179,24 +181,43 @@ export class ModuleLoader {
    * function path, e.g. `"messages"` or `"lib/utils"`).
    */
   async load(path: string): Promise<ConvexModule> {
-    const cached = this.loadedModules.get(path);
-    if (cached) {
-      return await cached;
-    }
+    return Fx.run(
+      Fx.defer(() => {
+        const cached = this.loadedModules.get(path);
+        if (cached) {
+          return Fx.from({
+            ok: () => cached,
+            err: (error) => error as Error,
+          });
+        }
 
-    const loader = this.modules[path];
-    if (loader === undefined) {
-      const available = Object.keys(this.modules)
-        .filter((key) => !isGeneratedModuleId(key))
-        .join(", ");
-      throw new Error(
-        `Could not find module for: "${path}". Available modules: ${available}`,
-      );
-    }
-    console.debug("[convex-embedded:loader] loading:", path);
-    const loading = loader();
-    this.loadedModules.set(path, loading);
-    return await loading;
+        const loader = this.modules[path];
+        if (loader === undefined) {
+          const available = Object.keys(this.modules)
+            .filter((key) => !isGeneratedModuleId(key))
+            .join(", ");
+          return Fx.fail(
+            new Error(
+              `Could not find module for: "${path}". Available modules: ${available}`,
+            ),
+          );
+        }
+
+        return Fx.sync(() => {
+          console.debug("[convex-embedded:loader] loading:", path);
+          const loading = loader();
+          this.loadedModules.set(path, loading);
+          return loading;
+        }).pipe(
+          Fx.chain((loading) =>
+            Fx.from({
+              ok: () => loading,
+              err: (error) => error as Error,
+            }),
+          ),
+        );
+      }),
+    );
   }
 }
 

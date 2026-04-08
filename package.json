@@ -14,6 +14,7 @@
     "bench:query-engine": "vp test bench tests/benchmarks/query-engine.bench.ts",
     "bench:platform": "vp test bench tests/benchmarks/platform.bench.ts",
     "bench:reactivity": "vp test bench tests/benchmarks/reactivity.bench.ts",
+    "bench:component-storage": "vp test bench tests/benchmarks/component-storage.bench.ts",
     "build": "vp run cache:build",
     "build:embedded": "vp exec convex codegen --component-dir ./packages/convex-embedded/src/component && vp run --filter @robelest/convex-embedded build",
     "build:demo": "vp run --filter demo-svelte build",
@@ -29,6 +30,7 @@
     "deploy:demo": "vp exec convex deploy --cmd 'vp run build:demo' --cmd-url-env-var-name CONVEX_URL && vp run --filter demo-svelte deploy",
     "dev:convex": "vp exec convex dev",
     "dev:svelte": "vp run --filter demo-svelte dev",
+    "test:live": "vp test --run tests/live",
     "prepare": "vp config"
   },
   "dependencies": {

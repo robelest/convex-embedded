@@ -1,7 +1,6 @@
 import * as Y from "yjs";
 
-import { normalizeProseContent } from "@/crdt/prose-lite";
-import { proseContentToYDoc } from "@/crdt/prose-yjs";
+import { normalizeProseContent, proseContentToYDoc } from "@/crdt/prose";
 import type { Definition } from "@/shared/schema";
 import { getCrdtType } from "@/shared/schema";
 import { CrdtType } from "@/shared/types";
@@ -51,7 +50,7 @@ export function initYjsDoc(
       }
       fields.set(key, setMap);
     } else {
-      fields.set(key, value as any);
+      fields.set(key, value as never);
     }
   }
 
@@ -66,12 +65,6 @@ export function encodeDocumentState(
   return Y.encodeStateAsUpdateV2(doc);
 }
 
-/**
- * Compute the incremental diff between a full update and a client's state vector.
- *
- * @remarks Uses `Y.diffUpdateV2` which is not part of Yjs's documented public API
- * but is stable and avoids creating a temporary Y.Doc just to compute a diff.
- */
 export function computeDiff(
   serverUpdate: Uint8Array,
   clientVector: Uint8Array,
@@ -83,13 +76,6 @@ export function mergeUpdate(...updates: Uint8Array[]): Uint8Array {
   return Y.mergeUpdatesV2(updates);
 }
 
-/**
- * Check whether a Yjs V2 update is empty (contains no actual operations).
- *
- * The magic byte sequence is the encoding of an empty Yjs V2 update:
- * `{structs: [], ds: {clients: []}}` — 13 zero-ish bytes produced by
- * `Y.encodeStateAsUpdateV2(new Y.Doc())`.
- */
 export function isDiffEmpty(update: Uint8Array): boolean {
   const EMPTY_YJS_V2_UPDATE = [0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
 

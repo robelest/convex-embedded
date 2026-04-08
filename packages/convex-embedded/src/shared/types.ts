@@ -106,6 +106,19 @@ export interface CrdtFieldDescriptor {
   resolve?: (conflict: Conflict<unknown>) => unknown;
 }
 
+export interface FieldRef<
+  TableName extends string = string,
+  FieldName extends string = string,
+  Value = unknown,
+  Kind extends string = string,
+> {
+  table: TableName;
+  id: string;
+  field: FieldName;
+  readonly __value?: Value;
+  readonly __kind?: Kind;
+}
+
 // ---------------------------------------------------------------------------
 // Resolve / remote types — wire format between client and server
 // ---------------------------------------------------------------------------

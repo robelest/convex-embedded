@@ -1,3 +1,11 @@
+/**
+ * Expo entry point for `@robelest/convex-embedded/expo`.
+ *
+ * This surface mirrors the browser embedded client while wiring in Expo-native
+ * persistence, crypto, connectivity, and blob storage adapters.
+ *
+ * @packageDocumentation
+ */
 import type { BaseConvexClientOptions } from "convex/browser";
 
 import type { AuthOptions, AuthState } from "@/client/auth";
@@ -116,6 +124,11 @@ export {
   switchIdentity,
 } from "@/client/auth";
 
+/**
+ * Read the current remote sync state for an Expo embedded client.
+ *
+ * @see subscribeRemoteState
+ */
 export { getRemoteState, subscribeRemoteState } from "@/client/remote";
 
 function ensureConvexAllowFunctionsInBrowser(): void {

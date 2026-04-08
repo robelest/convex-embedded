@@ -17,8 +17,8 @@ import {
   set,
   omit,
   prose,
-  initYjsDoc,
 } from "@resolve/server/schema";
+import { initYjsDoc } from "@resolve/shared/schema";
 import { v } from "convex/values";
 import { describe, it, expect } from "vite-plus/test";
 import * as Y from "yjs";

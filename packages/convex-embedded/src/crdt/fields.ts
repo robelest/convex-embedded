@@ -1,3 +1,4 @@
+import { Fx } from "@robelest/fx";
 import type { ConvexClient } from "convex/browser";
 import { convexToJson } from "convex/values";
 
@@ -13,13 +14,10 @@ import {
 } from "@/crdt/prose";
 import type { Definition } from "@/shared/schema";
 import { getCrdtType } from "@/shared/schema";
-import { CrdtType } from "@/shared/types";
+import { CrdtType, type FieldRef } from "@/shared/types";
 
-export interface FieldRef {
-  table: string;
-  id: string;
-  field: string;
-}
+type RefValue<TRef extends FieldRef> =
+  TRef extends FieldRef<string, string, infer Value, string> ? Value : unknown;
 
 interface BaseFieldHandle {
   subscribe(callback: () => void): () => void;
@@ -28,23 +26,23 @@ interface BaseFieldHandle {
 
 export interface ProseHandle extends BaseFieldHandle {
   readonly kind: "prose";
-  getValue(): ProseContent;
-  getText(): string;
+  value(): ProseContent;
+  text(): string;
 }
 
 export interface RegisterHandle<T = unknown> extends BaseFieldHandle {
   readonly kind: "register";
-  getValue(): T | undefined;
+  value(): T;
 }
 
-export interface SetHandle<T = string> extends BaseFieldHandle {
+export interface SetHandle<T = unknown[]> extends BaseFieldHandle {
   readonly kind: "set";
-  getValue(): T[];
+  value(): T;
 }
 
 export interface CounterHandle extends BaseFieldHandle {
   readonly kind: "counter";
-  getValue(): number;
+  value(): number;
 }
 
 type SharedFieldState<T> = {
@@ -147,20 +145,29 @@ function createSharedFieldState<T>(input: {
 
     refreshing = true;
     try {
-      const document = await input.entry.runtime.getDocument(
-        input.ref.table,
-        input.ref.id,
+      await Fx.run(
+        Fx.from({
+          ok: () =>
+            input.entry.runtime.getDocument(input.ref.table, input.ref.id),
+          err: (error) => error as Error,
+        }).pipe(
+          Fx.tap((document) =>
+            Fx.sync(() => {
+              const next = input.read(document);
+              const signature = `${serializeValue(next.value)}::${next.text ?? ""}`;
+              if (signature !== state.currentSignature) {
+                state.currentValue = next.value;
+                state.currentText = next.text;
+                state.currentSignature = signature;
+                for (const listener of Array.from(listeners)) {
+                  listener();
+                }
+              }
+            }),
+          ),
+          Fx.map(() => undefined as void),
+        ),
       );
-      const next = input.read(document);
-      const signature = `${serializeValue(next.value)}::${next.text ?? ""}`;
-      if (signature !== state.currentSignature) {
-        state.currentValue = next.value;
-        state.currentText = next.text;
-        state.currentSignature = signature;
-        for (const listener of Array.from(listeners)) {
-          listener();
-        }
-      }
     } finally {
       refreshing = false;
       if (refreshQueued) {
@@ -197,7 +204,7 @@ function createSharedFieldState<T>(input: {
 
 export async function openProse(
   client: ConvexClient,
-  ref: FieldRef,
+  ref: FieldRef<string, string, ProseContent, "prose">,
 ): Promise<ProseHandle> {
   const entry = requireEntry(client);
   const definition = requireDefinition(entry, ref.table);
@@ -216,12 +223,14 @@ export async function openProse(
       };
     },
   });
-  await state.ready;
+  await Fx.run(
+    Fx.from({ ok: () => state.ready, err: (error) => error as Error }),
+  );
 
   return {
     kind: "prose",
-    getValue: () => cloneProseContent(state.currentValue),
-    getText: () =>
+    value: () => cloneProseContent(state.currentValue),
+    text: () =>
       state.currentText ?? proseContentToPlainText(state.currentValue),
     subscribe: (callback) => {
       state.listeners.add(callback);
@@ -231,26 +240,27 @@ export async function openProse(
   };
 }
 
-export async function openRegister<T = unknown>(
-  client: ConvexClient,
-  ref: FieldRef,
-): Promise<RegisterHandle<T>> {
+export async function openRegister<
+  TRef extends FieldRef<string, string, unknown, "register">,
+>(client: ConvexClient, ref: TRef): Promise<RegisterHandle<RefValue<TRef>>> {
   const entry = requireEntry(client);
   const definition = requireDefinition(entry, ref.table);
   assertFieldType(definition, ref.field, CrdtType.Register);
 
-  const state = createSharedFieldState<T | undefined>({
+  const state = createSharedFieldState<RefValue<TRef>>({
     entry,
     ref,
     kind: "register",
-    emptyValue: undefined,
-    read: (document) => ({ value: document?.[ref.field] as T | undefined }),
+    emptyValue: undefined as RefValue<TRef>,
+    read: (document) => ({ value: document?.[ref.field] as RefValue<TRef> }),
   });
-  await state.ready;
+  await Fx.run(
+    Fx.from({ ok: () => state.ready, err: (error) => error as Error }),
+  );
 
   return {
     kind: "register",
-    getValue: () => state.currentValue,
+    value: () => state.currentValue,
     subscribe: (callback) => {
       state.listeners.add(callback);
       return () => state.listeners.delete(callback);
@@ -259,31 +269,34 @@ export async function openRegister<T = unknown>(
   };
 }
 
-export async function openSet<T = string>(
-  client: ConvexClient,
-  ref: FieldRef,
-): Promise<SetHandle<T>> {
+export async function openSet<
+  TRef extends FieldRef<string, string, unknown[], "set">,
+>(client: ConvexClient, ref: TRef): Promise<SetHandle<RefValue<TRef>>> {
   const entry = requireEntry(client);
   const definition = requireDefinition(entry, ref.table);
   assertFieldType(definition, ref.field, CrdtType.Set);
 
-  const state = createSharedFieldState<T[]>({
+  const state = createSharedFieldState<RefValue<TRef>>({
     entry,
     ref,
     kind: "set",
-    emptyValue: [],
+    emptyValue: [] as RefValue<TRef>,
     read: (document) => ({
       value: (() => {
         const fieldValue = document?.[ref.field];
-        return Array.isArray(fieldValue) ? (Array.from(fieldValue) as T[]) : [];
+        return Array.isArray(fieldValue)
+          ? (Array.from(fieldValue) as RefValue<TRef>)
+          : ([] as RefValue<TRef>);
       })(),
     }),
   });
-  await state.ready;
+  await Fx.run(
+    Fx.from({ ok: () => state.ready, err: (error) => error as Error }),
+  );
 
   return {
     kind: "set",
-    getValue: () => [...state.currentValue],
+    value: () => [...state.currentValue] as RefValue<TRef>,
     subscribe: (callback) => {
       state.listeners.add(callback);
       return () => state.listeners.delete(callback);
@@ -294,7 +307,7 @@ export async function openSet<T = string>(
 
 export async function openCounter(
   client: ConvexClient,
-  ref: FieldRef,
+  ref: FieldRef<string, string, number, "counter">,
 ): Promise<CounterHandle> {
   const entry = requireEntry(client);
   const definition = requireDefinition(entry, ref.table);
@@ -312,11 +325,13 @@ export async function openCounter(
           : 0,
     }),
   });
-  await state.ready;
+  await Fx.run(
+    Fx.from({ ok: () => state.ready, err: (error) => error as Error }),
+  );
 
   return {
     kind: "counter",
-    getValue: () => state.currentValue,
+    value: () => state.currentValue,
     subscribe: (callback) => {
       state.listeners.add(callback);
       return () => state.listeners.delete(callback);

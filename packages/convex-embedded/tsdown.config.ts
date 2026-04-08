@@ -25,6 +25,18 @@ export default defineConfig([
     },
     alias: srcAlias,
   },
+  // Schema-safe build — MUST produce a single file with no _deps/ chunks.
+  // Convex's schema evaluator only allows convex/* imports.
+  {
+    entry: { "server/schema": "src/server/schema.ts" },
+    format: "esm",
+    outDir: "dist",
+    dts: true,
+    clean: false,
+    platform: "node",
+    deps: { neverBundle: [/^convex/] },
+    outExtensions: jsExtensions,
+  },
   // Resolve server (node) — runs in Convex backend
   {
     entry: {
@@ -36,6 +48,7 @@ export default defineConfig([
     outDir: "dist",
     dts: true,
     clean: false,
+    unbundle: true,
     platform: "node",
     deps: {
       neverBundle: [/^convex/, "yjs", "convex-helpers"],

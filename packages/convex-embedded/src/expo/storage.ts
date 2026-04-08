@@ -119,7 +119,12 @@ export function createExpoStorageSurface(
               const contentType = request.headers.get("content-type") ?? "";
               const body = await request.arrayBuffer();
               const blob = new Blob([body], { type: contentType || undefined });
-              const storageId = await runtime.storeUploadedBlob(blob);
+              const storageId = await runtime.storeUploadedBlobWithMetadata(
+                blob,
+                {
+                  uploadSourceRef: runtime.consumeUploadUrlSource(token),
+                },
+              );
               uploadSurfaces.delete(token);
               return new Response(JSON.stringify({ storageId }), {
                 status: 200,
@@ -232,7 +237,12 @@ export function createExpoStorageSurface(
             const contentType = request.headers.get("content-type") ?? "";
             const body = await request.arrayBuffer();
             const blob = new Blob([body], { type: contentType || undefined });
-            const storageId = await runtime.storeUploadedBlob(blob);
+            const storageId = await runtime.storeUploadedBlobWithMetadata(
+              blob,
+              {
+                uploadSourceRef: runtime.consumeUploadUrlSource(token),
+              },
+            );
             uploadSurfaces.delete(token);
             return new Response(JSON.stringify({ storageId }), {
               status: 200,

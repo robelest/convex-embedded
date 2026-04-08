@@ -3,25 +3,28 @@
  *
  * Import in your `convex/` functions:
  *
- *   import { embeddedTable, setup } from "@robelest/convex-embedded/server";
+ *   import { bindTable, embeddedTable } from "@robelest/convex-embedded/server";
  *
  * @packageDocumentation
  */
 
-// Core API — embeddedTable + setup
+// Core API — embeddedTable + explicit remote binding
+//
+// Public server exports are grouped here intentionally so Convex apps can
+// consume a small stable surface without importing deep implementation files.
 export {
   embeddedTable,
   bindTable,
-  setup,
   localOnly,
   remoteOnly,
+  storageUploadUrl,
   getTableRegistry,
   _resetRegistry,
   REMOTE_META,
   PENDING_REPLAY_META,
+  STORAGE_UPLOAD_URL_META,
 } from "@/server/setup";
 export type {
-  SetupConfig,
   EmbeddedTableHandle,
   RemoteMeta,
   RouteMode,
@@ -29,6 +32,7 @@ export type {
   PendingReplayMigrationContext,
   PendingReplayMigrationResult,
   PendingReplayMigrationStep,
+  StorageUploadUrlMeta,
 } from "@/server/setup";
 
 // Schema system — CRDT field types + versioning

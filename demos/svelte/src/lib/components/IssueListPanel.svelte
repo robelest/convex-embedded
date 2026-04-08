@@ -7,7 +7,7 @@
 
   let { project, permissions, members, currentUserId, workspaceGroupId, client } = $props<{
     project: {
-      projectId: string;
+      _id: string;
       name: string;
       identifier: string;
       slug: string;
@@ -32,9 +32,9 @@
   }>();
 
   const issuesQuery = useQuery(
-		api.issues.forProject,
+      api.issues.forProject,
     () => ({
-      projectId: project.projectId,
+      projectId: project._id,
     }),
   );
 
@@ -117,7 +117,7 @@
     errorMessage = null;
     try {
 		await client.mutation(api.issues.create, {
-        projectId: project.projectId,
+        projectId: project._id,
         title: newTitle,
       });
       newTitle = "";
@@ -180,12 +180,12 @@
           <span class="font-label text-[0.6rem] text-gray-400">{group.issues.length}</span>
         </div>
 
-        {#each group.issues as issue (issue.issueId)}
+		{#each group.issues as issue (issue._id)}
           <!-- Issue row -->
           <div
-            class="flex items-center gap-3 px-3 py-2 border-b border-gray-200 bg-transparent cursor-pointer hover:bg-gray-50 text-left w-full transition-colors duration-75 {expandedIssueId === issue.issueId ? 'bg-gray-100' : ''}"
-            onclick={() => toggleIssue(issue.issueId)}
-            onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleIssue(issue.issueId); } }}
+			class="flex items-center gap-3 px-3 py-2 border-b border-gray-200 bg-transparent cursor-pointer hover:bg-gray-50 text-left w-full transition-colors duration-75 {expandedIssueId === issue._id ? 'bg-gray-100' : ''}"
+			onclick={() => toggleIssue(issue._id)}
+			onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleIssue(issue._id); } }}
             role="button"
             tabindex="0"
           >
@@ -212,7 +212,7 @@
           </div>
 
           <!-- Inline expand -->
-          {#if expandedIssueId === issue.issueId}
+		  {#if expandedIssueId === issue._id}
             <div class="border-b border-gray-300 bg-gray-50">
               <IssueDetailPanel
                 {issue}

@@ -5,6 +5,8 @@
  * configured. Data lives only for the lifetime of the runtime.
  */
 
+import { Fx } from "@robelest/fx";
+
 import type { StoredDocument } from "@/runtime/db/types";
 import type {
   CommitBatch,
@@ -54,15 +56,19 @@ export function ephemeralStorage(): StorageAdapter {
     },
 
     async commit(batch: CommitBatch): Promise<void> {
-      for (const { doc, tableName } of batch.puts) {
-        documents.set(doc._id as string, doc);
-        tableMap.set(doc._id as string, tableName);
-      }
-      for (const id of batch.deletes) {
-        documents.delete(id);
-        tableMap.delete(id);
-      }
-      meta = batch.meta;
+      await Fx.run(
+        Fx.sync(() => {
+          for (const { doc, tableName } of batch.puts) {
+            documents.set(doc._id as string, doc);
+            tableMap.set(doc._id as string, tableName);
+          }
+          for (const id of batch.deletes) {
+            documents.delete(id);
+            tableMap.delete(id);
+          }
+          meta = batch.meta;
+        }),
+      );
     },
 
     async storeBlob(id: string, blob: Blob): Promise<void> {

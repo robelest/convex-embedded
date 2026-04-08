@@ -1,12 +1,12 @@
 import { bindTable } from "@robelest/convex-embedded/server";
 import { ConvexError, v } from "convex/values";
 
-import type { Id } from "./_generated/dataModel";
+import { components } from "./_generated/api";
 import { prose } from "./prose";
 import { comments } from "./schema";
 import { DEFAULT_USER_ID, userSummary } from "./workspace";
 
-export const bind = bindTable(comments);
+export const bind = bindTable(comments, components.embedded);
 
 export const list = comments.query({
   args: {},
@@ -23,7 +23,7 @@ export const forIssue = comments.query({
     );
 
     return issueComments.map((comment) => ({
-      commentId: comment._id as Id<"comments">,
+      _id: comment._id,
       authorName: userSummary(comment.authorUserId).name,
       authorUserId: comment.authorUserId,
       body: prose.text(comment.body),

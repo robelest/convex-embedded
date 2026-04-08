@@ -79,6 +79,19 @@ function firstByIndex(
   return next.done ? null : (next.value as StoredDocument);
 }
 
+function readPendingById(
+  db: Database,
+  id: string,
+): (StoredDocument & { owner?: string; state?: string }) | null {
+  if (db.getTableForId(id) !== "_resolve_pending") {
+    return null;
+  }
+
+  return db.get("_resolve_pending", id as DocumentId) as
+    | (StoredDocument & { owner?: string; state?: string })
+    | null;
+}
+
 function allByIndex(
   db: Database,
   tableName: string,
@@ -413,15 +426,21 @@ const pendingRenewLease: SystemFunctionDef = {
       owner: string;
       leaseMs?: number;
     };
-    const doc = db.get("_resolve_pending", id as DocumentId) as
-      | (StoredDocument & { owner?: string; state?: string })
-      | null;
-    if (doc !== null && doc.owner === owner && doc.state === "processing") {
+    const doc = readPendingById(db, id);
+    if (
+      doc !== null &&
+      ((doc.owner === owner && doc.state === "processing") ||
+        ((doc.owner === undefined || doc.owner === null) &&
+          (doc.state === undefined || doc.state === "pending")))
+    ) {
       db.patch("_resolve_pending", id as DocumentId, {
+        state: "processing",
+        owner,
         leaseExpiresAt: Date.now() + (leaseMs ?? 30_000),
       });
+      return true;
     }
-    return null;
+    return false;
   },
 };
 
@@ -434,9 +453,7 @@ const pendingRemove: SystemFunctionDef = {
   type: "mutation",
   handler: (db, args) => {
     const { id, owner } = args as { id: string; owner?: string };
-    const doc = db.get("_resolve_pending", id as DocumentId) as
-      | (StoredDocument & { owner?: string })
-      | null;
+    const doc = readPendingById(db, id);
     if (doc !== null && (owner === undefined || doc.owner === owner)) {
       db.delete("_resolve_pending", id as DocumentId);
     }
@@ -448,9 +465,7 @@ const pendingRelease: SystemFunctionDef = {
   type: "mutation",
   handler: (db, args) => {
     const { id, owner } = args as { id: string; owner?: string };
-    const doc = db.get("_resolve_pending", id as DocumentId) as
-      | (StoredDocument & { owner?: string })
-      | null;
+    const doc = readPendingById(db, id);
     if (doc !== null && (owner === undefined || doc.owner === owner)) {
       db.patch("_resolve_pending", id as DocumentId, {
         state: "pending",
@@ -492,7 +507,7 @@ const pendingBlock: SystemFunctionDef = {
       id: string;
       reason: "reauthRequired" | "authorizationDenied" | "scopeChanged";
     };
-    const doc = db.get("_resolve_pending", id as DocumentId);
+    const doc = readPendingById(db, id);
     if (doc !== null) {
       db.patch("_resolve_pending", id as DocumentId, {
         state: "blocked",

@@ -1,7 +1,15 @@
+/**
+ * Table-focused server entry point for `@robelest/convex-embedded/server/table`.
+ *
+ * Use this narrower surface when you only need embedded table builders and
+ * routing metadata, not the broader server helper set from `server/index.ts`.
+ *
+ * @packageDocumentation
+ */
+
 export {
   embeddedTable,
   bindTable,
-  setup,
   localOnly,
   remoteOnly,
   getTableRegistry,
@@ -11,7 +19,6 @@ export {
 } from "@/server/setup";
 
 export type {
-  SetupConfig,
   EmbeddedTableHandle,
   RemoteMeta,
   RouteMode,

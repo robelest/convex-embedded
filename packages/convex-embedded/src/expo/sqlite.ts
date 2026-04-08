@@ -1,3 +1,4 @@
+import { Fx } from "@robelest/fx";
 import {
   defaultDatabaseDirectory,
   openDatabaseAsync,
@@ -41,12 +42,23 @@ export interface ExpoSqliteOptions {
 export async function openExpoSqliteStorage(
   options: ExpoSqliteOptions,
 ): Promise<StorageAdapter> {
-  const db = await openDatabaseAsync(
-    `${options.name}.db`,
-    undefined,
-    options.directory ?? defaultDatabaseDirectory,
+  const db = await Fx.run(
+    Fx.from({
+      ok: () =>
+        openDatabaseAsync(
+          `${options.name}.db`,
+          undefined,
+          options.directory ?? defaultDatabaseDirectory,
+        ),
+      err: (error) => error as Error,
+    }),
   );
-  await db.execAsync(SCHEMA_SQL);
+  await Fx.run(
+    Fx.from({
+      ok: () => db.execAsync(SCHEMA_SQL),
+      err: (error) => error as Error,
+    }),
+  );
 
   let queue: Promise<unknown> = Promise.resolve();
 

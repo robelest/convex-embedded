@@ -262,6 +262,7 @@ export class EmbeddedRuntime {
   private readonly _localQueryWatches: RuntimeQueryObserverRegistry<LocalQueryWatchRecord>;
   private readonly _localPaginatedQueryWatches: RuntimeQueryObserverRegistry<LocalPaginatedWatchRecord>;
   private readonly _tableWriteListeners = new Map<string, Set<() => void>>();
+  private readonly _uploadTokenSources = new Map<string, string>();
 
   private _schema: ParsedSchema | null;
   private _storageAdapter: StorageAdapter | null;
@@ -623,6 +624,13 @@ export class EmbeddedRuntime {
   }
 
   async storeUploadedBlob(blob: Blob): Promise<string> {
+    return this.storeUploadedBlobWithMetadata(blob, {});
+  }
+
+  async storeUploadedBlobWithMetadata(
+    blob: Blob,
+    metadata: { uploadSourceRef?: string },
+  ): Promise<string> {
     await this._hydrated;
     storageLog.info(
       `storeUploadedBlob start (${blob.size} bytes, ${blob.type || "unknown type"})`,
@@ -638,6 +646,7 @@ export class EmbeddedRuntime {
         size: blob.size,
         sha256,
         contentType: blob.type || undefined,
+        uploadSourceRef: metadata.uploadSourceRef,
       });
       this.db.storeFile(storageId, blob);
       const commit = this.db.commit();
@@ -648,6 +657,31 @@ export class EmbeddedRuntime {
       this.db.rollbackWrites();
       storageLog.error("storeUploadedBlob failed", error);
       throw error;
+    }
+  }
+
+  registerUploadUrlSource(uploadUrl: string, refName: string): void {
+    const token = this.extractUploadToken(uploadUrl);
+    if (token !== null) {
+      this._uploadTokenSources.set(token, refName);
+    }
+  }
+
+  consumeUploadUrlSource(token: string): string | undefined {
+    const refName = this._uploadTokenSources.get(token);
+    this._uploadTokenSources.delete(token);
+    return refName;
+  }
+
+  private extractUploadToken(uploadUrl: string): string | null {
+    try {
+      const url = new URL(uploadUrl, "http://convex-embedded.local");
+      const prefix = "/__convex_embedded/upload/";
+      return url.pathname.startsWith(prefix)
+        ? url.pathname.slice(prefix.length)
+        : null;
+    } catch {
+      return null;
     }
   }
 
@@ -1139,6 +1173,10 @@ export class EmbeddedRuntime {
     return this.db.getDocumentsForTable(table) as Array<
       Record<string, unknown>
     >;
+  }
+
+  hasLocalDocumentId(id: string): boolean {
+    return this.db.get(undefined, id as DocumentId) !== null;
   }
 
   async getDocument(

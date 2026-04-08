@@ -33,7 +33,7 @@ const STATUS_LABELS: Record<string, string> = {
 
 export default function IssuesScreen() {
   const dashboard = useQuery(api.dashboard.get, {});
-  const projectId = dashboard?.selectedWorkspace?.projects?.[0]?.projectId;
+  const projectId = dashboard?.selectedWorkspace?.projects?.[0]?._id;
   const issuesData = useQuery(
     api.issues.forProject,
     projectId ? { projectId } : "skip",
@@ -71,7 +71,7 @@ export default function IssuesScreen() {
       <SectionList
         style={styles.container}
         sections={sections}
-        keyExtractor={(item) => item.issueId}
+        keyExtractor={(item) => item._id}
         renderItem={({ item }) => <IssueRow issue={item} />}
         renderSectionHeader={({ section }) => (
           <SectionHeader title={section.title} count={section.data.length} />

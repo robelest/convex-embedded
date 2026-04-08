@@ -1,38 +1,56 @@
 <script lang="ts">
 	import "./layout.css";
+	import { browser } from "$app/environment";
 	import favicon from "$lib/assets/favicon.svg";
 	import Toaster from "$lib/components/Toaster.svelte";
 	import workerUrl from "$lib/embeddedWorkerUrl";
 	import { onDestroy, onMount, setContext } from "svelte";
+	import type { Snippet } from "svelte";
 	import { setConvexClientContext } from "convex-svelte";
 	import {
 		createConvexClient,
 		subscribeRemoteState,
 		type RemoteState,
 	} from "@robelest/convex-embedded/browser";
+	import type { Replica } from "@robelest/convex-embedded/client";
 	import { modules } from "../convex-modules";
 	import schema from "$convex/schema";
 
-	let { children } = $props();
+	type LayoutDataShape = {
+		replica: Replica | null;
+		convexUrl: string | null;
+	};
 
-	const convexUrl = import.meta.env.CONVEX_URL as string | undefined;
+	let { children, data }: { children: Snippet; data: LayoutDataShape } =
+		$props();
 
-	const client = createConvexClient({
-		modules,
-		schema,
-		name: "convex-embedded-svelte-demo",
-		workerUrl,
-		...(convexUrl ? { remote: { url: convexUrl } } : {}),
-	});
+	function createSsrBootstrappedClient() {
+		return createConvexClient({
+			modules,
+			schema,
+			name: "convex-embedded-svelte-demo",
+			workerUrl,
+			replica: data.replica ?? undefined,
+			...(data.convexUrl ? { remote: { url: data.convexUrl } } : {}),
+		});
+	}
 
-	setConvexClientContext(client);
+	const client = browser
+		? createSsrBootstrappedClient()
+		: null;
+
+	if (client) {
+		setConvexClientContext(client);
+	}
 
 	let syncStatus: RemoteState = $state({ status: "idle" });
 	setContext("syncStatus", () => syncStatus);
 
-	const unsubscribe = subscribeRemoteState(client, (state) => {
-		syncStatus = state;
-	});
+	const unsubscribe = client
+		? subscribeRemoteState(client, (state) => {
+				syncStatus = state;
+			})
+		: () => {};
 
 	onMount(() => {
 		async function registerServiceWorker() {
@@ -70,13 +88,13 @@
 
 	onDestroy(() => {
 		unsubscribe();
-		client.close();
+		client?.close();
 	});
 
 	if (import.meta.hot) {
 		import.meta.hot.dispose(() => {
 			unsubscribe();
-			client.close();
+			client?.close();
 		});
 	}
 </script>

@@ -8,7 +8,7 @@ import { PriorityChip } from "./PriorityChip";
 import { StatusDot } from "./StatusDot";
 
 interface IssueItem {
-  issueId: string;
+  _id: string;
   identifier: string;
   title: string;
   status: string;
@@ -22,7 +22,7 @@ export function IssueRow({ issue }: { issue: IssueItem }) {
   return (
     <Pressable
       style={({ pressed }) => [styles.row, pressed && styles.pressed]}
-      onPress={() => router.push(`/issue/${issue.issueId}`)}
+      onPress={() => router.push(`/issue/${issue._id}`)}
     >
       <StatusDot status={issue.status as any} />
       <Text style={styles.identifier}>{issue.identifier}</Text>

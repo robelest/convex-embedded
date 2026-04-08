@@ -1,3 +1,12 @@
+/**
+ * Field-constructor entry point for `@robelest/convex-embedded/server/fields`.
+ *
+ * This module exposes CRDT field builders and schema helpers without the rest
+ * of the server runtime surface.
+ *
+ * @packageDocumentation
+ */
+
 import type { Validator } from "convex/values";
 import { v } from "convex/values";
 

@@ -7,13 +7,15 @@ import {
   define,
   isCrdtField,
   getCrdtType,
+  createConflict,
+} from "@resolve/server/schema";
+import {
   initYjsDoc,
   encodeDocumentState,
   computeDiff,
   mergeUpdate,
   isDiffEmpty,
-  createConflict,
-} from "@resolve/server/schema";
+} from "@resolve/shared/schema";
 import { CrdtType } from "@resolve/shared/types";
 import { v } from "convex/values";
 import { describe, it, expect } from "vite-plus/test";

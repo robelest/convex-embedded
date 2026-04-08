@@ -1,4 +1,4 @@
-import { embeddedTable, schema } from "@robelest/convex-embedded/server";
+import { embeddedTable, schema } from "@robelest/convex-embedded/server/schema";
 import { defineSchema } from "convex/server";
 import { v } from "convex/values";
 
@@ -71,7 +71,7 @@ export const comments = embeddedTable("comments", {
 comments.index("by_issueId", ["issueId"]);
 
 export default defineSchema({
-  projects: projects as any,
-  issues: issues as any,
-  comments: comments as any,
+  projects,
+  issues,
+  comments,
 });

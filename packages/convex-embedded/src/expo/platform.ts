@@ -1,3 +1,5 @@
+import { Fx } from "@robelest/fx";
+
 import { createExpoConnectivityAdapter } from "@/expo/connectivity";
 import { createExpoCryptoProvider } from "@/expo/crypto";
 import { openExpoSqliteStorage } from "@/expo/sqlite";
@@ -18,18 +20,26 @@ export function createExpoPlatformAdapter(
   return {
     crypto,
     async openPersistence({ name }) {
-      try {
-        return await openExpoSqliteStorage({
-          name,
-          directory: options.databaseDirectory,
-        });
-      } catch (error) {
-        console.error(
-          "[convex-embedded] expo-sqlite storage init failed, continuing in-memory",
-          error,
-        );
-        return null;
-      }
+      return Fx.run(
+        Fx.from({
+          ok: () =>
+            openExpoSqliteStorage({
+              name,
+              directory: options.databaseDirectory,
+            }),
+          err: (error) => error as Error,
+        }).pipe(
+          Fx.recover((error) =>
+            Fx.sync(() => {
+              console.error(
+                "[convex-embedded] expo-sqlite storage init failed, continuing in-memory",
+                error,
+              );
+              return null;
+            }),
+          ),
+        ),
+      );
     },
     createStorageSurface({ runtime, crypto: runtimeCrypto }) {
       return createExpoStorageSurface(runtime, runtimeCrypto, {

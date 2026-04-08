@@ -1,12 +1,12 @@
 import { bindTable } from "@robelest/convex-embedded/server";
 import { ConvexError, v } from "convex/values";
 
-import type { Id } from "./_generated/dataModel";
+import { components } from "./_generated/api";
 import { prose } from "./prose";
 import { projects } from "./schema";
 import { DEFAULT_USER_ID, DEMO_WORKSPACE_ID, toSlug } from "./workspace";
 
-export const bind = bindTable(projects);
+export const bind = bindTable(projects, components.embedded);
 
 export const list = projects.query({
   args: {},
@@ -108,7 +108,7 @@ export const detail = projects.query({
     }
 
     return {
-      projectId: project._id as Id<"projects">,
+      _id: project._id,
       identifier: project.identifier,
       name: project.name,
       description: prose.normalize(project.description),

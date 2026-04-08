@@ -1,4 +1,3 @@
-import type { Id } from "./_generated/dataModel";
 import { query } from "./_generated/server";
 import { prose } from "./prose";
 import {
@@ -21,7 +20,7 @@ export const get = query({
         (entry) => entry.groupId === project.teamGroupId,
       );
       return {
-        projectId: project._id as Id<"projects">,
+        _id: project._id,
         name: project.name,
         identifier: project.identifier,
         slug: project.slug,

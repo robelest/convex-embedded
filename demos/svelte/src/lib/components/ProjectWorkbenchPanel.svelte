@@ -16,7 +16,7 @@
 
 	let { project, client, canEditProject } = $props<{
 		project: {
-			projectId: string;
+			_id: string;
 			name: string;
 			identifier: string;
 			description: string;
@@ -55,13 +55,13 @@
 
 	const isDesktop = $derived(innerWidth >= 960);
 	const notesStorageKey = $derived(
-		`convex-embedded:project-notes:${project.projectId}`,
+		`convex-embedded:project-notes:${project._id}`,
 	);
 	const layoutStorageKey = $derived(
-		`convex-embedded:project-panels:${project.projectId}`,
+		`convex-embedded:project-panels:${project._id}`,
 	);
 	const assistantStorageKey = $derived(
-		`convex-embedded:project-assistant:${project.projectId}`,
+		`convex-embedded:project-assistant:${project._id}`,
 	);
 		const hasDescription = $derived(
 			richTextToPlainText(liveDescription).length > 0,
@@ -189,7 +189,7 @@
 		assistantOpen = true;
 		try {
 			const result = await client.action(api.agent.chatProject, {
-				projectId: project.projectId,
+				projectId: project._id,
 				history: assistantMessages,
 				message,
 			});
@@ -216,7 +216,7 @@
 		errorMessage = null;
 		try {
 			await client.mutation(api.projects.update, {
-				projectId: project.projectId,
+				projectId: project._id,
 				description: editDescription,
 			});
 			isEditingDescription = false;

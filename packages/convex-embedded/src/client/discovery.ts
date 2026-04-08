@@ -1,3 +1,14 @@
+/**
+ * Remote discovery metadata captured from lazy Convex modules.
+ *
+ * The discovery pass extracts route modes, embedded-table bindings, and
+ * storage upload URL metadata without executing any remote sync logic.
+ * It is used by both live remote attachment and SSR replica creation.
+ *
+ * @internal
+ */
+import { Fx } from "@robelest/fx";
+
 import { getRouteMode, type RouteMode } from "@/client/routing/metadata";
 import { asError } from "@/client/routing/refs";
 import type { ConvexModule } from "@/kernel/modules";
@@ -18,6 +29,7 @@ export interface DiscoveredRemoteMetadata {
   routeModes: Map<string, RouteMode>;
   tables: Record<string, DiscoveryTable>;
   moduleLoadFailures: ModuleLoadFailure[];
+  uploadUrl?: string;
 }
 
 function createDiscoveryAccumulator(): DiscoveredRemoteMetadata {
@@ -25,6 +37,7 @@ function createDiscoveryAccumulator(): DiscoveredRemoteMetadata {
     routeModes: new Map(),
     tables: {},
     moduleLoadFailures: [],
+    uploadUrl: undefined,
   };
 }
 
@@ -141,6 +154,9 @@ function scanModuleExports(
 ): void {
   const REMOTE_META = Symbol.for("convex-embedded:remoteMeta");
   const RESOLVE_QUERY_META = Symbol.for("convex-embedded:resolveQueryMeta");
+  const STORAGE_UPLOAD_URL_META = Symbol.for(
+    "convex-embedded:storageUploadUrlMeta",
+  );
   let syncMetaTagged = false;
 
   for (const [exportName, exportValue] of Object.entries(
@@ -189,48 +205,89 @@ function scanModuleExports(
         resolveArgs: resolveQueryMeta.getArgs,
       };
     }
+
+    const storageUploadUrlMeta = exportValue[STORAGE_UPLOAD_URL_META];
+    if (
+      accumulator.uploadUrl === undefined &&
+      ((storageUploadUrlMeta &&
+        storageUploadUrlMeta.__brand ===
+          "convex-embedded:storageUploadUrlMeta") ||
+        exportName === "generateUploadUrl")
+    ) {
+      accumulator.uploadUrl = `${moduleName}:${exportName}`;
+    }
   }
 }
 
+/**
+ * Discover remote routing and embedded-table metadata from a module registry.
+ *
+ * @param input - Discovery options including the lazy module registry.
+ * @param input.modules - Canonical Convex module registry to inspect.
+ * @param input.shouldStop - Optional cancellation probe used during bootstrap.
+ * @returns Collected remote metadata, or `null` when discovery was cancelled.
+ *
+ * @see warnModuleLoadFailures
+ */
 export async function discoverRemoteMetadata(input: {
   modules: Record<string, () => Promise<ConvexModule>>;
   shouldStop?: () => boolean;
 }): Promise<DiscoveredRemoteMetadata | null> {
   const accumulator = createDiscoveryAccumulator();
 
-  for (const [moduleName, loader] of Object.entries(input.modules)) {
-    if (
-      input.shouldStop?.() ||
-      moduleName === "_generated" ||
-      moduleName.startsWith("_generated/")
-    ) {
-      continue;
-    }
-
-    try {
-      const mod = await loader();
-      if (input.shouldStop?.()) {
-        return null;
+  const result = await Fx.run(
+    Fx.each(Object.entries(input.modules), ([moduleName, loader]) => {
+      if (
+        input.shouldStop?.() ||
+        moduleName === "_generated" ||
+        moduleName.startsWith("_generated/")
+      ) {
+        return Fx.unit;
       }
-      scanModuleExports(moduleName, mod, accumulator);
-    } catch (err) {
-      accumulator.moduleLoadFailures.push({
-        path: moduleName,
-        error: asError(err),
-      });
-    }
-  }
+
+      return Fx.from({
+        ok: () => loader(),
+        err: (err) => err as Error,
+      }).pipe(
+        Fx.tap((mod) =>
+          Fx.sync(() => {
+            if (input.shouldStop?.()) {
+              return;
+            }
+            scanModuleExports(moduleName, mod, accumulator);
+          }),
+        ),
+        Fx.recover((err) =>
+          Fx.sync(() => {
+            accumulator.moduleLoadFailures.push({
+              path: moduleName,
+              error: asError(err),
+            });
+          }),
+        ),
+        Fx.map(() => undefined as void),
+      );
+    }).pipe(Fx.map(() => accumulator)),
+  );
 
   if (input.shouldStop?.()) {
     return null;
   }
 
   return {
-    ...accumulator,
-    tables: sortDiscoveredTables(accumulator.tables),
+    ...result,
+    tables: sortDiscoveredTables(result.tables),
   };
 }
 
+/**
+ * Emit a single warning summarizing module discovery failures.
+ *
+ * Discovery is intentionally best-effort so that a single broken module does
+ * not prevent unrelated embedded tables from bootstrapping.
+ *
+ * @param failures - Per-module load failures captured during discovery.
+ */
 export function warnModuleLoadFailures(failures: ModuleLoadFailure[]): void {
   if (failures.length === 0) {
     return;

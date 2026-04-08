@@ -52,18 +52,18 @@ export default function IssueDetail() {
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   const dashboard = useQuery(api.dashboard.get, {});
-  const projectId = dashboard?.selectedWorkspace?.projects?.[0]?.projectId;
+  const projectId = dashboard?.selectedWorkspace?.projects?.[0]?._id;
   const members = dashboard?.selectedWorkspace?.members ?? [];
   const issuesData = useQuery(
     api.issues.forProject,
     projectId ? { projectId } : "skip",
   );
   type IssueItem = NonNullable<typeof issuesData>["issues"][number];
-  const issue = issuesData?.issues.find((i: IssueItem) => i.issueId === id);
+  const issue = issuesData?.issues.find((i: IssueItem) => i._id === id);
 
   const commentsData = useQuery(
     api.comments.forIssue,
-    issue ? { issueId: issue.issueId as any } : "skip",
+    issue ? { issueId: issue._id } : "skip",
   );
   const issueDescription = normalizeRichTextContent(
     issue?.description as RichTextContent | undefined,
@@ -104,11 +104,11 @@ export default function IssueDetail() {
   const updateIssue = useCallback(
     (fields: Record<string, unknown>) => {
       void client.mutation(api.issues.update, {
-        issueId: issue.issueId as any,
+        issueId: issue._id,
         ...fields,
       });
     },
-    [issue.issueId],
+    [issue._id],
   );
 
   const handleTitleSubmit = () => {
@@ -123,7 +123,7 @@ export default function IssueDetail() {
     setPosting(true);
     try {
       await client.mutation(api.comments.create, {
-        issueId: issue.issueId as any,
+        issueId: issue._id,
         body: commentText.trim(),
       });
       setCommentText("");
@@ -138,8 +138,7 @@ export default function IssueDetail() {
       {
         text: "Delete",
         style: "destructive",
-        onPress: () =>
-          client.mutation(api.comments.remove, { commentId: commentId as any }),
+        onPress: () => client.mutation(api.comments.remove, { commentId }),
       },
     ]);
   };
@@ -149,7 +148,7 @@ export default function IssueDetail() {
       setConfirmDelete(true);
       return;
     }
-    await client.mutation(api.issues.remove, { issueId: issue.issueId as any });
+    await client.mutation(api.issues.remove, { issueId: issue._id });
     router.back();
   };
 
@@ -288,8 +287,8 @@ export default function IssueDetail() {
 
         {comments.map((comment: CommentItem, idx: number) => (
           <Pressable
-            key={comment.commentId}
-            onLongPress={() => handleDeleteComment(comment.commentId)}
+            key={comment._id}
+            onLongPress={() => handleDeleteComment(comment._id)}
             style={[styles.comment, idx > 0 && styles.commentBorder]}
           >
             <View style={styles.commentHeader}>

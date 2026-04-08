@@ -288,7 +288,7 @@ describe("remove()", () => {
 
     await queue.push("tasks:create", { title: "test" }, "uuid-1", "tasks");
     mockClient.mutation.mockClear();
-    mockClient.mutation.mockResolvedValue(null);
+    mockClient.mutation.mockResolvedValue(true);
 
     await queue.remove();
 
@@ -385,11 +385,13 @@ describe("claimNext() / renewLease() / release()", () => {
         leaseExpiresAt: 123,
       },
     ]);
-    mockClient.mutation.mockResolvedValue(null);
+    mockClient.mutation.mockResolvedValue(true);
 
     await queue.hydrate();
     const entry = queue.peek()!;
-    await queue.renewLease(entry, "processor-a", 500);
+    await expect(queue.renewLease(entry, "processor-a", 500)).resolves.toBe(
+      true,
+    );
 
     expect(mockClient.mutation).toHaveBeenCalledWith(
       "_system:pendingRenewLease",
@@ -401,6 +403,34 @@ describe("claimNext() / renewLease() / release()", () => {
     );
     expect(entry.owner).toBe("processor-a");
     expect(typeof entry.leaseExpiresAt).toBe("number");
+  });
+
+  it("returns false when lease renewal fails and the entry cannot be reacquired", async () => {
+    mockClient.query
+      .mockResolvedValueOnce([
+        {
+          _id: "doc-1",
+          ref: "tasks:create",
+          args: '{"title":"hello"}',
+          localResult: '"uuid-1"',
+          table: "tasks",
+          state: "processing",
+          owner: "processor-a",
+          leaseExpiresAt: 123,
+        },
+      ])
+      .mockResolvedValueOnce([]);
+    mockClient.mutation
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(null);
+
+    await queue.hydrate();
+    const entry = queue.peek()!;
+
+    await expect(queue.renewLease(entry, "processor-a", 500)).resolves.toBe(
+      false,
+    );
+    expect(queue.peek()?._id).toBe("doc-1");
   });
 
   it("releases a claimed entry back to pending", async () => {

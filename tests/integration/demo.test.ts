@@ -17,8 +17,6 @@ import { convexTest } from "convex-test";
  *   -> resolve returns empty (up to date)
  */
 import { describe, it, expect, vi, beforeEach } from "vite-plus/test";
-// Ensure setup() runs so the component reference is bound.
-import "@convex/embedded";
 import * as Y from "yjs";
 
 /** Safely convert a Uint8Array to a proper ArrayBuffer for Convex v.bytes() */
@@ -52,7 +50,6 @@ function readRegister(fields: Y.Map<unknown>, key: string): unknown {
 const modules = {
   "_generated/api": () => import("../../convex/_generated/api.js"),
   "_generated/server": () => import("../../convex/_generated/server.js"),
-  embedded: () => import("../../convex/embedded"),
   schema: () => import("../../convex/schema"),
   projects: () => import("../../convex/projects"),
   issues: () => import("../../convex/issues"),

@@ -1,3 +1,4 @@
+import { Fx } from "@robelest/fx";
 import { ConvexHttpClient } from "convex/browser";
 import { convexToJson, type JSONValue } from "convex/values";
 
@@ -199,41 +200,72 @@ export async function createReplica(
   const modules = normalizeModuleRegistry(
     options.modules as Record<string, () => Promise<ConvexModule>>,
   );
-  const discovered = await discoverRemoteMetadata({ modules });
+  return Fx.run(
+    Fx.from({
+      ok: () => discoverRemoteMetadata({ modules }),
+      err: (error) => error as Error,
+    }).pipe(
+      Fx.map((discovered) => {
+        if (!discovered) {
+          throw new Error(
+            "[convex-embedded] createReplica failed: module discovery returned no result. " +
+              "This can happen if discovery was cancelled via shouldStop() or if no modules could be loaded.",
+          );
+        }
+        return discovered;
+      }),
+      Fx.tap((discovered) =>
+        Fx.sync(() => {
+          warnModuleLoadFailures(discovered.moduleLoadFailures);
+        }),
+      ),
+      Fx.chain((discovered) => {
+        const selectedTables = pickReplicaTables(
+          discovered.tables,
+          options.tables,
+        );
+        const tableNames = Object.keys(selectedTables);
+        if (tableNames.length === 0) {
+          return Fx.fail(
+            new Error(
+              "[convex-embedded] createReplica found no embedded table metadata in the provided modules.",
+            ),
+          );
+        }
 
-  if (!discovered) {
-    throw new Error(
-      "[convex-embedded] createReplica failed: module discovery returned no result. " +
-        "This can happen if discovery was cancelled via shouldStop() or if no modules could be loaded.",
-    );
-  }
+        const remoteClient = new ConvexHttpClient(options.url, {
+          auth: options.token ?? undefined,
+          logger: false,
+        });
 
-  warnModuleLoadFailures(discovered.moduleLoadFailures);
-
-  const selectedTables = pickReplicaTables(discovered.tables, options.tables);
-  const tableNames = Object.keys(selectedTables);
-  if (tableNames.length === 0) {
-    throw new Error(
-      "[convex-embedded] createReplica found no embedded table metadata in the provided modules.",
-    );
-  }
-
-  const remoteClient = new ConvexHttpClient(options.url, {
-    auth: options.token ?? undefined,
-    logger: false,
-  });
-
-  const tables: Replica["tables"] = {};
-  for (const tableName of tableNames) {
-    const table = selectedTables[tableName]!;
-    const args = table.resolveArgs?.() ?? {};
-    const result = await remoteClient.consistentQuery(table.query as any, args);
-    tables[tableName] = normalizeReplicaDocuments(tableName, result);
-  }
-
-  return {
-    version: 1,
-    identityKey: options.identityKey ?? null,
-    tables,
-  };
+        const tables: Replica["tables"] = {};
+        return Fx.each(tableNames, (tableName) => {
+          const table = selectedTables[tableName]!;
+          const args = table.resolveArgs?.() ?? {};
+          return Fx.from({
+            ok: () => remoteClient.consistentQuery(table.query as any, args),
+            err: (error) => error as Error,
+          }).pipe(
+            Fx.tap((result) =>
+              Fx.sync(() => {
+                tables[tableName] = normalizeReplicaDocuments(
+                  tableName,
+                  result,
+                );
+              }),
+            ),
+            Fx.map(() => undefined as void),
+          );
+        }).pipe(
+          Fx.map(
+            (): Replica => ({
+              version: 1,
+              identityKey: options.identityKey ?? null,
+              tables,
+            }),
+          ),
+        );
+      }),
+    ),
+  );
 }

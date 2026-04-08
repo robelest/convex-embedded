@@ -9,9 +9,11 @@
     "test:coverage": "vp test --run --coverage",
     "test:consumer": "vp run --filter @robelest/convex-embedded build && vp test --run tests/package/consumer.test.ts",
     "bench": "vp test bench tests/benchmarks",
+    "bench:component-storage": "vp test bench tests/benchmarks/component-storage.bench.ts",
     "test:embedded": "vp test --run embedded",
     "test:resolve": "vp test --run resolve",
-    "test:integration": "vp test --run integration"
+    "test:integration": "vp test --run integration",
+    "test:live": "vp test --run tests/live"
   },
   "devDependencies": {
     "@edge-runtime/vm": "^5.0.0",

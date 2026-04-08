@@ -1,3 +1,4 @@
+import { Fx } from "@robelest/fx";
 import { convexToJson } from "convex/values";
 
 import type { QueryDependency } from "@/runtime/db/types";
@@ -281,7 +282,14 @@ export class RuntimeQueryObserverRegistry<TMeta> {
   }
 
   async refreshAll(): Promise<void> {
-    await Promise.all(this.values().map((observer) => this.refresh(observer)));
+    await Fx.run(
+      Fx.each(this.values(), (observer) =>
+        Fx.from({
+          ok: () => this.refresh(observer),
+          err: (error) => error as Error,
+        }).pipe(Fx.map(() => undefined as void)),
+      ),
+    );
   }
 
   getRelevantObservers(

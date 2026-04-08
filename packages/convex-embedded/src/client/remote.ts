@@ -13,6 +13,7 @@ import {
   type ModuleLoadFailure,
   warnModuleLoadFailures,
 } from "@/client/discovery";
+import type { IdMap } from "@/client/ids";
 import type { RouteMode } from "@/client/routing/metadata";
 import {
   planMutationExecution,
@@ -32,6 +33,7 @@ export interface RemoteOptions {
   url: string;
   maxRetries?: number;
   retryDelayMs?: number;
+  uploadUrlRef?: unknown;
 }
 
 export type RemoteState =
@@ -61,6 +63,7 @@ export interface EngineInstance {
   start(): void;
   stop(): void;
   pendingCount?(): number;
+  readonly idMap?: IdMap;
 }
 
 export interface ResolveAttachment {
@@ -88,11 +91,13 @@ type DiscoveryResult =
       _tag: "Empty";
       routeModes: Map<string, RouteMode>;
       moduleLoadFailures: ModuleLoadFailure[];
+      uploadUrl?: string;
     }
   | {
       _tag: "Ready";
       routeModes: Map<string, RouteMode>;
       moduleLoadFailures: ModuleLoadFailure[];
+      uploadUrl?: string;
       tables: Record<
         string,
         { resolve: string; query: string; schema?: unknown }
@@ -119,9 +124,13 @@ export function deleteResolveEntry(client: ConvexClient): void {
   resolveEntries.delete(client);
 }
 
-async function loadEngine(): Promise<any> {
-  const { engine } = await import("@/client/engine");
-  return engine;
+function loadEngine(): Promise<any> {
+  return Fx.run(
+    Fx.from({
+      ok: () => import("@/client/engine"),
+      err: (error) => error as Error,
+    }).pipe(Fx.map(({ engine }) => engine)),
+  );
 }
 
 function resolveMutationRoute(entry: ResolveEntry, ref: unknown) {
@@ -151,12 +160,18 @@ function executeLocalMutation(
     return entry.engine.mutation(ref, args, { enqueueForReplay });
   }
 
-  return runtime.executeLocal({
-    kind: "mutation",
-    path: getFunctionRefName(ref),
-    args,
-    applyLocalEffects: true,
-  });
+  return Fx.run(
+    Fx.from({
+      ok: () =>
+        runtime.executeLocal({
+          kind: "mutation",
+          path: getFunctionRefName(ref),
+          args,
+          applyLocalEffects: true,
+        }),
+      err: (error) => error as Error,
+    }),
+  );
 }
 
 function deferUntilDiscovery<T>(
@@ -190,11 +205,13 @@ function toDiscoveryResult(
         _tag: "Empty",
         routeModes: accumulator.routeModes,
         moduleLoadFailures: accumulator.moduleLoadFailures,
+        uploadUrl: accumulator.uploadUrl,
       }
     : {
         _tag: "Ready",
         routeModes: accumulator.routeModes,
         moduleLoadFailures: accumulator.moduleLoadFailures,
+        uploadUrl: accumulator.uploadUrl,
         tables: accumulator.tables,
       };
 }
@@ -207,6 +224,17 @@ function notifyResolveListeners(entry: ResolveEntry, state: RemoteState): void {
     } catch {
       /* listener error */
     }
+  }
+}
+
+function toErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  if (error == null) return "unknown error";
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return "unknown error";
   }
 }
 
@@ -269,6 +297,9 @@ async function discoverAndStart(input: {
       table: string,
     ) => Promise<Array<Record<string, unknown>>>;
     executeLocal: EmbeddedRuntime["executeLocal"];
+    getStorageBlob: EmbeddedRuntime["getStorageBlob"];
+    getStorageMetadata: EmbeddedRuntime["getStorageMetadata"];
+    registerUploadUrlSource: EmbeddedRuntime["registerUploadUrlSource"];
   };
   remoteClient: ConvexClient;
   resolveOpts: RemoteOptions;
@@ -331,6 +362,7 @@ async function discoverAndStart(input: {
               embedded,
               remoteClient,
               tables: current.tables,
+              uploadUrlRef: resolveOpts.uploadUrlRef ?? current.uploadUrl,
               maxRetries: resolveOpts.maxRetries,
               retryDelayMs: resolveOpts.retryDelayMs,
               getIdentityKey: getIdentityKeyForSync,
@@ -372,9 +404,7 @@ async function discoverAndStart(input: {
       Fx.sync(() => {
         if (entry.closed) return;
         const error =
-          err instanceof Error
-            ? err
-            : new Error(String(err ?? "unknown error"));
+          err instanceof Error ? err : new Error(toErrorMessage(err));
         console.error("[convex-embedded] resolve setup failed", error);
         notifyResolveListeners(entry, { status: "error", error });
       }),
@@ -410,7 +440,11 @@ export function attachResolve(input: {
     client,
     ingestDocuments: runtime.ingestDocuments.bind(runtime),
     getDocumentsForTable: runtime.getDocumentsForTable.bind(runtime),
+    hasLocalDocumentId: runtime.hasLocalDocumentId.bind(runtime),
     executeLocal: runtime.executeLocal.bind(runtime),
+    getStorageBlob: runtime.getStorageBlob.bind(runtime),
+    getStorageMetadata: runtime.getStorageMetadata.bind(runtime),
+    registerUploadUrlSource: runtime.registerUploadUrlSource.bind(runtime),
   };
 
   const entry: ResolveEntry = {
@@ -439,6 +473,10 @@ export function attachResolve(input: {
       }),
     executeLocalMutation: (ref, args, enqueueForReplay) =>
       executeLocalMutation(entry, runtime, ref, args, enqueueForReplay),
+    translateLocalArgsToRuntime: (args) =>
+      entry.engine?.idMap?.translateClientIdsToRuntime(args) ?? args,
+    translateLocalResultToClient: (value) =>
+      entry.engine?.idMap?.translateResult(value) ?? value,
     waitUntilReady: (run) => deferUntilDiscovery(entry, run),
     isReady: () => entry.discoveryReady,
     connectivity: input.connectivity,
@@ -474,13 +512,27 @@ export function attachResolve(input: {
       (remoteClient as any).setAdminAuth?.(...args);
     },
     getPendingCount: () => entry.engine?.pendingCount?.() ?? 0,
-    refresh: () => entry.engine?.reloadIdentity?.() ?? Promise.resolve(),
-    close: async () => {
-      entry.closed = true;
-      if (entry.engine) {
-        entry.engine.stop();
-      }
-      await remoteClient.close();
-    },
+    refresh: () =>
+      Fx.run(
+        Fx.from({
+          ok: () => entry.engine?.reloadIdentity?.() ?? Promise.resolve(),
+          err: (error) => error as Error,
+        }),
+      ),
+    close: () =>
+      Fx.run(
+        Fx.gen(function* () {
+          yield* Fx.sync(() => {
+            entry.closed = true;
+            if (entry.engine) {
+              entry.engine.stop();
+            }
+          });
+          yield* Fx.from({
+            ok: () => remoteClient.close(),
+            err: (error) => error as Error,
+          });
+        }),
+      ),
   };
 }

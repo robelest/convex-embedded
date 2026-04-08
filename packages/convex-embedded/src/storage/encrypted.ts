@@ -1,3 +1,13 @@
+/**
+ * Encrypted storage adapter wrapper.
+ *
+ * Wraps a storage adapter so documents and blobs are encrypted at rest using
+ * caller-supplied key management hooks.
+ *
+ * @internal
+ */
+import { Fx } from "@robelest/fx";
+
 import type { EmbeddedCryptoProvider } from "@/runtime/crypto";
 import type { StoredDocument } from "@/runtime/db/types";
 import { decodeBase64, encodeBase64 } from "@/shared/base64";
@@ -113,71 +123,153 @@ async function decryptDocument(
   return decryptJson<StoredDocument>(encrypted, options);
 }
 
+/**
+ * Wrap a storage adapter with encryption-at-rest behavior.
+ *
+ * @param storage - Underlying storage adapter used for persistence.
+ * @param options - Encryption key management and crypto hooks.
+ * @returns A storage adapter that encrypts documents and blobs before writing.
+ *
+ * @see EncryptionOptions
+ */
 export function createEncryptedStorage(
   storage: StorageAdapter,
   options: EncryptionOptions,
 ): StorageAdapter {
   return {
     async getDocuments(): Promise<StoredDocumentWithTable[]> {
-      const rows = await storage.getDocuments();
-      return Promise.all(
-        rows.map(async ({ doc, tableName }) => ({
-          doc: await decryptDocument(doc, options),
-          tableName,
-        })),
+      return Fx.run(
+        Fx.from({
+          ok: () => storage.getDocuments(),
+          err: (error) => error as Error,
+        }).pipe(
+          Fx.chain((rows) =>
+            Fx.each(rows, ({ doc, tableName }) =>
+              Fx.from({
+                ok: () => decryptDocument(doc, options),
+                err: (error) => error as Error,
+              }).pipe(Fx.map((decrypted) => ({ doc: decrypted, tableName }))),
+            ),
+          ),
+        ),
       );
     },
 
     async getDocumentsByTable(tableName: string): Promise<StoredDocument[]> {
-      const docs = await storage.getDocumentsByTable(tableName);
-      return Promise.all(docs.map((doc) => decryptDocument(doc, options)));
+      return Fx.run(
+        Fx.from({
+          ok: () => storage.getDocumentsByTable(tableName),
+          err: (error) => error as Error,
+        }).pipe(
+          Fx.chain((docs) =>
+            Fx.each(docs, (doc) =>
+              Fx.from({
+                ok: () => decryptDocument(doc, options),
+                err: (error) => error as Error,
+              }),
+            ),
+          ),
+        ),
+      );
     },
 
     getMeta: () => storage.getMeta(),
 
     getBlobs: async () => {
-      const entries = await storage.getBlobs();
-      return Promise.all(
-        entries.map(async ({ id, blob }) => {
-          const text = await blob.text();
-          const envelope = JSON.parse(text) as EncryptedEnvelope;
-          const bytes = await decryptJson<number[]>(envelope, options);
-          return { id, blob: new Blob([Uint8Array.from(bytes)]) };
-        }),
+      return Fx.run(
+        Fx.from({
+          ok: () => storage.getBlobs(),
+          err: (error) => error as Error,
+        }).pipe(
+          Fx.chain((entries) =>
+            Fx.each(entries, ({ id, blob }) =>
+              Fx.from({
+                ok: () => blob.text(),
+                err: (error) => error as Error,
+              }).pipe(
+                Fx.map((text) => JSON.parse(text) as EncryptedEnvelope),
+                Fx.chain((envelope) =>
+                  Fx.from({
+                    ok: () => decryptJson<number[]>(envelope, options),
+                    err: (error) => error as Error,
+                  }),
+                ),
+                Fx.map((bytes) => ({
+                  id,
+                  blob: new Blob([Uint8Array.from(bytes)]),
+                })),
+              ),
+            ),
+          ),
+        ),
       );
     },
 
     commit: async (batch: CommitBatch) => {
-      const puts = await Promise.all(
-        batch.puts.map(async ({ doc, tableName }) => ({
-          tableName,
-          doc: (await encryptDocument(
-            doc,
-            options,
-          )) as unknown as StoredDocument,
-        })),
+      const puts = await Fx.run(
+        Fx.each(batch.puts, ({ doc, tableName }) =>
+          Fx.from({
+            ok: () => encryptDocument(doc, options),
+            err: (error) => error as Error,
+          }).pipe(
+            Fx.map((encrypted) => ({
+              tableName,
+              doc: encrypted as unknown as StoredDocument,
+            })),
+          ),
+        ),
       );
-      await storage.commit({ ...batch, puts });
+      await Fx.run(
+        Fx.from({
+          ok: () => storage.commit({ ...batch, puts }),
+          err: (error) => error as Error,
+        }),
+      );
     },
 
     storeBlob: async (id: string, blob: Blob) => {
-      const keyMaterial = await options.getActiveKey({
-        identityKey: options.getIdentityKey(),
-      });
-      const buffer = await blob.arrayBuffer();
-      const envelope = await encryptJson(
-        Array.from(new Uint8Array(buffer)),
-        keyMaterial,
-        options.getIdentityKey(),
-        options.crypto,
+      const identityKey = options.getIdentityKey();
+      const [keyMaterial, buffer] = await Fx.run(
+        Fx.zip(
+          Fx.from({
+            ok: () => options.getActiveKey({ identityKey }),
+            err: (error) => error as Error,
+          }),
+          Fx.from({
+            ok: () => blob.arrayBuffer(),
+            err: (error) => error as Error,
+          }),
+        ),
       );
-      await storage.storeBlob(id, new Blob([JSON.stringify(envelope)]));
+      const envelope = await Fx.run(
+        Fx.from({
+          ok: () =>
+            encryptJson(
+              Array.from(new Uint8Array(buffer)),
+              keyMaterial,
+              identityKey,
+              options.crypto,
+            ),
+          err: (error) => error as Error,
+        }),
+      );
+      await Fx.run(
+        Fx.from({
+          ok: () => storage.storeBlob(id, new Blob([JSON.stringify(envelope)])),
+          err: (error) => error as Error,
+        }),
+      );
     },
 
     deleteBlob: (id: string) => storage.deleteBlob(id),
     clear: () => storage.clear(),
     close: async () => {
-      await storage.close?.();
+      await Fx.run(
+        Fx.from({
+          ok: () => storage.close?.() ?? Promise.resolve(),
+          err: (error) => error as Error,
+        }),
+      );
     },
   };
 }

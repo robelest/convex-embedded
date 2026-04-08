@@ -5,6 +5,7 @@
 		prose,
 		type ProseContent,
 	} from "@robelest/convex-embedded/crdt";
+	import { issues } from "$convex/schema.js";
 	import type { issueStatus, issuePriority } from "$convex/schema.js";
 	import { onMount } from "svelte";
   import { api } from "$convex/_generated/api.js";
@@ -29,7 +30,7 @@
     onclose,
   } = $props<{
 		issue: {
-			issueId: string;
+			_id: string;
 			identifier: string;
 			number: number;
 			title: string;
@@ -58,12 +59,12 @@
   }>();
 
   // Only comments need a subscription — everything else is already loaded
-  const commentsQuery = useQuery(
+	const commentsQuery = useQuery(
 	api.comments.forIssue,
-    () => ({
-      issueId: issue.issueId,
-    }),
-  );
+		() => ({
+		  issueId: issue._id,
+		}),
+	);
 
   const comments = $derived(commentsQuery.data ?? []);
 
@@ -129,26 +130,22 @@
 		let handleDispose = () => {};
 		let disposed = false;
 
-		void prose.open(client, {
-			table: "issues",
-			id: issue.issueId,
-			field: "description",
-		}).then((handle) => {
+		void prose.open(client, issues.field(issue._id, "description")).then((handle) => {
 			if (disposed) {
 				handle.dispose();
 				return;
 			}
 
 			handleDispose = () => handle.dispose();
-			liveDescription = handle.getValue();
+			liveDescription = handle.value();
 			if (!isEditing) {
-				editDescription = handle.getValue();
+				editDescription = handle.value();
 			}
 
 			unsubscribe = handle.subscribe(() => {
-				liveDescription = handle.getValue();
+				liveDescription = handle.value();
 				if (!isEditing) {
-					editDescription = handle.getValue();
+					editDescription = handle.value();
 				}
 			});
 		});
@@ -164,7 +161,7 @@
     errorMessage = null;
     try {
 		await client.mutation(api.issues.update, {
-        issueId: issue.issueId,
+			issueId: issue._id,
         title: editTitle,
         description: editDescription,
       });
@@ -179,7 +176,7 @@
     errorMessage = null;
     try {
 		await client.mutation(api.issues.update, {
-        issueId: issue.issueId,
+			issueId: issue._id,
         status: newStatus,
       });
     } catch (e: unknown) {
@@ -192,7 +189,7 @@
     errorMessage = null;
     try {
 		await client.mutation(api.issues.update, {
-        issueId: issue.issueId,
+			issueId: issue._id,
         priority: newPriority,
       });
     } catch (e: unknown) {
@@ -204,7 +201,7 @@
     errorMessage = null;
     try {
 		await client.mutation(api.issues.update, {
-        issueId: issue.issueId,
+			issueId: issue._id,
         assigneeUserId: newAssigneeUserId || null,
       });
     } catch (e: unknown) {
@@ -218,7 +215,7 @@
     errorMessage = null;
     try {
 		await client.mutation(api.comments.create, {
-        issueId: issue.issueId,
+			issueId: issue._id,
         body: newComment,
       });
       newComment = "";
@@ -248,11 +245,11 @@
       return;
     }
     errorMessage = null;
-    try {
-		await client.mutation(api.issues.remove, {
-        issueId: issue.issueId,
-      });
-      onclose();
+		try {
+			await client.mutation(api.issues.remove, {
+				issueId: issue._id,
+			});
+			onclose();
     } catch (e: unknown) {
       errorMessage = e instanceof Error ? e.message : "Failed to delete issue";
     } finally {
@@ -400,7 +397,7 @@
   <div class="flex flex-col gap-2 mt-1">
     {#if comments.length > 0}
       <div class="flex flex-col gap-1.5">
-        {#each comments as comment (comment.commentId)}
+		{#each comments as comment (comment._id)}
           <div class="flex items-start gap-2 py-1.5 border-b border-gray-200">
             <div class="flex-1">
               <span class="font-label text-[0.6875rem] font-semibold text-gray-700">{comment.authorName}</span>
@@ -410,7 +407,7 @@
             {#if canDeleteComments || comment.authorUserId === currentUserId}
               <button
                 class="bg-transparent border-0 p-0 cursor-pointer flex items-center text-gray-400 hover:text-accent-600"
-                onclick={() => handleDeleteComment(comment.commentId)}
+				onclick={() => handleDeleteComment(comment._id)}
               >
                 <Trash size={14} />
               </button>

@@ -116,4 +116,4 @@ export {
   initYjsDoc,
   isDiffEmpty,
   mergeUpdate,
-} from "@/shared/schema-yjs";
+} from "@/shared/yjs";

@@ -24,32 +24,103 @@ import type { FunctionReference } from "convex/server";
 export type ComponentApi<Name extends string | undefined = string | undefined> =
   {
     public: {
-      cleanup: FunctionReference<
+      cleanupDoc: FunctionReference<
         "mutation",
         "internal",
-        { collection: string; docId: string; keepLatest?: number },
-        { deleted: number; kept: number },
+        {
+          collection: string;
+          docId: string;
+          keepCheckpointCount?: number;
+          keepTailCount?: number;
+          tailByteLimit?: number;
+        },
+        {
+          checkpointDeleted: number;
+          checkpointKept: number;
+          tailDeleted: number;
+          tailKept: number;
+        },
         Name
       >;
-      getLatestDelta: FunctionReference<
+      createCheckpoint: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          actorId?: string;
+          collection: string;
+          docId: string;
+          keepCheckpointCount?: number;
+          label?: string;
+          metadata?: any;
+          pinned?: boolean;
+          reason?: string;
+          source?: string;
+        },
+        { checkpointId: string | string; seq: number },
+        Name
+      >;
+      getCheckpoint: FunctionReference<
+        "query",
+        "internal",
+        { checkpointId: string | string; collection: string; docId: string },
+        {
+          actorId?: string;
+          byteLength: number;
+          checkpointId: string | string;
+          createdAt: number;
+          label?: string;
+          metadata?: any;
+          pinned: boolean;
+          reason?: string;
+          seq: number;
+          source?: string;
+          update: ArrayBuffer;
+        } | null,
+        Name
+      >;
+      getLiveState: FunctionReference<
         "query",
         "internal",
         { collection: string; docId: string },
         { seq: number; update: ArrayBuffer } | null,
         Name
       >;
-      getLatestDeltas: FunctionReference<
+      getLiveStates: FunctionReference<
         "query",
         "internal",
         { collection: string; docIds: Array<string> },
         Array<{ docId: string; seq: number; update: ArrayBuffer } | null>,
         Name
       >;
-      insertDelta: FunctionReference<
+      listCheckpoints: FunctionReference<
+        "query",
+        "internal",
+        { collection: string; docId: string },
+        Array<{
+          actorId?: string;
+          byteLength: number;
+          checkpointId: string | string;
+          createdAt: number;
+          label?: string;
+          metadata?: any;
+          pinned: boolean;
+          reason?: string;
+          seq: number;
+          source?: string;
+        }>,
+        Name
+      >;
+      recordUpdate: FunctionReference<
         "mutation",
         "internal",
-        { collection: string; docId: string; update: ArrayBuffer },
-        null,
+        {
+          collection: string;
+          docId: string;
+          keepTailCount?: number;
+          tailByteLimit?: number;
+          update: ArrayBuffer;
+        },
+        { seq: number; tailDeleted: number; tailKept: number },
         Name
       >;
     };

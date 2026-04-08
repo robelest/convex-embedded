@@ -1,3 +1,4 @@
+import { Fx } from "@robelest/fx";
 import { Cv } from "@robelest/fx/convex";
 import type { ConvexClient } from "convex/browser";
 
@@ -29,6 +30,10 @@ function createRuntimeLocalOnUpdate(input: {
   runtime: EmbeddedRuntime;
   getRefName: (ref: unknown) => string;
   asError: (error: unknown) => Error;
+  translateLocalArgsToRuntime?: (
+    args: Record<string, unknown>,
+  ) => Record<string, unknown>;
+  translateLocalResultToClient?: <T>(value: T) => T;
 }) {
   return (
     ref: unknown,
@@ -36,15 +41,18 @@ function createRuntimeLocalOnUpdate(input: {
     callback: (result: unknown, meta?: unknown) => unknown,
     onError?: (error: Error, meta?: unknown) => unknown,
   ) => {
+    const translatedArgs =
+      input.translateLocalArgsToRuntime?.(args ?? {}) ?? args ?? {};
     const watch = input.runtime.watchLocalQuery(
       input.getRefName(ref),
-      args ?? {},
+      translatedArgs,
     );
 
     const notify = () => {
       try {
         callback(
-          watch.localQueryResult(),
+          input.translateLocalResultToClient?.(watch.localQueryResult()) ??
+            watch.localQueryResult(),
           "Second argument to onUpdate callback is reserved for later use",
         );
       } catch (error) {
@@ -62,7 +70,9 @@ function createRuntimeLocalOnUpdate(input: {
 
     const unsubscribe = watch.onUpdate(notify) as any;
     unsubscribe.unsubscribe = unsubscribe;
-    unsubscribe.getCurrentValue = () => watch.localQueryResult();
+    unsubscribe.getCurrentValue = () =>
+      input.translateLocalResultToClient?.(watch.localQueryResult()) ??
+      watch.localQueryResult();
     unsubscribe.getQueryLogs = () => watch.localQueryLogs();
     return unsubscribe;
   };
@@ -72,6 +82,10 @@ function createRuntimeLocalPaginatedOnUpdate(input: {
   runtime: EmbeddedRuntime;
   getRefName: (ref: unknown) => string;
   asError: (error: unknown) => Error;
+  translateLocalArgsToRuntime?: (
+    args: Record<string, unknown>,
+  ) => Record<string, unknown>;
+  translateLocalResultToClient?: <T>(value: T) => T;
 }) {
   return (
     ref: unknown,
@@ -80,16 +94,19 @@ function createRuntimeLocalPaginatedOnUpdate(input: {
     callback: (result: unknown, meta?: unknown) => unknown,
     onError?: (error: Error, meta?: unknown) => unknown,
   ) => {
+    const translatedArgs =
+      input.translateLocalArgsToRuntime?.(args ?? {}) ?? args ?? {};
     const watch = input.runtime.watchLocalPaginatedQuery(
       input.getRefName(ref),
-      args ?? {},
+      translatedArgs,
       options,
     );
 
     const notify = () => {
       try {
         callback(
-          watch.localQueryResult(),
+          input.translateLocalResultToClient?.(watch.localQueryResult()) ??
+            watch.localQueryResult(),
           "Second argument to onUpdate callback is reserved for later use",
         );
       } catch (error) {
@@ -107,7 +124,9 @@ function createRuntimeLocalPaginatedOnUpdate(input: {
 
     const unsubscribe = watch.onUpdate(notify) as any;
     unsubscribe.unsubscribe = unsubscribe;
-    unsubscribe.getCurrentValue = () => watch.localQueryResult();
+    unsubscribe.getCurrentValue = () =>
+      input.translateLocalResultToClient?.(watch.localQueryResult()) ??
+      watch.localQueryResult();
     unsubscribe.getQueryLogs = () => watch.localQueryLogs();
     return unsubscribe;
   };
@@ -117,6 +136,10 @@ function patchBaseClientLocalQueryAccess(input: {
   client: ConvexClient;
   runtime: EmbeddedRuntime;
   resolveReadPlanByName: (refName: string) => ReadPlan;
+  translateLocalArgsToRuntime?: (
+    args: Record<string, unknown>,
+  ) => Record<string, unknown>;
+  translateLocalResultToClient?: <T>(value: T) => T;
 }) {
   const baseClient = (input.client as any).client as any;
   if (!baseClient) {
@@ -136,9 +159,12 @@ function patchBaseClientLocalQueryAccess(input: {
         return originalLocalQueryResult(refName, args);
       }
 
-      return input.runtime
-        .watchLocalQuery(refName, args ?? {})
+      const translatedArgs =
+        input.translateLocalArgsToRuntime?.(args ?? {}) ?? args ?? {};
+      const result = input.runtime
+        .watchLocalQuery(refName, translatedArgs)
         .localQueryResult();
+      return input.translateLocalResultToClient?.(result) ?? result;
     };
   }
 
@@ -189,34 +215,46 @@ function deferSubscription(input: {
     return undefined;
   };
 
-  void input
-    .factory()
-    .then((actual) => {
-      if (cancelled) {
-        if (typeof actual === "function") {
-          actual();
-        } else if (actual && typeof actual.unsubscribe === "function") {
-          actual.unsubscribe();
-        }
-        return;
-      }
-      inner = actual;
-    })
-    .catch((error) => {
-      const normalized = input.asError(error);
-      if (input.onInitError) {
-        try {
-          input.onInitError(normalized);
-          return;
-        } catch {
-          /* listener error */
-        }
-      }
-      console.error(
-        "[convex-embedded] failed to initialize subscription",
-        normalized,
-      );
-    });
+  Fx.detach(
+    () =>
+      Fx.run(
+        Fx.from({
+          ok: () => input.factory(),
+          err: (error) => input.asError(error),
+        }).pipe(
+          Fx.tap((actual) =>
+            Fx.sync(() => {
+              if (cancelled) {
+                if (typeof actual === "function") {
+                  actual();
+                } else if (actual && typeof actual.unsubscribe === "function") {
+                  actual.unsubscribe();
+                }
+                return;
+              }
+              inner = actual;
+            }),
+          ),
+          Fx.recover((error) =>
+            Fx.sync(() => {
+              if (input.onInitError) {
+                try {
+                  input.onInitError(error);
+                  return;
+                } catch {
+                  /* listener error */
+                }
+              }
+              console.error(
+                "[convex-embedded] failed to initialize subscription",
+                error,
+              );
+            }),
+          ),
+        ),
+      ),
+    "[adapter] deferSubscription:",
+  );
 
   return unsubscribe;
 }
@@ -237,6 +275,10 @@ export function patchRoutedConvexClient(input: {
     args: Record<string, unknown>,
     enqueueForReplay: boolean,
   ) => Promise<unknown>;
+  translateLocalArgsToRuntime?: (
+    args: Record<string, unknown>,
+  ) => Record<string, unknown>;
+  translateLocalResultToClient?: <T>(value: T) => T;
   waitUntilReady?: WaitUntilReady;
   isReady?: () => boolean;
   connectivity?: ConnectivityAdapter;
@@ -245,17 +287,23 @@ export function patchRoutedConvexClient(input: {
     client: input.client,
     runtime: input.runtime,
     resolveReadPlanByName: input.resolveReadPlanByName,
+    translateLocalArgsToRuntime: input.translateLocalArgsToRuntime,
+    translateLocalResultToClient: input.translateLocalResultToClient,
   });
 
   const localOnUpdate = createRuntimeLocalOnUpdate({
     runtime: input.runtime,
     getRefName: input.getRefName,
     asError: input.asError,
+    translateLocalArgsToRuntime: input.translateLocalArgsToRuntime,
+    translateLocalResultToClient: input.translateLocalResultToClient,
   });
   const localPaginatedOnUpdate = createRuntimeLocalPaginatedOnUpdate({
     runtime: input.runtime,
     getRefName: input.getRefName,
     asError: input.asError,
+    translateLocalArgsToRuntime: input.translateLocalArgsToRuntime,
+    translateLocalResultToClient: input.translateLocalResultToClient,
   });
   const remoteClient = input.remoteClient ?? null;
   const waitUntilReady = input.waitUntilReady ?? ((run) => run());
@@ -265,12 +313,24 @@ export function patchRoutedConvexClient(input: {
     ref: unknown,
     args: Record<string, unknown>,
     kind: "query" | "action",
-  ) =>
-    input.runtime.executeLocal({
-      kind,
-      path: input.getRefName(ref),
-      args,
-    });
+  ) => {
+    const translatedArgs = input.translateLocalArgsToRuntime?.(args) ?? args;
+    return Fx.run(
+      Fx.from({
+        ok: () =>
+          input.runtime.executeLocal({
+            kind,
+            path: input.getRefName(ref),
+            args: translatedArgs,
+          }),
+        err: (error) => input.asError(error),
+      }).pipe(
+        Fx.map(
+          (result) => input.translateLocalResultToClient?.(result) ?? result,
+        ),
+      ),
+    );
+  };
 
   const createSubscriptionFactory = (
     localSubscribe: (...args: any[]) => any,
@@ -320,20 +380,30 @@ export function patchRoutedConvexClient(input: {
     };
   };
 
-  (input.client as any).mutation = async function patchedMutation(
+  (input.client as any).mutation = function patchedMutation(
     ...args: Parameters<typeof input.client.mutation>
   ): Promise<any> {
-    return waitUntilReady(async () => {
+    return waitUntilReady(() => {
       const route = input.resolveMutationPlan(args[0]);
-      return route.kind === "error"
-        ? Promise.reject(route.error)
-        : route.kind === "local"
-          ? input.executeLocalMutation(
-              args[0],
-              (args[1] ?? {}) as Record<string, unknown>,
-              route.enqueueForReplay,
-            )
-          : (() => {
+      return Fx.run(
+        Fx.defer(() => {
+          if (route.kind === "error") {
+            return Fx.fail(route.error);
+          }
+          if (route.kind === "local") {
+            return Fx.from({
+              ok: () =>
+                input.executeLocalMutation(
+                  args[0],
+                  (args[1] ?? {}) as Record<string, unknown>,
+                  route.enqueueForReplay,
+                ),
+              err: (error) => input.asError(error),
+            });
+          }
+
+          return Fx.from({
+            ok: () => {
               assertRemotePlanOnline(route);
               if (!remoteClient) {
                 throw Cv.error({
@@ -345,24 +415,38 @@ export function patchRoutedConvexClient(input: {
                 });
               }
               return (remoteClient as any).mutation(...args);
-            })();
+            },
+            err: (error) => input.asError(error),
+          });
+        }),
+      );
     });
   };
 
-  (input.client as any).query = async function patchedQuery(
+  (input.client as any).query = function patchedQuery(
     ...args: Parameters<typeof input.client.query>
   ): Promise<any> {
-    return waitUntilReady(async () => {
+    return waitUntilReady(() => {
       const route = input.resolveReadPlan(args[0]);
-      return route.kind === "error"
-        ? Promise.reject(route.error)
-        : route.kind === "local"
-          ? executeLocalRead(
-              args[0],
-              (args[1] ?? {}) as Record<string, unknown>,
-              "query",
-            )
-          : (() => {
+      return Fx.run(
+        Fx.defer(() => {
+          if (route.kind === "error") {
+            return Fx.fail(route.error);
+          }
+          if (route.kind === "local") {
+            return Fx.from({
+              ok: () =>
+                executeLocalRead(
+                  args[0],
+                  (args[1] ?? {}) as Record<string, unknown>,
+                  "query",
+                ),
+              err: (error) => input.asError(error),
+            });
+          }
+
+          return Fx.from({
+            ok: () => {
               assertRemotePlanOnline(route);
               if (!remoteClient) {
                 throw Cv.error({
@@ -374,24 +458,38 @@ export function patchRoutedConvexClient(input: {
                 });
               }
               return (remoteClient as any).query(...args);
-            })();
+            },
+            err: (error) => input.asError(error),
+          });
+        }),
+      );
     });
   };
 
-  (input.client as any).action = async function patchedAction(
+  (input.client as any).action = function patchedAction(
     ...args: Parameters<typeof input.client.action>
   ): Promise<any> {
-    return waitUntilReady(async () => {
+    return waitUntilReady(() => {
       const route = input.resolveReadPlan(args[0]);
-      return route.kind === "error"
-        ? Promise.reject(route.error)
-        : route.kind === "local"
-          ? executeLocalRead(
-              args[0],
-              (args[1] ?? {}) as Record<string, unknown>,
-              "action",
-            )
-          : (() => {
+      return Fx.run(
+        Fx.defer(() => {
+          if (route.kind === "error") {
+            return Fx.fail(route.error);
+          }
+          if (route.kind === "local") {
+            return Fx.from({
+              ok: () =>
+                executeLocalRead(
+                  args[0],
+                  (args[1] ?? {}) as Record<string, unknown>,
+                  "action",
+                ),
+              err: (error) => input.asError(error),
+            });
+          }
+
+          return Fx.from({
+            ok: () => {
               assertRemotePlanOnline(route);
               if (!remoteClient) {
                 throw Cv.error({
@@ -403,7 +501,11 @@ export function patchRoutedConvexClient(input: {
                 });
               }
               return (remoteClient as any).action(...args);
-            })();
+            },
+            err: (error) => input.asError(error),
+          });
+        }),
+      );
     });
   };
 

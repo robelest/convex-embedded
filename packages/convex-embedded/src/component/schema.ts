@@ -4,26 +4,56 @@ import { v } from "convex/values";
 /**
  * Component schema for convex-embedded.
  *
- * The `deltas` table stores full Yjs state snapshots recorded after each
- * mutation on a registered table. Each delta is a complete
- * Y.encodeStateAsUpdateV2(doc), not an incremental diff.
- *
- * The `resolve` query only needs the latest delta per document to compute
- * a diff against the client's state vector.
+ * Storage roles are intentionally separated:
+ * - `liveStates`: one authoritative merged Yjs state per document used by resolve.
+ * - `deltaTail`: a bounded recent update log for diagnostics and operational context.
+ * - `checkpoints`: bounded recent restore points kept by retention policy.
+ * - `pinnedCheckpoints`: explicit archival restore points kept off the hot path.
  */
 export default defineSchema({
-  deltas: defineTable({
-    /** The app table this delta belongs to (e.g. "tasks"). */
+  liveStates: defineTable({
     collection: v.string(),
-    /** The document ID within that table. */
     docId: v.string(),
-    /** Full Yjs state snapshot as binary (Y.encodeStateAsUpdateV2). */
     update: v.bytes(),
-    /** Monotonically increasing sequence number per (collection, docId). */
     seq: v.number(),
-    /** Timestamp when this delta was recorded. */
+    byteLength: v.number(),
+    updatedAt: v.number(),
+  }).index("by_collection_doc", ["collection", "docId"]),
+
+  deltaTail: defineTable({
+    collection: v.string(),
+    docId: v.string(),
+    update: v.bytes(),
+    seq: v.number(),
+    byteLength: v.number(),
     createdAt: v.number(),
-  })
-    .index("by_collection_doc", ["collection", "docId"])
-    .index("by_collection_doc_seq", ["collection", "docId", "seq"]),
+  }).index("by_collection_doc_seq", ["collection", "docId", "seq"]),
+
+  checkpoints: defineTable({
+    collection: v.string(),
+    docId: v.string(),
+    update: v.bytes(),
+    seq: v.number(),
+    byteLength: v.number(),
+    createdAt: v.number(),
+    label: v.optional(v.string()),
+    reason: v.optional(v.string()),
+    actorId: v.optional(v.string()),
+    source: v.optional(v.string()),
+    metadata: v.optional(v.any()),
+  }).index("by_collection_doc_createdAt", ["collection", "docId", "createdAt"]),
+
+  pinnedCheckpoints: defineTable({
+    collection: v.string(),
+    docId: v.string(),
+    update: v.bytes(),
+    seq: v.number(),
+    byteLength: v.number(),
+    createdAt: v.number(),
+    label: v.optional(v.string()),
+    reason: v.optional(v.string()),
+    actorId: v.optional(v.string()),
+    source: v.optional(v.string()),
+    metadata: v.optional(v.any()),
+  }).index("by_collection_doc_createdAt", ["collection", "docId", "createdAt"]),
 });

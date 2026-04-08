@@ -49,6 +49,8 @@ export type LocalMutationExecutorFn = (
   args: Record<string, unknown>,
 ) => Promise<unknown>;
 
+export type LocalDocumentPresenceFn = (id: string) => boolean;
+
 export class IdMap {
   /** In-memory cache: localId → remoteId */
   private _cache = new Map<string, string>();
@@ -68,16 +70,21 @@ export class IdMap {
   /** Active identity namespace for persistence. */
   private _getIdentityKey: (() => string | null) | null;
 
+  /** Synchronous local document presence lookup for active aliasing. */
+  private _hasLocalDocumentId: LocalDocumentPresenceFn | null;
+
   constructor(
     localClient: ConvexClient,
     queryFn?: LocalQueryExecutorFn,
     mutationFn?: LocalMutationExecutorFn,
     getIdentityKey?: () => string | null,
+    hasLocalDocumentId?: LocalDocumentPresenceFn,
   ) {
     this._localClient = localClient;
     this._queryFn = queryFn ?? null;
     this._mutationFn = mutationFn ?? null;
     this._getIdentityKey = getIdentityKey ?? null;
+    this._hasLocalDocumentId = hasLocalDocumentId ?? null;
   }
 
   // -----------------------------------------------------------------------
@@ -157,7 +164,14 @@ export class IdMap {
    * Look up the local UUID for a remote ID.
    */
   getLocalId(remoteId: string): string | null {
-    return this._reverse.get(remoteId) ?? null;
+    const localId = this._reverse.get(remoteId) ?? null;
+    if (!localId) {
+      return null;
+    }
+    if (!this._hasLocalDocumentId) {
+      return localId;
+    }
+    return this._hasLocalDocumentId(localId) ? localId : null;
   }
 
   /**
@@ -178,7 +192,7 @@ export class IdMap {
     if (remoteId) {
       aliases.add(remoteId);
     }
-    const localId = this._reverse.get(id);
+    const localId = this.getLocalId(id);
     if (localId) {
       aliases.add(localId);
     }
@@ -287,16 +301,55 @@ export class IdMap {
    * Returns a new object (does not mutate the original).
    */
   translateArgs(args: Record<string, unknown>): Record<string, unknown> {
-    return this._translateValue(args) as Record<string, unknown>;
+    return this.translateLocalIdsToRemote(args) as Record<string, unknown>;
   }
 
-  private _translateValue(value: unknown): unknown {
+  translateLocalIdsToRemote<T>(value: T): T {
+    return this._translateValue(value, (candidate) =>
+      this._cache.get(candidate),
+    ) as T;
+  }
+
+  translateRemoteIdsToLocal<T>(value: T): T {
+    return this._translateValue(
+      value,
+      (candidate) => this.getLocalId(candidate) ?? undefined,
+    ) as T;
+  }
+
+  translateClientIdsToRuntime<T>(value: T): T {
+    return this._translateValue(value, (candidate) => {
+      const activeLocalId = this.getLocalId(candidate);
+      if (activeLocalId) {
+        return activeLocalId;
+      }
+      return this._cache.get(candidate);
+    }) as T;
+  }
+
+  translateResult<T>(value: T): T {
+    return this.translateLocalIdsToRemote(value);
+  }
+
+  private _shouldTranslateKey(key: string): boolean {
+    return (
+      key === "_id" || key === "id" || key.endsWith("Id") || key.endsWith("Ids")
+    );
+  }
+
+  private _translateValue(
+    value: unknown,
+    mapString: (value: string) => string | undefined,
+    allowStringRewrite = true,
+  ): unknown {
     if (typeof value === "string") {
-      return this._cache.get(value) ?? value;
+      return allowStringRewrite ? (mapString(value) ?? value) : value;
     }
 
     if (Array.isArray(value)) {
-      return value.map((item) => this._translateValue(item));
+      return value.map((item) =>
+        this._translateValue(item, mapString, allowStringRewrite),
+      );
     }
 
     if (
@@ -310,7 +363,11 @@ export class IdMap {
     return Object.fromEntries(
       Object.entries(value).map(([key, entryValue]) => [
         key,
-        this._translateValue(entryValue),
+        this._translateValue(
+          entryValue,
+          mapString,
+          this._shouldTranslateKey(key),
+        ),
       ]),
     );
   }

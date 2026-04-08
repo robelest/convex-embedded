@@ -8,14 +8,13 @@
  * @module
  */
 
-import type * as _check from "../_check.js";
 import type * as agent from "../agent.js";
 import type * as assistant from "../assistant.js";
 import type * as comments from "../comments.js";
 import type * as dashboard from "../dashboard.js";
-import type * as embedded from "../embedded.js";
 import type * as issues from "../issues.js";
 import type * as projects from "../projects.js";
+import type * as prose from "../prose.js";
 import type * as validators from "../validators.js";
 import type * as workspace from "../workspace.js";
 
@@ -26,14 +25,13 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
-  _check: typeof _check;
   agent: typeof agent;
   assistant: typeof assistant;
   comments: typeof comments;
   dashboard: typeof dashboard;
-  embedded: typeof embedded;
   issues: typeof issues;
   projects: typeof projects;
+  prose: typeof prose;
   validators: typeof validators;
   workspace: typeof workspace;
 }>;
@@ -4898,29 +4896,97 @@ export declare const components: {
   };
   embedded: {
     public: {
-      cleanup: FunctionReference<
+      cleanupDoc: FunctionReference<
         "mutation",
         "internal",
-        { collection: string; docId: string; keepLatest?: number },
-        { deleted: number; kept: number }
+        {
+          collection: string;
+          docId: string;
+          keepCheckpointCount?: number;
+          keepTailCount?: number;
+          tailByteLimit?: number;
+        },
+        {
+          checkpointDeleted: number;
+          checkpointKept: number;
+          tailDeleted: number;
+          tailKept: number;
+        }
       >;
-      getLatestDelta: FunctionReference<
+      createCheckpoint: FunctionReference<
+        "mutation",
+        "internal",
+        {
+          actorId?: string;
+          collection: string;
+          docId: string;
+          keepCheckpointCount?: number;
+          label?: string;
+          metadata?: any;
+          pinned?: boolean;
+          reason?: string;
+          source?: string;
+        },
+        { checkpointId: string | string; seq: number }
+      >;
+      getCheckpoint: FunctionReference<
+        "query",
+        "internal",
+        { checkpointId: string | string; collection: string; docId: string },
+        {
+          actorId?: string;
+          byteLength: number;
+          checkpointId: string | string;
+          createdAt: number;
+          label?: string;
+          metadata?: any;
+          pinned: boolean;
+          reason?: string;
+          seq: number;
+          source?: string;
+          update: ArrayBuffer;
+        } | null
+      >;
+      getLiveState: FunctionReference<
         "query",
         "internal",
         { collection: string; docId: string },
         { seq: number; update: ArrayBuffer } | null
       >;
-      getLatestDeltas: FunctionReference<
+      getLiveStates: FunctionReference<
         "query",
         "internal",
         { collection: string; docIds: Array<string> },
         Array<{ docId: string; seq: number; update: ArrayBuffer } | null>
       >;
-      insertDelta: FunctionReference<
+      listCheckpoints: FunctionReference<
+        "query",
+        "internal",
+        { collection: string; docId: string },
+        Array<{
+          actorId?: string;
+          byteLength: number;
+          checkpointId: string | string;
+          createdAt: number;
+          label?: string;
+          metadata?: any;
+          pinned: boolean;
+          reason?: string;
+          seq: number;
+          source?: string;
+        }>
+      >;
+      recordUpdate: FunctionReference<
         "mutation",
         "internal",
-        { collection: string; docId: string; update: ArrayBuffer },
-        null
+        {
+          collection: string;
+          docId: string;
+          keepTailCount?: number;
+          tailByteLimit?: number;
+          update: ArrayBuffer;
+        },
+        { seq: number; tailDeleted: number; tailKept: number }
       >;
     };
   };

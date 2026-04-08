@@ -18,9 +18,9 @@
   } = $props<{
     workspaces: Array<{ groupId: string; name: string }>;
     selectedWorkspace: { groupId: string; name: string };
-    projects: Array<{
-      projectId: string;
-      name: string;
+		projects: Array<{
+		  _id: string;
+		  name: string;
       identifier: string;
       slug: string;
       teamGroupId: string | null;
@@ -232,7 +232,7 @@
       </form>
     {/if}
 
-		{#each workspaceProjects as project (project.projectId)}
+		{#each workspaceProjects as project (project._id)}
       <button
         class="block w-full py-[0.3rem] px-3 border-0 border-l-2 border-l-transparent bg-transparent font-label text-[0.75rem] font-medium text-left text-gray-700 cursor-pointer hover:text-accent-600 hover:bg-gray-100 {selectedProjectSlug === project.slug && activeTab === 'issues' ? 'border-l-accent-500 !text-accent-600 font-semibold bg-gray-100' : ''}"
         onclick={() => selectProject(project.slug)}
@@ -247,7 +247,7 @@
 
 		{#each teamsWithProjects as team (team.groupId)}
 			<span class="px-3 py-1 mt-1 font-label text-[0.6875rem] font-semibold text-gray-500">{team.name}</span>
-			{#each team.projects as project (project.projectId)}
+			{#each team.projects as project (project._id)}
         <button
           class="block w-full py-[0.3rem] px-3 pl-5 border-0 border-l-2 border-l-transparent bg-transparent font-label text-[0.75rem] font-medium text-left text-gray-700 cursor-pointer hover:text-accent-600 hover:bg-gray-100 {selectedProjectSlug === project.slug && activeTab === 'issues' ? 'border-l-accent-500 !text-accent-600 font-semibold bg-gray-100' : ''}"
           onclick={() => selectProject(project.slug)}
@@ -261,7 +261,7 @@
       {/each}
 			{#each team.children as child (child.groupId)}
 				<span class="px-3 pl-5 py-0.5 font-label text-[0.625rem] text-gray-400">{child.name}</span>
-				{#each child.projects as project (project.projectId)}
+				{#each child.projects as project (project._id)}
           <button
             class="block w-full py-[0.3rem] px-3 pl-7 border-0 border-l-2 border-l-transparent bg-transparent font-label text-[0.75rem] font-medium text-left text-gray-700 cursor-pointer hover:text-accent-600 hover:bg-gray-100 {selectedProjectSlug === project.slug && activeTab === 'issues' ? 'border-l-accent-500 !text-accent-600 font-semibold bg-gray-100' : ''}"
             onclick={() => selectProject(project.slug)}

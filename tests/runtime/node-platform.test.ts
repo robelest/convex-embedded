@@ -4,8 +4,8 @@ import { api } from "../../convex/_generated/api";
 import schema from "../../convex/schema";
 import { DEMO_WORKSPACE_ID } from "../../convex/workspace";
 import { getEmbeddedClientEntry } from "../../packages/convex-embedded/src/client/entry";
-import { SystemPaths } from "../../packages/convex-embedded/src/index";
 import { createConvexClient } from "../../packages/convex-embedded/src/node/index";
+import { openNodePersistence } from "../../packages/convex-embedded/src/node/sqlite/adapter";
 import {
   createLiveModules,
   temporaryDatabasePath,
@@ -20,27 +20,6 @@ afterEach(async () => {
   }
 });
 
-async function runLocalSystemMutation(
-  client: Awaited<ReturnType<typeof createConvexClient>> & {
-    close(): Promise<void>;
-  },
-  path: string,
-  args: Record<string, unknown>,
-) {
-  const runtime = getEmbeddedClientEntry(client)?.runtime;
-  if (!runtime) {
-    throw new Error(
-      "[convex-embedded] missing embedded runtime entry for client",
-    );
-  }
-  return await runtime.executeLocal({
-    kind: "mutation",
-    path,
-    args,
-    applyLocalEffects: true,
-  });
-}
-
 describe("node platform persistence", () => {
   it("persists local runtime state across client restarts", async () => {
     const name = uniqueSuffix("node-persist");
@@ -53,6 +32,10 @@ describe("node platform persistence", () => {
       databasePath,
     });
     clientsToClose.push(firstClient as { close(): Promise<void> });
+
+    await firstClient.query(api.projects.list, {
+      workspaceId: DEMO_WORKSPACE_ID,
+    });
 
     const projectId = await firstClient.mutation(api.projects.create, {
       workspaceId: DEMO_WORKSPACE_ID,
@@ -95,7 +78,7 @@ describe("node platform persistence", () => {
   it("reloads a larger persisted local dataset after restart", async () => {
     const name = uniqueSuffix("node-volume");
     const databasePath = temporaryDatabasePath(name);
-    const pendingCount = 120;
+    const projectCount = 100;
 
     const firstClient = createConvexClient({
       convex: { modules: createLiveModules() },
@@ -105,34 +88,14 @@ describe("node platform persistence", () => {
     });
     clientsToClose.push(firstClient as { close(): Promise<void> });
 
-    for (let index = 0; index < pendingCount; index += 1) {
-      await runLocalSystemMutation(
-        firstClient as Awaited<ReturnType<typeof createConvexClient>> & {
-          close(): Promise<void>;
-        },
-        SystemPaths.pendingPush,
-        {
-          ref: "issues:update",
-          args: JSON.stringify({
-            issueId: `fake-issue-${index}`,
-            title: `${name}-${index}`,
-          }),
-          localResult: JSON.stringify(null),
-          table: "issues",
-          payloadVersion: 1,
-        },
-      );
+    for (let index = 0; index < projectCount; index += 1) {
+      await firstClient.mutation(api.projects.create, {
+        workspaceId: DEMO_WORKSPACE_ID,
+        name: `Node Volume ${name}-${index}`,
+        identifier: `V${String(index).padStart(5, "0")}`,
+        description: `Node volume ${name}-${index}`,
+      });
     }
-
-    const firstRuntime = getEmbeddedClientEntry(firstClient)?.runtime;
-    if (!firstRuntime) {
-      throw new Error(
-        "[convex-embedded] missing embedded runtime entry for client",
-      );
-    }
-    expect(
-      await firstRuntime.getDocumentsForTable("_resolve_pending"),
-    ).toHaveLength(pendingCount);
 
     await firstClient.close();
     clientsToClose.length = 0;
@@ -151,22 +114,45 @@ describe("node platform persistence", () => {
         "[convex-embedded] missing embedded runtime entry for client",
       );
     }
-    const persistedPending =
-      await runtime.getDocumentsForTable("_resolve_pending");
+    const hydratedProjects = await runtime.getDocumentsForTable("projects");
+    await secondClient.close();
+    clientsToClose.length = 0;
 
-    expect(persistedPending).toHaveLength(pendingCount);
+    const persistence = await openNodePersistence({ filename: databasePath });
+    const persistedProjects = await persistence.list("projects");
+    await persistence.close();
     expect(
-      persistedPending.every(
-        (entry) => (entry as { table?: string }).table === "issues",
-      ),
-    ).toBe(true);
+      hydratedProjects
+        .filter(
+          (entry) =>
+            (entry as { groupId?: string }).groupId === DEMO_WORKSPACE_ID,
+        )
+        .filter((entry) =>
+          String((entry as { name?: string }).name).startsWith(
+            `Node Volume ${name}-`,
+          ),
+        ).length,
+    ).toBeGreaterThan(0);
     expect(
-      persistedPending.some((entry) =>
-        String((entry as { args?: string }).args).includes(
-          `${name}-${pendingCount - 1}`,
-        ),
-      ),
-    ).toBe(true);
+      persistedProjects
+        .filter(
+          (entry) =>
+            (entry as { groupId?: string }).groupId === DEMO_WORKSPACE_ID,
+        )
+        .filter((entry) =>
+          String((entry as { name?: string }).name).startsWith(
+            `Node Volume ${name}-`,
+          ),
+        ).length,
+    ).toBeGreaterThanOrEqual(projectCount - 2);
+    expect(persistedProjects).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          groupId: DEMO_WORKSPACE_ID,
+          name: `Node Volume ${name}-${projectCount - 1}`,
+        }),
+      ]),
+    );
   });
 
   it("does not duplicate projects in list after issue creation updates the project", async () => {

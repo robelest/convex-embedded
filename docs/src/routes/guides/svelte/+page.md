@@ -14,8 +14,8 @@ convex-embedded integrates with SvelteKit through `convex-svelte`. The practical
 client-only flow is: disable SSR, create the client in your layout, provide it
 once, and use the normal query/mutation helpers.
 
-If you want SSR for the initial route, the supported path is different: build a
-replica on the server with `createReplica(...)`, render against
+If you want SSR for the initial route, the supported path is different: build
+prefetch data on the server with `createEmbeddedPrefetch(...)`, render against
 `createEmbeddedRuntime(...)`, and only create the browser client after
 hydration.
 
@@ -218,7 +218,7 @@ code.
 ## Key points
 
 - **Client creation is browser-only** -- wa-sqlite still requires `IndexedDB`,
-  `Worker`, and `WebAssembly`. If you want SSR, use the replica bootstrap flow
+  `Worker`, and `WebAssembly`. If you want SSR, use the prefetch bootstrap flow
   instead of creating the client on the server.
 - **Modules must stay lazy** -- Use canonical module ids like
   `"./convex/tasks.ts": () => import("./convex/tasks")`.

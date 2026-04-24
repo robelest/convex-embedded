@@ -56,7 +56,6 @@ import {
   getSetMembers,
   resolveRegister,
   extractProseText,
-  materializeYjsDoc,
 } from "@robelest/convex-embedded/crdt";
 ```
 

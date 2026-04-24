@@ -51,22 +51,23 @@ The `tasks` handle returned by `embeddedTable()` is both a valid
 `TableDefinition` (so `defineSchema` accepts it) and a builder for mutations and
 queries.
 
-## 2. Set Up Server Binding
+## 2. Bind The Remote Component
 
-Create `convex/embedded.ts` to bind the component reference. This enables CRDT
-delta recording on the remote Convex backend.
+Export a `bind` helper from each synced module to attach the embedded component.
+This enables CRDT delta recording on the remote Convex backend.
 
 ```ts
-// convex/embedded.ts
-import { setup } from "@robelest/convex-embedded/server";
+// convex/tasks.ts
+import { bindTable } from "@robelest/convex-embedded/server";
 import { components } from "./_generated/api";
+import { tasks } from "./schema";
 
-setup({ component: components.embedded });
+export const bind = bindTable(tasks, components.embedded);
 ```
 
-This file is side-effect-only. It binds `components.embedded` to every table
-registered with `embeddedTable()`. Function registration does not depend on this
-file -- mutations and queries are registered at definition time.
+`bindTable(...)` is explicit and per-table. Function registration still happens
+at definition time; binding only adds the remote component hooks used for CRDT
+delta recording and resolve.
 
 ## 3. Write Functions
 
@@ -75,9 +76,12 @@ API mirrors standard Convex functions:
 
 ```ts
 // convex/tasks.ts
+import { bindTable } from "@robelest/convex-embedded/server";
+import { components } from "./_generated/api";
 import { v } from "convex/values";
 import { tasks } from "./schema";
 
+export const bind = bindTable(tasks, components.embedded);
 export const resolve = tasks.resolve;
 
 export const create = tasks.mutation({
@@ -132,6 +136,7 @@ export const list = tasks.query({
 
 The important embedded-specific pieces here are:
 
+- `export const bind = bindTable(tasks, components.embedded)`
 - `export const resolve = tasks.resolve`
 - `remote:` for server-only follow-up logic
 - `resolve.args` for queries that should be re-fetched after resolve
@@ -250,10 +255,10 @@ function App() {
 If your app server-renders its first route, do not create the browser client on
 the server. Instead:
 
-1. build a `replica` with `createReplica(...)` from
+1. build prefetched data with `createEmbeddedPrefetch(...)` from
    `@robelest/convex-embedded/client`
-2. render with `createEmbeddedRuntime({ replica })`
-3. pass the same `replica` into `createConvexClient(...)` in the browser
+2. render with `createEmbeddedRuntime({ prefetch })`
+3. pass the same prefetched data into `createConvexClient(...)` in the browser
 
 That keeps the first browser render aligned with the SSR HTML and lets runtime
 pagination work before remote sync resumes.

@@ -59,12 +59,12 @@ Only plain data crosses the worker boundary:
 - **`ArrayBuffer`s** -- binary blobs (e.g., Yjs state vectors).
 
 No functions, proxies, or other non-transferable objects are sent across
-`postMessage`. The main-thread `StorageAdapter` proxy translates each database
-operation (hydrate, commit, clear) into an RPC call to the worker and awaits the
-response.
+`postMessage`. The main-thread `PersistenceAdapter` proxy translates each
+database operation (hydrate, commit, clear) into an RPC call to the worker and
+awaits the response.
 
-The `WebAssembly.Module` is compiled once (via `compileWasmModule()`) and
-transferred to the worker at init time, avoiding a second download.
+The sqlite worker owns engine initialization and opens the configured OPFS
+database when the browser client starts.
 
 ## Platform Adapters
 

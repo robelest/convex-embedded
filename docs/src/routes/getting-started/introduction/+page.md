@@ -35,11 +35,8 @@ The current architecture is explicitly layered:
 - route overrides (`localOnly()` / `remoteOnly()`) define alpha-safe execution
   boundaries
 
-`convex-embedded` builds on
-[`@robelest/fx`](https://www.npmjs.com/package/@robelest/fx) for its internal
-effect system. `@robelest/fx` now lives in its own repository, so
-`convex-embedded` consumes it as a normal published dependency rather than as an
-in-repo workspace package.
+`convex-embedded` builds on `effect` for its internal control-flow and runtime
+primitives.
 
 ## Key Features
 
@@ -60,7 +57,7 @@ in-repo workspace package.
     Documents persist to IndexedDB via wa-sqlite running in a Dedicated Worker. Data survives page refreshes and browser restarts.
   </Card>
   <Card title="Framework Agnostic">
-    The browser entry stays framework agnostic. The core SSR/bootstrap flow is driven by `createReplica`, `createEmbeddedRuntime`, and `createConvexClient` rather than a framework-specific wrapper.
+    The browser entry stays framework agnostic. The core SSR/bootstrap flow is driven by `createEmbeddedPrefetch`, `createEmbeddedRuntime`, and `createConvexClient` rather than a framework-specific wrapper.
   </Card>
 </CardGrid>
 

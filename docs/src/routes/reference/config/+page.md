@@ -22,41 +22,50 @@ import { createConvexClient } from "@robelest/convex-embedded/browser";
 const client = createConvexClient(options: ClientOptions);
 ```
 
-| Option          | Type                                     | Default             | Description                                                                    |
-| --------------- | ---------------------------------------- | ------------------- | ------------------------------------------------------------------------------ |
-| `modules`       | `Record<string, () => Promise<unknown>>` | _required_          | Lazy ESM registry keyed by canonical module id.                                |
-| `schema`        | `unknown`                                | `undefined`         | Default export from `convex/schema.ts`.                                        |
-| `clientOptions` | `Partial<BaseConvexClientOptions>`       | `undefined`         | Forwarded to `ConvexClient`.                                                   |
-| `workerUrl`     | `URL \| string`                          | auto-resolved       | wa-sqlite worker URL. Rarely needed.                                           |
-| `name`          | `string`                                 | `"convex-embedded"` | IndexedDB database name. Shared across tabs.                                   |
-| `remote`        | `RemoteOptions`                          | `undefined`         | Enable remote. Omit for local-only.                                            |
-| `auth`          | `AuthOptions`                            | `undefined`         | Auth and identity configuration.                                               |
-| `replica`       | `Replica`                                | `undefined`         | Initial embedded table data created by `createReplica(...)` for SSR/bootstrap. |
-| `encryption`    | `EncryptionOptions`                      | `undefined`         | Encrypt persisted local state at rest.                                         |
+| Option          | Type                                     | Default             | Description                                                                             |
+| --------------- | ---------------------------------------- | ------------------- | --------------------------------------------------------------------------------------- |
+| `modules`       | `Record<string, () => Promise<unknown>>` | _required_          | Lazy ESM registry keyed by canonical module id.                                         |
+| `schema`        | `unknown`                                | `undefined`         | Default export from `convex/schema.ts`.                                                 |
+| `clientOptions` | `Partial<BaseConvexClientOptions>`       | `undefined`         | Forwarded to `ConvexClient`.                                                            |
+| `name`          | `string`                                 | `"convex-embedded"` | Persistent browser database name. Shared across tabs.                                   |
+| `remote`        | `RemoteOptions`                          | `undefined`         | Enable remote. Omit for local-only.                                                     |
+| `auth`          | `AuthOptions`                            | `undefined`         | Auth and identity configuration.                                                        |
+| `prefetch`      | `Prefetch`                               | `undefined`         | Initial embedded table data created by `createEmbeddedPrefetch(...)` for SSR/bootstrap. |
+| `encryption`    | `EncryptionOptions`                      | `undefined`         | Encrypt persisted local state at rest.                                                  |
 
-## Replica bootstrap
+## Prefetch bootstrap
 
-To render on the server and start the browser client warm, build a replica from
-`@robelest/convex-embedded/client` and pass it into both the runtime and the
-browser client:
+To render on the server and start the browser client warm, build prefetch data
+from `@robelest/convex-embedded/client` and pass it into both the runtime and
+the browser client:
 
 ```ts
 import { createEmbeddedRuntime } from "@robelest/convex-embedded";
-import { createReplica } from "@robelest/convex-embedded/client";
+import { createEmbeddedPrefetch } from "@robelest/convex-embedded/client";
 import { createConvexClient } from "@robelest/convex-embedded/browser";
 
-const replica = await createReplica({
-  modules,
+const { embedded: prefetched } = await createEmbeddedPrefetch({
   url: process.env.CONVEX_URL!,
   token,
+  queries: {
+    tasks: {
+      query: api.tasks.list,
+      args: {},
+      collection: "tasks",
+    },
+  },
 });
 
-const runtime = createEmbeddedRuntime({ modules, schema, replica });
+const runtime = createEmbeddedRuntime({
+  modules,
+  schema,
+  prefetch: prefetched,
+});
 const client = createConvexClient({
   modules,
   schema,
   remote: { url },
-  replica,
+  prefetch: prefetched,
 });
 ```
 

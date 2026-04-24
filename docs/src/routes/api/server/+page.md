@@ -17,7 +17,7 @@ scoping queries with views, and declaring local migration metadata.
 ```ts
 import {
   embeddedTable,
-  setup,
+  bindTable,
   localOnly,
   remoteOnly,
   view,
@@ -32,7 +32,7 @@ import {
 | table definition  | `embeddedTable(...)`                                       | declares an embedded synced table            |
 | synced exports    | `table.query(...)`, `table.mutation(...)`, `table.resolve` | builds local-first synced functions          |
 | execution control | `localOnly(...)`, `remoteOnly(...)`                        | forces local-only or remote-only execution   |
-| component binding | `setup({ component })`                                     | binds delta storage / resolve component refs |
+| component binding | `bindTable(table, components.embedded)`                    | binds delta storage / resolve component refs |
 | extras            | `view.*`                                                   | query scoping utilities                      |
 
 ## Most common usage
@@ -98,8 +98,8 @@ function embeddedTable(
 | `options.defaults` | `Record<string, unknown>`                 | `{}`         | Default values for additive changes.                       |
 | `options.migrate`  | `Record<number, LocalTableMigrationStep>` | `{}`         | Forward-only local document migration steps by version.    |
 
-Each call registers the table in a module-level registry (read by `setup()` and
-`getTableRegistry()`).
+Each call registers the table in a module-level registry exposed by
+`getTableRegistry()`.
 
 The current alpha model is explicit:
 
@@ -223,8 +223,12 @@ export default defineSchema({
 ### Example: `convex/tasks.ts`
 
 ```ts
+import { bindTable } from "@robelest/convex-embedded/server";
+import { components } from "./_generated/api";
 import { tasks } from "./schema";
 import { v } from "convex/values";
+
+export const bind = bindTable(tasks, components.embedded);
 
 export const create = tasks.mutation({
   args: { title: v.string(), body: v.string() },
@@ -249,50 +253,36 @@ export const resolve = tasks.resolve;
 
 ---
 
-## `setup(config)`
+## `bindTable(table, component)`
 
-Binds the component reference to all registered embedded tables. Call once per
-app in a dedicated file (e.g. `convex/embedded.ts`). This enables CRDT delta
-recording and resolve queries against the real component.
+Binds the component reference for one embedded table. Export it from the same
+module as that table's synced functions. This enables CRDT delta recording and
+resolve queries against the real component.
 
-Function registration does **not** depend on `setup()` -- the `.mutation()` and
-`.query()` builders use `mutationGeneric` / `queryGeneric` from `convex/server`
-directly and produce registered functions at definition time.
-
-```ts
-function setup(config: SetupConfig): void;
-```
-
-### `SetupConfig`
+Function registration does **not** depend on `bindTable()` -- the `.mutation()`
+and `.query()` builders use `mutationGeneric` / `queryGeneric` from
+`convex/server` directly and produce registered functions at definition time.
 
 ```ts
-interface SetupConfig {
-  component?: {
-    public: {
-      insertDelta: FunctionReference<"mutation", any>;
-      getLatestDelta: FunctionReference<"query", any>;
-      getLatestDeltas: FunctionReference<"query", any>;
-      cleanup: FunctionReference<"mutation", any>;
-    };
-  };
-}
+function bindTable(
+  table: EmbeddedTableHandle,
+  component: ComponentBinding,
+): RegisteredQuery<"public", DefaultFunctionArgs, any>;
 ```
 
-| Field       | Type                    | Description                                                                                                  |
+| Parameter   | Type                    | Description                                                                                                  |
 | ----------- | ----------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `table`     | Embedded table handle   | The result of `embeddedTable(...)` from your schema module.                                                  |
 | `component` | Component API reference | The Convex component reference (`components.embedded`). Provides access to the CRDT delta storage functions. |
 
-Evaluation order between `schema.ts` and `embedded.ts` does not matter. If
-`setup()` runs before `embeddedTable()` (e.g. due to ESM evaluation order), the
-config is stored and applied automatically when tables register.
-
-### Example: `convex/embedded.ts`
+### Example: `convex/tasks.ts`
 
 ```ts
-import { setup } from "@robelest/convex-embedded/server";
+import { bindTable } from "@robelest/convex-embedded/server";
 import { components } from "./_generated/api";
+import { tasks } from "./schema";
 
-setup({ component: components.embedded });
+export const bind = bindTable(tasks, components.embedded);
 ```
 
 ---
@@ -424,7 +414,7 @@ API, but it is no longer the primary app-facing workflow.
 ## `getTableRegistry()`
 
 Returns a read-only snapshot of all tables declared with `embeddedTable()`. Used
-by the browser entry point for auto-discovery and internally by `setup()`.
+by the browser entry point for auto-discovery.
 
 ```ts
 function getTableRegistry(): ReadonlyMap<string, EmbeddedTableHandle>;

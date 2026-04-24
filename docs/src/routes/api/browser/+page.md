@@ -39,13 +39,13 @@ function createConvexClient(options: ClientOptions): ConvexClient;
 ```
 
 The factory creates an `EmbeddedRuntime` on the main thread, connects it to a
-`ConvexClient` via a loopback WebSocket transport, and initializes wa-sqlite
-persistence in a Dedicated Worker. The returned client behaves like a standard
-`ConvexClient`, but uses the embedded runtime as its local execution and sync
-layer.
+`ConvexClient` via a loopback WebSocket transport, and initializes browser
+sqlite persistence in a Dedicated Worker. The returned client behaves like a
+standard `ConvexClient`, but uses the embedded runtime as its local execution
+and sync layer.
 
 **Without `remote`**: Purely local. Queries and mutations run against an
-in-browser database persisted to IndexedDB via wa-sqlite. No network traffic.
+in-browser database persisted via OPFS-backed sqlite. No network traffic.
 
 **With `remote`**: Local-first with transparent remote. Queries read from the
 local embedded database (instant, offline-capable). Mutations write locally
@@ -95,22 +95,32 @@ onDestroy(() => client.close());
 
 ```ts
 import { createEmbeddedRuntime } from "@robelest/convex-embedded";
-import { createReplica } from "@robelest/convex-embedded/client";
+import { createEmbeddedPrefetch } from "@robelest/convex-embedded/client";
 import { createConvexClient } from "@robelest/convex-embedded/browser";
 
-const replica = await createReplica({
-  modules,
+const { embedded: prefetched } = await createEmbeddedPrefetch({
   url: process.env.CONVEX_URL!,
+  queries: {
+    tasks: {
+      query: api.tasks.list,
+      args: {},
+      collection: "tasks",
+    },
+  },
 });
 
-const runtime = createEmbeddedRuntime({ modules, schema, replica });
+const runtime = createEmbeddedRuntime({
+  modules,
+  schema,
+  prefetch: prefetched,
+});
 const firstPage = await runtime.paginate(
   api.tasks.list,
   {},
   { initialNumItems: 20 },
 );
 
-const client = createConvexClient({ modules, schema, replica });
+const client = createConvexClient({ modules, schema, prefetch: prefetched });
 ```
 
 ---
@@ -127,11 +137,10 @@ interface ClientOptions {
     Partial<BaseConvexClientOptions>,
     "webSocketConstructor"
   >;
-  workerUrl?: URL | string;
   name?: string;
   remote?: RemoteOptions;
   auth?: AuthOptions;
-  replica?: Replica;
+  prefetch?: Prefetch;
 }
 ```
 
@@ -140,11 +149,10 @@ interface ClientOptions {
 | `modules`       | `Record<string, () => Promise<unknown>>`     | **required**        | Lazy ESM registry keyed by canonical module id.        |
 | `schema`        | `unknown`                                    | `undefined`         | Default export from `convex/schema.ts`.                |
 | `clientOptions` | `Omit<Partial<...>, "webSocketConstructor">` | `undefined`         | Forwarded to `ConvexClient`.                           |
-| `workerUrl`     | `URL \| string`                              | auto-resolved       | wa-sqlite worker URL. Rarely needed.                   |
-| `name`          | `string`                                     | `"convex-embedded"` | IndexedDB database name. Shared across tabs.           |
+| `name`          | `string`                                     | `"convex-embedded"` | Persistent browser database name. Shared across tabs.  |
 | `remote`        | `RemoteOptions`                              | `undefined`         | Enable remote. Omit for local-only.                    |
 | `auth`          | `AuthOptions`                                | `undefined`         | Auth configuration.                                    |
-| `replica`       | `Replica`                                    | `undefined`         | Initial remote-backed embedded data for SSR/bootstrap. |
+| `prefetch`      | `Prefetch`                                   | `undefined`         | Initial remote-backed embedded data for SSR/bootstrap. |
 | `encryption`    | `EncryptionOptions`                          | `undefined`         | Encrypt persisted local state at rest.                 |
 
 ### Current architecture notes

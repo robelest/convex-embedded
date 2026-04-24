@@ -56,9 +56,10 @@ const client =
     : null;
 ```
 
-If you want SSR for the first route instead, build a replica on the server with
-`createReplica(...)`, render with `createEmbeddedRuntime({ replica })`, and only
-call `createConvexClient(...)` in the browser.
+If you want SSR for the first route instead, build prefetch data on the server
+with `createEmbeddedPrefetch(...)`, render with
+`createEmbeddedRuntime({ prefetch })`, and only call `createConvexClient(...)`
+in the browser.
 
 ## Module registry
 
@@ -92,8 +93,7 @@ const modules = {
 
 ## Worker URL resolution
 
-**Problem**: The wa-sqlite worker fails to load, with errors like
-`wa-sqlite worker failed to load` or `wa-sqlite worker RPC timed out`.
+**Problem**: The browser sqlite worker fails to load.
 
 **Solution**: In most setups the worker URL resolves automatically. The worker
 is loaded as a `{ type: "module" }` Worker from a URL relative to the package:
@@ -103,14 +103,7 @@ new Worker(workerUrl, { type: "module" });
 ```
 
 If your build pipeline moves worker scripts to a different location, override
-the `workerUrl` option:
-
-```ts
-const client = createConvexClient({
-  modules,
-  workerUrl: new URL("./path/to/worker.js", import.meta.url),
-});
-```
+the package-owned browser worker asset resolves correctly in your build.
 
 The worker RPC has a default timeout of 15 seconds. If initialization takes
 longer (slow device, large database), you may see timeout errors on first load

@@ -210,8 +210,7 @@ The wa-sqlite worker may fail to initialize if:
 These errors surface as rejected promises during client initialization. The
 worker RPC has a default timeout of 15 seconds.
 
-**Fix**: Ensure your build pipeline correctly bundles the wa-sqlite worker. If
-needed, override the `workerUrl` option.
+**Fix**: Ensure your build pipeline correctly bundles the browser sqlite worker.
 
 ### Network errors during remote
 

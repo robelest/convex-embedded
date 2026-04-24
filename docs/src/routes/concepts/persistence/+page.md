@@ -1,8 +1,8 @@
 ---
 title: Persistence
 description:
-  How documents are persisted to IndexedDB via wa-sqlite, and how to configure
-  storage options.
+  How documents are persisted through browser sqlite backed by OPFS, and how to
+  configure storage options.
 ---
 
 <svelte:head>
@@ -12,9 +12,9 @@ description:
 
 # Persistence
 
-By default, `convex-embedded` persists documents to IndexedDB using wa-sqlite.
-This page starts with the parts you actually configure, then explains how the
-storage layer works.
+By default, `convex-embedded` persists documents through browser sqlite backed
+by OPFS. This page starts with the parts you actually configure, then explains
+how the storage layer works.
 
 ## What you configure
 
@@ -22,7 +22,6 @@ storage layer works.
 const client = createConvexClient({
   modules,
   name: "my-app-data",
-  workerUrl: new URL("./worker.js", import.meta.url),
   encryption: myEncryptionHooks,
 });
 ```
@@ -30,46 +29,39 @@ const client = createConvexClient({
 The important browser-facing knobs are:
 
 - `name` for database sharing/isolation
-- `workerUrl` if your build pipeline moves the worker asset
 - `encryption` if you want persisted local state encrypted at rest
 
-## wa-sqlite (Default)
+## Browser SQLite (Default)
 
-The default storage backend uses wa-sqlite with the `IDBBatchAtomicVFS` virtual
-file system. This stores SQLite database pages as IndexedDB entries, giving you
-a full relational database with ACID transactions inside the browser.
+The default storage backend uses `@effect/sql-sqlite-wasm` with an OPFS-backed
+worker. This gives you a full relational database with ACID transactions inside
+the browser.
 
 ### Dedicated Worker
 
-wa-sqlite runs in a **Dedicated Worker** to keep heavy database operations off
-the main thread. The main-thread `StorageAdapter` proxy communicates with the
-worker via `postMessage`:
+Browser sqlite runs in a **Dedicated Worker** to keep heavy database operations
+off the main thread. The main-thread `PersistenceAdapter` proxy communicates
+with the worker through the sqlite-wasm worker protocol:
 
 - **JSON strings** for document data and metadata.
-- **`ArrayBuffer`s** for binary blobs (transferred, not copied).
-- **`WebAssembly.Module`** for the compiled wa-sqlite binary (transferred once
-  at init).
-
-No functions, proxies, or other non-cloneable objects cross the boundary.
+- **`ArrayBuffer`s** for binary blobs (transferred, not copied). No Convex
+  modules, functions, or other non-cloneable objects cross the boundary.
 
 ### Initialization Flow
 
 When `createConvexClient()` is called:
 
-1. The wa-sqlite WASM module is compiled via `compileWasmModule()`.
-2. A Dedicated Worker is spawned.
-3. The compiled `WebAssembly.Module` is transferred to the worker.
-4. The worker initializes wa-sqlite with `IDBBatchAtomicVFS` and the configured
-   database name.
-5. All persisted documents are read from SQLite and loaded into the in-memory
+1. A Dedicated Worker is spawned.
+2. The worker initializes OPFS-backed sqlite for the configured database name.
+3. All persisted documents are read from SQLite and loaded into the in-memory
    database (hydration).
-6. The hydration gate resolves, and the `ConvexClient` starts processing
+4. The hydration gate resolves, and the `ConvexClient` starts processing
    messages.
 
 ### Operations
 
-The `StorageAdapter` interface exposes these operations, all delegated to the
-worker via RPC:
+The `PersistenceAdapter` interface exposes these operations, all delegated to
+the browser sqlite adapter:
 
 | Method                       | Description                                                                           |
 | ---------------------------- | ------------------------------------------------------------------------------------- |
@@ -120,7 +112,7 @@ const { storageId } = await response.json();
 - Upload URLs are single-use and expire after a successful upload.
 - Upload URLs accept `POST` requests only.
 - The storage surface is implemented by the platform entry point (`/browser`),
-  not by `StorageAdapter` itself.
+  not by `PersistenceAdapter` itself.
 - If a runtime has no platform storage surface installed, `getUrl()` and
   `generateUploadUrl()` fail closed with a clear error.
 
@@ -169,13 +161,13 @@ This mode is primarily useful for testing or for transient UI state that does
 not need to persist. When `createConvexClient()` is called and the wa-sqlite
 worker fails to initialize, the runtime falls back to ephemeral mode.
 
-## StorageAdapter Interface
+## PersistenceAdapter Interface
 
 You can implement a custom storage backend by providing an object that satisfies
-the `StorageAdapter` interface:
+the `PersistenceAdapter` interface:
 
 ```ts
-interface StorageAdapter {
+interface PersistenceAdapter {
   // Hydration -- called once on startup
   getDocuments(): Promise<StoredDocumentWithTable[]>;
   getDocumentsByTable(tableName: string): Promise<StoredDocument[]>;
@@ -212,7 +204,7 @@ must be applied in the order: puts, deletes, then meta.
 ### Custom Backend Example
 
 ```ts
-const customStorage: StorageAdapter = {
+const customStorage: PersistenceAdapter = {
   async getDocuments() {
     // Read all documents from your backend
     return [];
@@ -247,26 +239,7 @@ const customStorage: StorageAdapter = {
 This could be used to back the embedded database with a different storage engine
 (e.g., OPFS, a custom server, or an in-memory store for tests).
 
-## Preloading
+## Worker Asset
 
-The wa-sqlite WASM binary can be preloaded to avoid a cold-start delay. The
-`browser` entry point exports utilities for this:
-
-```ts
-import {
-  preloadLinks,
-  injectPreloadLinks,
-  compileWasmModule,
-  WASM_URL,
-} from "@robelest/convex-embedded/browser";
-```
-
-| Utility                | Description                                                                                 |
-| ---------------------- | ------------------------------------------------------------------------------------------- |
-| `preloadLinks()`       | Returns an array of `<link rel="preload">` descriptors.                                     |
-| `injectPreloadLinks()` | Appends preload links to the document head.                                                 |
-| `compileWasmModule()`  | Compiles the WASM binary into a `WebAssembly.Module` that can be transferred to the worker. |
-| `WASM_URL`             | The CDN URL of the wa-sqlite binary.                                                        |
-
-These are called automatically by `createConvexClient()` but can be invoked
-earlier (e.g., in a service worker or during SSR preload) for faster startup.
+The browser sqlite worker is bundled and resolved by the package. Most apps do
+not need to configure or reference it directly.

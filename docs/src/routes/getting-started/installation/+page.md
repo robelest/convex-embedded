@@ -24,9 +24,9 @@ Before installing, make sure you have:
 
 ## 1. Install the Package
 
-`@robelest/convex-embedded` depends on the standalone `@robelest/fx` package
-internally. You do not need to install `@robelest/fx` separately unless you are
-also using its lower-level APIs directly in your own code.
+`@robelest/convex-embedded` now uses `effect` internally for its core control
+flow primitives. You do not need to install or configure anything separately to
+use the package.
 
 <Tabs>
   <TabItem label="npm">
@@ -80,15 +80,15 @@ you need:
 | ----------------------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------- |
 | `@robelest/convex-embedded/browser`       | Browser         | `createConvexClient` factory, `getRemoteState`, `subscribeRemoteState`, `getAuthState`, `subscribeAuthState`, preload utilities |
 | `@robelest/convex-embedded/react`         | React           | `createConvexReactClient` and React-compatible wrapping for `ConvexProvider`, `useQuery`, and `usePaginatedQuery`               |
-| `@robelest/convex-embedded/server`        | Convex backend  | `embeddedTable`, `setup`, `localOnly`, `remoteOnly`                                                                             |
+| `@robelest/convex-embedded/server`        | Convex backend  | `embeddedTable`, `bindTable`, `localOnly`, `remoteOnly`                                                                         |
 | `@robelest/convex-embedded/crdt`          | Convex backend  | `schema` namespace (`register`, `prose`, `counter`, `set`, `omit`)                                                              |
-| `@robelest/convex-embedded/client`        | Advanced client | Replica/bootstrap helpers such as `createReplica`                                                                               |
+| `@robelest/convex-embedded/client`        | Advanced client | Prefetch/bootstrap helpers such as `createEmbeddedPrefetch`                                                                     |
 | `@robelest/convex-embedded/convex.config` | Convex          | Component configuration                                                                                                         |
 | `@robelest/convex-embedded/test`          | Test            | Testing utilities                                                                                                               |
 
 Most applications only need `browser`, `server`, and `crdt`. Use `react` for
 React hook compatibility, and reach for `client` when you need SSR/bootstrap
-helpers such as `createReplica`.
+helpers such as `createEmbeddedPrefetch`.
 
 ## Next Steps
 

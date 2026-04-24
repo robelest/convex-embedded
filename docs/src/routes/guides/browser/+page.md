@@ -153,25 +153,35 @@ const firstPage = await client.query(api.tasks.paginated, {
 Imports from `@robelest/convex-embedded/browser` are SSR-safe, but client
 creation is still a browser-only step.
 
-For SSR startup, build a remote replica on the server, run your first queries
-against an embedded runtime, and then pass the same replica into the browser
-client:
+For SSR startup, build remote prefetch data on the server, run your first
+queries against an embedded runtime, and then pass the same prefetched data into
+the browser client:
 
 ```ts
 import { createEmbeddedRuntime } from "@robelest/convex-embedded";
-import { createReplica } from "@robelest/convex-embedded/client";
+import { createEmbeddedPrefetch } from "@robelest/convex-embedded/client";
 import { createConvexClient } from "@robelest/convex-embedded/browser";
 
-const replica = await createReplica({
-  modules,
+const { embedded: prefetched } = await createEmbeddedPrefetch({
   url: process.env.CONVEX_URL!,
+  queries: {
+    tasks: {
+      query: api.tasks.list,
+      args: {},
+      collection: "tasks",
+    },
+  },
 });
 
-const runtime = createEmbeddedRuntime({ modules, schema, replica });
-const dashboard = await runtime.query(api.dashboard.get, {});
-const issues = await runtime.paginate(
-  api.issues.forProject,
-  { projectId: "p1" },
+const runtime = createEmbeddedRuntime({
+  modules,
+  schema,
+  prefetch: prefetched,
+});
+const tasks = await runtime.query(api.tasks.list, {});
+const firstPage = await runtime.paginate(
+  api.tasks.paginated,
+  {},
   { initialNumItems: 20 },
 );
 
@@ -179,7 +189,7 @@ const client = createConvexClient({
   modules,
   schema,
   remote: { url: process.env.CONVEX_URL! },
-  replica,
+  prefetch: prefetched,
 });
 ```
 

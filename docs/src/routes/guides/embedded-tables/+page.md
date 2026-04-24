@@ -19,7 +19,8 @@ You use:
 1. `embeddedTable()` in `convex/schema.ts`
 2. `table.mutation(...)` / `table.query(...)` in feature modules
 3. `export const resolve = table.resolve` in each synced table module
-4. `setup({ component: components.embedded })` once in your app
+4. `export const bind = bindTable(table, components.embedded)` in each synced
+   table module
 
 ## Minimal example
 
@@ -45,9 +46,12 @@ export default defineSchema({ tasks });
 
 ```ts
 // convex/tasks.ts
+import { bindTable } from "@robelest/convex-embedded/server";
+import { components } from "./_generated/api";
 import { v } from "convex/values";
 import { tasks } from "./schema";
 
+export const bind = bindTable(tasks, components.embedded);
 export const resolve = tasks.resolve;
 
 export const create = tasks.mutation({

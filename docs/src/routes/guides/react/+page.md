@@ -206,8 +206,9 @@ const client =
 
 Imports are now SSR-safe, so the React entry can be imported on the server. Only
 `createConvexReactClient(...)` remains browser-only. For server-rendered
-startup, use `createReplica(...)` from `@robelest/convex-embedded/client` plus
-`createEmbeddedRuntime(...)` from the root package.
+startup, use `createEmbeddedPrefetch(...)` from
+`@robelest/convex-embedded/client` plus `createEmbeddedRuntime(...)` from the
+root package.
 
 ## What happens after setup
 

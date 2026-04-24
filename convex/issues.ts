@@ -24,9 +24,12 @@ export const forProject = issues.query({
       throw new ConvexError("Project not found");
     }
 
-    const sorted = (await ctx.db.query("issues").collect())
-      .filter((issue) => issue.projectId === args.projectId)
-      .sort((a, b) => a.position - b.position);
+    const sorted = (
+      await ctx.db
+        .query("issues")
+        .withIndex("by_projectId", (q) => q.eq("projectId", args.projectId))
+        .collect()
+    ).sort((a, b) => a.position - b.position);
 
     return {
       issues: sorted.map((issue) => ({
@@ -45,6 +48,39 @@ export const forProject = issues.query({
         createdByName: userSummary(issue.createdByUserId).name,
         createdByUserId: issue.createdByUserId,
       })),
+    };
+  },
+});
+
+export const detail = issues.query({
+  args: { issueId: v.id("issues") },
+  handler: async (ctx, args) => {
+    const issue = await ctx.db.get(args.issueId);
+    if (!issue) {
+      throw new ConvexError("Issue not found");
+    }
+
+    const project = await ctx.db.get(issue.projectId);
+    if (!project) {
+      throw new ConvexError("Project not found");
+    }
+
+    return {
+      _id: issue._id,
+      identifier: `${project.identifier}-${issue.number}`,
+      number: issue.number,
+      title: issue.title,
+      status: issue.status,
+      priority: issue.priority,
+      labels: issue.labels,
+      assigneeName: issue.assigneeUserId
+        ? userSummary(issue.assigneeUserId).name
+        : null,
+      assigneeUserId: issue.assigneeUserId ?? null,
+      createdByName: userSummary(issue.createdByUserId).name,
+      createdByUserId: issue.createdByUserId,
+      projectId: issue.projectId,
+      groupId: issue.groupId,
     };
   },
 });
@@ -149,9 +185,10 @@ export const remove = issues.mutation({
     }
 
     const project = await ctx.db.get(issue.projectId);
-    const comments = (await ctx.db.query("comments").collect()).filter(
-      (comment) => comment.issueId === issue._id,
-    );
+    const comments = await ctx.db
+      .query("comments")
+      .withIndex("by_issueId", (q) => q.eq("issueId", issue._id))
+      .collect();
 
     await Promise.all(comments.map((comment) => ctx.db.delete(comment._id)));
     await ctx.db.delete(issue._id);

@@ -46,6 +46,10 @@ export default defineConfig(({ command }) => ({
               replacement: embeddedSrc + "/server/fields.ts",
             },
             {
+              find: "@robelest/convex-embedded/server/schema",
+              replacement: embeddedSrc + "/server/schema.ts",
+            },
+            {
               find: "@robelest/convex-embedded/server",
               replacement: embeddedSrc + "/server/index.ts",
             },
@@ -80,6 +84,10 @@ export default defineConfig(({ command }) => ({
     port: 3000,
     fs: {
       allow: ["../../..", embeddedRoot],
+    },
+    headers: {
+      "Cross-Origin-Opener-Policy": "same-origin",
+      "Cross-Origin-Embedder-Policy": "require-corp",
     },
   },
 }));

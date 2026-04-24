@@ -7,7 +7,6 @@
     "icon": "./assets/images/icon.png",
     "scheme": "demoexpo",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": true,
     "ios": {
       "supportsTablet": true
     },
@@ -41,8 +40,14 @@
       ]
     ],
     "experiments": {
+      "autolinkingModuleResolution": true,
       "typedRoutes": true,
       "reactCompiler": true
+    },
+    "extra": {
+      "router": {
+        "origin": false
+      }
     }
   }
 }

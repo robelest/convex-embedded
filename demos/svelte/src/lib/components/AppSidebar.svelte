@@ -49,7 +49,7 @@
   let newProjectName = $state("");
   let newProjectIdentifier = $state("");
   let newProjectError = $state<string | null>(null);
-  let isCreatingProject = $state(false);
+  let createProjectRequests = $state(0);
 
 	const allTeamGroups = $derived.by(() => {
 		const result: Array<{ groupId: string; name: string; indent: boolean }> = [];
@@ -109,22 +109,32 @@
   }
 
   async function handleCreateProject() {
-    if (!newProjectName.trim() || !newProjectIdentifier.trim()) return;
-    isCreatingProject = true;
+    const name = newProjectName.trim();
+    const identifier = newProjectIdentifier.trim();
+    if (!name || !identifier) return;
+    createProjectRequests += 1;
     newProjectError = null;
+    newProjectName = "";
+    newProjectIdentifier = "";
     try {
 		await client.mutation(api.projects.create, {
         workspaceId: workspaceGroupId,
         ...(newProjectTeamId ? { teamGroupId: newProjectTeamId } : {}),
-        name: newProjectName.trim(),
-        identifier: newProjectIdentifier.trim(),
+        name,
+        identifier,
         description: "",
       });
       showNewProject = false;
     } catch (e: unknown) {
       newProjectError = e instanceof Error ? e.message : "Failed to create project";
+      if (!newProjectName.trim()) {
+        newProjectName = name;
+      }
+      if (!newProjectIdentifier.trim()) {
+        newProjectIdentifier = identifier;
+      }
     } finally {
-      isCreatingProject = false;
+      createProjectRequests -= 1;
     }
   }
 
@@ -221,8 +231,8 @@
         <input class="input input--compact w-full" bind:value={newProjectName} placeholder="Project name" maxlength="50" type="text" />
         <input class="input input--compact w-full" bind:value={newProjectIdentifier} placeholder="ID (e.g. AUTH)" maxlength="6" type="text" style="text-transform: uppercase" />
         <div class="flex gap-1">
-          <button class="button button--accent button--compact flex-1" type="submit" disabled={isCreatingProject || !newProjectName.trim() || !newProjectIdentifier.trim()}>
-            {isCreatingProject ? "..." : "Create"}
+          <button class="button button--accent button--compact flex-1" type="submit" disabled={!newProjectName.trim() || !newProjectIdentifier.trim()}>
+            {createProjectRequests > 0 ? "..." : "Create"}
           </button>
           <button class="button button--secondary button--compact" type="button" onclick={() => { showNewProject = false; }}>Cancel</button>
         </div>

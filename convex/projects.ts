@@ -9,9 +9,12 @@ import { DEFAULT_USER_ID, DEMO_WORKSPACE_ID, toSlug } from "./workspace";
 export const bind = bindTable(projects, components.embedded);
 
 export const list = projects.query({
-  args: {},
-  handler: async (ctx) => {
-    return await ctx.db.query("projects").collect();
+  args: { workspaceId: v.string() },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query("projects")
+      .withIndex("by_groupId", (q) => q.eq("groupId", args.workspaceId))
+      .collect();
   },
 });
 
@@ -39,23 +42,14 @@ export const create = projects.mutation({
       throw new ConvexError("Project identifier is required.");
     }
 
-    const existing = await ctx.db.query("projects").collect();
-    if (
-      existing.some(
-        (project) =>
-          project.groupId === DEMO_WORKSPACE_ID && project.slug === slug,
-      )
-    ) {
+    const existingInGroup = await ctx.db
+      .query("projects")
+      .withIndex("by_groupId", (q) => q.eq("groupId", DEMO_WORKSPACE_ID))
+      .collect();
+    if (existingInGroup.some((project) => project.slug === slug)) {
       throw new ConvexError("A project with that name already exists.");
     }
-
-    if (
-      existing.some(
-        (project) =>
-          project.groupId === DEMO_WORKSPACE_ID &&
-          project.identifier === identifier,
-      )
-    ) {
+    if (existingInGroup.some((project) => project.identifier === identifier)) {
       throw new ConvexError("That project identifier is already in use.");
     }
 

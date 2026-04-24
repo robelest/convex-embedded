@@ -9,14 +9,7 @@ const self = globalThis as unknown as ServiceWorkerGlobalScope;
 
 const CACHE = `convex-embedded-demo-${version}`;
 const ASSETS = [...build, ...files];
-const WA_SQLITE_ORIGIN = "https://wa-sqlite.trestle.inc";
-const WA_SQLITE_ASSETS = [
-  `${WA_SQLITE_ORIGIN}/v1.0.0/dist/wa-sqlite-async.wasm`,
-  `${WA_SQLITE_ORIGIN}/v1.0.0/dist/wa-sqlite-async.mjs`,
-  `${WA_SQLITE_ORIGIN}/v1.0.0/src/examples/IDBBatchAtomicVFS.js`,
-  `${WA_SQLITE_ORIGIN}/v1.0.0/src/sqlite-api.js`,
-];
-const PRECACHE_URLS = [...ASSETS, "/", ...WA_SQLITE_ASSETS];
+const PRECACHE_URLS = [...ASSETS, "/"];
 const SHELL_FALLBACKS = ["/"];
 
 async function warmResource(cache: Cache, resource: string) {
@@ -62,9 +55,8 @@ self.addEventListener("fetch", (event) => {
 
   const url = new URL(request.url);
   const isSameOrigin = url.origin === self.location.origin;
-  const isWaSqliteAsset = url.origin === WA_SQLITE_ORIGIN;
 
-  if (!isSameOrigin && !isWaSqliteAsset) {
+  if (!isSameOrigin) {
     return;
   }
 
@@ -77,10 +69,6 @@ self.addEventListener("fetch", (event) => {
     const cached =
       (await cache.match(request)) ??
       (isSameOrigin ? await cache.match(url.pathname) : undefined);
-
-    if (isWaSqliteAsset && cached) {
-      return cached;
-    }
 
     if (isSameOrigin && ASSETS.includes(url.pathname) && cached) {
       return cached;

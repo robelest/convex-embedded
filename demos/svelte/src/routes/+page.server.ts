@@ -1,44 +1,41 @@
-import schema from "$convex/schema";
-import { createEmbeddedRuntime } from "@robelest/convex-embedded";
-import type { Replica } from "@robelest/convex-embedded/client";
+import { prose } from "$convex/prose";
 
-import { modules } from "../convex-modules";
+import type { PageServerLoad } from "./$types";
 
-const DASHBOARD_QUERY = "dashboard:get";
+export const load: PageServerLoad = async ({ parent }) => {
+  const { prefetch } = await parent();
 
-export const load = async ({
-  parent,
-}: {
-  parent: () => Promise<{ replica: Replica | null }>;
-}) => {
-  const { replica } = await parent();
-
-  if (!replica) {
-    return { dashboard: null };
+  const workspace = prefetch.workspace;
+  const allProjects = prefetch.projects;
+  if (!workspace) {
+    return { workspace: null, projects: null };
   }
 
-  const runtime = createEmbeddedRuntime({
-    modules,
-    schema,
-    replica,
-  });
+  const teams = workspace.selectedWorkspace.teams.flatMap((team: any) => [
+    { groupId: team.groupId, name: team.name },
+    ...team.children,
+  ]);
+  const projects = allProjects
+    .filter(
+      (project: any) => project.groupId === workspace.selectedWorkspace.groupId,
+    )
+    .map((project: any) => ({
+      _id: project._id,
+      name: project.name,
+      identifier: project.identifier,
+      slug: project.slug,
+      description: prose.text(project.description),
+      status: project.status,
+      teamGroupId: project.teamGroupId ?? null,
+      teamName:
+        teams.find((team: any) => team.groupId === project.teamGroupId)?.name ??
+        null,
+      issueCount: project.issueCounter,
+      openIssueCount: project.openIssueCount,
+    }));
 
-  try {
-    const dashboard = await runtime.executeLocal({
-      kind: "query",
-      path: DASHBOARD_QUERY,
-      args: {},
-    });
-
-    return {
-      dashboard,
-    };
-  } catch (error) {
-    console.warn("[svelte-demo] failed to load SSR dashboard", error);
-    return {
-      dashboard: null,
-    };
-  } finally {
-    runtime.shutdown();
-  }
+  return {
+    workspace,
+    projects,
+  };
 };

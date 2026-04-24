@@ -1,13 +1,8 @@
 import { api } from "$convex/_generated/api";
+import type { Id } from "$convex/_generated/dataModel";
 import { useQuery } from "convex/react";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import React, {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import React, { useCallback, useState } from "react";
 import {
   View,
   Text,
@@ -17,109 +12,81 @@ import {
   StyleSheet,
   ActivityIndicator,
   Alert,
+  InteractionManager,
 } from "react-native";
 
 import { AssigneePicker } from "@/src/components/AssigneePicker";
 import { PriorityPicker } from "@/src/components/PriorityPicker";
-import RichTextEditor from "@/src/components/RichTextEditor";
 import { StatusPicker } from "@/src/components/StatusPicker";
-import { client } from "@/src/convex-client";
+import { useEmbeddedClient } from "@/src/convex-client";
+import { useOverlayRegistration } from "@/src/overlay-guard";
+import { useProjectSelection } from "@/src/project-selection";
 import { colors } from "@/src/theme";
-
-const EMPTY_DESCRIPTION = {
-  type: "doc",
-  content: [{ type: "paragraph" }],
-} as const;
-
-type RichTextContent = Record<string, unknown>;
-
-function normalizeRichTextContent(content?: RichTextContent): RichTextContent {
-  if (!content || Array.isArray(content)) {
-    return EMPTY_DESCRIPTION;
-  }
-
-  return content;
-}
+import { useWorkspaceData } from "@/src/use-workspace-data";
 
 export default function IssueDetail() {
+  const client = useEmbeddedClient();
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
   const [editingTitle, setEditingTitle] = useState(false);
   const [titleDraft, setTitleDraft] = useState("");
-  const [descDraft, setDescDraft] = useState<RichTextContent | null>(null);
   const [commentText, setCommentText] = useState("");
   const [posting, setPosting] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [readyForComments, setReadyForComments] = useState(false);
 
-  const dashboard = useQuery(api.dashboard.get, {});
-  const projectId = dashboard?.selectedWorkspace?.projects?.[0]?._id;
-  const members = dashboard?.selectedWorkspace?.members ?? [];
-  const issuesData = useQuery(
-    api.issues.forProject,
-    projectId ? { projectId } : "skip",
+  useOverlayRegistration(`issue:${id}`);
+
+  React.useEffect(() => {
+    const task = InteractionManager.runAfterInteractions(() => {
+      setReadyForComments(true);
+    });
+    return () => task.cancel();
+  }, []);
+
+  const { workspace, projects } = useWorkspaceData();
+  const { selectedProjectId } = useProjectSelection();
+  const selectedProject =
+    projects.find((project) => project._id === selectedProjectId) ?? null;
+  const members = workspace?.selectedWorkspace?.members ?? [];
+  const issue = useQuery(
+    api.issues.detail,
+    typeof id === "string" ? { issueId: id as Id<"issues"> } : "skip",
   );
-  type IssueItem = NonNullable<typeof issuesData>["issues"][number];
-  const issue = issuesData?.issues.find((i: IssueItem) => i._id === id);
 
   const commentsData = useQuery(
     api.comments.forIssue,
-    issue ? { issueId: issue._id } : "skip",
+    readyForComments && issue ? { issueId: issue._id } : "skip",
   );
-  const issueDescription = normalizeRichTextContent(
-    issue?.description as RichTextContent | undefined,
-  );
-  const serializedIssueDescription = useMemo(
-    () => JSON.stringify(issueDescription),
-    [issueDescription],
-  );
-  const lastSubmittedDescription = useRef<string | null>(null);
-  const previousIssueDescription = useRef(serializedIssueDescription);
-
-  useEffect(() => {
-    const previousSerialized = previousIssueDescription.current;
-    previousIssueDescription.current = serializedIssueDescription;
-
-    setDescDraft((current) => {
-      if (current === null) {
-        return issueDescription;
-      }
-
-      return JSON.stringify(current) === previousSerialized
-        ? issueDescription
-        : current;
-    });
-  }, [issueDescription, serializedIssueDescription]);
-
-  if (!issue) {
-    return (
-      <View style={styles.loading}>
-        <ActivityIndicator color={colors.accent[500]} />
-      </View>
-    );
-  }
 
   type CommentItem = NonNullable<typeof commentsData>[number];
   const comments = commentsData ?? [];
 
   const updateIssue = useCallback(
     (fields: Record<string, unknown>) => {
+      if (!issue) {
+        return;
+      }
       void client.mutation(api.issues.update, {
         issueId: issue._id,
         ...fields,
       });
     },
-    [issue._id],
+    [client, issue],
   );
 
-  const handleTitleSubmit = () => {
+  const handleTitleSubmit = useCallback(() => {
     setEditingTitle(false);
+    if (!issue) {
+      return;
+    }
     if (titleDraft.trim() && titleDraft.trim() !== issue.title) {
       updateIssue({ title: titleDraft.trim() });
     }
-  };
+  }, [issue, titleDraft, updateIssue]);
 
-  const handlePostComment = async () => {
-    if (!commentText.trim()) return;
+  const handlePostComment = useCallback(async () => {
+    if (!issue || !commentText.trim()) return;
     setPosting(true);
     try {
       await client.mutation(api.comments.create, {
@@ -130,65 +97,41 @@ export default function IssueDetail() {
     } finally {
       setPosting(false);
     }
-  };
+  }, [client, commentText, issue]);
 
-  const handleDeleteComment = (commentId: string) => {
-    Alert.alert("Delete comment?", "This cannot be undone.", [
-      { text: "Cancel", style: "cancel" },
-      {
-        text: "Delete",
-        style: "destructive",
-        onPress: () => client.mutation(api.comments.remove, { commentId }),
-      },
-    ]);
-  };
+  const handleDeleteComment = useCallback(
+    (commentId: Id<"comments">) => {
+      Alert.alert("Delete comment?", "This cannot be undone.", [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Delete",
+          style: "destructive",
+          onPress: () => client.mutation(api.comments.remove, { commentId }),
+        },
+      ]);
+    },
+    [client],
+  );
 
-  const handleDeleteIssue = async () => {
+  const handleDeleteIssue = useCallback(async () => {
+    if (!issue) {
+      return;
+    }
     if (!confirmDelete) {
       setConfirmDelete(true);
       return;
     }
     await client.mutation(api.issues.remove, { issueId: issue._id });
     router.back();
-  };
+  }, [client, confirmDelete, issue, router]);
 
-  const editingDescription = descDraft ?? issueDescription;
-  const serializedEditingDescription = useMemo(
-    () => JSON.stringify(editingDescription),
-    [editingDescription],
-  );
-  const isDescriptionDirty =
-    serializedEditingDescription !== serializedIssueDescription;
-
-  useEffect(() => {
-    if (lastSubmittedDescription.current === serializedIssueDescription) {
-      lastSubmittedDescription.current = null;
-    }
-  }, [serializedIssueDescription]);
-
-  useEffect(() => {
-    if (!isDescriptionDirty) {
-      return;
-    }
-
-    if (lastSubmittedDescription.current === serializedEditingDescription) {
-      return;
-    }
-
-    const timeout = setTimeout(() => {
-      lastSubmittedDescription.current = serializedEditingDescription;
-      updateIssue({ description: editingDescription });
-    }, 500);
-
-    return () => {
-      clearTimeout(timeout);
-    };
-  }, [
-    editingDescription,
-    isDescriptionDirty,
-    serializedEditingDescription,
-    updateIssue,
-  ]);
+  if (!workspace || !selectedProject || !issue) {
+    return (
+      <View style={styles.loading}>
+        <ActivityIndicator color={colors.accent[500]} />
+      </View>
+    );
+  }
 
   return (
     <ScrollView
@@ -253,20 +196,6 @@ export default function IssueDetail() {
           ))}
         </View>
       )}
-
-      {/* Description */}
-      <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Description</Text>
-        <View style={styles.editorWrap}>
-          <RichTextEditor
-            content={editingDescription}
-            onChange={async (content) => {
-              setDescDraft(content);
-            }}
-            style={{ height: 176 }}
-          />
-        </View>
-      </View>
 
       {/* Assignee */}
       <View style={styles.section}>
@@ -452,24 +381,6 @@ const styles = StyleSheet.create({
     letterSpacing: 1.6,
     color: colors.warm[500],
     marginBottom: 10,
-  },
-  description: { fontSize: 15, color: colors.warm[700], lineHeight: 24 },
-  editorWrap: {
-    minHeight: 176,
-  },
-  descPlaceholder: { color: colors.warm[400], fontStyle: "italic" },
-  descInput: {
-    fontSize: 15,
-    color: colors.warm[700],
-    lineHeight: 24,
-    minHeight: 80,
-    borderWidth: 1,
-    borderColor: colors.warm[300],
-    borderRadius: 8,
-    padding: 12,
-    backgroundColor: colors.warm[50],
-    textAlignVertical: "top",
-    borderCurve: "continuous",
   },
   comment: { paddingVertical: 12 },
   commentBorder: {

@@ -1,10 +1,11 @@
 import React from "react";
 import { View, StyleSheet } from "react-native";
 
-import type { Status } from "@/src/data/mock";
 import { statusColors } from "@/src/theme";
 
-export function StatusDot({ status }: { status: Status }) {
+type IssueStatus = "backlog" | "todo" | "in_progress" | "done" | "cancelled";
+
+export function StatusDot({ status }: { status: IssueStatus }) {
   return (
     <View style={[styles.dot, { backgroundColor: statusColors[status] }]} />
   );

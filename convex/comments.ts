@@ -9,8 +9,14 @@ import { DEFAULT_USER_ID, userSummary } from "./workspace";
 export const bind = bindTable(comments, components.embedded);
 
 export const list = comments.query({
-  args: {},
-  handler: async (ctx) => {
+  args: { issueId: v.optional(v.id("issues")) },
+  handler: async (ctx, args) => {
+    if (args.issueId) {
+      return await ctx.db
+        .query("comments")
+        .withIndex("by_issueId", (q) => q.eq("issueId", args.issueId!))
+        .collect();
+    }
     return await ctx.db.query("comments").collect();
   },
 });
@@ -18,9 +24,10 @@ export const list = comments.query({
 export const forIssue = comments.query({
   args: { issueId: v.id("issues") },
   handler: async (ctx, args) => {
-    const issueComments = (await ctx.db.query("comments").collect()).filter(
-      (comment) => comment.issueId === args.issueId,
-    );
+    const issueComments = await ctx.db
+      .query("comments")
+      .withIndex("by_issueId", (q) => q.eq("issueId", args.issueId))
+      .collect();
 
     return issueComments.map((comment) => ({
       _id: comment._id,

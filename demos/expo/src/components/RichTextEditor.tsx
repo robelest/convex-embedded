@@ -1,5 +1,6 @@
 import {
   RichText,
+  useBridgeState,
   useEditorBridge,
   useEditorContent,
 } from "@10play/tentap-editor";
@@ -7,7 +8,6 @@ import { prose } from "@robelest/convex-embedded/crdt";
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Animated,
-  Platform,
   StyleSheet,
   Text,
   View,
@@ -108,7 +108,6 @@ export default function RichTextEditor({
   style,
   onChange,
 }: RichTextEditorProps) {
-  const [loadVersion, setLoadVersion] = useState(0);
   const [showPreview, setShowPreview] = useState(true);
   const normalizedContent = useMemo(() => normalizeContent(content), [content]);
   const previewText = useMemo(
@@ -120,7 +119,6 @@ export default function RichTextEditor({
     [normalizedContent],
   );
   const lastAppliedContent = useRef(serializedContent);
-  const loadCount = useRef(0);
   const previewOpacity = useRef(new Animated.Value(1)).current;
   const hidePreviewTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -142,6 +140,31 @@ export default function RichTextEditor({
     type: "json",
     debounceInterval: 120,
   });
+  const editorState = useBridgeState(editor);
+
+  useEffect(() => {
+    if (!editorState.isReady) {
+      return;
+    }
+
+    const timeout = setTimeout(() => {
+      setShowPreview(false);
+    }, 80);
+
+    return () => clearTimeout(timeout);
+  }, [editorState.isReady]);
+
+  useEffect(() => {
+    if (!showPreview) {
+      return;
+    }
+
+    const fallback = setTimeout(() => {
+      setShowPreview(false);
+    }, 900);
+
+    return () => clearTimeout(fallback);
+  }, [showPreview]);
 
   useEffect(() => {
     if (showPreview) {
@@ -157,65 +180,51 @@ export default function RichTextEditor({
   }, [previewOpacity, showPreview]);
 
   useEffect(() => {
-    if (loadVersion === 0) {
+    if (!editorState.isReady) {
       return;
     }
 
-    const timeout = setTimeout(() => {
-      editor.injectCSS(EDITOR_CSS);
-      editor.setEditable(editable);
-      editor.setPlaceholder(placeholder);
-      editor.setContent(normalizedContent);
-      lastAppliedContent.current = serializedContent;
-
-      const requiredLoads = Platform.OS === "ios" ? 2 : 1;
-      if (loadCount.current >= requiredLoads) {
-        hidePreviewTimeout.current = setTimeout(() => {
-          setShowPreview(false);
-        }, 80);
-      }
-    }, 40);
-
-    return () => {
-      clearTimeout(timeout);
-      if (hidePreviewTimeout.current) {
-        clearTimeout(hidePreviewTimeout.current);
-        hidePreviewTimeout.current = null;
-      }
-    };
+    editor.injectCSS(EDITOR_CSS);
+    editor.setEditable(editable);
+    editor.setPlaceholder(placeholder);
+    editor.setContent(normalizedContent);
+    lastAppliedContent.current = serializedContent;
   }, [
     editable,
     editor,
-    loadVersion,
+    editorState.isReady,
     normalizedContent,
     placeholder,
     serializedContent,
   ]);
 
   useEffect(() => {
-    if (loadVersion === 0) {
+    if (!editorState.isReady) {
       return;
     }
 
     editor.setEditable(editable);
-  }, [editable, editor, loadVersion]);
+  }, [editable, editor, editorState.isReady]);
 
   useEffect(() => {
-    if (loadVersion === 0) {
+    if (!editorState.isReady) {
       return;
     }
 
     editor.setPlaceholder(placeholder);
-  }, [editor, loadVersion, placeholder]);
+  }, [editor, editorState.isReady, placeholder]);
 
   useEffect(() => {
-    if (loadVersion === 0 || serializedContent === lastAppliedContent.current) {
+    if (
+      !editorState.isReady ||
+      serializedContent === lastAppliedContent.current
+    ) {
       return;
     }
 
     lastAppliedContent.current = serializedContent;
     editor.setContent(normalizedContent);
-  }, [editor, loadVersion, normalizedContent, serializedContent]);
+  }, [editor, editorState.isReady, normalizedContent, serializedContent]);
 
   useEffect(() => {
     if (!editorContent || Array.isArray(editorContent)) {
@@ -249,13 +258,7 @@ export default function RichTextEditor({
           <Text style={styles.previewText}>{previewText}</Text>
         </Animated.View>
       )}
-      <RichText
-        editor={editor}
-        onLoad={() => {
-          loadCount.current += 1;
-          setLoadVersion((current) => current + 1);
-        }}
-      />
+      <RichText editor={editor} />
     </View>
   );
 }

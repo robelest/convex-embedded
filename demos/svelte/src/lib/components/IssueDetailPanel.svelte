@@ -84,8 +84,10 @@
 	const isViewer = $derived(!canEdit && !canMove && !canComment);
 
 	let newComment = $state("");
-	let isSubmittingComment = $state(false);
-	let isEditing = $state(false);
+  let commentRequests = $state(0);
+	let isSavingEdit = $state(false);
+	let editSaveQueued = $state(false);
+	let editAutosaveTimer = $state<ReturnType<typeof setTimeout> | null>(null);
 	let liveDescription = $state<ProseContent>(createEmptyRichTextContent());
 	let editTitle = $state("");
 	let editDescription = $state<ProseContent>(createEmptyRichTextContent());
@@ -97,7 +99,8 @@
 	$effect(() => {
 		const normalized = normalizeRichTextContent(issue.description);
 		liveDescription = normalized;
-		if (!isEditing) {
+		if (!isSavingEdit && !editSaveQueued) {
+			editTitle = issue.title;
 			editDescription = normalized;
 		}
 	});
@@ -118,13 +121,6 @@
     { value: "none", label: "None" },
   ];
 
-  function startEditing() {
-    if (!canEdit) return;
-    editTitle = issue.title;
-    editDescription = liveDescription;
-    isEditing = true;
-  }
-
 	onMount(() => {
 		let unsubscribe = () => {};
 		let handleDispose = () => {};
@@ -138,13 +134,15 @@
 
 			handleDispose = () => handle.dispose();
 			liveDescription = handle.value();
-			if (!isEditing) {
+			if (!isSavingEdit && !editSaveQueued) {
+				editTitle = issue.title;
 				editDescription = handle.value();
 			}
 
 			unsubscribe = handle.subscribe(() => {
 				liveDescription = handle.value();
-				if (!isEditing) {
+				if (!isSavingEdit && !editSaveQueued) {
+					editTitle = issue.title;
 					editDescription = handle.value();
 				}
 			});
@@ -154,10 +152,22 @@
 			disposed = true;
 			unsubscribe();
 			handleDispose();
+			if (editAutosaveTimer) {
+				clearTimeout(editAutosaveTimer);
+			}
 		};
 	});
 
   async function saveEdit() {
+		if (
+			editTitle.trim() === issue.title &&
+			JSON.stringify(editDescription) === JSON.stringify(liveDescription)
+		) {
+			editSaveQueued = false;
+			return;
+		}
+		isSavingEdit = true;
+		editSaveQueued = false;
     errorMessage = null;
     try {
 		await client.mutation(api.issues.update, {
@@ -165,11 +175,23 @@
         title: editTitle,
         description: editDescription,
       });
-      isEditing = false;
     } catch (e: unknown) {
       errorMessage = e instanceof Error ? e.message : "Failed to save";
+		} finally {
+			isSavingEdit = false;
     }
   }
+
+	function queueEditSave() {
+		editSaveQueued = true;
+		if (editAutosaveTimer) {
+			clearTimeout(editAutosaveTimer);
+		}
+		editAutosaveTimer = setTimeout(() => {
+			editAutosaveTimer = null;
+			void saveEdit();
+		}, 300);
+	}
 
 	async function handleStatusChange(newStatus: Infer<typeof issueStatus>) {
     if (!canMove) return;
@@ -210,19 +232,23 @@
   }
 
   async function handleAddComment() {
-    if (newComment.trim().length === 0 || !canComment) return;
-    isSubmittingComment = true;
+    const body = newComment.trim();
+    if (body.length === 0 || !canComment) return;
+    commentRequests += 1;
     errorMessage = null;
+    newComment = "";
     try {
 		await client.mutation(api.comments.create, {
 			issueId: issue._id,
-        body: newComment,
+        body,
       });
-      newComment = "";
     } catch (e: unknown) {
       errorMessage = e instanceof Error ? e.message : "Failed to add comment";
+      if (newComment.trim().length === 0) {
+        newComment = body;
+      }
     } finally {
-      isSubmittingComment = false;
+      commentRequests -= 1;
     }
   }
 
@@ -274,40 +300,42 @@
   <!-- Title -->
   <div class="flex items-start justify-between gap-2">
     <div class="flex-1">
-      {#if isEditing}
-        <input bind:value={editTitle} class="input w-full" type="text" maxlength="120" />
+			{#if canEdit}
+				<input
+					bind:value={editTitle}
+					class="input w-full"
+					type="text"
+					maxlength="120"
+					oninput={queueEditSave}
+				/>
         <div class="mt-1.5">
 				<RichTextEditor
 					value={editDescription}
 					onChange={(value) => {
 						editDescription = value;
+						queueEditSave();
 					}}
 					placeholder="Describe the issue..."
 				/>
 			</div>
-        <div class="flex gap-1.5 mt-1.5">
-          <button class="button button--accent button--compact" onclick={saveEdit}>Save</button>
-          <button class="button button--secondary button--compact" onclick={() => { isEditing = false; }}>Cancel</button>
-        </div>
-      {:else}
-					{#if canEdit}
-						<button
-							class="m-0 border-0 bg-transparent p-0 text-left font-sans text-base font-semibold leading-tight text-gray-900 cursor-pointer hover:text-accent-600"
-							type="button"
-							onclick={startEditing}
-						>
-							{issue.title}
-						</button>
+				<p class="mt-1.5 font-label text-[0.625rem] uppercase tracking-[0.08em] text-gray-400">
+					{#if isSavingEdit}
+						Saving...
+					{:else if editSaveQueued}
+						Saving soon...
 					{:else}
-						<h3 class="m-0 font-sans text-base font-semibold leading-tight text-gray-900">
-							{issue.title}
-						</h3>
+						Synced
 					{/if}
-					{#if hasDescription}
-						<div class="mt-1">
-							<RichTextContent value={liveDescription} />
-						</div>
-					{/if}
+				</p>
+			{:else}
+				<h3 class="m-0 font-sans text-base font-semibold leading-tight text-gray-900">
+					{issue.title}
+				</h3>
+				{#if hasDescription}
+					<div class="mt-1">
+						<RichTextContent value={liveDescription} />
+					</div>
+				{/if}
       {/if}
     </div>
     <button class="bg-transparent border-0 p-0 cursor-pointer flex items-center text-gray-400 hover:text-gray-600" onclick={onclose}><X size={16} /></button>
@@ -428,10 +456,10 @@
         />
         <button
           class="button button--secondary button--compact"
-          disabled={isSubmittingComment || newComment.trim().length === 0}
+          disabled={newComment.trim().length === 0}
           type="submit"
         >
-          {isSubmittingComment ? "Posting..." : "Post"}
+          {commentRequests > 0 ? "Posting..." : "Post"}
         </button>
       </form>
     {/if}

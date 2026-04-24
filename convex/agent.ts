@@ -114,7 +114,14 @@ const summarizeProjectAction = action({
       project.issues.length > 0
         ? `Visible issues:\n${project.issues
             .map(
-              (issue) =>
+              (issue: {
+                identifier: string;
+                title: string;
+                status: string;
+                priority: string;
+                assigneeName?: string | null;
+                labels: string[];
+              }) =>
                 `- ${issue.identifier}: ${issue.title} [${issue.status}, ${issue.priority}] assignee=${issue.assigneeName ?? "unassigned"} labels=${issue.labels.join(", ") || "none"}`,
             )
             .join("\n")}`
@@ -163,7 +170,14 @@ const chatProjectAction = action({
       project.issues.length > 0
         ? `Visible issues:\n${project.issues
             .map(
-              (issue) =>
+              (issue: {
+                identifier: string;
+                title: string;
+                status: string;
+                priority: string;
+                assigneeName?: string | null;
+                labels: string[];
+              }) =>
                 `- ${issue.identifier}: ${issue.title} [${issue.status}, ${issue.priority}] assignee=${issue.assigneeName ?? "unassigned"} labels=${issue.labels.join(", ") || "none"}`,
             )
             .join("\n")}`

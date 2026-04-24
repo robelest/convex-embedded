@@ -1,20 +1,21 @@
 <script lang="ts">
 	import type { ConvexClient } from "convex/browser";
 	import { api } from "$convex/_generated/api.js";
+	import type { ProseContent } from "@robelest/convex-embedded/crdt";
 	import { useQuery } from "convex-svelte";
 	import IssueDetailPanel from "./IssueDetailPanel.svelte";
 	import ProjectWorkbenchPanel from "./ProjectWorkbenchPanel.svelte";
 
   let { project, permissions, members, currentUserId, workspaceGroupId, client } = $props<{
-    project: {
-      _id: string;
-      name: string;
-      identifier: string;
-      slug: string;
-      teamGroupId: string;
-      teamName: string;
-      description: string;
-    };
+		project: {
+			_id: string;
+			name: string;
+			identifier: string;
+			slug: string;
+			teamGroupId: string;
+			teamName: string;
+			description: ProseContent | string;
+		};
     permissions: {
       canCreateIssues: boolean;
       canManageProjects: boolean;
@@ -97,7 +98,7 @@
   });
 
   let expandedIssueId = $state<string | null>(null);
-  let isCreating = $state(false);
+  let createRequests = $state(0);
   let newTitle = $state("");
   let errorMessage = $state<string | null>(null);
 
@@ -112,19 +113,23 @@
   }
 
   async function handleCreateIssue() {
-    if (newTitle.trim().length === 0) return;
-    isCreating = true;
+    const title = newTitle.trim();
+    if (title.length === 0) return;
+    createRequests += 1;
     errorMessage = null;
+    newTitle = "";
     try {
 		await client.mutation(api.issues.create, {
         projectId: project._id,
-        title: newTitle,
+        title,
       });
-      newTitle = "";
     } catch (e: unknown) {
       errorMessage = e instanceof Error ? e.message : "Failed to create issue";
+      if (newTitle.trim().length === 0) {
+        newTitle = title;
+      }
     } finally {
-      isCreating = false;
+      createRequests -= 1;
     }
   }
 
@@ -152,10 +157,10 @@
         />
         <button
           class="button button--accent button--compact"
-          disabled={isCreating || newTitle.trim().length === 0}
+          disabled={newTitle.trim().length === 0}
           type="submit"
         >
-          {isCreating ? "Adding..." : "Add"}
+          {createRequests > 0 ? "Adding..." : "Add"}
         </button>
       </form>
     {/if}

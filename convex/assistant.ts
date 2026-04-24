@@ -18,9 +18,10 @@ export const issueForAssistant = internalQuery({
       throw new ConvexError("Project not found");
     }
 
-    const comments = (await ctx.db.query("comments").collect()).filter(
-      (comment) => comment.issueId === issue._id,
-    );
+    const comments = await ctx.db
+      .query("comments")
+      .withIndex("by_issueId", (q) => q.eq("issueId", issue._id))
+      .collect();
 
     return {
       identifier: `${project.identifier}-${issue.number}`,
@@ -54,8 +55,12 @@ export const projectForAssistant = internalQuery({
       ["user_priya", "Priya Shah"],
     ]);
 
-    const issues = (await ctx.db.query("issues").collect())
-      .filter((issue) => issue.projectId === args.projectId)
+    const issues = (
+      await ctx.db
+        .query("issues")
+        .withIndex("by_projectId", (q) => q.eq("projectId", args.projectId))
+        .collect()
+    )
       .sort((a, b) => a.position - b.position)
       .slice(0, 20);
 

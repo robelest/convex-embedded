@@ -1,4 +1,3 @@
-import { useRouter } from "expo-router";
 import React from "react";
 import { View, Text, Pressable, StyleSheet } from "react-native";
 
@@ -11,20 +10,24 @@ interface IssueItem {
   _id: string;
   identifier: string;
   title: string;
-  status: string;
-  priority: string;
+  status: "backlog" | "todo" | "in_progress" | "done" | "cancelled";
+  priority: "none" | "low" | "medium" | "high" | "urgent";
   assigneeName: string | null;
 }
 
-export function IssueRow({ issue }: { issue: IssueItem }) {
-  const router = useRouter();
-
+export function IssueRow({
+  issue,
+  onPress,
+}: {
+  issue: IssueItem;
+  onPress?: () => void;
+}) {
   return (
     <Pressable
       style={({ pressed }) => [styles.row, pressed && styles.pressed]}
-      onPress={() => router.push(`/issue/${issue._id}`)}
+      onPress={onPress}
     >
-      <StatusDot status={issue.status as any} />
+      <StatusDot status={issue.status} />
       <Text style={styles.identifier}>{issue.identifier}</Text>
       <View style={styles.titleWrap}>
         <Text style={styles.title} numberOfLines={1}>
@@ -32,7 +35,7 @@ export function IssueRow({ issue }: { issue: IssueItem }) {
         </Text>
       </View>
       <View style={styles.trailing}>
-        <PriorityChip priority={issue.priority as any} />
+        <PriorityChip priority={issue.priority} />
         {issue.assigneeName && (
           <View style={styles.avatar}>
             <Text style={styles.avatarText}>
@@ -49,33 +52,33 @@ const styles = StyleSheet.create({
   row: {
     flexDirection: "row",
     alignItems: "center",
-    paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 9,
     backgroundColor: colors.white,
   },
   pressed: { backgroundColor: colors.warm[100] },
   identifier: {
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: "600",
     color: colors.warm[500],
-    marginLeft: 12,
-    width: 56,
+    marginLeft: 10,
+    width: 52,
   },
-  titleWrap: { flex: 1, marginLeft: 8 },
-  title: { fontSize: 15, color: colors.warm[900] },
+  titleWrap: { flex: 1, marginLeft: 6 },
+  title: { fontSize: 14, color: colors.warm[900] },
   trailing: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 8,
-    marginLeft: 8,
+    gap: 6,
+    marginLeft: 6,
   },
   avatar: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
     backgroundColor: colors.accent[500],
     alignItems: "center",
     justifyContent: "center",
   },
-  avatarText: { fontSize: 10, fontWeight: "700", color: colors.white },
+  avatarText: { fontSize: 9, fontWeight: "700", color: colors.white },
 });

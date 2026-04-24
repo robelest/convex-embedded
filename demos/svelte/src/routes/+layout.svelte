@@ -3,7 +3,6 @@
 	import { browser } from "$app/environment";
 	import favicon from "$lib/assets/favicon.svg";
 	import Toaster from "$lib/components/Toaster.svelte";
-	import workerUrl from "$lib/embeddedWorkerUrl";
 	import { onDestroy, onMount, setContext } from "svelte";
 	import type { Snippet } from "svelte";
 	import { setConvexClientContext } from "convex-svelte";
@@ -12,25 +11,36 @@
 		subscribeRemoteState,
 		type RemoteState,
 	} from "@robelest/convex-embedded/browser";
-	import type { Replica } from "@robelest/convex-embedded/client";
-	import { modules } from "../convex-modules";
+	import type { UserIdentity } from "@robelest/convex-embedded/auth";
+	import type { LayoutData } from "./$types";
+	import { convex } from "$convex/embedded.modules";
 	import schema from "$convex/schema";
 
-	type LayoutDataShape = {
-		replica: Replica | null;
-		convexUrl: string | null;
-	};
-
-	let { children, data }: { children: Snippet; data: LayoutDataShape } =
+	let { children, data }: { children: Snippet; data: LayoutData } =
 		$props();
+
+	function getBrowserIdentity(): UserIdentity | null {
+		const identityKey = data.auth.identityKey;
+		return identityKey
+			? {
+				subject: identityKey,
+				issuer: "embedded-svelte-demo",
+				tokenIdentifier: identityKey,
+			}
+			: null;
+	}
 
 	function createSsrBootstrappedClient() {
 		return createConvexClient({
-			modules,
+			convex,
 			schema,
 			name: "convex-embedded-svelte-demo",
-			workerUrl,
-			replica: data.replica ?? undefined,
+			prefetch: data.embedded,
+			auth: {
+				fetchToken: async () => data.auth.token,
+				getUserIdentity: async () => getBrowserIdentity(),
+				getIdentityKey: (identity) => identity?.tokenIdentifier ?? null,
+			},
 			...(data.convexUrl ? { remote: { url: data.convexUrl } } : {}),
 		});
 	}
@@ -60,15 +70,6 @@
 			);
 
 			await navigator.serviceWorker.ready;
-
-			try {
-				await fetch(workerUrl, { cache: "reload" });
-			} catch (error) {
-				console.warn(
-					"[convex-embedded] failed to warm dedicated worker cache",
-					error,
-				);
-			}
 
 			return registration;
 		}

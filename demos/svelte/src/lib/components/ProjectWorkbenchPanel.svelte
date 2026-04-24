@@ -4,6 +4,8 @@
 		import { toast } from "svelte-sonner";
 
 		import { api } from "$convex/_generated/api.js";
+		import { projects } from "$convex/schema.js";
+		import { prose } from "@robelest/convex-embedded/crdt";
 		import type { RemoteState } from "@robelest/convex-embedded/browser";
 		import type { ProseContent } from "@robelest/convex-embedded/crdt";
 		import RichTextContent from "$lib/components/RichTextContent.svelte";
@@ -19,7 +21,7 @@
 			_id: string;
 			name: string;
 			identifier: string;
-			description: string;
+			description: ProseContent | string;
 			openIssueCount: number;
 			issueCount?: number;
 		};
@@ -34,13 +36,16 @@
 	let assistantOpen = $state(false);
 	let notes = $state("");
 	let assistantDraft = $state("");
-	let assistantMessages = $state<Array<{ role: "user" | "assistant"; content: string }>>([]);
-	let isAskingAssistant = $state(false);
-	let isEditingDescription = $state(false);
-	let isSavingDescription = $state(false);
-	let liveDescription = $state<ProseContent>(createEmptyRichTextContent());
-	let editDescription = $state<ProseContent>(createEmptyRichTextContent());
-	let errorMessage = $state<string | null>(null);
+		let assistantMessages = $state<Array<{ role: "user" | "assistant"; content: string }>>([]);
+		let isAskingAssistant = $state(false);
+		let isSavingDescription = $state(false);
+		let descriptionSaveQueued = $state(false);
+		let liveDescription = $state<ProseContent>(createEmptyRichTextContent());
+		let editDescription = $state<ProseContent>(createEmptyRichTextContent());
+		let errorMessage = $state<string | null>(null);
+		let descriptionHandleDispose = $state<() => void>(() => {});
+		let descriptionUnsubscribe = $state<() => void>(() => {});
+		let descriptionAutosaveTimer = $state<ReturnType<typeof setTimeout> | null>(null);
 
 	let notesPosition = $state({ x: 32, y: 140 });
 	let assistantPosition = $state({ x: 416, y: 140 });
@@ -72,13 +77,33 @@
 			toast.warning("Project assistant is unavailable offline.");
 		}
 
-	onMount(() => {
-		const normalized = normalizeRichTextContent(project.description);
-		liveDescription = normalized;
-		editDescription = normalized;
+		onMount(() => {
+			const normalized = normalizeRichTextContent(project.description);
+			liveDescription = normalized;
+			editDescription = normalized;
 
-		const storedNotes = window.localStorage.getItem(notesStorageKey);
-		notes = storedNotes ?? "";
+			let disposed = false;
+			void prose
+				.open(client, projects.field(project._id, "description"))
+				.then((handle) => {
+					if (disposed) {
+						handle.dispose();
+						return;
+					}
+
+					descriptionHandleDispose = () => handle.dispose();
+					const syncFromHandle = () => {
+						const next = handle.value();
+						liveDescription = next;
+						editDescription = next;
+					};
+
+					syncFromHandle();
+					descriptionUnsubscribe = handle.subscribe(syncFromHandle);
+				});
+
+			const storedNotes = window.localStorage.getItem(notesStorageKey);
+			notes = storedNotes ?? "";
 
 		const storedLayout = window.localStorage.getItem(layoutStorageKey);
 		if (storedLayout) {
@@ -108,16 +133,21 @@
 			} catch {
 				// ignore malformed assistant history
 			}
-		}
-	});
+			}
 
-	$effect(() => {
-		const normalized = normalizeRichTextContent(project.description);
-		liveDescription = normalized;
-		if (!isEditingDescription) {
-			editDescription = normalized;
-		}
-	});
+			return () => {
+				disposed = true;
+				descriptionUnsubscribe();
+				descriptionHandleDispose();
+				if (descriptionAutosaveTimer) {
+					clearTimeout(descriptionAutosaveTimer);
+				}
+			};
+		});
+
+		$effect(() => {
+			liveDescription = normalizeRichTextContent(project.description);
+		});
 
 	$effect(() => {
 		window.localStorage.setItem(notesStorageKey, notes);
@@ -205,29 +235,35 @@
 		}
 	}
 
-	function startEditingDescription() {
-		if (!canEditProject) return;
-		editDescription = liveDescription;
-		isEditingDescription = true;
-	}
-
-	async function saveProjectDescription() {
-		isSavingDescription = true;
-		errorMessage = null;
-		try {
-			await client.mutation(api.projects.update, {
-				projectId: project._id,
-				description: editDescription,
-			});
-			isEditingDescription = false;
-		} catch (e: unknown) {
-			errorMessage =
-				e instanceof Error ? e.message : "Failed to update project description";
-		} finally {
-			isSavingDescription = false;
+		async function saveProjectDescription() {
+			isSavingDescription = true;
+			descriptionSaveQueued = false;
+			errorMessage = null;
+			try {
+				await client.mutation(api.projects.update, {
+					projectId: project._id,
+					description: editDescription,
+				});
+			} catch (e: unknown) {
+				errorMessage =
+					e instanceof Error ? e.message : "Failed to update project description";
+			} finally {
+				isSavingDescription = false;
+			}
 		}
-	}
-</script>
+
+		function queueProjectDescriptionSave(value: ProseContent) {
+			editDescription = value;
+			descriptionSaveQueued = true;
+			if (descriptionAutosaveTimer) {
+				clearTimeout(descriptionAutosaveTimer);
+			}
+			descriptionAutosaveTimer = setTimeout(() => {
+				descriptionAutosaveTimer = null;
+				void saveProjectDescription();
+			}, 300);
+		}
+	</script>
 
 <svelte:window bind:innerWidth onpointermove={handlePointerMove} onpointerup={stopDrag} onpointercancel={stopDrag} />
 
@@ -240,35 +276,30 @@
 					</span>
 					<span class="font-label text-[0.75rem] font-semibold text-gray-500">{project.identifier}</span>
 				</div>
-				{#if isEditingDescription}
+				{#if canEditProject}
 					<RichTextEditor
 						value={editDescription}
-						onChange={(value) => {
-							editDescription = value;
-						}}
+						onChange={queueProjectDescriptionSave}
 						placeholder="Describe the project..."
 						className="richtext-editor--compact"
 					/>
-					<div class="mt-2 flex gap-1.5">
-						<button class="button button--accent button--compact" type="button" onclick={saveProjectDescription} disabled={isSavingDescription}>
-							{isSavingDescription ? "Saving..." : "Save"}
-						</button>
-						<button class="button button--secondary button--compact" type="button" onclick={() => { isEditingDescription = false; editDescription = liveDescription; }}>
-							Cancel
-						</button>
-					</div>
+					<p class="mt-2 font-label text-[0.625rem] uppercase tracking-[0.08em] text-gray-400">
+						{#if isSavingDescription}
+							Saving...
+						{:else if descriptionSaveQueued}
+							Saving soon...
+						{:else}
+							Synced
+						{/if}
+					</p>
 				{:else if hasDescription}
-					<button
-						class="m-0 w-full border-0 bg-transparent p-0 text-left cursor-text font-sans text-base font-semibold leading-tight text-gray-900 hover:text-accent-600"
-						type="button"
-						onclick={startEditingDescription}
-					>
+					<div class="m-0 w-full p-0 text-left font-sans text-base font-semibold leading-tight text-gray-900">
 						<RichTextContent value={liveDescription} />
-					</button>
+					</div>
 				{:else}
-					<button class="m-0 border-0 bg-transparent p-0 text-left font-sans text-base font-semibold leading-tight text-gray-400 cursor-pointer hover:text-accent-600" type="button" onclick={startEditingDescription}>
+					<div class="m-0 p-0 text-left font-sans text-base font-semibold leading-tight text-gray-400">
 						No project description yet.
-					</button>
+					</div>
 				{/if}
 			</div>
 			<div class="flex flex-wrap items-center gap-2">

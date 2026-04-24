@@ -12,19 +12,10 @@ declare global {
     // interface Error {}
     interface Locals {
       authToken: string | null;
+      authIdentityKey: string | null;
       isAuthenticated: boolean;
     }
 
-    interface PageData {
-      convexUrl: string | undefined;
-      authProviders: {
-        google: boolean;
-      };
-      auth: {
-        token: string | null;
-        isAuthenticated: boolean;
-      };
-    }
     // interface PageState {}
   }
 }

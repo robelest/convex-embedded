@@ -1,3 +1,5 @@
+import { query } from "./_generated/server";
+
 export const DEMO_WORKSPACE_ID = "workspace_demo";
 export const DEFAULT_USER_ID = "user_alice";
 
@@ -89,3 +91,46 @@ export function userSummary(userId: string) {
     email: null,
   };
 }
+
+export const get = query({
+  args: {},
+  handler: async () => {
+    return {
+      user: userSummary("user_alice"),
+      workspaces: [
+        {
+          groupId: DEMO_WORKSPACE_ID,
+          name: "Acme",
+          roleIds: ["orgAdmin"],
+          grants: [],
+        },
+      ],
+      selectedWorkspace: {
+        groupId: DEMO_WORKSPACE_ID,
+        name: "Acme",
+        roleIds: ["orgAdmin"],
+        grants: [],
+        userRoleLabel: "Admin",
+        teams: demoTeams.map((team) => ({
+          groupId: team.groupId,
+          name: team.name,
+          type: team.type,
+          children: team.children.map((child) => ({
+            groupId: child.groupId,
+            name: child.name,
+            type: child.type,
+          })),
+        })),
+        members: demoMembers.map((member) => ({
+          memberId: member.memberId,
+          userId: member.userId,
+          name: member.name,
+          email: member.email,
+          roleIds: [...member.roleIds],
+          status: member.status,
+        })),
+        permissions: { ...permissions },
+      },
+    };
+  },
+});

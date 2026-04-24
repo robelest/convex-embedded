@@ -23,6 +23,11 @@ export const colors = {
 } as const;
 
 export const priorityColors = {
+  none: {
+    bg: colors.warm[50],
+    text: colors.warm[500],
+    border: colors.warm[200],
+  },
   urgent: { bg: "#fef2f2", text: "#7f1d1d", border: "#fecaca" },
   high: { bg: "#fff7ed", text: "#7c2d12", border: "#fed7aa" },
   medium: { bg: "#fffbeb", text: "#854d0e", border: "#fde68a" },

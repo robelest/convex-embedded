@@ -11,7 +11,6 @@
 import type * as agent from "../agent.js";
 import type * as assistant from "../assistant.js";
 import type * as comments from "../comments.js";
-import type * as dashboard from "../dashboard.js";
 import type * as issues from "../issues.js";
 import type * as projects from "../projects.js";
 import type * as prose from "../prose.js";
@@ -28,7 +27,6 @@ declare const fullApi: ApiFromModules<{
   agent: typeof agent;
   assistant: typeof assistant;
   comments: typeof comments;
-  dashboard: typeof dashboard;
   issues: typeof issues;
   projects: typeof projects;
   prose: typeof prose;
@@ -4896,97 +4894,159 @@ export declare const components: {
   };
   embedded: {
     public: {
-      cleanupDoc: FunctionReference<
-        "mutation",
-        "internal",
-        {
-          collection: string;
-          docId: string;
-          keepCheckpointCount?: number;
-          keepTailCount?: number;
-          tailByteLimit?: number;
-        },
-        {
-          checkpointDeleted: number;
-          checkpointKept: number;
-          tailDeleted: number;
-          tailKept: number;
-        }
-      >;
-      createCheckpoint: FunctionReference<
-        "mutation",
-        "internal",
-        {
-          actorId?: string;
-          collection: string;
-          docId: string;
-          keepCheckpointCount?: number;
-          label?: string;
-          metadata?: any;
-          pinned?: boolean;
-          reason?: string;
-          source?: string;
-        },
-        { checkpointId: string | string; seq: number }
-      >;
-      getCheckpoint: FunctionReference<
+      getCollectionChanges: FunctionReference<
         "query",
         "internal",
-        { checkpointId: string | string; collection: string; docId: string },
+        { collection: string; sinceSeq: number | null },
         {
-          actorId?: string;
-          byteLength: number;
-          checkpointId: string | string;
-          createdAt: number;
-          label?: string;
-          metadata?: any;
-          pinned: boolean;
-          reason?: string;
-          seq: number;
-          source?: string;
-          update: ArrayBuffer;
-        } | null
+          changes: Array<{ docId: string; kind: "upsert" | "delete" }>;
+          collectionSeq: number;
+          isGapDetected: boolean;
+          mode: "full" | "incremental";
+        }
       >;
       getLiveState: FunctionReference<
         "query",
         "internal",
         { collection: string; docId: string },
-        { seq: number; update: ArrayBuffer } | null
+        { docCreationTime?: number; seq: number; update: ArrayBuffer } | null
       >;
       getLiveStates: FunctionReference<
         "query",
         "internal",
-        { collection: string; docIds: Array<string> },
-        Array<{ docId: string; seq: number; update: ArrayBuffer } | null>
+        { collection: string; docIds?: Array<string> },
+        Array<{
+          docCreationTime?: number;
+          docId: string;
+          seq: number;
+          update: ArrayBuffer;
+        } | null>
       >;
-      listCheckpoints: FunctionReference<
+      getLiveStatesPage: FunctionReference<
         "query",
         "internal",
-        { collection: string; docId: string },
-        Array<{
-          actorId?: string;
-          byteLength: number;
-          checkpointId: string | string;
-          createdAt: number;
-          label?: string;
-          metadata?: any;
-          pinned: boolean;
-          reason?: string;
-          seq: number;
-          source?: string;
-        }>
+        { collection: string; cursor?: string | null; limit?: number },
+        {
+          continueCursor: string | null;
+          isDone: boolean;
+          page: Array<{
+            docCreationTime?: number;
+            docId: string;
+            seq: number;
+            update: ArrayBuffer;
+          }>;
+        }
+      >;
+      live: {
+        getCollectionChanges: FunctionReference<
+          "query",
+          "internal",
+          { collection: string; sinceSeq: number | null },
+          {
+            changes: Array<{ docId: string; kind: "upsert" | "delete" }>;
+            collectionSeq: number;
+            isGapDetected: boolean;
+            mode: "full" | "incremental";
+          }
+        >;
+        getLiveState: FunctionReference<
+          "query",
+          "internal",
+          { collection: string; docId: string },
+          { docCreationTime?: number; seq: number; update: ArrayBuffer } | null
+        >;
+        getLiveStates: FunctionReference<
+          "query",
+          "internal",
+          { collection: string; docIds?: Array<string> },
+          Array<{
+            docCreationTime?: number;
+            docId: string;
+            seq: number;
+            update: ArrayBuffer;
+          } | null>
+        >;
+        getLiveStatesPage: FunctionReference<
+          "query",
+          "internal",
+          { collection: string; cursor?: string | null; limit?: number },
+          {
+            continueCursor: string | null;
+            isDone: boolean;
+            page: Array<{
+              docCreationTime?: number;
+              docId: string;
+              seq: number;
+              update: ArrayBuffer;
+            }>;
+          }
+        >;
+        recordDelete: FunctionReference<
+          "mutation",
+          "internal",
+          {
+            collection: string;
+            docId: string;
+            keepCollectionTailCount?: number;
+          },
+          {
+            collectionSeq: number;
+            collectionTailDeleted: number;
+            deletedDeltaCount: number;
+            deletedLiveState: boolean;
+          }
+        >;
+        recordUpdate: FunctionReference<
+          "mutation",
+          "internal",
+          {
+            collection: string;
+            docCreationTime: number;
+            docId: string;
+            keepCollectionTailCount?: number;
+            keepTailCount?: number;
+            tailByteLimit?: number;
+            update: ArrayBuffer;
+          },
+          {
+            collectionSeq: number;
+            collectionTailDeleted: number;
+            seq: number;
+            tailDeleted: number;
+            tailKept: number;
+          }
+        >;
+      };
+      recordDelete: FunctionReference<
+        "mutation",
+        "internal",
+        { collection: string; docId: string; keepCollectionTailCount?: number },
+        {
+          collectionSeq: number;
+          collectionTailDeleted: number;
+          deletedDeltaCount: number;
+          deletedLiveState: boolean;
+        }
       >;
       recordUpdate: FunctionReference<
         "mutation",
         "internal",
         {
           collection: string;
+          docCreationTime: number;
           docId: string;
+          keepCollectionTailCount?: number;
           keepTailCount?: number;
           tailByteLimit?: number;
           update: ArrayBuffer;
         },
-        { seq: number; tailDeleted: number; tailKept: number }
+        {
+          collectionSeq: number;
+          collectionTailDeleted: number;
+          seq: number;
+          tailDeleted: number;
+          tailKept: number;
+        }
       >;
     };
   };

@@ -1,12 +1,6 @@
 import { BrowserSessionBroadcast } from "@embedded/browser/session";
-import {
-  afterEach,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it } from "@tests/testkit";
+import { vi } from "vitest";
 
 class MockBroadcastChannel {
   static instances: MockBroadcastChannel[] = [];
@@ -124,5 +118,25 @@ describe("BrowserSessionBroadcast", () => {
     expect(callback).not.toHaveBeenCalled();
 
     fanoutB.close();
+  });
+
+  it("uses unique localStorage fallback payloads for repeated notifications", () => {
+    vi.stubGlobal(
+      "BroadcastChannel",
+      undefined as unknown as typeof BroadcastChannel,
+    );
+    const localStorageMock = { setItem: vi.fn() };
+    vi.stubGlobal("localStorage", localStorageMock);
+    const fanout = new BrowserSessionBroadcast("session-storage-fallback");
+
+    fanout.notify({ type: "authChanged" });
+    fanout.notify({ type: "authChanged" });
+
+    expect(localStorageMock.setItem).toHaveBeenCalledTimes(2);
+    expect(localStorageMock.setItem.mock.calls[0]?.[1]).not.toBe(
+      localStorageMock.setItem.mock.calls[1]?.[1],
+    );
+
+    fanout.close();
   });
 });

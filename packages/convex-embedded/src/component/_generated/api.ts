@@ -8,7 +8,11 @@
  * @module
  */
 
+import type * as helpers from "../helpers.js";
 import type * as public_ from "../public.js";
+import type * as public_cleanup from "../public/cleanup.js";
+import type * as public_live from "../public/live.js";
+import type * as public_marks from "../public/marks.js";
 
 import type {
   ApiFromModules,
@@ -18,7 +22,11 @@ import type {
 import { anyApi, componentsGeneric } from "convex/server";
 
 const fullApi: ApiFromModules<{
+  helpers: typeof helpers;
   public: typeof public_;
+  "public/cleanup": typeof public_cleanup;
+  "public/live": typeof public_live;
+  "public/marks": typeof public_marks;
 }> = anyApi as any;
 
 /**

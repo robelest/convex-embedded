@@ -1,7 +1,8 @@
 import { wrapConvexBrowserClientForReact } from "@resolve/react";
+import { describe, expect, it } from "@tests/testkit";
 import type { ConvexClient } from "convex/browser";
 import { makeFunctionReference } from "convex/server";
-import { describe, expect, it, vi } from "vite-plus/test";
+import { vi } from "vitest";
 
 function createQuerySubscription<T>(initialValue: T | undefined) {
   let currentValue = initialValue;

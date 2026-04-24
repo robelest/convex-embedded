@@ -1,5 +1,3 @@
-import { Fx } from "@robelest/fx";
-
 /**
  * Module resolution for Convex functions from lazy ESM module registries.
  *
@@ -141,15 +139,35 @@ export type ConvexModule = Record<string, unknown>;
 export type ConvexModuleLoader = () => Promise<ConvexModule>;
 export type ConvexModuleRegistry = Record<string, ConvexModuleLoader>;
 
+export interface ConvexRemoteTableManifest {
+  readonly resolve: string;
+  readonly schemaModule?: string;
+  readonly schemaExport?: string;
+}
+
+export interface ConvexRemoteManifest {
+  readonly routeModes?: Record<string, import("@/shared/route").RouteMode>;
+  readonly tables: Record<string, ConvexRemoteTableManifest>;
+  readonly uploadUrl?: string;
+}
+
+export interface ConvexManifest {
+  readonly remote?: ConvexRemoteManifest;
+}
+
+export interface ConvexInput {
+  readonly modules: ConvexModuleRegistry;
+  readonly manifest?: ConvexManifest;
+}
+
 export function normalizeModuleRegistry<T>(
   modules: Record<string, T>,
 ): Record<string, T> {
-  const legacyRoot = inferLegacyModulesRoot(Object.keys(modules));
   const normalizedEntries: Array<[string, T]> = [];
   const seen = new Map<string, string>();
 
   for (const [key, value] of Object.entries(modules)) {
-    const normalizedKey = normalizeModuleKey(key, legacyRoot);
+    const normalizedKey = normalizeModuleKey(key);
     const existing = seen.get(normalizedKey);
     if (existing !== undefined && existing !== key) {
       throw new Error(
@@ -181,43 +199,25 @@ export class ModuleLoader {
    * function path, e.g. `"messages"` or `"lib/utils"`).
    */
   async load(path: string): Promise<ConvexModule> {
-    return Fx.run(
-      Fx.defer(() => {
-        const cached = this.loadedModules.get(path);
-        if (cached) {
-          return Fx.from({
-            ok: () => cached,
-            err: (error) => error as Error,
-          });
-        }
+    const cached = this.loadedModules.get(path);
+    if (cached) {
+      return cached;
+    }
 
-        const loader = this.modules[path];
-        if (loader === undefined) {
-          const available = Object.keys(this.modules)
-            .filter((key) => !isGeneratedModuleId(key))
-            .join(", ");
-          return Fx.fail(
-            new Error(
-              `Could not find module for: "${path}". Available modules: ${available}`,
-            ),
-          );
-        }
+    const loader = this.modules[path];
+    if (loader === undefined) {
+      const available = Object.keys(this.modules)
+        .filter((key) => !isGeneratedModuleId(key))
+        .join(", ");
+      throw new Error(
+        `Could not find module for: "${path}". Available modules: ${available}`,
+      );
+    }
 
-        return Fx.sync(() => {
-          console.debug("[convex-embedded:loader] loading:", path);
-          const loading = loader();
-          this.loadedModules.set(path, loading);
-          return loading;
-        }).pipe(
-          Fx.chain((loading) =>
-            Fx.from({
-              ok: () => loading,
-              err: (error) => error as Error,
-            }),
-          ),
-        );
-      }),
-    );
+    console.debug("[convex-embedded:loader] loading:", path);
+    const loading = loader();
+    this.loadedModules.set(path, loading);
+    return loading;
   }
 }
 
@@ -225,59 +225,15 @@ export class ModuleLoader {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Determine the prefix to strip from legacy path-like registry keys.
- */
-function inferLegacyModulesRoot(moduleKeys: string[]): string | null {
-  const pathLikeKeys = moduleKeys.filter(isPathLikeModuleKey);
-  if (pathLikeKeys.length === 0) {
-    return null;
-  }
-
-  const generatedFilePath = pathLikeKeys.find((path) =>
-    path.includes("_generated"),
-  );
-  if (generatedFilePath !== undefined) {
-    return generatedFilePath.split("_generated", 2)[0] ?? null;
-  }
-
-  const commonPrefix = longestCommonPrefix(pathLikeKeys);
-  const lastSlash = commonPrefix.lastIndexOf("/");
-  return lastSlash === -1 ? null : commonPrefix.slice(0, lastSlash + 1);
-}
-
-function normalizeModuleKey(key: string, legacyRoot: string | null): string {
+function normalizeModuleKey(key: string): string {
   let normalized = key;
-  if (legacyRoot && normalized.startsWith(legacyRoot)) {
-    normalized = normalized.slice(legacyRoot.length);
-  }
 
   normalized = normalized.replace(/^\.\//, "");
+  normalized = normalized.replace(/^convex\//, "");
   normalized = normalized.replace(/\.[^.]+$/, "");
   return normalized;
 }
 
-function isPathLikeModuleKey(key: string): boolean {
-  return key.startsWith(".") || key.startsWith("/") || /\.[^./]+$/.test(key);
-}
-
 function isGeneratedModuleId(key: string): boolean {
   return key === "_generated" || key.startsWith("_generated/");
-}
-
-function longestCommonPrefix(values: string[]): string {
-  if (values.length === 0) {
-    return "";
-  }
-
-  let prefix = values[0] ?? "";
-  for (const value of values.slice(1)) {
-    while (!value.startsWith(prefix) && prefix.length > 0) {
-      prefix = prefix.slice(0, -1);
-    }
-    if (prefix.length === 0) {
-      break;
-    }
-  }
-  return prefix;
 }

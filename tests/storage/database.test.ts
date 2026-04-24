@@ -1,7 +1,9 @@
+import { PersistenceAdapter } from "@embedded/persistence/adapter";
+import { OpaqueAdapter } from "@embedded/persistence/opaque/adapter";
 import { Database } from "@embedded/runtime/db/database";
-import type { StorageAdapter } from "@embedded/storage/adapter";
-import { ephemeralStorage } from "@embedded/storage/memory";
-import { describe, it, expect, vi } from "vite-plus/test";
+import { mockAdapter } from "@tests/helpers/test-adapter";
+import { describe, it, expect } from "@tests/testkit";
+import { vi } from "vitest";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -11,8 +13,8 @@ import { describe, it, expect, vi } from "vite-plus/test";
  * Create a Database backed by a ephemeralStorage adapter, hydrate it,
  * and return both.
  */
-async function createPersistedDb(storage?: StorageAdapter) {
-  const s = storage ?? ephemeralStorage();
+async function createPersistedDb(storage?: PersistenceAdapter) {
+  const s = storage ?? new OpaqueAdapter();
   const db = new Database(null, s);
   await db.hydrate();
   return { db, storage: s };
@@ -48,7 +50,7 @@ describe("Database persistence", () => {
 
   describe("round-trip", () => {
     it("documents survive a simulated restart", async () => {
-      const storage = ephemeralStorage();
+      const storage = new OpaqueAdapter();
 
       // Session 1: insert documents
       const { db: db1 } = await createPersistedDb(storage);
@@ -77,7 +79,7 @@ describe("Database persistence", () => {
     });
 
     it("metadata counters survive a restart", async () => {
-      const storage = ephemeralStorage();
+      const storage = new OpaqueAdapter();
 
       const { db: db1 } = await createPersistedDb(storage);
       insertAndCommit(db1, "tasks", { text: "a" });
@@ -85,7 +87,7 @@ describe("Database persistence", () => {
 
       await new Promise((r) => setTimeout(r, 10));
 
-      const meta = await storage.getMeta();
+      const meta = await storage.meta();
       expect(meta).not.toBeNull();
       expect(meta!.timestamp).toBe(2);
 
@@ -104,7 +106,7 @@ describe("Database persistence", () => {
 
   describe("deletes", () => {
     it("deleted documents are not restored on hydration", async () => {
-      const storage = ephemeralStorage();
+      const storage = new OpaqueAdapter();
 
       const { db: db1 } = await createPersistedDb(storage);
       const { id } = insertAndCommit(db1, "tasks", { text: "temp" });
@@ -130,7 +132,7 @@ describe("Database persistence", () => {
 
   describe("mutations", () => {
     it("patched documents persist the updated values", async () => {
-      const storage = ephemeralStorage();
+      const storage = new OpaqueAdapter();
 
       const { db: db1 } = await createPersistedDb(storage);
       const { id } = insertAndCommit(db1, "tasks", {
@@ -186,11 +188,21 @@ describe("Database persistence", () => {
 
   describe("error handling", () => {
     it("storage commit failure does not break in-memory state", async () => {
-      const storage = ephemeralStorage();
-      const failingStorage: StorageAdapter = {
-        ...storage,
+      // Use mockAdapter so we can override `commit` to fail while sharing the
+      // ephemeral adapter's storage surface. The real `OpaqueAdapter`
+      // instance is reused for everything except the commit callback.
+      const storage = new OpaqueAdapter();
+      const failingStorage: PersistenceAdapter = mockAdapter({
+        kind: "opaque",
+        listAll: () => storage.listAll(),
+        list: (tableName) => storage.list(tableName),
+        meta: () => storage.meta(),
+        listBlobs: () => storage.listBlobs(),
         commit: vi.fn().mockRejectedValue(new Error("disk full")),
-      };
+        putBlob: (id, blob) => storage.putBlob(id, blob),
+        deleteBlob: (id) => storage.deleteBlob(id),
+        clear: () => storage.clear(),
+      });
 
       const db = new Database(null, failingStorage);
 
@@ -218,7 +230,7 @@ describe("Database persistence", () => {
 
   describe("clear via storage", () => {
     it("clears storage when adapter.clear() is called directly", async () => {
-      const storage = ephemeralStorage();
+      const storage = new OpaqueAdapter();
 
       const { db: db1 } = await createPersistedDb(storage);
       insertAndCommit(db1, "tasks", { text: "hello" });

@@ -6,7 +6,26 @@
     "strict": true,
     "skipLibCheck": true,
     "moduleResolution": "bundler",
-    "noEmit": true
+    "noEmit": true,
+    "paths": {
+      "@robelest/convex-embedded": ["./src/index.ts"],
+      "@robelest/convex-embedded/browser": ["./src/browser/index.ts"],
+      "@robelest/convex-embedded/auth": ["./src/auth/index.ts"],
+      "@robelest/convex-embedded/react": ["./src/react.ts"],
+      "@robelest/convex-embedded/expo": ["./src/expo/index.ts"],
+      "@robelest/convex-embedded/server": ["./src/server/index.ts"],
+      "@robelest/convex-embedded/server/table": ["./src/server/table.ts"],
+      "@robelest/convex-embedded/server/fields": ["./src/server/fields.ts"],
+      "@robelest/convex-embedded/server/schema": ["./src/server/schema.ts"],
+      "@robelest/convex-embedded/client": ["./src/client/index.ts"],
+      "@robelest/convex-embedded/crdt": ["./src/crdt/index.ts"],
+      "@robelest/convex-embedded/convex.config": [
+        "./src/component/convex.config.ts"
+      ],
+      "@robelest/convex-embedded/test": ["./src/test.ts"],
+      "@robelest/convex-embedded/tracing/browser": ["./src/tracing/browser.ts"],
+      "@robelest/convex-embedded/tracing/node": ["./src/tracing/node.ts"]
+    }
   },
   "include": ["consumer-types/**/*.ts"]
 }

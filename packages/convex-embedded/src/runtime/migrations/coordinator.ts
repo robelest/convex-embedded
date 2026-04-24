@@ -1,5 +1,5 @@
-import { migratePendingEntries } from "@/client/pending";
 import type { EmbeddedRuntime } from "@/runtime/embedded";
+import { migratePendingEntries } from "@/runtime/migrations/pending";
 import type {
   MigrationCoordinatorOptions,
   StoreMigrationManifest,
@@ -9,12 +9,73 @@ import {
   setStoredVersion,
 } from "@/runtime/migrations/versions";
 import { createLogger } from "@/shared/logger";
-import {
-  runMigrations,
-  type LocalMigrationAdapter,
-} from "@/shared/migration-utils";
+import { runMigrations, type LocalMigrationAdapter } from "@/shared/migrate";
 
 const log = createLogger("migrations");
+
+async function readPendingEntriesByIdentity(
+  runtime: EmbeddedRuntime,
+  identityKey: string | null,
+): Promise<Array<Record<string, unknown>>> {
+  const qid = runtime.db.startQueryAsync({
+    source: {
+      type: "IndexRange",
+      indexName: "_resolve_pending.by_identity_key_and_creation_time",
+      range: [{ type: "Eq", fieldPath: "identityKey", value: identityKey }],
+      order: "asc",
+    } as never,
+    operators: [],
+  });
+
+  const rows: Array<Record<string, unknown>> = [];
+  try {
+    while (true) {
+      const next = await runtime.db.queryNextAsync(qid);
+      if (next.done) {
+        return rows;
+      }
+      rows.push(next.value as Record<string, unknown>);
+    }
+  } finally {
+    runtime.db.queryCleanup(qid);
+  }
+}
+
+async function readRowsByIndexEq(input: {
+  runtime: EmbeddedRuntime;
+  tableName: string;
+  indexName: string;
+  predicate: { fieldName: string; value: unknown };
+}): Promise<Array<Record<string, unknown>>> {
+  const qid = input.runtime.db.startQueryAsync({
+    source: {
+      type: "IndexRange",
+      indexName: `${input.tableName}.${input.indexName}`,
+      range: [
+        {
+          type: "Eq",
+          fieldPath: input.predicate.fieldName,
+          value: input.predicate.value,
+        },
+      ],
+      order: "asc",
+    } as never,
+    operators: [],
+  });
+
+  const rows: Array<Record<string, unknown>> = [];
+  try {
+    while (true) {
+      const next = await input.runtime.db.queryNextAsync(qid);
+      if (next.done) {
+        return rows;
+      }
+      rows.push(next.value as Record<string, unknown>);
+    }
+  } finally {
+    input.runtime.db.queryCleanup(qid);
+  }
+}
 
 function createLocalMigrationAdapter(
   runtime: EmbeddedRuntime,
@@ -24,7 +85,7 @@ function createLocalMigrationAdapter(
       runtime.db.startTransaction();
       try {
         const result = await work();
-        runtime.db.commit();
+        await runtime.db.commitAsync();
         return result;
       } catch (error) {
         runtime.db.rollbackWrites();
@@ -33,19 +94,19 @@ function createLocalMigrationAdapter(
     },
 
     async list(table) {
-      return runtime.db.getDocumentsForTable(table);
+      return runtime.db.listDocumentsAsync(table);
     },
 
     async patch(_table, id, fields) {
-      runtime.db.patch(undefined, id as never, fields);
+      runtime.db.patch(_table as never, id as never, fields);
     },
 
     async replace(_table, id, fields) {
-      runtime.db.replace(undefined, id as never, fields);
+      runtime.db.replace(_table as never, id as never, fields);
     },
 
     async delete(_table, id) {
-      runtime.db.delete(undefined, id as never);
+      runtime.db.delete(_table as never, id as never);
     },
   };
 }
@@ -110,9 +171,7 @@ export async function runLocalMigrations(
     {
       transaction: (work) => local.transaction(work),
       list: async (identityKey) =>
-        runtime.db
-          .getDocumentsForTable("_resolve_pending")
-          .filter((row) => (row.identityKey ?? null) === identityKey),
+        readPendingEntriesByIdentity(runtime, identityKey),
       patch: async (id, fields) => {
         runtime.db.patch("_resolve_pending", id as never, fields);
       },
@@ -135,20 +194,21 @@ export async function runLocalMigrations(
                   }),
                 }) as { fieldName: string; value: unknown };
 
-                return runtime.db
-                  .getDocumentsForTable(tableName)
-                  .filter(
-                    (row) => row[predicate.fieldName] === predicate.value,
-                  );
+                return readRowsByIndexEq({
+                  runtime,
+                  tableName,
+                  indexName: _indexName,
+                  predicate,
+                });
               },
             }),
-            collect: async () => runtime.db.getDocumentsForTable(tableName),
+            collect: async () => runtime.db.listDocumentsAsync(tableName),
           }),
           patch: async (id, fields) => {
             runtime.db.startTransaction();
             try {
               runtime.db.patch(undefined, id as never, fields);
-              runtime.db.commit();
+              await runtime.db.commitAsync();
             } catch (error) {
               runtime.db.rollbackWrites();
               throw error;
@@ -158,7 +218,7 @@ export async function runLocalMigrations(
             runtime.db.startTransaction();
             try {
               const id = runtime.db.insert(tableName, doc);
-              runtime.db.commit();
+              await runtime.db.commitAsync();
               return id;
             } catch (error) {
               runtime.db.rollbackWrites();
@@ -169,7 +229,7 @@ export async function runLocalMigrations(
             runtime.db.startTransaction();
             try {
               runtime.db.delete(undefined, id as never);
-              runtime.db.commit();
+              await runtime.db.commitAsync();
             } catch (error) {
               runtime.db.rollbackWrites();
               throw error;
@@ -178,7 +238,7 @@ export async function runLocalMigrations(
         },
         runMutation: async () => {
           throw new Error(
-            `Remote mutation-based table migrations are not supported during local startup for table "${table}". Use embeddedTable(..., { migrate }) local steps instead.`,
+            `Remote mutation-based table migrations are not supported during local load for table "${table}". Use embeddedTable(..., { migrate }) local steps instead.`,
           );
         },
         local,

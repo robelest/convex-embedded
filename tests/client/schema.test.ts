@@ -10,6 +10,7 @@ import {
   encodeState,
   materializeYjsDoc,
 } from "@resolve/client/schema";
+import { createEmptyProseContent } from "@resolve/crdt/prose/content";
 import {
   define,
   register,
@@ -19,8 +20,8 @@ import {
   prose,
 } from "@resolve/server/schema";
 import { initYjsDoc } from "@resolve/shared/schema";
+import { describe, it, expect } from "@tests/testkit";
 import { v } from "convex/values";
-import { describe, it, expect } from "vite-plus/test";
 import * as Y from "yjs";
 
 // ---------------------------------------------------------------------------
@@ -405,7 +406,15 @@ describe("materializeYjsDoc()", () => {
     const result = materializeYjsDoc(def, doc);
 
     expect(result.title).toBe("My Post");
-    expect(result.body).toBe("Hello world");
+    expect(result.body).toEqual({
+      type: "doc",
+      content: [
+        {
+          type: "paragraph",
+          content: [{ type: "text", text: "Hello world" }],
+        },
+      ],
+    });
     expect(result.votes).toBe(7);
     expect(result.tags).toEqual(expect.arrayContaining(["a", "b"]));
     expect((result.tags as string[]).length).toBe(2);
@@ -427,7 +436,7 @@ describe("materializeYjsDoc()", () => {
     const result = materializeYjsDoc(def, doc);
 
     expect(result.title).toBeUndefined();
-    expect(result.body).toBe("");
+    expect(result.body).toEqual(createEmptyProseContent());
     expect(result.votes).toBe(0);
     expect(result.tags).toEqual([]);
   });

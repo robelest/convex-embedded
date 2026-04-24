@@ -10,6 +10,7 @@ const embeddedSrc = path.resolve(
   import.meta.dirname,
   "packages/convex-embedded/src",
 );
+const testsRoot = path.resolve(import.meta.dirname, "tests");
 const convexApp = path.resolve(import.meta.dirname, "convex");
 
 export default defineConfig({
@@ -38,6 +39,7 @@ export default defineConfig({
       "**/coverage/**",
       "**/node_modules/**",
       "**/convex/_generated/**",
+      "packages/convex-embedded/consumer-types/**",
       "**/*.d.ts",
     ],
     rules: {
@@ -82,6 +84,7 @@ export default defineConfig({
           "README.md",
           "!**/dist/**",
           "!**/_generated/**",
+          "convex/embedded.modules.ts",
         ],
       },
       "cache:check": {
@@ -99,6 +102,7 @@ export default defineConfig({
           "README.md",
           "!**/dist/**",
           "!**/_generated/**",
+          "convex/embedded.modules.ts",
         ],
       },
       "cache:test": {
@@ -116,6 +120,7 @@ export default defineConfig({
           "README.md",
           "!**/dist/**",
           "!**/_generated/**",
+          "convex/embedded.modules.ts",
         ],
       },
     },
@@ -138,6 +143,7 @@ export default defineConfig({
   resolve: {
     alias: {
       "@embedded": embeddedSrc,
+      "@tests": testsRoot,
       "@resolve": embeddedSrc,
       "@robelest/convex-embedded/server/schema": path.join(
         embeddedSrc,
@@ -170,6 +176,7 @@ export default defineConfig({
     },
   },
   test: {
+    globals: true,
     include: ["**/*.test.ts"],
     testTimeout: 10_000,
     coverage: {

@@ -9,23 +9,38 @@ export interface EmbeddedClientEntry {
   fieldHandles: Map<string, unknown>;
 }
 
-const embeddedClientEntries = new WeakMap<ConvexClient, EmbeddedClientEntry>();
+const EMBEDDED_CLIENT_ENTRIES = Symbol.for(
+  "convex-embedded:client/entry:embeddedClientEntries",
+);
+
+type EntryGlobal = typeof globalThis & {
+  [EMBEDDED_CLIENT_ENTRIES]?: WeakMap<ConvexClient, EmbeddedClientEntry>;
+};
+
+function getEmbeddedClientEntriesStore() {
+  const globalState = globalThis as EntryGlobal;
+  globalState[EMBEDDED_CLIENT_ENTRIES] ??= new WeakMap<
+    ConvexClient,
+    EmbeddedClientEntry
+  >();
+  return globalState[EMBEDDED_CLIENT_ENTRIES];
+}
 
 export function registerEmbeddedClientEntry(
   client: ConvexClient,
   entry: EmbeddedClientEntry,
 ): void {
-  embeddedClientEntries.set(client, entry);
+  getEmbeddedClientEntriesStore().set(client, entry);
 }
 
 export function getEmbeddedClientEntry(
   client: ConvexClient,
 ): EmbeddedClientEntry | undefined {
-  return embeddedClientEntries.get(client);
+  return getEmbeddedClientEntriesStore().get(client);
 }
 
 export function deleteEmbeddedClientEntry(client: ConvexClient): void {
-  embeddedClientEntries.delete(client);
+  getEmbeddedClientEntriesStore().delete(client);
 }
 
 export function extractEmbeddedTableDefinitions(

@@ -9,13 +9,10 @@
  * @packageDocumentation
  */
 
-import { Fx } from "@robelest/fx";
 import type { ConvexClient } from "convex/browser";
 
-import type { StoreMigrationManifest } from "@/runtime/migrations/types";
-import { getFunctionName } from "@/shared/function-refs";
 import { createLogger } from "@/shared/logger";
-import type { PendingReplayMeta } from "@/shared/symbols";
+import { getFunctionName } from "@/shared/refs";
 
 const log = createLogger("pending-queue");
 
@@ -32,12 +29,6 @@ const SYS_PENDING_RELEASE = "_system:pendingRelease";
 const SYS_PENDING_CLEAR = "_system:pendingClear";
 const SYS_PENDING_BLOCK = "_system:pendingBlock";
 const SYS_PENDING_UNBLOCK_ALL = "_system:pendingUnblockAll";
-
-export const PENDING_STORE_MIGRATIONS: StoreMigrationManifest = {
-  store: "pendingQueue",
-  scope: "identity",
-  version: 1,
-};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -103,82 +94,6 @@ export type LocalMutationExecutorFn = (
   args: Record<string, unknown>,
 ) => Promise<unknown>;
 
-export interface PendingEntryStoreAdapter {
-  transaction<T>(work: () => Promise<T> | T): Promise<T>;
-  list(identityKey: string | null): Promise<Array<Record<string, unknown>>>;
-  patch(id: string, fields: Record<string, unknown>): Promise<void>;
-}
-
-export async function migratePendingEntries(
-  adapter: PendingEntryStoreAdapter,
-  identityKey: string | null,
-  replayMetadata: ReadonlyMap<string, PendingReplayMeta>,
-): Promise<void> {
-  await adapter.transaction(async () => {
-    const entries = await adapter.list(identityKey);
-    for (const entry of entries) {
-      const ref = typeof entry.ref === "string" ? entry.ref : null;
-      const argsJson = typeof entry.args === "string" ? entry.args : null;
-      const localResultJson =
-        typeof entry.localResult === "string" ? entry.localResult : null;
-      if (!ref || !argsJson || !localResultJson) {
-        continue;
-      }
-
-      const meta = replayMetadata.get(ref);
-      const targetVersion = meta?.version ?? 1;
-      let currentVersion =
-        typeof entry.payloadVersion === "number" ? entry.payloadVersion : 1;
-
-      if (currentVersion > targetVersion) {
-        throw new Error(
-          `Pending queue entry for "${ref}" is at payload version ${currentVersion}, but this app only supports ${targetVersion}.`,
-        );
-      }
-
-      let args = JSON.parse(argsJson) as Record<string, unknown>;
-      let localResult = JSON.parse(localResultJson) as unknown;
-
-      for (
-        let version = currentVersion + 1;
-        version <= targetVersion;
-        version++
-      ) {
-        const step = meta?.migrate[version];
-        if (!step) {
-          currentVersion = version;
-          continue;
-        }
-
-        const next = await step({
-          ref,
-          fromVersion: version - 1,
-          toVersion: version,
-          args,
-          localResult,
-        });
-        args = next.args;
-        localResult = next.localResult;
-        currentVersion = version;
-      }
-
-      const nextArgs = JSON.stringify(args);
-      const nextLocalResult = JSON.stringify(localResult);
-      if (
-        currentVersion !== entry.payloadVersion ||
-        nextArgs !== argsJson ||
-        nextLocalResult !== localResultJson
-      ) {
-        await adapter.patch(String(entry._id), {
-          args: nextArgs,
-          localResult: nextLocalResult,
-          payloadVersion: currentVersion,
-        });
-      }
-    }
-  });
-}
-
 export class PendingQueue {
   /** In-memory queue — kept in remote with the DB. */
   private _entries: PendingEntry[] = [];
@@ -215,65 +130,48 @@ export class PendingQueue {
    * Load all persisted pending mutations from the embedded DB.
    * Must be called (and awaited) before processing the queue.
    */
-  hydrate(): Promise<void> {
+  async hydrate(): Promise<void> {
     const identityKey = this._getIdentityKey?.() ?? null;
-    return Fx.run(
-      Fx.from({
-        ok: () => {
-          if (this._queryFn) {
-            return this._queryFn(SYS_PENDING_GET_ALL, {
-              identityKey,
-            }) as Promise<Array<Record<string, unknown>>>;
-          }
-          return (this._localClient as any).query(SYS_PENDING_GET_ALL, {
+    try {
+      const entries = await (async () => {
+        if (this._queryFn) {
+          return this._queryFn(SYS_PENDING_GET_ALL, {
             identityKey,
           }) as Promise<Array<Record<string, unknown>>>;
-        },
-        err: (e) => e as Error,
-      }).pipe(
-        Fx.tap((entries) =>
-          Fx.sync(() => {
-            this._entries = entries.map((e) => ({
-              _id: e._id as string,
-              ref: e.ref as string,
-              args: e.args as string,
-              localResult: e.localResult as string,
-              table: e.table as string,
-              payloadVersion:
-                typeof e.payloadVersion === "number"
-                  ? (e.payloadVersion as number)
-                  : 1,
-              identityKey: (e.identityKey as string | undefined) ?? undefined,
-              state:
-                (e.state as PendingEntry["state"] | undefined) ?? "pending",
-              owner: (e.owner as string | undefined) ?? undefined,
-              processingStartedAt:
-                (e.processingStartedAt as number | undefined) ?? undefined,
-              leaseExpiresAt:
-                (e.leaseExpiresAt as number | undefined) ?? undefined,
-              blockedReason:
-                (e.blockedReason as
-                  | PendingEntry["blockedReason"]
-                  | undefined) ?? undefined,
-              hydrated: true,
-            }));
-            log.info(
-              `pending-queue: hydrated ${this._entries.length} entry/entries`,
-            );
-          }),
-        ),
-        Fx.inspect((err) =>
-          Fx.sync(() =>
-            log.warn(
-              "pending-queue: hydration failed (starting with empty queue)",
-              err,
-            ),
-          ),
-        ),
-        Fx.recover(() => Fx.unit),
-        Fx.map(() => undefined as void),
-      ),
-    );
+        }
+        return (this._localClient as any).query(SYS_PENDING_GET_ALL, {
+          identityKey,
+        }) as Promise<Array<Record<string, unknown>>>;
+      })();
+
+      this._entries = entries.map((e: any) => ({
+        _id: e._id as string,
+        ref: e.ref as string,
+        args: e.args as string,
+        localResult: e.localResult as string,
+        table: e.table as string,
+        payloadVersion:
+          typeof e.payloadVersion === "number"
+            ? (e.payloadVersion as number)
+            : 1,
+        identityKey: (e.identityKey as string | undefined) ?? undefined,
+        state: (e.state as PendingEntry["state"] | undefined) ?? "pending",
+        owner: (e.owner as string | undefined) ?? undefined,
+        processingStartedAt:
+          (e.processingStartedAt as number | undefined) ?? undefined,
+        leaseExpiresAt: (e.leaseExpiresAt as number | undefined) ?? undefined,
+        blockedReason:
+          (e.blockedReason as PendingEntry["blockedReason"] | undefined) ??
+          undefined,
+        hydrated: true,
+      }));
+      log.info(`pending-queue: hydrated ${this._entries.length} entry/entries`);
+    } catch (err) {
+      log.warn(
+        "pending-queue: hydration failed (starting with empty queue)",
+        err,
+      );
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -286,7 +184,7 @@ export class PendingQueue {
    * The function reference is stored as its name string (e.g. "tasks:create")
    * via `getFunctionName()`. Args and localResult are JSON-serialized.
    */
-  push(
+  async push(
     ref: unknown,
     args: Record<string, unknown>,
     localResult: unknown,
@@ -307,55 +205,50 @@ export class PendingQueue {
       state: "pending" as const,
     };
 
+    const collapsed = this._collapseTransientCreateDelete(
+      serialized,
+      localResult,
+    );
+    if (collapsed) {
+      return collapsed;
+    }
+
     if (this._hasEquivalentPendingEntry(serialized)) {
       log.debug(
         `pending-queue: skipped duplicate entry (table: ${table}, queue size: ${this._entries.length})`,
       );
-      return Promise.resolve();
+      return;
     }
 
     let persistenceError: PendingQueuePersistenceError | null = null;
 
-    return Fx.run(
-      Fx.from({
-        ok: () =>
-          (this._mutationFn
-            ? this._mutationFn(SYS_PENDING_PUSH, serialized)
-            : (this._localClient as any).mutation(
-                SYS_PENDING_PUSH,
-                serialized,
-              )) as Promise<string>,
-        err: (e) => e as Error,
-      }).pipe(
-        Fx.tap((id) =>
-          Fx.sync(() => {
-            this._entries.push({ _id: id, ...serialized, hydrated: false });
-            log.debug(
-              `pending-queue: pushed entry (table: ${table}, queue size: ${this._entries.length})`,
-            );
-          }),
-        ),
-        Fx.inspect((err) =>
-          Fx.sync(() => {
-            log.warn("pending-queue: failed to persist entry", err);
-            const ephemeralEntry = {
-              _id: `ephemeral_${Date.now()}`,
-              ...serialized,
-              hydrated: false,
-            };
-            // Keep an in-memory fallback for this session, but surface that
-            // durability has been lost so callers can react explicitly.
-            this._entries.push(ephemeralEntry);
-            persistenceError = new PendingQueuePersistenceError(
-              ephemeralEntry,
-              err,
-            );
-          }),
-        ),
-        Fx.recover((err) => Fx.fail(persistenceError ?? (err as Error))),
-        Fx.map(() => undefined as void),
-      ),
-    );
+    try {
+      const id = await ((
+        this._mutationFn
+          ? this._mutationFn(SYS_PENDING_PUSH, serialized)
+          : (this._localClient as any).mutation(SYS_PENDING_PUSH, serialized)
+      ) as Promise<string>);
+
+      this._entries.push({ _id: id, ...serialized, hydrated: false });
+      log.debug(
+        `pending-queue: pushed entry (table: ${table}, queue size: ${this._entries.length})`,
+      );
+    } catch (err) {
+      log.warn("pending-queue: failed to persist entry", err);
+      const ephemeralEntry = {
+        _id: `ephemeral_${Date.now()}`,
+        ...serialized,
+        hydrated: false,
+      };
+      // Keep an in-memory fallback for this session, but surface that
+      // durability has been lost so callers can react explicitly.
+      this._entries.push(ephemeralEntry);
+      persistenceError = new PendingQueuePersistenceError(
+        ephemeralEntry,
+        err as Error,
+      );
+      throw persistenceError;
+    }
   }
 
   /**
@@ -413,7 +306,7 @@ export class PendingQueue {
   /**
    * Remove an entry from the queue after successful processing.
    */
-  remove(
+  async remove(
     target?: PendingEntry,
     owner?: string,
   ): Promise<PendingEntry | undefined> {
@@ -422,41 +315,40 @@ export class PendingQueue {
         ? 0
         : this._entries.findIndex((entry) => entry._id === target._id);
     if (index < 0) {
-      return Promise.resolve(undefined);
+      return undefined;
     }
 
-    const [entry] = this._entries.splice(index, 1);
-    if (entry === undefined) return Promise.resolve(undefined);
+    const entry = this._entries[index];
+    if (entry === undefined) return undefined;
 
     if (entry._id.startsWith("ephemeral_")) {
-      return Promise.resolve(entry);
+      this._entries.splice(index, 1);
+      return entry;
     }
 
-    return Fx.run(
-      Fx.from({
-        ok: () =>
-          this._mutationFn
-            ? this._mutationFn(SYS_PENDING_REMOVE, { id: entry._id, owner })
-            : ((this._localClient as any).mutation(SYS_PENDING_REMOVE, {
-                id: entry._id,
-                owner,
-              }) as Promise<unknown>),
-        err: (e) => e as Error,
-      }).pipe(
-        Fx.inspect((err) =>
-          Fx.sync(() =>
-            log.warn("pending-queue: failed to remove persisted entry", err),
-          ),
-        ),
-        Fx.recover(() => Fx.unit),
-        Fx.map(() => entry),
-      ),
-    );
+    try {
+      const result = await (this._mutationFn
+        ? this._mutationFn(SYS_PENDING_REMOVE, { id: entry._id, owner })
+        : ((this._localClient as any).mutation(SYS_PENDING_REMOVE, {
+            id: entry._id,
+            owner,
+          }) as Promise<unknown>));
+
+      if (result === undefined) {
+        return undefined;
+      }
+      this._entries.splice(index, 1);
+      return entry;
+    } catch (err) {
+      log.warn("pending-queue: failed to remove persisted entry", err);
+      return undefined;
+    }
   }
 
   async claimNext(
     owner: string,
     leaseMs = 30_000,
+    processorStaleMs = leaseMs,
   ): Promise<PendingEntry | undefined> {
     const identityKey = this._getIdentityKey?.() ?? null;
     const claimed = (await (this._mutationFn
@@ -464,18 +356,14 @@ export class PendingQueue {
           identityKey,
           owner,
           leaseMs,
+          processorStaleMs,
         })
       : ((this._localClient as any).mutation(SYS_PENDING_CLAIM_NEXT, {
           identityKey,
           owner,
           leaseMs,
+          processorStaleMs,
         }) as Promise<PendingEntry | null>))) as PendingEntry | null;
-
-    const fallback = this._entries.find(
-      (entry) =>
-        (entry.identityKey ?? identityKey ?? null) === identityKey &&
-        (entry.state === undefined || entry.state === "pending"),
-    );
 
     if (
       claimed &&
@@ -492,14 +380,6 @@ export class PendingQueue {
 
       this._entries.push(claimed);
       return claimed;
-    }
-
-    if (fallback) {
-      fallback.state = "processing";
-      fallback.owner = owner;
-      fallback.processingStartedAt = Date.now();
-      fallback.leaseExpiresAt = Date.now() + leaseMs;
-      return fallback;
     }
 
     if (!claimed) {
@@ -569,30 +449,20 @@ export class PendingQueue {
   /**
    * Clear all entries from the queue.
    */
-  clear(): Promise<void> {
+  async clear(): Promise<void> {
     this._entries = [];
 
-    return Fx.run(
-      Fx.from({
-        ok: () =>
-          this._mutationFn
-            ? this._mutationFn(SYS_PENDING_CLEAR, {
-                identityKey: this._getIdentityKey?.() ?? null,
-              })
-            : ((this._localClient as any).mutation(SYS_PENDING_CLEAR, {
-                identityKey: this._getIdentityKey?.() ?? null,
-              }) as Promise<unknown>),
-        err: (e) => e as Error,
-      }).pipe(
-        Fx.inspect((err) =>
-          Fx.sync(() =>
-            log.warn("pending-queue: failed to clear persisted entries", err),
-          ),
-        ),
-        Fx.recover(() => Fx.unit),
-        Fx.map(() => undefined as void),
-      ),
-    );
+    try {
+      await (this._mutationFn
+        ? this._mutationFn(SYS_PENDING_CLEAR, {
+            identityKey: this._getIdentityKey?.() ?? null,
+          })
+        : ((this._localClient as any).mutation(SYS_PENDING_CLEAR, {
+            identityKey: this._getIdentityKey?.() ?? null,
+          }) as Promise<unknown>));
+    } catch (err) {
+      log.warn("pending-queue: failed to clear persisted entries", err);
+    }
   }
 
   /** Number of entries in the queue. */
@@ -628,6 +498,65 @@ export class PendingQueue {
       }
       return this._extractMutationTargetId(entry.args) === candidateId;
     });
+  }
+
+  private _collapseTransientCreateDelete(
+    candidate: {
+      ref: string;
+      args: string;
+      localResult: string;
+      table: string;
+      identityKey: string | null;
+    },
+    localResult: unknown,
+  ): Promise<void> | null {
+    if (!candidate.ref.endsWith(":remove")) {
+      return null;
+    }
+
+    const candidateId = this._extractMutationTargetId(candidate.args);
+    if (candidateId === null) {
+      return null;
+    }
+
+    const matchingEntries = this._entries.filter((entry) => {
+      if (entry.table !== candidate.table) {
+        return false;
+      }
+      if ((entry.identityKey ?? null) !== candidate.identityKey) {
+        return false;
+      }
+      return this._extractEntryLogicalId(entry) === candidateId;
+    });
+
+    const hasCreate = matchingEntries.some((entry) =>
+      entry.ref.endsWith(":create"),
+    );
+    if (!hasCreate) {
+      return null;
+    }
+
+    return Promise.all(matchingEntries.map((entry) => this.remove(entry))).then(
+      () => {
+        log.debug(
+          `pending-queue: collapsed transient create/delete pair (table: ${candidate.table}, queue size: ${this._entries.length})`,
+          { localResult },
+        );
+      },
+    );
+  }
+
+  private _extractEntryLogicalId(entry: PendingEntry): string | null {
+    if (entry.ref.endsWith(":create")) {
+      try {
+        const parsed = JSON.parse(entry.localResult) as unknown;
+        return typeof parsed === "string" ? parsed : null;
+      } catch {
+        return null;
+      }
+    }
+
+    return this._extractMutationTargetId(entry.args);
   }
 
   private _extractMutationTargetId(argsJson: string): string | null {

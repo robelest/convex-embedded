@@ -37,6 +37,11 @@ type VectorFilterPlan =
   | { kind: "all" }
   | { kind: "or"; clauses: VectorFilterClause[] };
 
+export type VectorFilterSqlClauseGroup = {
+  kind: "or";
+  clauses: Array<{ fieldPath: string; bucketKey: string }>;
+};
+
 type VectorSearchResult = {
   _id: string;
   _score: number;
@@ -61,6 +66,26 @@ function valueToBucketKey(value: Value | undefined): string {
 
 function vectorFilterValueToBucketKey(value: JSONValue): string {
   return JSON.stringify(value);
+}
+
+export function buildVectorFilterClauses(
+  filter: VectorSearchExpression | null,
+  definition: VectorIndexDefinition,
+): Array<{ fieldPath: string; bucketKey: string }> {
+  if (filter === null) {
+    return [];
+  }
+  return collectFilterClauses(filter, definition);
+}
+
+export function buildVectorFilterSqlClauseGroups(
+  filter: VectorSearchExpression | null,
+  definition: VectorIndexDefinition,
+): VectorFilterSqlClauseGroup[] {
+  if (filter === null) {
+    return [];
+  }
+  return collectFilterClauseGroups(filter, definition);
 }
 
 function normalizeVector(values: number[]): {
@@ -207,6 +232,43 @@ function collectFilterClauses(
     return children.flatMap((child) =>
       collectFilterClauses(child as VectorSearchExpression, definition),
     );
+  }
+
+  throw new Error(
+    "Vector search filter only supports q.eq(...) and q.or(...).",
+  );
+}
+
+function collectFilterClauseGroups(
+  expression: VectorSearchExpression,
+  definition: VectorIndexDefinition,
+): VectorFilterSqlClauseGroup[] {
+  const record = asRecord(expression);
+  if (!record) {
+    throw new Error(
+      "Vector search filter only supports q.eq(...) and q.or(...).",
+    );
+  }
+
+  if ("$eq" in record) {
+    return [{ kind: "or", clauses: [parseEqClause(expression, definition)] }];
+  }
+
+  if ("$or" in record) {
+    const children = record.$or;
+    if (!Array.isArray(children)) {
+      throw new Error(
+        "Vector search filter only supports q.eq(...) and q.or(...).",
+      );
+    }
+    return [
+      {
+        kind: "or",
+        clauses: children.flatMap((child) =>
+          collectFilterClauses(child as VectorSearchExpression, definition),
+        ),
+      },
+    ];
   }
 
   throw new Error(

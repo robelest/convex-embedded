@@ -4,7 +4,7 @@ import {
   getFunctionFromHandle,
   resolveFunctionPath,
 } from "@embedded/kernel/modules";
-import { describe, it, expect } from "vite-plus/test";
+import { describe, it, expect } from "@tests/testkit";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -20,10 +20,9 @@ function createMockModules(): Record<string, () => Promise<any>> {
 
 function createLegacyMockModules(): Record<string, () => Promise<any>> {
   return {
-    "./convex/_generated/api.ts": () => Promise.resolve({ default: {} }),
-    "./convex/messages.ts": () =>
-      Promise.resolve({ list: "listFn", send: "sendFn" }),
-    "./convex/lib/utils.ts": () => Promise.resolve({ helper: "helperFn" }),
+    "_generated/api": () => Promise.resolve({ default: {} }),
+    messages: () => Promise.resolve({ list: "listFn", send: "sendFn" }),
+    "lib/utils": () => Promise.resolve({ helper: "helperFn" }),
     "./convex/auth.tsx": () => Promise.resolve({ login: "loginFn" }),
   };
 }
@@ -74,8 +73,8 @@ describe("ModuleLoader", () => {
 
   it("supports legacy path-like keys without a _generated sentinel", async () => {
     const loader = new ModuleLoader({
-      "./convex/foo.ts": () => Promise.resolve({ default: "fooFn" }),
-      "./convex/bar.ts": () => Promise.resolve({ default: "barFn" }),
+      foo: () => Promise.resolve({ default: "fooFn" }),
+      bar: () => Promise.resolve({ default: "barFn" }),
     });
 
     await expect(loader.load("foo")).resolves.toEqual({ default: "fooFn" });

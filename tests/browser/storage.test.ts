@@ -1,6 +1,6 @@
 import { EmbeddedRuntime } from "@embedded/runtime/embedded";
 import { createBrowserStorageSurface } from "@resolve/browser/storage";
-import { afterEach, describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it } from "@tests/testkit";
 
 const runtimes: EmbeddedRuntime[] = [];
 const surfaces: Array<{ close(): void }> = [];
@@ -16,7 +16,7 @@ afterEach(() => {
 
 describe("browser storage surface", () => {
   it("supports local upload URLs and blob-backed getUrl", async () => {
-    const runtime = new EmbeddedRuntime({ modules: {} });
+    const runtime = new EmbeddedRuntime({ convex: { modules: {} } });
     runtimes.push(runtime);
 
     const surface = createBrowserStorageSurface(runtime);
@@ -56,7 +56,7 @@ describe("browser storage surface", () => {
   });
 
   it("revokes cached URLs after the blob is deleted", async () => {
-    const runtime = new EmbeddedRuntime({ modules: {} });
+    const runtime = new EmbeddedRuntime({ convex: { modules: {} } });
     runtimes.push(runtime);
 
     const surface = createBrowserStorageSurface(runtime);
@@ -87,7 +87,7 @@ describe("browser storage surface", () => {
   });
 
   it("expires upload URLs after first successful use", async () => {
-    const runtime = new EmbeddedRuntime({ modules: {} });
+    const runtime = new EmbeddedRuntime({ convex: { modules: {} } });
     runtimes.push(runtime);
 
     const surface = createBrowserStorageSurface(runtime);
@@ -110,7 +110,7 @@ describe("browser storage surface", () => {
   });
 
   it("rejects non-POST upload requests", async () => {
-    const runtime = new EmbeddedRuntime({ modules: {} });
+    const runtime = new EmbeddedRuntime({ convex: { modules: {} } });
     runtimes.push(runtime);
 
     const surface = createBrowserStorageSurface(runtime);

@@ -4,14 +4,8 @@ import {
   OccConflictError,
   OCC_MAX_RETRIES,
 } from "@embedded/kernel/transaction";
-import {
-  describe,
-  it,
-  expect,
-  vi,
-  beforeEach,
-  afterEach,
-} from "vite-plus/test";
+import { describe, it, expect, beforeEach, afterEach } from "@tests/testkit";
+import { vi } from "vitest";
 
 // ---------------------------------------------------------------------------
 // TransactionManager
@@ -147,6 +141,7 @@ function createMockDb() {
   return {
     startTransaction: vi.fn(),
     commit: vi.fn(),
+    commitAsync: vi.fn(async () => undefined),
     rollbackWrites: vi.fn(),
     getDocumentTimestamp: vi.fn().mockReturnValue(1),
     getTableLastWriteTimestamp: vi.fn().mockReturnValue(null),
@@ -174,7 +169,7 @@ describe("OccTransaction", () => {
 
     expect(result).toBe("hello");
     expect(db.startTransaction).toHaveBeenCalledOnce();
-    expect(db.commit).toHaveBeenCalledOnce();
+    expect(db.commitAsync).toHaveBeenCalledOnce();
     expect(db.rollbackWrites).not.toHaveBeenCalled();
   });
 
@@ -184,7 +179,9 @@ describe("OccTransaction", () => {
     const callOrder: string[] = [];
 
     db.startTransaction.mockImplementation(() => callOrder.push("start"));
-    db.commit.mockImplementation(() => callOrder.push("commit"));
+    db.commitAsync.mockImplementation(async () => {
+      callOrder.push("commit");
+    });
 
     await tx.execute(async () => {
       callOrder.push("fn");
@@ -209,7 +206,7 @@ describe("OccTransaction", () => {
     expect(db.getDocumentTimestamp).toHaveBeenCalledWith(
       "aaaaaaaa-0000-4000-8000-000000000001",
     );
-    expect(db.commit).toHaveBeenCalledOnce();
+    expect(db.commitAsync).toHaveBeenCalledOnce();
   });
 
   it("tracks table reads via addTableRead", async () => {
@@ -225,7 +222,7 @@ describe("OccTransaction", () => {
     });
 
     expect(db.getTableLastWriteTimestamp).toHaveBeenCalledWith("messages");
-    expect(db.commit).toHaveBeenCalledOnce();
+    expect(db.commitAsync).toHaveBeenCalledOnce();
   });
 
   it("throws OccConflictError when document timestamp differs", async () => {
@@ -276,7 +273,7 @@ describe("OccTransaction", () => {
 
     expect(attempts).toBe(1); // no retry
     expect(db.rollbackWrites).toHaveBeenCalledOnce();
-    expect(db.commit).not.toHaveBeenCalled();
+    expect(db.commitAsync).not.toHaveBeenCalled();
   });
 
   it("resets read set between retry attempts", async () => {

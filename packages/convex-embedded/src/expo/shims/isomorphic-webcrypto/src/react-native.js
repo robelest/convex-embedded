@@ -1,4 +1,4 @@
-const ExpoCrypto = require("expo-crypto");
+require("react-native-get-random-values");
 
 const shim = {
   subtle: globalThis.crypto?.subtle,
@@ -6,7 +6,7 @@ const shim = {
     return Promise.resolve(true);
   },
   getRandomValues(array) {
-    return ExpoCrypto.getRandomValues(array);
+    return globalThis.crypto.getRandomValues(array);
   },
 };
 

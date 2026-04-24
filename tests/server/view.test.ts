@@ -1,5 +1,6 @@
 import { view } from "@resolve/server/view";
-import { describe, it, expect, vi } from "vite-plus/test";
+import { describe, it, expect } from "@tests/testkit";
+import { vi } from "vitest";
 
 describe("view.public()", () => {
   it("returns query unchanged", () => {

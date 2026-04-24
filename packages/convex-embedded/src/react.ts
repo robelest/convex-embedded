@@ -11,7 +11,6 @@ import type { ConvexClient } from "convex/browser";
 import type { ConvexReactClient } from "convex/react";
 
 import {
-  compileWasmModule,
   createBrowserPlatformAdapter,
   createConvexClient,
   getAuthIdentity as getBrowserAuthIdentity,
@@ -26,7 +25,7 @@ import {
   type AuthOptions,
   type AuthState,
   type ClientOptions,
-  type ConvexModuleRegistry,
+  type ConvexInput,
   type EncryptionOptions,
   type RemoteOptions,
   type RemoteState,
@@ -36,17 +35,23 @@ import {
   wrapConvexClientForReact,
 } from "@/react/client";
 
+/**
+ * Browser-compatible config and state types re-exported for React consumers.
+ */
 export type {
   AuthOptions,
   AuthState,
   ClientOptions,
-  ConvexModuleRegistry,
+  ConvexInput,
   EncryptionOptions,
   RemoteOptions,
   RemoteState,
 };
 
-export { compileWasmModule, createBrowserPlatformAdapter };
+/**
+ * Re-export the browser platform adapter for advanced React integrations.
+ */
+export { createBrowserPlatformAdapter };
 
 /**
  * React entry point for `@robelest/convex-embedded/react`.

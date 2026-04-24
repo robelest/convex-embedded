@@ -4,8 +4,9 @@ import {
   createJsSyscall,
 } from "@embedded/kernel/syscalls";
 import { Database } from "@embedded/runtime/db/database";
+import { describe, it, expect, beforeEach } from "@tests/testkit";
 import { ConvexError } from "convex/values";
-import { describe, it, expect, vi, beforeEach } from "vite-plus/test";
+import { vi } from "vitest";
 
 // ---------------------------------------------------------------------------
 // Helpers

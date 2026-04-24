@@ -17,10 +17,31 @@ import { CrdtType } from "@/shared/types";
 
 const CRDT_FIELD = Symbol.for("convex-embedded:crdt-field");
 
+/**
+ * Conflict-resolution options for register fields.
+ *
+ * @typeParam T - Plain value type stored in the register.
+ */
 export interface RegisterOptions<T> {
+  /**
+   * Optional custom resolver used when multiple register values conflict.
+   * When omitted, the newest timestamp wins.
+   */
   resolve?: (conflict: Conflict<T>) => T;
 }
 
+/**
+ * Declare a prose CRDT field.
+ *
+ * @returns A field descriptor suitable for `embeddedTable({...})`.
+ *
+ * @example
+ * ```ts
+ * const posts = embeddedTable("posts", {
+ *   body: prose(),
+ * });
+ * ```
+ */
 export function prose(): CrdtFieldDescriptor & { [CRDT_FIELD]: true } {
   return {
     [CRDT_FIELD]: true as const,
@@ -29,6 +50,14 @@ export function prose(): CrdtFieldDescriptor & { [CRDT_FIELD]: true } {
   };
 }
 
+/**
+ * Declare a last-write-wins register CRDT field.
+ *
+ * @typeParam T - Plain value type accepted by the validator.
+ * @param validator - Convex validator for the stored register value.
+ * @param options - Optional conflict resolution behavior.
+ * @returns A field descriptor suitable for `embeddedTable({...})`.
+ */
 export function register<T>(
   validator: Validator<T, any, any>,
   options?: RegisterOptions<T>,
@@ -43,6 +72,11 @@ export function register<T>(
   };
 }
 
+/**
+ * Declare a numeric counter CRDT field.
+ *
+ * @returns A field descriptor suitable for `embeddedTable({...})`.
+ */
 export function counter(): CrdtFieldDescriptor & { [CRDT_FIELD]: true } {
   return {
     [CRDT_FIELD]: true as const,
@@ -51,6 +85,13 @@ export function counter(): CrdtFieldDescriptor & { [CRDT_FIELD]: true } {
   };
 }
 
+/**
+ * Declare a set CRDT field.
+ *
+ * @typeParam T - Member value type accepted by the validator.
+ * @param validator - Convex validator for each set member.
+ * @returns A field descriptor suitable for `embeddedTable({...})`.
+ */
 export function set<T>(
   validator: Validator<T, any, any>,
 ): CrdtFieldDescriptor & { [CRDT_FIELD]: true } {
@@ -61,6 +102,16 @@ export function set<T>(
   };
 }
 
+/**
+ * Declare an omitted field.
+ *
+ * Omitted fields are validated remotely but excluded from local CRDT
+ * materialization.
+ *
+ * @typeParam T - Value type accepted by the validator.
+ * @param validator - Convex validator for the omitted field.
+ * @returns A field descriptor suitable for `embeddedTable({...})`.
+ */
 export function omit<T>(
   validator: Validator<T, any, any>,
 ): CrdtFieldDescriptor & { [CRDT_FIELD]: true } {
@@ -71,6 +122,17 @@ export function omit<T>(
   };
 }
 
+/**
+ * Namespace-style schema helper collection for server-side table definitions.
+ *
+ * @example
+ * ```ts
+ * const tasks = embeddedTable("tasks", {
+ *   title: schema.register(v.string()),
+ *   body: schema.prose(),
+ * });
+ * ```
+ */
 export const schema = {
   define,
   prose,

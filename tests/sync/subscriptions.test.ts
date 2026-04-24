@@ -1,6 +1,7 @@
 import type { QueryDependency } from "@embedded/runtime/db/types";
 import { SubscriptionManager } from "@embedded/sync/subscriptions";
-import { describe, it, expect, vi } from "vite-plus/test";
+import { describe, it, expect } from "@tests/testkit";
+import { vi } from "vitest";
 
 describe("SubscriptionManager", () => {
   // -------------------------------------------------------------------------
@@ -167,6 +168,32 @@ describe("SubscriptionManager", () => {
           },
         ]),
       ).not.toThrow();
+    });
+
+    it("falls back to table invalidation when a change lacks precise row data", () => {
+      const manager = new SubscriptionManager();
+      const cb = vi.fn();
+      const dependencies: QueryDependency[] = [
+        {
+          type: "IndexRange",
+          tableName: "users",
+          indexName: "by_age",
+          range: [{ type: "Eq", fieldPath: "age", value: 42 }],
+          order: "asc",
+        },
+      ];
+
+      manager.subscribe("q1", new Set(["users"]), dependencies, cb);
+
+      manager.invalidate([
+        {
+          tableName: "users",
+          before: null,
+          after: null,
+        },
+      ]);
+
+      expect(cb).toHaveBeenCalledOnce();
     });
   });
 

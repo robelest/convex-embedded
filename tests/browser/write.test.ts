@@ -1,12 +1,6 @@
 import { BrowserWriteBroadcast } from "@embedded/browser/write";
-import {
-  describe,
-  it,
-  expect,
-  vi,
-  beforeEach,
-  afterEach,
-} from "vite-plus/test";
+import { describe, it, expect, beforeEach, afterEach } from "@tests/testkit";
+import { vi } from "vitest";
 
 // ---------------------------------------------------------------------------
 // Mock BroadcastChannel
@@ -241,6 +235,28 @@ describe("BrowserWriteBroadcast", () => {
       expect(cb).not.toHaveBeenCalled();
 
       fanout2.close();
+    });
+  });
+
+  describe("localStorage fallback", () => {
+    it("writes unique payloads for repeated notifications", () => {
+      vi.stubGlobal(
+        "BroadcastChannel",
+        undefined as unknown as typeof BroadcastChannel,
+      );
+      const localStorageMock = { setItem: vi.fn() };
+      vi.stubGlobal("localStorage", localStorageMock);
+      const fanout = new BrowserWriteBroadcast("storage-fallback");
+
+      fanout.notify(new Set(["users"]));
+      fanout.notify(new Set(["users"]));
+
+      expect(localStorageMock.setItem).toHaveBeenCalledTimes(2);
+      expect(localStorageMock.setItem.mock.calls[0]?.[1]).not.toBe(
+        localStorageMock.setItem.mock.calls[1]?.[1],
+      );
+
+      fanout.close();
     });
   });
 });

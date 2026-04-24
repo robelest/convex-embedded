@@ -1,5 +1,3 @@
-import { Fx } from "@robelest/fx";
-
 import {
   createAmbientCryptoProvider,
   type EmbeddedCryptoProvider,
@@ -142,52 +140,37 @@ export function createBrowserStorageSurface(
         );
       }
 
-      return await Fx.run(
-        Fx.from({
-          ok: async () => {
-            log.info(`starting local upload for token ${token}`);
-            const contentType = request.headers.get("content-type") ?? "";
-            const body = await request.arrayBuffer();
-            const blob = new Blob([body], {
-              type: contentType || undefined,
-            });
-            log.debug(
-              `received upload body for token ${token} (${blob.size} bytes, ${blob.type || "unknown type"})`,
-            );
-            const storageId = await runtime.storeUploadedBlobWithMetadata(
-              blob,
-              {
-                uploadSourceRef: runtime.consumeUploadUrlSource(token),
-              },
-            );
-            uploadSurfaces.delete(token);
-            log.info(
-              `completed local upload for token ${token} -> ${storageId}`,
-            );
-            return new Response(JSON.stringify({ storageId }), {
-              status: 200,
-              headers: { "Content-Type": "application/json" },
-            });
+      try {
+        log.info(`starting local upload for token ${token}`);
+        const contentType = request.headers.get("content-type") ?? "";
+        const body = await request.arrayBuffer();
+        const blob = new Blob([body], {
+          type: contentType || undefined,
+        });
+        log.debug(
+          `received upload body for token ${token} (${blob.size} bytes, ${blob.type || "unknown type"})`,
+        );
+        const storageId = await runtime.storeUploadedBlobWithMetadata(blob, {
+          uploadSourceRef: runtime.consumeUploadUrlSource(token),
+        });
+        uploadSurfaces.delete(token);
+        log.info(`completed local upload for token ${token} -> ${storageId}`);
+        return new Response(JSON.stringify({ storageId }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      } catch (thrown) {
+        const error =
+          thrown instanceof Error ? thrown : new Error(String(thrown));
+        log.error(`local upload failed for token ${token}`, error);
+        return new Response(
+          JSON.stringify({ error: error.message || "Upload failed." }),
+          {
+            status: 500,
+            headers: { "Content-Type": "application/json" },
           },
-          err: (error) =>
-            error instanceof Error ? error : new Error(String(error)),
-        }).pipe(
-          Fx.recover((error) =>
-            Fx.succeed(
-              (() => {
-                log.error(`local upload failed for token ${token}`, error);
-                return new Response(
-                  JSON.stringify({ error: error.message || "Upload failed." }),
-                  {
-                    status: 500,
-                    headers: { "Content-Type": "application/json" },
-                  },
-                );
-              })(),
-            ),
-          ),
-        ),
-      );
+        );
+      }
     },
 
     close(): void {

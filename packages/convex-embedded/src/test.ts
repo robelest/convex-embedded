@@ -11,6 +11,7 @@
 import type { TestConvex } from "convex-test";
 import type { GenericSchema, SchemaDefinition } from "convex/server";
 
+import type { UserIdentity } from "./auth";
 import schema from "./component/schema";
 import type { ConvexModule, ConvexModuleRegistry } from "./kernel/modules";
 
@@ -50,4 +51,37 @@ export function register(
   t.registerComponent(name, schema, modules);
 }
 
-export default { register, schema, modules };
+/**
+ * Create a stable test identity for embedded auth scenarios.
+ *
+ * @param attrs - Partial identity overrides.
+ * @returns A complete embedded user identity suitable for tests.
+ *
+ * @example
+ * ```ts
+ * const identity = createTestIdentity({ subject: "user-42" });
+ * await t.setIdentity(identity);
+ * ```
+ */
+export function createTestIdentity(
+  attrs: Record<string, any> = {},
+): UserIdentity {
+  const subject = (attrs.subject as string) ?? "test-user-1";
+  const issuer = (attrs.issuer as string) ?? "https://embedded.local";
+  const tokenIdentifier =
+    (attrs.tokenIdentifier as string) ?? `${issuer}|${subject}`;
+
+  return {
+    subject,
+    issuer,
+    tokenIdentifier,
+    name: "Test User",
+    email: "test@embedded.local",
+    ...attrs,
+  };
+}
+
+/**
+ * Default test helpers bundle for integration setups.
+ */
+export default { register, schema, modules, createTestIdentity };

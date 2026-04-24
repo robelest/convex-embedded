@@ -1,22 +1,35 @@
 import type { ModuleLoader } from "@embedded/kernel/modules";
 import { UdfExecutor } from "@embedded/kernel/udf";
-import { remoteOnly } from "@embedded/server/setup";
+import { remoteOnly } from "@embedded/server/table";
+import { describe, it, expect } from "@tests/testkit";
 import { ConvexError } from "convex/values";
-import { describe, it, expect, vi } from "vite-plus/test";
+import { vi } from "vitest";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 function createMockDb() {
+  const commitResult = {
+    timestamp: 1,
+    tablesWritten: new Set(["messages"]),
+    persisted: Promise.resolve(),
+  };
   return {
     startTransaction: vi.fn(),
-    commit: vi.fn().mockReturnValue({
-      timestamp: 1,
-      tablesWritten: new Set(["messages"]),
-      persisted: Promise.resolve(),
-    }),
+    commit: vi.fn().mockReturnValue(commitResult),
+    commitAsync: vi.fn().mockResolvedValue(commitResult),
     rollbackWrites: vi.fn(),
+  } as any;
+}
+
+function createMockCrypto() {
+  return {
+    randomUUID: vi.fn(() => "00000000-0000-4000-8000-000000000000"),
+    getRandomValues: vi.fn((bytes: Uint8Array) => bytes),
+    sha256: vi.fn(async () => new Uint8Array()),
+    encryptAesGcm: vi.fn(async () => new Uint8Array()),
+    decryptAesGcm: vi.fn(async () => new Uint8Array()),
   } as any;
 }
 
@@ -49,6 +62,7 @@ function makeExecutor(
   return {
     executor: new UdfExecutor({
       db,
+      crypto: createMockCrypto(),
       moduleLoader: createMockModuleLoader(modules),
       runUdf: mockRunUdf,
     }),
@@ -176,7 +190,7 @@ describe("executeMutation", () => {
 
     expect(result).toBe("hello");
     expect(commit.tablesWritten).toEqual(new Set(["messages"]));
-    expect(db.commit).toHaveBeenCalledOnce();
+    expect(db.commitAsync).toHaveBeenCalledOnce();
     expect(db.rollbackWrites).not.toHaveBeenCalled();
   });
 

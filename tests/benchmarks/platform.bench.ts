@@ -3,10 +3,10 @@ import { Database } from "@embedded/runtime/db/database";
 import { EmbeddedRuntime } from "@embedded/runtime/embedded";
 import { SchedulerExecutor } from "@embedded/scheduler/executor";
 import { SubscriptionManager } from "@embedded/sync/subscriptions";
-import { bench, describe } from "vite-plus/test";
+import { bench, describe } from "@tests/testkit";
 
 const STUB_MODULES: Record<string, () => Promise<Record<string, unknown>>> = {
-  "./convex/_generated/api.ts": async () => ({}),
+  "_generated/api": async () => ({}),
 };
 
 function createMockModuleLoader(
@@ -46,7 +46,7 @@ function createExecutor() {
 }
 
 async function seedSystemRuntime(): Promise<EmbeddedRuntime> {
-  const runtime = new EmbeddedRuntime({ modules: STUB_MODULES });
+  const runtime = new EmbeddedRuntime({ convex: { modules: STUB_MODULES } });
   await runtime.hydrate();
 
   for (let index = 0; index < 1_000; index += 1) {

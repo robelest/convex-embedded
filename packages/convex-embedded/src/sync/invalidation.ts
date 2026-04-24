@@ -38,6 +38,10 @@ export function dependencyOverlapsChanges(
       return false;
     }
 
+    if (before === null && after === null) {
+      return true;
+    }
+
     if (dependency.type === "IndexRange") {
       return [before, after].some(
         (doc) => doc !== null && matchesRangeExpressions(doc, dependency.range),

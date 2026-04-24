@@ -8,13 +8,14 @@ Embedded Convex runtime for local-first applications.
   `createEmbeddedRuntime()` and transport helpers.
 - `@robelest/convex-embedded/browser` - browser-first `createConvexClient()`
   factory with persistence, auth, and remote sync wiring.
-- `@robelest/convex-embedded/expo` - Expo-first `createConvexClient()` factory
-  with `expo-sqlite`, `expo-file-system`, `expo-network`, and `expo-crypto`.
+- `@robelest/convex-embedded/react-native` - React Native `createConvexClient()`
+  factory with SQLite persistence plus Expo-backed file, network, and crypto
+  adapters.
 - `@robelest/convex-embedded/server` - `embeddedTable()`, schema helpers,
   migrations, and Convex-side setup utilities.
 - `@robelest/convex-embedded/crdt` - CRDT field constructors and runtime helpers
   for reading Yjs-backed state.
-- `@robelest/convex-embedded/client` - lower-level client sync internals for
-  custom wrappers.
+- `@robelest/convex-embedded/client` - client bootstrap helpers such as
+  `createEmbeddedPrefetch()` for SSR/bootstrap data loading.
 - `@robelest/convex-embedded/test` - test helpers for registering the packaged
   component with `convex-test`.

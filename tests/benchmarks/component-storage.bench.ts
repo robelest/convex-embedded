@@ -1,23 +1,19 @@
-import { bench, describe } from "vite-plus/test";
+import { bench, describe } from "@tests/testkit";
 import * as Y from "yjs";
 
 import {
-  cleanupDoc,
-  createCheckpoint,
   getLiveStates,
   recordUpdate,
 } from "../../packages/convex-embedded/src/component/public";
 
 const recordUpdateHandler = (recordUpdate as any)._handler as Function;
 const getLiveStatesHandler = (getLiveStates as any)._handler as Function;
-const createCheckpointHandler = (createCheckpoint as any)._handler as Function;
-const cleanupDocHandler = (cleanupDoc as any)._handler as Function;
 
 type TableName =
+  | "collectionHeads"
+  | "collectionTail"
   | "liveStates"
-  | "deltaTail"
-  | "checkpoints"
-  | "pinnedCheckpoints";
+  | "deltaTail";
 
 function clone<T>(value: T): T {
   return structuredClone(value);
@@ -25,10 +21,10 @@ function clone<T>(value: T): T {
 
 function createMockCtx() {
   const tables: Record<TableName, Array<any>> = {
+    collectionHeads: [],
+    collectionTail: [],
     liveStates: [],
     deltaTail: [],
-    checkpoints: [],
-    pinnedCheckpoints: [],
   };
   let idCounter = 0;
 
@@ -41,6 +37,15 @@ function createMockCtx() {
           return {
             eq: (nextField: string, nextValue: unknown) => {
               filters[nextField] = nextValue;
+              return {
+                gt: (gtField: string, gtValue: unknown) => {
+                  filters[gtField] = { $gt: gtValue };
+                  return undefined;
+                },
+              };
+            },
+            gt: (nextField: string, nextValue: unknown) => {
+              filters[nextField] = { $gt: nextValue };
               return undefined;
             },
           };
@@ -48,14 +53,24 @@ function createMockCtx() {
       });
 
       const rows = tables[tableName].filter((row) =>
-        Object.entries(filters).every(([key, value]) => row[key] === value),
+        Object.entries(filters).every(([key, value]) => {
+          const currentRow = row as Record<string, any>;
+          if (
+            value &&
+            typeof value === "object" &&
+            "$gt" in (value as Record<string, unknown>)
+          ) {
+            return currentRow[key] > (value as { $gt: any }).$gt;
+          }
+          return currentRow[key] === value;
+        }),
       );
 
       return {
         unique: async () => clone(rows[0] ?? null),
         order: (direction: "asc" | "desc") => {
-          const orderField = indexName.endsWith("createdAt")
-            ? "createdAt"
+          const orderField = indexName.endsWith("updatedAt")
+            ? "updatedAt"
             : "seq";
           const ordered = [...rows].sort((a, b) =>
             direction === "desc"
@@ -97,17 +112,6 @@ function createMockCtx() {
           }
         }
       },
-      get: async (id: string) => {
-        for (const table of Object.values(tables)) {
-          const row = table.find((entry) => entry._id === id);
-          if (row) {
-            return clone(row);
-          }
-        }
-        return null;
-      },
-      normalizeId: (tableName: string, id: string) =>
-        id.startsWith(`${tableName}:`) ? id : null,
     },
     tables,
   };
@@ -123,35 +127,6 @@ function yUpdate(content: string) {
   return buffer;
 }
 
-async function seedDocumentHistory(input: {
-  ctx: ReturnType<typeof createMockCtx>;
-  docId: string;
-  updates: number;
-  checkpointsEvery?: number;
-}) {
-  for (let index = 0; index < input.updates; index += 1) {
-    await recordUpdateHandler(input.ctx as any, {
-      collection: "issues",
-      docId: input.docId,
-      update: yUpdate(`value-${index}`),
-      keepTailCount: 64,
-      tailByteLimit: 256 * 1024,
-    });
-    if (
-      input.checkpointsEvery &&
-      index > 0 &&
-      index % input.checkpointsEvery === 0
-    ) {
-      await createCheckpointHandler(input.ctx as any, {
-        collection: "issues",
-        docId: input.docId,
-        label: `checkpoint-${index}`,
-        keepCheckpointCount: 10,
-      });
-    }
-  }
-}
-
 describe("component storage", () => {
   bench("recordUpdate single document x1000", async () => {
     const ctx = createMockCtx();
@@ -160,8 +135,23 @@ describe("component storage", () => {
         collection: "issues",
         docId: "doc-1",
         update: yUpdate(`content-${index}`),
+        docCreationTime: 1,
         keepTailCount: 64,
         tailByteLimit: 256 * 1024,
+      });
+    }
+  });
+
+  bench("recordUpdate same document x1000 with large retained tail", async () => {
+    const ctx = createMockCtx();
+    for (let index = 0; index < 1_000; index += 1) {
+      await recordUpdateHandler(ctx as any, {
+        collection: "issues",
+        docId: "doc-hot",
+        update: yUpdate(`hot-${index}`),
+        docCreationTime: 1,
+        keepTailCount: 1_000,
+        tailByteLimit: 2 * 1024 * 1024,
       });
     }
   });
@@ -174,6 +164,7 @@ describe("component storage", () => {
           collection: "issues",
           docId: `doc-${doc}`,
           update: yUpdate(`doc-${doc}-${index}`),
+          docCreationTime: doc,
           keepTailCount: 64,
           tailByteLimit: 256 * 1024,
         });
@@ -189,6 +180,7 @@ describe("component storage", () => {
           collection: "issues",
           docId: `doc-${index}`,
           update: yUpdate(`seed-${index}`),
+          docCreationTime: index,
           keepTailCount: 64,
           tailByteLimit: 256 * 1024,
         }),
@@ -198,24 +190,6 @@ describe("component storage", () => {
     await getLiveStatesHandler(ctx as any, {
       collection: "issues",
       docIds: Array.from({ length: 500 }, (_, index) => `doc-${index}`),
-    });
-  });
-
-  bench("cleanupDoc after long history with checkpoints", async () => {
-    const ctx = createMockCtx();
-    await seedDocumentHistory({
-      ctx,
-      docId: "doc-cleanup",
-      updates: 1_000,
-      checkpointsEvery: 50,
-    });
-
-    await cleanupDocHandler(ctx as any, {
-      collection: "issues",
-      docId: "doc-cleanup",
-      keepTailCount: 32,
-      tailByteLimit: 128 * 1024,
-      keepCheckpointCount: 5,
     });
   });
 });

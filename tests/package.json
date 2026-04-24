@@ -4,26 +4,26 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "vp test",
-    "test:once": "vp test --run",
-    "test:coverage": "vp test --run --coverage",
-    "test:consumer": "vp run --filter @robelest/convex-embedded build && vp test --run tests/package/consumer.test.ts",
-    "bench": "vp test bench tests/benchmarks",
-    "bench:component-storage": "vp test bench tests/benchmarks/component-storage.bench.ts",
-    "test:embedded": "vp test --run embedded",
-    "test:resolve": "vp test --run resolve",
-    "test:integration": "vp test --run integration",
-    "test:live": "vp test --run tests/live"
+    "test": "vp exec vitest",
+    "test:once": "vp exec vitest --run",
+    "test:coverage": "vp exec vitest --run --coverage",
+    "test:consumer": "vp run --filter @robelest/convex-embedded build && vp exec vitest --run tests/package/consumer.test.ts",
+    "bench": "vp exec vitest bench tests/benchmarks",
+    "bench:component-storage": "vp exec vitest bench tests/benchmarks/component-storage.bench.ts",
+    "test:embedded": "vp exec vitest --run embedded",
+    "test:resolve": "vp exec vitest --run resolve",
+    "test:integration": "vp exec vitest --run integration",
+    "test:live": "vp exec vitest --run tests/live"
   },
   "devDependencies": {
     "@edge-runtime/vm": "^5.0.0",
     "@robelest/convex-embedded": "workspace:*",
-    "@robelest/fx": "0.0.1-preview.4",
     "@types/node": "^25.5.0",
     "convex": "catalog:",
     "convex-test": "^0.0.36",
     "typescript": "catalog:",
     "vite-plus": "catalog:",
+    "vitest": "catalog:",
     "yjs": "^13.6.0"
   }
 }

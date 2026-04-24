@@ -46,6 +46,7 @@ import {
   type FunctionPath,
 } from "../../packages/convex-embedded/src/kernel/modules";
 import { UdfExecutor } from "../../packages/convex-embedded/src/kernel/udf";
+import { createAmbientCryptoProvider } from "../../packages/convex-embedded/src/runtime/crypto";
 import { Database } from "../../packages/convex-embedded/src/runtime/db/database";
 import type { ParsedSchema } from "../../packages/convex-embedded/src/runtime/db/schema";
 
@@ -203,6 +204,7 @@ export function embeddedTest(
 
   const executor = new UdfExecutor({
     db,
+    crypto: createAmbientCryptoProvider(),
     moduleLoader,
     runUdf,
   });

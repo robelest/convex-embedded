@@ -1,11 +1,15 @@
-import { Cv } from "@robelest/fx/convex";
+import { ConvexError } from "convex/values";
 
+import type { FunctionPath } from "@/kernel/modules";
+import {
+  isConnectivityOffline,
+  type ConnectivityAdapter,
+} from "@/runtime/platform";
 import {
   componentRouteTargetLabel,
   type RemoteRouteReason,
   type RouteMode,
-} from "@/client/routing/metadata";
-import type { FunctionPath } from "@/kernel/modules";
+} from "@/shared/route";
 
 export type MutationPlan =
   | { kind: "local"; enqueueForReplay: boolean }
@@ -49,7 +53,7 @@ export function planMutationExecution(input: {
     const target = componentRouteTargetLabel(refPath);
     return {
       kind: "error",
-      error: Cv.error({
+      error: new ConvexError({
         code: "ROUTE_LOCAL_UNSUPPORTED",
         message:
           `[convex-embedded] Function "${target}" is marked localOnly() but cannot run locally in alpha. ` +
@@ -87,7 +91,7 @@ export function planReadExecution(input: {
     const target = componentRouteTargetLabel(refPath);
     return {
       kind: "error",
-      error: Cv.error({
+      error: new ConvexError({
         code: "ROUTE_LOCAL_UNSUPPORTED",
         message:
           `[convex-embedded] Function "${target}" is marked localOnly() but cannot run locally in alpha. ` +
@@ -111,13 +115,16 @@ export function planReadExecution(input: {
   return { kind: "local" };
 }
 
-export function assertRemotePlanOnline(plan: {
-  refName: string;
-  cause: RemoteRouteReason;
-}): void {
-  if (typeof navigator !== "undefined" && navigator.onLine === false) {
+export function assertRemotePlanOnline(
+  plan: {
+    refName: string;
+    cause: RemoteRouteReason;
+  },
+  connectivity?: ConnectivityAdapter,
+): void {
+  if (isConnectivityOffline(connectivity)) {
     const refName = plan.refName.length > 0 ? plan.refName : "<unknown>";
-    throw Cv.error({
+    throw new ConvexError({
       code: "ROUTE_REMOTE_OFFLINE",
       message: `[convex-embedded] ${plan.cause} function "${refName}" cannot run while offline.`,
       refName,

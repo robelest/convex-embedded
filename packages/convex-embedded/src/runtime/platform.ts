@@ -1,7 +1,7 @@
+import type { PersistenceAdapter } from "@/persistence/adapter";
 import type { EmbeddedCryptoProvider } from "@/runtime/crypto";
 import type { EmbeddedRuntime } from "@/runtime/embedded";
 import type { StorageSurface } from "@/runtime/storage";
-import type { StorageAdapter } from "@/storage/adapter";
 import type { EncryptionOptions } from "@/storage/encrypted";
 
 export type SessionEvent = { type: "authChanged" };
@@ -35,6 +35,39 @@ export interface ConnectivityAdapter {
   close?(): void;
 }
 
+export function createAmbientConnectivityAdapter(): ConnectivityAdapter {
+  return {
+    isOnline() {
+      const hasNavigator =
+        typeof globalThis !== "undefined" && "navigator" in globalThis;
+      const nav = hasNavigator
+        ? (globalThis as { navigator?: { onLine?: boolean } }).navigator
+        : undefined;
+      return nav?.onLine !== false;
+    },
+    onOnline(callback) {
+      if (typeof globalThis.addEventListener !== "function") {
+        return () => {};
+      }
+      globalThis.addEventListener("online", callback);
+      return () => globalThis.removeEventListener("online", callback);
+    },
+    onOffline(callback) {
+      if (typeof globalThis.addEventListener !== "function") {
+        return () => {};
+      }
+      globalThis.addEventListener("offline", callback);
+      return () => globalThis.removeEventListener("offline", callback);
+    },
+  };
+}
+
+export function isConnectivityOffline(
+  connectivity?: ConnectivityAdapter,
+): boolean {
+  return connectivity?.isOnline() === false;
+}
+
 export interface ProcessorIdentity {
   getProcessorId(input: { name: string }): string;
 }
@@ -51,7 +84,7 @@ export interface EmbeddedPlatformAdapter {
     name: string;
     runtime: EmbeddedRuntime;
     encryption?: Omit<EncryptionOptions, "getIdentityKey">;
-  }): Promise<StorageAdapter | null>;
+  }): Promise<PersistenceAdapter | null>;
   createSessionBroadcast?(input: { name: string }): SessionBroadcast;
   createWriteBroadcast?(input: { name: string }): WriteBroadcast;
   createStorageSurface?(input: {

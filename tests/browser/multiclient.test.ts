@@ -1,12 +1,6 @@
-import { createTestIdentity } from "@embedded/auth/resolver";
-import {
-  afterEach,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vite-plus/test";
+import { createTestIdentity } from "@embedded/test";
+import { afterEach, beforeEach, describe, expect, it } from "@tests/testkit";
+import { vi } from "vitest";
 
 vi.mock("convex/browser", () => {
   class MockConvexClient {
@@ -120,8 +114,8 @@ let switchIdentity: typeof import("@resolve/browser/index").switchIdentity;
 
 function createModules() {
   return {
-    "./convex/_generated/api.ts": async () => ({}),
-    "./convex/auth.ts": async () => {
+    "_generated/api": async () => ({}),
+    auth: async () => {
       const { query } = await import("../../convex/_generated/server");
       return {
         whoami: query({
@@ -156,7 +150,7 @@ function createRemoteModules() {
 
   return {
     ...createModules(),
-    "./convex/tasks.ts": async () => ({
+    tasks: async () => ({
       resolve: resolveExport,
       list: () => [],
     }),
@@ -203,12 +197,12 @@ describe("multi-client auth lifecycle", () => {
     const getUserIdentity = vi.fn(async () => currentIdentity);
 
     const clientA = createConvexClient({
-      modules: createModules(),
+      convex: { modules: createModules() },
       name: "multiclient-auth",
       auth: { getUserIdentity },
     });
     const clientB = createConvexClient({
-      modules: createModules(),
+      convex: { modules: createModules() },
       name: "multiclient-auth",
       auth: { getUserIdentity },
     });
@@ -266,12 +260,12 @@ describe("multi-client auth lifecycle", () => {
   it("keeps identityMismatch scoped to the client that still owns pending work", async () => {
     let currentIdentity = createTestIdentity({ subject: "alice" });
     const clientA = createConvexClient({
-      modules: createModules(),
+      convex: { modules: createModules() },
       name: "multiclient-mismatch",
       auth: { getUserIdentity: async () => currentIdentity },
     });
     const clientB = createConvexClient({
-      modules: createModules(),
+      convex: { modules: createModules() },
       name: "multiclient-mismatch",
       auth: { getUserIdentity: async () => currentIdentity },
     });
@@ -318,12 +312,12 @@ describe("multi-client auth lifecycle", () => {
   it("closing one client does not break the surviving client's identity updates", async () => {
     let currentIdentity = createTestIdentity({ subject: "alice" });
     const clientA = createConvexClient({
-      modules: createModules(),
+      convex: { modules: createModules() },
       name: "multiclient-close",
       auth: { getUserIdentity: async () => currentIdentity },
     });
     const clientB = createConvexClient({
-      modules: createModules(),
+      convex: { modules: createModules() },
       name: "multiclient-close",
       auth: { getUserIdentity: async () => currentIdentity },
     });
@@ -349,13 +343,13 @@ describe("multi-client auth lifecycle", () => {
   it("reconnect preserves the refreshed native identity across clients", async () => {
     let currentIdentity = createTestIdentity({ subject: "alice" });
     const clientA = createConvexClient({
-      modules: createRemoteModules(),
+      convex: { modules: createRemoteModules() },
       name: "multiclient-reconnect",
       remote: { url: "https://remote.example.convex.cloud" },
       auth: { getUserIdentity: async () => currentIdentity },
     });
     const clientB = createConvexClient({
-      modules: createRemoteModules(),
+      convex: { modules: createRemoteModules() },
       name: "multiclient-reconnect",
       remote: { url: "https://remote.example.convex.cloud" },
       auth: { getUserIdentity: async () => currentIdentity },
@@ -392,13 +386,13 @@ describe("multi-client auth lifecycle", () => {
   it("closing one remote client does not break the surviving client's reconnect flow", async () => {
     let currentIdentity = createTestIdentity({ subject: "alice" });
     const clientA = createConvexClient({
-      modules: createRemoteModules(),
+      convex: { modules: createRemoteModules() },
       name: "multiclient-remote-close",
       remote: { url: "https://remote.example.convex.cloud" },
       auth: { getUserIdentity: async () => currentIdentity },
     });
     const clientB = createConvexClient({
-      modules: createRemoteModules(),
+      convex: { modules: createRemoteModules() },
       name: "multiclient-remote-close",
       remote: { url: "https://remote.example.convex.cloud" },
       auth: { getUserIdentity: async () => currentIdentity },

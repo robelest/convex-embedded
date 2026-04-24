@@ -1,19 +1,6 @@
 import {
-  AuthResolver,
-  EmbeddedRuntime,
-  createEmbeddedClient,
-  createEmbeddedRuntime,
-  createTestIdentity,
-  createTransport,
-  ephemeralStorage,
-  type EmbeddedClientOptions,
-  type EmbeddedPlatformAdapter,
-  type EmbeddedRuntimeOptions,
-} from "@robelest/convex-embedded";
-import {
   getAuthState,
   getAuthIdentity,
-  compileWasmModule,
   createBrowserPlatformAdapter,
   createConvexClient,
   getRemoteState,
@@ -28,18 +15,13 @@ import {
   type ClientOptions,
   type RemoteOptions,
   type RemoteState,
-} from "@robelest/convex-embedded/browser";
+} from "../dist/browser/index.js";
 import {
-  createReplica,
-  IdMap,
-  type CreateReplicaOptions,
-  type Replica,
-  clientSchema,
-  engine,
-  runtime,
-  type EngineConfig,
-} from "@robelest/convex-embedded/client";
-import embedded from "@robelest/convex-embedded/convex.config";
+  createEmbeddedPrefetch,
+  type CreateEmbeddedPrefetchOptions,
+  type Prefetch,
+} from "../dist/client/index.js";
+import embedded from "../dist/component/convex.config.js";
 import {
   CrdtType,
   counter,
@@ -49,11 +31,21 @@ import {
   schema,
   set as setCrdt,
   type Conflict,
-} from "@robelest/convex-embedded/crdt";
+} from "../dist/crdt/index.js";
+import {
+  AuthResolver,
+  EmbeddedRuntime,
+  createEmbeddedClient,
+  createEmbeddedRuntime,
+  createTransport,
+  type EmbeddedClientOptions,
+  type EmbeddedPlatformAdapter,
+  type EmbeddedRuntimeOptions,
+} from "../dist/index.js";
 import {
   createConvexReactClient,
   wrapConvexBrowserClientForReact,
-} from "@robelest/convex-embedded/react";
+} from "../dist/react.js";
 import {
   embeddedTable,
   localOnly,
@@ -61,8 +53,8 @@ import {
   remoteOnly,
   view,
   type EmbeddedTableHandle,
-} from "@robelest/convex-embedded/server";
-import { register } from "@robelest/convex-embedded/test";
+} from "../dist/server/index.js";
+import { createTestIdentity, register } from "../dist/test.js";
 
 type _RootSurface = {
   AuthResolver: typeof AuthResolver;
@@ -71,14 +63,12 @@ type _RootSurface = {
   createEmbeddedRuntime: typeof createEmbeddedRuntime;
   createTestIdentity: typeof createTestIdentity;
   createTransport: typeof createTransport;
-  ephemeralStorage: typeof ephemeralStorage;
   embeddedClientOptions: EmbeddedClientOptions | null;
   embeddedPlatformAdapter: EmbeddedPlatformAdapter | null;
   runtimeOptions: EmbeddedRuntimeOptions | null;
 };
 
 type _BrowserSurface = {
-  compileWasmModule: typeof compileWasmModule;
   createBrowserPlatformAdapter: typeof createBrowserPlatformAdapter;
   createConvexClient: typeof createConvexClient;
   getAuthIdentity: typeof getAuthIdentity;
@@ -103,14 +93,9 @@ type _ReactSurface = {
 };
 
 type _ClientSurface = {
-  IdMap: typeof IdMap;
-  createReplica: typeof createReplica;
-  clientSchema: typeof clientSchema;
-  engine: typeof engine;
-  runtime: typeof runtime;
-  createReplicaOptions: CreateReplicaOptions | null;
-  engineConfig: EngineConfig | null;
-  replica: Replica | null;
+  createEmbeddedPrefetch: typeof createEmbeddedPrefetch;
+  prefetchOptions: CreateEmbeddedPrefetchOptions<Record<string, never>> | null;
+  prefetchData: Prefetch | null;
 };
 
 type _CrdtSurface = {
@@ -142,14 +127,12 @@ void (<_RootSurface>{
   createEmbeddedRuntime,
   createTestIdentity,
   createTransport,
-  ephemeralStorage,
   embeddedClientOptions: null,
   embeddedPlatformAdapter: null,
   runtimeOptions: null,
 });
 
 void (<_BrowserSurface>{
-  compileWasmModule,
   createBrowserPlatformAdapter,
   createConvexClient,
   getAuthIdentity,
@@ -174,14 +157,9 @@ void (<_ReactSurface>{
 });
 
 void (<_ClientSurface>{
-  IdMap,
-  createReplica,
-  clientSchema,
-  engine,
-  runtime,
-  createReplicaOptions: null,
-  engineConfig: null,
-  replica: null,
+  createEmbeddedPrefetch,
+  prefetchOptions: null,
+  prefetchData: null,
 });
 
 void (<_CrdtSurface>{

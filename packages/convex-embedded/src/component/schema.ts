@@ -7,15 +7,32 @@ import { v } from "convex/values";
  * Storage roles are intentionally separated:
  * - `liveStates`: one authoritative merged Yjs state per document used by resolve.
  * - `deltaTail`: a bounded recent update log for diagnostics and operational context.
- * - `checkpoints`: bounded recent restore points kept by retention policy.
- * - `pinnedCheckpoints`: explicit archival restore points kept off the hot path.
+ *
+ * `docId` remains a plain string on purpose. These tables are generic across
+ * collections/components, so Convex `v.id(...)` validators would be misleading
+ * here: cross-component document references are not typed foreign keys.
  */
 export default defineSchema({
+  collectionHeads: defineTable({
+    collection: v.string(),
+    seq: v.number(),
+    updatedAt: v.number(),
+  }).index("by_collection", ["collection"]),
+
+  collectionTail: defineTable({
+    collection: v.string(),
+    seq: v.number(),
+    docId: v.string(),
+    kind: v.union(v.literal("upsert"), v.literal("delete")),
+    createdAt: v.number(),
+  }).index("by_collection_seq", ["collection", "seq"]),
+
   liveStates: defineTable({
     collection: v.string(),
     docId: v.string(),
     update: v.bytes(),
     seq: v.number(),
+    docCreationTime: v.optional(v.number()),
     byteLength: v.number(),
     updatedAt: v.number(),
   }).index("by_collection_doc", ["collection", "docId"]),
@@ -28,32 +45,4 @@ export default defineSchema({
     byteLength: v.number(),
     createdAt: v.number(),
   }).index("by_collection_doc_seq", ["collection", "docId", "seq"]),
-
-  checkpoints: defineTable({
-    collection: v.string(),
-    docId: v.string(),
-    update: v.bytes(),
-    seq: v.number(),
-    byteLength: v.number(),
-    createdAt: v.number(),
-    label: v.optional(v.string()),
-    reason: v.optional(v.string()),
-    actorId: v.optional(v.string()),
-    source: v.optional(v.string()),
-    metadata: v.optional(v.any()),
-  }).index("by_collection_doc_createdAt", ["collection", "docId", "createdAt"]),
-
-  pinnedCheckpoints: defineTable({
-    collection: v.string(),
-    docId: v.string(),
-    update: v.bytes(),
-    seq: v.number(),
-    byteLength: v.number(),
-    createdAt: v.number(),
-    label: v.optional(v.string()),
-    reason: v.optional(v.string()),
-    actorId: v.optional(v.string()),
-    source: v.optional(v.string()),
-    metadata: v.optional(v.any()),
-  }).index("by_collection_doc_createdAt", ["collection", "docId", "createdAt"]),
 });

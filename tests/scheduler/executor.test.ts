@@ -1,12 +1,6 @@
 import { SchedulerExecutor } from "@embedded/scheduler/executor";
-import {
-  describe,
-  it,
-  expect,
-  vi,
-  beforeEach,
-  afterEach,
-} from "vite-plus/test";
+import { describe, it, expect, beforeEach, afterEach } from "@tests/testkit";
+import { vi } from "vitest";
 
 describe("SchedulerExecutor", () => {
   beforeEach(() => {

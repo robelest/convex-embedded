@@ -1,9 +1,6 @@
-import {
-  AuthResolver,
-  createTestIdentity,
-  getIdentityKey,
-} from "@embedded/auth/resolver";
-import { describe, it, expect } from "vite-plus/test";
+import { AuthResolver, getIdentityKey } from "@embedded/auth";
+import { createTestIdentity } from "@embedded/test";
+import { describe, it, expect } from "@tests/testkit";
 
 describe("AuthResolver", () => {
   it("initial state: getUserIdentity returns null", async () => {

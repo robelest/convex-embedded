@@ -1,26 +1,39 @@
+import "react-native-get-random-values";
 import { gcm } from "@noble/ciphers/aes.js";
-import * as ExpoCrypto from "expo-crypto";
+import { sha256 } from "@noble/hashes/sha2.js";
 
 import type { EmbeddedCryptoProvider } from "@/runtime/crypto";
+import { formatUuidV4 } from "@/runtime/crypto";
 
 export function createExpoCryptoProvider(): EmbeddedCryptoProvider {
+  const crypto = globalThis.crypto;
+  if (!crypto) {
+    throw new Error(
+      "[convex-embedded] No React Native crypto polyfill is available.",
+    );
+  }
+
   return {
     randomUUID() {
-      return ExpoCrypto.randomUUID();
+      return typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : formatUuidV4(
+            crypto.getRandomValues(new Uint8Array(16)) as Uint8Array,
+          );
     },
     getRandomValues(bytes) {
-      return ExpoCrypto.getRandomValues(bytes);
+      return crypto.getRandomValues(
+        bytes as Uint8Array<ArrayBuffer>,
+      ) as Uint8Array;
     },
     async sha256(data) {
       const input = data instanceof Uint8Array ? data : new Uint8Array(data);
-      const digest = await ExpoCrypto.digest(
-        ExpoCrypto.CryptoDigestAlgorithm.SHA256,
+      return sha256(
         input.buffer.slice(
           input.byteOffset,
           input.byteOffset + input.byteLength,
         ) as ArrayBuffer,
       );
-      return new Uint8Array(digest);
     },
     async encryptAesGcm({ key, plaintext, nonce, additionalData }) {
       return gcm(asKeyBytes(key), nonce, additionalData).encrypt(plaintext);

@@ -9,7 +9,6 @@
  * `ConvexReactClient` / `ConvexClient` can talk to us without modification.
  */
 
-import { Fx } from "@robelest/fx";
 import { convexToJson } from "convex/values";
 import type { JSONValue } from "convex/values";
 
@@ -33,7 +32,8 @@ import { encodeBase64 } from "@/shared/base64";
  */
 function numberToEncodedU64(n: number): string {
   const bytes = new Uint8Array(8);
-  // Write as unsigned 64-bit LE — JS numbers are safe up to 2^53.
+  // Write as unsigned 64-bit LE. JS numbers only preserve 53 bits exactly, but
+  // that is sufficient for our timestamp/domain values on this protocol path.
   let val = n;
   for (let i = 0; i < 8; i++) {
     bytes[i] = val & 0xff;
@@ -395,36 +395,16 @@ export class SyncProtocolHandler {
   ): Promise<ServerMessage[]> {
     return this._withSessionLock(sessionId, async () => {
       console.debug("[convex-embedded:protocol]", message.type, sessionId);
-      return Fx.run(
-        matchTag(message, "type", {
-          Connect: (current) =>
-            Fx.from({
-              ok: () => this._handleConnect(sessionId, current),
-              err: (err) => err as Error,
-            }),
-          ModifyQuerySet: (current) =>
-            Fx.from({
-              ok: () => this._handleModifyQuerySet(sessionId, current),
-              err: (err) => err as Error,
-            }),
-          Mutation: (current) =>
-            Fx.from({
-              ok: () => this._handleMutation(sessionId, current),
-              err: (err) => err as Error,
-            }),
-          Action: (current) =>
-            Fx.from({
-              ok: () => this._handleAction(sessionId, current),
-              err: (err) => err as Error,
-            }),
-          Authenticate: (current) =>
-            Fx.from({
-              ok: () => this._handleAuthenticate(sessionId, current),
-              err: (err) => err as Error,
-            }),
-          Event: () => Fx.succeed([]),
-        }),
-      );
+      return matchTag(message, "type", {
+        Connect: (current) =>
+          Promise.resolve(this._handleConnect(sessionId, current)),
+        ModifyQuerySet: (current) =>
+          this._handleModifyQuerySet(sessionId, current),
+        Mutation: (current) => this._handleMutation(sessionId, current),
+        Action: (current) => this._handleAction(sessionId, current),
+        Authenticate: (current) => this._handleAuthenticate(sessionId, current),
+        Event: () => Promise.resolve([] as ServerMessage[]),
+      });
     });
   }
 
@@ -466,20 +446,11 @@ export class SyncProtocolHandler {
 
         const startVersion = { ...session.version };
 
-        const evaluated = await Fx.run(
-          Fx.each(relevantQueries, (observer) =>
-            Fx.from({
-              ok: () =>
-                this._refreshProtocolQueryObserver(
-                  sessionId,
-                  session,
-                  observer,
-                ),
-              err: (err) => err as Error,
-            }),
+        const modifications = await Promise.all(
+          relevantQueries.map((observer) =>
+            this._refreshProtocolQueryObserver(sessionId, session, observer),
           ),
         );
-        const modifications = evaluated;
 
         session.version = {
           ...session.version,
@@ -597,70 +568,68 @@ export class SyncProtocolHandler {
    * Run a single query and return the appropriate state modification.
    * Catches errors and returns a QueryFailed modification instead of throwing.
    */
-  private _evaluateQuery(q: {
+  private async _evaluateQuery(q: {
     sessionId: string;
     identity: unknown;
     identityKey: string | null;
     queryId: number;
     udfPath: string;
     args: unknown[];
-  }): Fx<{
+  }): Promise<{
     modification: StateModification;
     tablesRead: Set<string>;
     dependencies: QueryDependency[];
   }> {
-    return Fx.attempt(
-      () =>
-        this._executor.runQuery(
-          {
-            sessionId: q.sessionId,
-            identity: q.identity,
-            identityKey: q.identityKey,
-          },
-          q.udfPath,
-          ...q.args,
-        ),
-      (value) => {
-        const { result, tablesRead, dependencies } =
-          typeof value === "object" &&
-          value !== null &&
-          "result" in value &&
-          "tablesRead" in value
-            ? (value as {
-                result: JSONValue;
-                tablesRead: Set<string>;
-                dependencies?: QueryDependency[];
-              })
-            : {
-                result: value as JSONValue,
-                tablesRead: new Set<string>(),
-                dependencies: [],
-              };
-        return {
-          modification: {
-            type: "QueryUpdated",
-            queryId: q.queryId,
-            value: result as JSONValue,
-            logLines: [],
-            journal: null,
-          },
-          tablesRead,
-          dependencies: dependencies ?? [],
-        };
-      },
-      (err) => ({
+    try {
+      const value = await this._executor.runQuery(
+        {
+          sessionId: q.sessionId,
+          identity: q.identity,
+          identityKey: q.identityKey,
+        },
+        q.udfPath,
+        ...q.args,
+      );
+      const { result, tablesRead, dependencies } =
+        typeof value === "object" &&
+        value !== null &&
+        "result" in value &&
+        "tablesRead" in value
+          ? (value as {
+              result: JSONValue;
+              tablesRead: Set<string>;
+              dependencies?: QueryDependency[];
+            })
+          : {
+              result: value as JSONValue,
+              tablesRead: new Set<string>(),
+              dependencies: [],
+            };
+      return {
+        modification: {
+          type: "QueryUpdated",
+          queryId: q.queryId,
+          value: result as JSONValue,
+          logLines: [] as string[],
+          journal: null,
+        } as StateModification,
+        tablesRead,
+        dependencies: (dependencies ?? []) as QueryDependency[],
+      };
+    } catch (err) {
+      return {
         modification: {
           type: "QueryFailed",
           queryId: q.queryId,
           errorMessage: errorMessage(err),
-          logLines: [errorMessage(err)],
+          logLines: [errorMessage(err)] as string[],
           errorData: extractErrorData(err) ?? null,
           journal: null,
-        },
+        } as StateModification,
         tablesRead: new Set<string>(),
-        dependencies: [],
-      }),
-    );
+        dependencies: [] as QueryDependency[],
+      };
+    }
   }
 
   private _createProtocolQueryObserver(
@@ -669,14 +638,12 @@ export class SyncProtocolHandler {
     query: ProtocolQueryRecord,
   ): RuntimeQueryObserver<ProtocolQueryRecord> {
     return this._queryStore.ensure(sessionId, query, async () => {
-      const evaluated = await Fx.run(
-        this._evaluateQuery({
-          sessionId,
-          identity: session.identity,
-          identityKey: session.identityKey,
-          ...query,
-        }),
-      );
+      const evaluated = await this._evaluateQuery({
+        sessionId,
+        identity: session.identity,
+        identityKey: session.identityKey,
+        ...query,
+      });
       query.tablesRead = evaluated.tablesRead;
       query.dependencies = evaluated.dependencies;
       return {
@@ -696,14 +663,12 @@ export class SyncProtocolHandler {
     session: SessionState,
     observer: RuntimeQueryObserver<ProtocolQueryRecord>,
   ): Promise<StateModification> {
-    const evaluated = await Fx.run(
-      this._evaluateQuery({
-        sessionId,
-        identity: session.identity,
-        identityKey: session.identityKey,
-        ...observer.meta,
-      }),
-    );
+    const evaluated = await this._evaluateQuery({
+      sessionId,
+      identity: session.identity,
+      identityKey: session.identityKey,
+      ...observer.meta,
+    });
     observer.meta.tablesRead = evaluated.tablesRead;
     observer.meta.dependencies = evaluated.dependencies;
     this._queryStore.track(sessionId, observer.meta.queryId, {
@@ -752,39 +717,37 @@ export class SyncProtocolHandler {
     }
 
     const startVersion = { ...session.version };
-    const modifications = await Fx.run(
-      Fx.each(message.modifications, (modification) =>
-        matchTag(modification, "type", {
-          Add: (current) =>
-            Fx.from({
-              ok: async () => {
-                const query = {
-                  queryId: current.queryId,
-                  udfPath: current.udfPath,
-                  args: current.args ?? [],
-                  tablesRead: new Set<string>(),
-                  dependencies: [] as QueryDependency[],
-                };
-                const observer = this._createProtocolQueryObserver(
-                  sessionId,
-                  session,
-                  query,
-                );
-                return this._refreshProtocolQueryObserver(
-                  sessionId,
-                  session,
-                  observer,
-                );
-              },
-              err: (err) => err as Error,
-            }),
-          Remove: (current) =>
-            Fx.sync(() => {
-              this._queryStore.delete(sessionId, current.queryId);
-              return null;
-            }),
-        }),
-      ).pipe(Fx.map((values) => values.filter((value) => value !== null))),
+    const results: Array<StateModification | null> = [];
+    for (const modification of message.modifications) {
+      const result = await matchTag(modification, "type", {
+        Add: async (current) => {
+          const query = {
+            queryId: current.queryId,
+            udfPath: current.udfPath,
+            args: current.args ?? [],
+            tablesRead: new Set<string>(),
+            dependencies: [] as QueryDependency[],
+          };
+          const observer = this._createProtocolQueryObserver(
+            sessionId,
+            session,
+            query,
+          );
+          return this._refreshProtocolQueryObserver(
+            sessionId,
+            session,
+            observer,
+          );
+        },
+        Remove: (current) => {
+          this._queryStore.delete(sessionId, current.queryId);
+          return Promise.resolve(null);
+        },
+      });
+      results.push(result as StateModification | null);
+    }
+    const modifications = results.filter(
+      (value): value is StateModification => value !== null,
     );
 
     session.version = {
@@ -805,101 +768,82 @@ export class SyncProtocolHandler {
 
     let writtenTables: Set<string> | null = new Set<string>();
     let writtenChanges: ProtocolChange[] | null = null;
-    const mutationResponse: ServerMessage = await Fx.run(
-      Fx.attempt(
-        () =>
-          this._executor.runMutation(
-            {
-              sessionId,
-              identity: session.identity,
-              identityKey: session.identityKey,
-            },
-            message.udfPath,
-            ...(message.args ?? []),
-          ),
-        (value): ServerMessage => {
-          const { result, tablesWritten, changes } =
-            typeof value === "object" &&
-            value !== null &&
-            "result" in value &&
-            "tablesWritten" in value
-              ? (value as {
-                  result: JSONValue;
-                  tablesWritten: Set<string>;
-                  changes?: ProtocolChange[];
-                })
-              : {
-                  result: value as JSONValue,
-                  tablesWritten: null as Set<string> | null,
-                  changes: null as ProtocolChange[] | null,
-                };
-          writtenTables = tablesWritten;
-          writtenChanges = changes ?? null;
-          return {
-            type: "MutationResponse",
-            requestId: message.requestId,
-            success: true,
-            result: result ?? null,
-            ts: numberToEncodedU64(this._nextTs()),
-            logLines: [],
-          };
+    let mutationResponse: ServerMessage;
+    try {
+      const value = await this._executor.runMutation(
+        {
+          sessionId,
+          identity: session.identity,
+          identityKey: session.identityKey,
         },
-        (err): ServerMessage => {
-          const data = extractErrorData(err);
-          return {
-            type: "MutationResponse",
-            requestId: message.requestId,
-            success: false,
-            result: errorMessage(err),
-            logLines: [],
-            ...(data !== undefined && { errorData: data }),
-          };
-        },
-      ),
-    );
+        message.udfPath,
+        ...(message.args ?? []),
+      );
+      const { result, tablesWritten, changes } =
+        typeof value === "object" &&
+        value !== null &&
+        "result" in value &&
+        "tablesWritten" in value
+          ? (value as {
+              result: JSONValue;
+              tablesWritten: Set<string>;
+              changes?: ProtocolChange[];
+            })
+          : {
+              result: value as JSONValue,
+              tablesWritten: null as Set<string> | null,
+              changes: null as ProtocolChange[] | null,
+            };
+      writtenTables = tablesWritten;
+      writtenChanges = changes ?? null;
+      mutationResponse = {
+        type: "MutationResponse",
+        requestId: message.requestId,
+        success: true,
+        result: result ?? null,
+        ts: numberToEncodedU64(this._nextTs()),
+        logLines: [],
+      };
+    } catch (err) {
+      const data = extractErrorData(err);
+      mutationResponse = {
+        type: "MutationResponse",
+        requestId: message.requestId,
+        success: false,
+        result: errorMessage(err),
+        logLines: [],
+        ...(data !== undefined && { errorData: data }),
+      };
+    }
 
-    const transition =
-      !this._queryStore.hasQueries(sessionId) ||
-      (writtenTables !== null && writtenTables.size === 0)
-        ? null
-        : await Fx.run(
-            Fx.from({
-              ok: async () => {
-                const startVersion = { ...session.version };
-                const relevantQueries = this._queryStore.getRelevantObservers(
-                  sessionId,
-                  writtenTables ?? undefined,
-                  writtenChanges,
-                );
-                const evaluated = await Fx.run(
-                  Fx.each(relevantQueries, (observer) =>
-                    Fx.from({
-                      ok: () =>
-                        this._refreshProtocolQueryObserver(
-                          sessionId,
-                          session,
-                          observer,
-                        ),
-                      err: (err) => err as Error,
-                    }),
-                  ),
-                );
-                const modifications = evaluated;
+    let transition: ServerMessage | null = null;
+    if (
+      this._queryStore.hasQueries(sessionId) &&
+      !(writtenTables !== null && writtenTables.size === 0)
+    ) {
+      const startVersion = { ...session.version };
+      const relevantQueries = this._queryStore.getRelevantObservers(
+        sessionId,
+        writtenTables ?? undefined,
+        writtenChanges,
+      );
+      const modifications = await Promise.all(
+        relevantQueries.map((observer) =>
+          this._refreshProtocolQueryObserver(sessionId, session, observer),
+        ),
+      );
 
-                session.version = {
-                  ...session.version,
-                  ts: this._nextTs(),
-                };
+      session.version = {
+        ...session.version,
+        ts: this._nextTs(),
+      };
 
-                return buildTransition(
-                  startVersion,
-                  session.version,
-                  modifications,
-                );
-              },
-              err: (err) => err as Error,
-            }),
-          );
+      transition = buildTransition(
+        startVersion,
+        session.version,
+        modifications,
+      );
+    }
 
     return transition ? [mutationResponse, transition] : [mutationResponse];
   }
@@ -910,38 +854,35 @@ export class SyncProtocolHandler {
     message: ClientAction,
   ): Promise<ServerMessage[]> {
     const session = this._getOrCreateSession(sessionId);
-    const response: ServerMessage = await Fx.run(
-      Fx.attempt(
-        () =>
-          this._executor.runAction(
-            {
-              sessionId,
-              identity: session.identity,
-              identityKey: session.identityKey,
-            },
-            message.udfPath,
-            ...(message.args ?? []),
-          ),
-        (result): ServerMessage => ({
-          type: "ActionResponse",
-          requestId: message.requestId,
-          success: true,
-          result: result ?? null,
-          logLines: [],
-        }),
-        (err): ServerMessage => {
-          const data = extractErrorData(err);
-          return {
-            type: "ActionResponse",
-            requestId: message.requestId,
-            success: false,
-            result: errorMessage(err),
-            logLines: [],
-            ...(data !== undefined && { errorData: data }),
-          };
+    let response: ServerMessage;
+    try {
+      const result = await this._executor.runAction(
+        {
+          sessionId,
+          identity: session.identity,
+          identityKey: session.identityKey,
         },
-      ),
-    );
+        message.udfPath,
+        ...(message.args ?? []),
+      );
+      response = {
+        type: "ActionResponse",
+        requestId: message.requestId,
+        success: true,
+        result: result ?? null,
+        logLines: [],
+      };
+    } catch (err) {
+      const data = extractErrorData(err);
+      response = {
+        type: "ActionResponse",
+        requestId: message.requestId,
+        success: false,
+        result: errorMessage(err),
+        logLines: [],
+        ...(data !== undefined && { errorData: data }),
+      };
+    }
     return [response];
   }
 
@@ -960,34 +901,18 @@ export class SyncProtocolHandler {
       ];
     }
 
-    const authResult: AuthResult = await Fx.run(
-      matchTag(message, "tokenType", {
-        None: () =>
-          Fx.succeed(authSuccessResult({ identity: null, identityKey: null })),
-        User: () =>
-          Fx.from({
-            ok: () => this._auth.verifyToken(message.value ?? ""),
-            err: errorMessage,
-          }).pipe(
-            Fx.fold({
-              ok: (value) =>
-                authSuccessResult(normalizeVerifiedIdentity(value)),
-              err: authFailureResult,
-            }),
-          ),
-        Admin: () =>
-          Fx.from({
-            ok: () => this._auth.verifyToken(message.value ?? ""),
-            err: errorMessage,
-          }).pipe(
-            Fx.fold({
-              ok: (value) =>
-                authSuccessResult(normalizeVerifiedIdentity(value)),
-              err: authFailureResult,
-            }),
-          ),
-      }),
-    );
+    let authResult: AuthResult;
+    if (message.tokenType === "None") {
+      authResult = authSuccessResult({ identity: null, identityKey: null });
+    } else {
+      // "User" and "Admin" both verify the token
+      try {
+        const value = await this._auth.verifyToken(message.value ?? "");
+        authResult = authSuccessResult(normalizeVerifiedIdentity(value));
+      } catch (err) {
+        authResult = authFailureResult(errorMessage(err));
+      }
+    }
 
     return matchTag(authResult, "_tag", {
       Success: (current) => {

@@ -13,9 +13,25 @@
     "yjs"
   ],
   "license": "MIT",
+  "bin": "./dist/cli.js",
   "files": [
     "dist",
-    "src",
+    "!dist/**/*.map",
+    "!dist/node_modules",
+    "!dist/node_modules/**",
+    "!dist/component/_virtual",
+    "!dist/component/_virtual/**",
+    "src/auth",
+    "src/client/index.ts",
+    "src/client/prefetch.ts",
+    "src/component",
+    "src/crdt",
+    "src/expo/metro.cjs",
+    "src/expo/shims",
+    "src/kernel/modules.ts",
+    "src/server",
+    "src/shared",
+    "src/test.ts",
     "README.md"
   ],
   "type": "module",
@@ -29,6 +45,26 @@
       "types": "./dist/browser/index.d.ts",
       "import": "./dist/browser/index.js",
       "default": "./dist/browser/index.js"
+    },
+    "./auth": {
+      "types": "./dist/auth.d.ts",
+      "import": "./dist/auth.js",
+      "default": "./dist/auth.js"
+    },
+    "./node": {
+      "types": "./dist/node/index.d.ts",
+      "import": "./dist/node/index.js",
+      "default": "./dist/node/index.js"
+    },
+    "./tracing/browser": {
+      "types": "./dist/tracing/browser.d.ts",
+      "import": "./dist/tracing/browser.js",
+      "default": "./dist/tracing/browser.js"
+    },
+    "./tracing/node": {
+      "types": "./dist/tracing/node.d.ts",
+      "import": "./dist/tracing/node.js",
+      "default": "./dist/tracing/node.js"
     },
     "./react": {
       "types": "./dist/react.d.ts",
@@ -79,6 +115,7 @@
     "./convex.config": {
       "@convex-dev/component-source": "./src/component/convex.config.ts",
       "types": "./dist/component/convex.config.d.ts",
+      "import": "./dist/component/convex.config.js",
       "default": "./dist/component/convex.config.js"
     },
     "./test": {
@@ -103,11 +140,24 @@
   },
   "dependencies": {
     "@noble/ciphers": "^1.3.0",
-    "@robelest/fx": "0.0.1-preview.4",
+    "@noble/hashes": "^1.8.0",
+    "@opentelemetry/api": "catalog:",
+    "@opentelemetry/resources": "catalog:",
+    "@opentelemetry/sdk-logs": "catalog:",
+    "@opentelemetry/sdk-metrics": "catalog:",
+    "@opentelemetry/sdk-trace-base": "catalog:",
+    "@opentelemetry/sdk-trace-node": "catalog:",
+    "@opentelemetry/sdk-trace-web": "catalog:",
+    "@opentelemetry/semantic-conventions": "catalog:",
+    "clerc": "^0.20.0",
     "convex-helpers": "^0.1.0",
+    "react-native-get-random-values": "^1.11.0",
+    "wa-sqlite": "github:rhashimoto/wa-sqlite",
     "yjs": "^13.6.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0",
+    "@types/node": "^24.3.0",
     "convex": "catalog:",
     "convex-test": "^0.0.36",
     "tsdown": "catalog:",
@@ -142,5 +192,8 @@
     "react": {
       "optional": true
     }
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^11.0.0"
   }
 }

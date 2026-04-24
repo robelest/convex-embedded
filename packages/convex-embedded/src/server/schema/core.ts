@@ -4,6 +4,9 @@ import type { Validator } from "convex/values";
 // CRDT types
 // ---------------------------------------------------------------------------
 
+/**
+ * Internal CRDT field kind constants used by schema descriptors.
+ */
 export const CrdtType = {
   Prose: "prose",
   Register: "register",
@@ -13,14 +16,27 @@ export const CrdtType = {
   Omitted: "omitted",
 } as const;
 
+/**
+ * Union of schema descriptor CRDT kinds.
+ */
 export type CrdtTypeValue = (typeof CrdtType)[keyof typeof CrdtType];
 
+/**
+ * Metadata for one conflicting register write.
+ *
+ * @typeParam T - Register value type.
+ */
 export interface ConflictEntry<T> {
   value: T;
   clientId: string;
   timestamp: number;
 }
 
+/**
+ * Conflict information passed into custom register resolvers.
+ *
+ * @typeParam T - Register value type.
+ */
 export interface Conflict<T> {
   values: T[];
   entries: ConflictEntry<T>[];
@@ -28,12 +44,18 @@ export interface Conflict<T> {
   byClient(id: string): T | undefined;
 }
 
+/**
+ * Shared descriptor shape implemented by all embedded CRDT fields.
+ */
 export interface CrdtFieldDescriptor {
   type: CrdtTypeValue;
   validator: unknown;
   resolve?: (conflict: Conflict<unknown>) => unknown;
 }
 
+/**
+ * JSON representation for prose/rich-text fields.
+ */
 export interface ProseJson {
   type: string;
   content?: ProseJson[];
@@ -53,23 +75,28 @@ export type TypedFieldDescriptor<
   resolve?: ResolveType;
 };
 
+/** Prose CRDT field descriptor. */
 export type ProseFieldDescriptor = TypedFieldDescriptor<typeof CrdtType.Prose>;
 
+/** Register CRDT field descriptor. */
 export type RegisterFieldDescriptor<T> = TypedFieldDescriptor<
   typeof CrdtType.Register,
   Validator<T, any, any>,
   (conflict: Conflict<T>) => T
 >;
 
+/** Counter CRDT field descriptor. */
 export type CounterFieldDescriptor = TypedFieldDescriptor<
   typeof CrdtType.Counter
 >;
 
+/** Set CRDT field descriptor. */
 export type SetFieldDescriptor<T> = TypedFieldDescriptor<
   typeof CrdtType.Set,
   Validator<T, any, any>
 >;
 
+/** Omitted-field descriptor. */
 export type OmittedFieldDescriptor<T> = TypedFieldDescriptor<
   typeof CrdtType.Omitted,
   Validator<T, any, any>
@@ -81,6 +108,13 @@ export type OmittedFieldDescriptor<T> = TypedFieldDescriptor<
 
 const CRDT_FIELD = Symbol.for("convex-embedded:crdt-field");
 
+/**
+ * Check whether an arbitrary value is an embedded CRDT field descriptor.
+ *
+ * @param value - Value to inspect.
+ * @returns `true` when the value is a CRDT field descriptor produced by the
+ * embedded schema helpers.
+ */
 export function isCrdtField(
   value: unknown,
 ): value is CrdtFieldDescriptor & { [CRDT_FIELD]: true } {
@@ -92,16 +126,26 @@ export function isCrdtField(
   );
 }
 
+/**
+ * Read the CRDT field kind from a descriptor-like value.
+ *
+ * @param field - Candidate CRDT field value.
+ * @returns The CRDT kind, or `null` when the value is not a descriptor.
+ */
 export function getCrdtType(field: unknown): CrdtTypeValue | null {
   return isCrdtField(field) ? field.type : null;
 }
 
+/** @internal Symbol used to tag embedded CRDT field descriptors. */
 export { CRDT_FIELD };
 
 // ---------------------------------------------------------------------------
 // Definition builder
 // ---------------------------------------------------------------------------
 
+/**
+ * Migration callback used by versioned local tables.
+ */
 export type LocalTableMigrationStep = (ctx: {
   table: string;
   fromVersion: number;
@@ -126,6 +170,9 @@ export type LocalTableMigrationStep = (ctx: {
   };
 }) => Promise<void> | void;
 
+/**
+ * Options for `define(...)`.
+ */
 export interface DefineOptions {
   version: number;
   shape: Record<string, unknown>;
@@ -133,6 +180,9 @@ export interface DefineOptions {
   migrate?: Record<number, LocalTableMigrationStep>;
 }
 
+/**
+ * Normalized embedded schema definition returned by `define(...)`.
+ */
 export interface Definition {
   version: number;
   shape: Record<string, unknown>;
@@ -143,6 +193,12 @@ export interface Definition {
   getOmittedFields(): string[];
 }
 
+/**
+ * Build a normalized embedded schema definition.
+ *
+ * @param options - Versioned schema configuration.
+ * @returns A schema helper object used by embedded table builders.
+ */
 export function define(options: DefineOptions): Definition {
   const { version, shape, defaults = {}, migrate = {} } = options;
   return {
@@ -178,6 +234,9 @@ export function define(options: DefineOptions): Definition {
 // Field value inference
 // ---------------------------------------------------------------------------
 
+/**
+ * Infer the runtime CRDT kind string for a field descriptor.
+ */
 export type FieldKindForDescriptor<Field> = Field extends ProseFieldDescriptor
   ? "prose"
   : Field extends RegisterFieldDescriptor<any>
@@ -188,6 +247,9 @@ export type FieldKindForDescriptor<Field> = Field extends ProseFieldDescriptor
         ? "counter"
         : string;
 
+/**
+ * Infer the materialized runtime value type for a field descriptor.
+ */
 export type FieldValueForDescriptor<Field> = Field extends ProseFieldDescriptor
   ? ProseJson
   : Field extends RegisterFieldDescriptor<infer T>

@@ -12,6 +12,9 @@
 //
 // Public server exports are grouped here intentionally so Convex apps can
 // consume a small stable surface without importing deep implementation files.
+/**
+ * Embedded table builders, runtime binding, and routing metadata.
+ */
 export {
   embeddedTable,
   bindTable,
@@ -23,7 +26,7 @@ export {
   REMOTE_META,
   PENDING_REPLAY_META,
   STORAGE_UPLOAD_URL_META,
-} from "@/server/setup";
+} from "@/server/table";
 export type {
   EmbeddedTableHandle,
   RemoteMeta,
@@ -33,9 +36,12 @@ export type {
   PendingReplayMigrationResult,
   PendingReplayMigrationStep,
   StorageUploadUrlMeta,
-} from "@/server/setup";
+} from "@/server/table";
 
 // Schema system — CRDT field types + versioning
+/**
+ * Server-side CRDT schema constructors and helpers.
+ */
 export {
   schema,
   define,
@@ -55,10 +61,16 @@ export type {
 } from "@/server/schema";
 
 // Views — query scoping utilities
+/**
+ * Query scoping helper for deriving bound views from embedded tables.
+ */
 export { view } from "@/server/view";
 export type { ViewFilter } from "@/server/view";
 
 // Migration — local schema versioning
+/**
+ * Local schema migration helpers for embedded tables.
+ */
 export { migration, runMigrations } from "@/server/migration";
 export type {
   MigrationConfig,
@@ -69,6 +81,9 @@ export type {
 } from "@/server/migration";
 
 // Re-export shared types for convenience
+/**
+ * Shared conflict and recovery types used by server-side helpers.
+ */
 export type {
   Conflict,
   ConflictEntry,

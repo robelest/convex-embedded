@@ -5,7 +5,7 @@ import type {
   SerializedQuery,
   VectorSearchExpression,
 } from "@embedded/runtime/db/types";
-import { describe, it, expect } from "vite-plus/test";
+import { describe, it, expect } from "@tests/testkit";
 
 // ---------------------------------------------------------------------------
 // Helpers

@@ -32,6 +32,10 @@ function toValueKey(value: unknown): string {
     : JSON.stringify(convexToJson(value as never));
 }
 
+function hasPreciseChange(change: ProtocolChangeLike): boolean {
+  return change.before !== null || change.after !== null;
+}
+
 function getIndexRangeEqDependencies(
   dependencies: QueryDependency[],
 ): IndexRangeEqDependency[] {
@@ -245,6 +249,15 @@ export class SubscriptionManager {
     const candidateTokens = new Set<string>();
     if (changes !== null) {
       for (const table of tablesWritten) {
+        if (
+          changes.some(
+            (change) => change.tableName === table && !hasPreciseChange(change),
+          )
+        ) {
+          for (const token of this._subscriptionsByTable.get(table) ?? []) {
+            candidateTokens.add(token);
+          }
+        }
         for (const token of this._tableFallbackSubscriptionsByTable.get(
           table,
         ) ?? []) {

@@ -16,7 +16,7 @@
  *
  * **Pending Queue (`_resolve_pending` table)**
  * Persists queued mutations so they survive page reloads. The sync engine
- * hydrates this queue on startup and replays entries to the remote.
+ * hydrates this queue on load and replays entries to the remote.
  *
  * @packageDocumentation
  */
@@ -37,25 +37,26 @@ export interface SystemFunctionDef {
   handler: SystemFn;
 }
 
-function readActiveAuthState(
+const AUTH_STATE_DOCUMENT_ID = "auth_state" as DocumentId;
+
+async function readActiveAuthState(
   db: Database,
-): (StoredDocument & { activeIdentityKey?: string | null }) | null {
-  const qid = db.startQuery({
-    source: {
-      type: "FullTableScan",
-      tableName: "_resolve_auth_state",
-      order: null,
-    },
-    operators: [],
-  });
-  const next = db.queryNext(qid);
-  db.queryCleanup(qid);
-  return next.done || !next.value
-    ? null
-    : (next.value as StoredDocument & { activeIdentityKey?: string | null });
+): Promise<(StoredDocument & { activeIdentityKey?: string | null }) | null> {
+  const singleton = (await db.getAsync(
+    "_resolve_auth_state",
+    AUTH_STATE_DOCUMENT_ID,
+  )) as (StoredDocument & { activeIdentityKey?: string | null }) | null;
+  if (singleton !== null) {
+    return singleton;
+  }
+  const rows = await db.listDocumentsAsync("_resolve_auth_state");
+  const first = rows[0] ?? null;
+  return first as
+    | (StoredDocument & { activeIdentityKey?: string | null })
+    | null;
 }
 
-function firstByIndex(
+async function firstByIndex(
   db: Database,
   tableName: string,
   indexName: string,
@@ -64,8 +65,8 @@ function firstByIndex(
     fieldPath: string;
     value: unknown;
   }>,
-): StoredDocument | null {
-  const qid = db.startQuery({
+): Promise<StoredDocument | null> {
+  const qid = db.startQueryAsync({
     source: {
       type: "IndexRange",
       indexName: `${tableName}.${indexName}`,
@@ -74,25 +75,83 @@ function firstByIndex(
     } as never,
     operators: [{ limit: 1 }],
   });
-  const next = db.queryNext(qid);
+  const next = await db.queryNextAsync(qid);
   db.queryCleanup(qid);
   return next.done ? null : (next.value as StoredDocument);
 }
 
-function readPendingById(
+async function readPendingById(
   db: Database,
   id: string,
-): (StoredDocument & { owner?: string; state?: string }) | null {
+): Promise<(StoredDocument & { owner?: string; state?: string }) | null> {
   if (db.getTableForId(id) !== "_resolve_pending") {
     return null;
   }
 
-  return db.get("_resolve_pending", id as DocumentId) as
+  return (await db.getAsync("_resolve_pending", id as DocumentId)) as
     | (StoredDocument & { owner?: string; state?: string })
     | null;
 }
 
-function allByIndex(
+async function readProcessor(
+  db: Database,
+  identityKey: string | null,
+  processorId: string,
+): Promise<(StoredDocument & { lastSeenAt?: number }) | null> {
+  return (await firstByIndex(
+    db,
+    "_resolve_processors",
+    "by_identity_key_and_processor_id",
+    [
+      { type: "Eq", fieldPath: "identityKey", value: identityKey },
+      { type: "Eq", fieldPath: "processorId", value: processorId },
+    ],
+  )) as (StoredDocument & { lastSeenAt?: number }) | null;
+}
+
+async function readCollectionMetadata(
+  db: Database,
+  input: {
+    identityKey: string | null;
+    collection: string;
+    schemaVersion: number;
+  },
+): Promise<StoredDocument | null> {
+  return firstByIndex(
+    db,
+    "_resolve_collection_metadata",
+    "by_identity_key_and_collection",
+    [
+      { type: "Eq", fieldPath: "identityKey", value: input.identityKey },
+      { type: "Eq", fieldPath: "collection", value: input.collection },
+      { type: "Eq", fieldPath: "schemaVersion", value: input.schemaVersion },
+    ],
+  );
+}
+
+async function readDocumentMetadata(
+  db: Database,
+  input: {
+    identityKey: string | null;
+    collection: string;
+    docId: string;
+    schemaVersion: number;
+  },
+): Promise<StoredDocument | null> {
+  return firstByIndex(
+    db,
+    "_resolve_document_metadata",
+    "by_identity_key_and_collection_and_doc_id",
+    [
+      { type: "Eq", fieldPath: "identityKey", value: input.identityKey },
+      { type: "Eq", fieldPath: "collection", value: input.collection },
+      { type: "Eq", fieldPath: "docId", value: input.docId },
+      { type: "Eq", fieldPath: "schemaVersion", value: input.schemaVersion },
+    ],
+  );
+}
+
+async function allByIndex(
   db: Database,
   tableName: string,
   indexName: string,
@@ -101,8 +160,8 @@ function allByIndex(
     fieldPath: string;
     value: unknown;
   }>,
-): StoredDocument[] {
-  const qid = db.startQuery({
+): Promise<StoredDocument[]> {
+  const qid = db.startQueryAsync({
     source: {
       type: "IndexRange",
       indexName: `${tableName}.${indexName}`,
@@ -112,12 +171,12 @@ function allByIndex(
     operators: [],
   });
   const results: StoredDocument[] = [];
-  let next = db.queryNext(qid);
+  let next = await db.queryNextAsync(qid);
   while (!next.done) {
     if (next.value) {
       results.push(next.value as StoredDocument);
     }
-    next = db.queryNext(qid);
+    next = await db.queryNextAsync(qid);
   }
   db.queryCleanup(qid);
   return results;
@@ -134,7 +193,7 @@ function allByIndex(
  */
 const idMapSet: SystemFunctionDef = {
   type: "mutation",
-  handler: (db, args) => {
+  handler: async (db, args) => {
     const { localId, remoteId, table, identityKey } = args as {
       localId: string;
       remoteId: string;
@@ -142,7 +201,7 @@ const idMapSet: SystemFunctionDef = {
       identityKey?: string | null;
     };
 
-    const existing = firstByIndex(
+    const existing = await firstByIndex(
       db,
       "_resolve_id_map",
       "by_identity_key_and_local_id",
@@ -179,7 +238,7 @@ const idMapSet: SystemFunctionDef = {
  */
 const idMapGet: SystemFunctionDef = {
   type: "query",
-  handler: (db, args) => {
+  handler: async (db, args) => {
     const { localId, identityKey } = args as {
       localId: string;
       identityKey?: string | null;
@@ -187,10 +246,19 @@ const idMapGet: SystemFunctionDef = {
 
     return (
       (
-        firstByIndex(db, "_resolve_id_map", "by_identity_key_and_local_id", [
-          { type: "Eq", fieldPath: "identityKey", value: identityKey ?? null },
-          { type: "Eq", fieldPath: "localId", value: localId },
-        ]) as any
+        (await firstByIndex(
+          db,
+          "_resolve_id_map",
+          "by_identity_key_and_local_id",
+          [
+            {
+              type: "Eq",
+              fieldPath: "identityKey",
+              value: identityKey ?? null,
+            },
+            { type: "Eq", fieldPath: "localId", value: localId },
+          ],
+        )) as any
       )?.remoteId ?? null
     );
   },
@@ -204,7 +272,7 @@ const idMapGet: SystemFunctionDef = {
  */
 const idMapGetAll: SystemFunctionDef = {
   type: "query",
-  handler: (db, args) => {
+  handler: async (db, args) => {
     const { identityKey } = args as { identityKey?: string | null };
     const results: Array<{
       localId: string;
@@ -213,7 +281,7 @@ const idMapGetAll: SystemFunctionDef = {
       identityKey?: string;
     }> = [];
 
-    for (const doc of allByIndex(
+    for (const doc of await allByIndex(
       db,
       "_resolve_id_map",
       "by_identity_key_and_local_id",
@@ -237,13 +305,13 @@ const idMapGetAll: SystemFunctionDef = {
  */
 const idMapDelete: SystemFunctionDef = {
   type: "mutation",
-  handler: (db, args) => {
+  handler: async (db, args) => {
     const { localId, identityKey } = args as {
       localId: string;
       identityKey?: string | null;
     };
 
-    const existing = firstByIndex(
+    const existing = await firstByIndex(
       db,
       "_resolve_id_map",
       "by_identity_key_and_local_id",
@@ -315,13 +383,15 @@ const pendingPush: SystemFunctionDef = {
  */
 const pendingGetAll: SystemFunctionDef = {
   type: "query",
-  handler: (db, args) => {
+  handler: async (db, args) => {
     const { identityKey } = args as { identityKey?: string | null };
-    return allByIndex(
-      db,
-      "_resolve_pending",
-      "by_identity_key_and_creation_time",
-      [{ type: "Eq", fieldPath: "identityKey", value: identityKey ?? null }],
+    return (
+      await allByIndex(
+        db,
+        "_resolve_pending",
+        "by_identity_key_and_creation_time",
+        [{ type: "Eq", fieldPath: "identityKey", value: identityKey ?? null }],
+      )
     ).map((doc) => ({
       _id: doc._id,
       ref: (doc as any).ref,
@@ -342,29 +412,42 @@ const pendingGetAll: SystemFunctionDef = {
 
 const pendingClaimNext: SystemFunctionDef = {
   type: "mutation",
-  handler: (db, args) => {
-    const { identityKey, owner, leaseMs } = args as {
+  handler: async (db, args) => {
+    const { identityKey, owner, leaseMs, processorStaleMs } = args as {
       identityKey?: string | null;
       owner: string;
       leaseMs?: number;
+      processorStaleMs?: number;
     };
     const now = Date.now();
     const expiresAt = now + (leaseMs ?? 30_000);
+    const processorCutoff = now - (processorStaleMs ?? leaseMs ?? 30_000);
 
-    for (const doc of allByIndex(
+    const candidates = await allByIndex(
       db,
       "_resolve_pending",
       "by_identity_key_and_creation_time",
       [{ type: "Eq", fieldPath: "identityKey", value: identityKey ?? null }],
-    )) {
+    );
+    for (const doc of candidates) {
       const state = (doc as { state?: string }).state ?? "pending";
+      const processingOwner = (doc as { owner?: string }).owner ?? null;
       const leaseExpiresAt = (doc as { leaseExpiresAt?: number })
         .leaseExpiresAt;
+      const processor =
+        processingOwner === null
+          ? null
+          : await readProcessor(db, identityKey ?? null, processingOwner);
+      const processorStale =
+        processingOwner !== null &&
+        (processor === null ||
+          typeof processor.lastSeenAt !== "number" ||
+          processor.lastSeenAt <= processorCutoff);
       const claimable =
         state === "pending" ||
         (state === "processing" &&
-          typeof leaseExpiresAt === "number" &&
-          leaseExpiresAt <= now);
+          ((typeof leaseExpiresAt === "number" && leaseExpiresAt <= now) ||
+            processorStale));
       if (!claimable) {
         continue;
       }
@@ -377,7 +460,10 @@ const pendingClaimNext: SystemFunctionDef = {
         blockedReason: { $undefined: true },
       });
 
-      const claimed = db.get("_resolve_pending", doc._id as DocumentId) as
+      const claimed = (await db.getAsync(
+        "_resolve_pending",
+        doc._id as DocumentId,
+      )) as
         | (StoredDocument & {
             ref?: string;
             args?: string;
@@ -420,13 +506,13 @@ const pendingClaimNext: SystemFunctionDef = {
 
 const pendingRenewLease: SystemFunctionDef = {
   type: "mutation",
-  handler: (db, args) => {
+  handler: async (db, args) => {
     const { id, owner, leaseMs } = args as {
       id: string;
       owner: string;
       leaseMs?: number;
     };
-    const doc = readPendingById(db, id);
+    const doc = await readPendingById(db, id);
     if (
       doc !== null &&
       ((doc.owner === owner && doc.state === "processing") ||
@@ -451,9 +537,9 @@ const pendingRenewLease: SystemFunctionDef = {
  */
 const pendingRemove: SystemFunctionDef = {
   type: "mutation",
-  handler: (db, args) => {
+  handler: async (db, args) => {
     const { id, owner } = args as { id: string; owner?: string };
-    const doc = readPendingById(db, id);
+    const doc = await readPendingById(db, id);
     if (doc !== null && (owner === undefined || doc.owner === owner)) {
       db.delete("_resolve_pending", id as DocumentId);
     }
@@ -463,9 +549,9 @@ const pendingRemove: SystemFunctionDef = {
 
 const pendingRelease: SystemFunctionDef = {
   type: "mutation",
-  handler: (db, args) => {
+  handler: async (db, args) => {
     const { id, owner } = args as { id: string; owner?: string };
-    const doc = readPendingById(db, id);
+    const doc = await readPendingById(db, id);
     if (doc !== null && (owner === undefined || doc.owner === owner)) {
       db.patch("_resolve_pending", id as DocumentId, {
         state: "pending",
@@ -486,9 +572,9 @@ const pendingRelease: SystemFunctionDef = {
  */
 const pendingClear: SystemFunctionDef = {
   type: "mutation",
-  handler: (db, args) => {
+  handler: async (db, args) => {
     const { identityKey } = args as { identityKey?: string | null };
-    for (const doc of allByIndex(
+    for (const doc of await allByIndex(
       db,
       "_resolve_pending",
       "by_identity_key_and_creation_time",
@@ -502,12 +588,12 @@ const pendingClear: SystemFunctionDef = {
 
 const pendingBlock: SystemFunctionDef = {
   type: "mutation",
-  handler: (db, args) => {
+  handler: async (db, args) => {
     const { id, reason } = args as {
       id: string;
       reason: "reauthRequired" | "authorizationDenied" | "scopeChanged";
     };
-    const doc = readPendingById(db, id);
+    const doc = await readPendingById(db, id);
     if (doc !== null) {
       db.patch("_resolve_pending", id as DocumentId, {
         state: "blocked",
@@ -523,9 +609,9 @@ const pendingBlock: SystemFunctionDef = {
 
 const pendingUnblockAll: SystemFunctionDef = {
   type: "mutation",
-  handler: (db, args) => {
+  handler: async (db, args) => {
     const { identityKey } = args as { identityKey?: string | null };
-    for (const doc of allByIndex(
+    for (const doc of await allByIndex(
       db,
       "_resolve_pending",
       "by_identity_key_and_creation_time",
@@ -543,29 +629,234 @@ const pendingUnblockAll: SystemFunctionDef = {
   },
 };
 
+const processorHeartbeat: SystemFunctionDef = {
+  type: "mutation",
+  handler: async (db, args) => {
+    const { processorId, identityKey } = args as {
+      processorId: string;
+      identityKey?: string | null;
+    };
+    const existing = await readProcessor(db, identityKey ?? null, processorId);
+    if (existing) {
+      db.patch("_resolve_processors", existing._id as DocumentId, {
+        lastSeenAt: Date.now(),
+      });
+      return null;
+    }
+
+    db.insert("_resolve_processors", {
+      processorId,
+      identityKey: identityKey ?? null,
+      lastSeenAt: Date.now(),
+    });
+    return null;
+  },
+};
+
+const processorRemove: SystemFunctionDef = {
+  type: "mutation",
+  handler: async (db, args) => {
+    const { processorId, identityKey } = args as {
+      processorId: string;
+      identityKey?: string | null;
+    };
+    const existing = await readProcessor(db, identityKey ?? null, processorId);
+    if (existing) {
+      db.delete("_resolve_processors", existing._id as DocumentId);
+    }
+    return null;
+  },
+};
+
+const collectionMetadataGet: SystemFunctionDef = {
+  type: "query",
+  handler: async (db, args) => {
+    const { collection, identityKey, schemaVersion } = args as {
+      collection: string;
+      identityKey?: string | null;
+      schemaVersion: number;
+    };
+    const row = (await readCollectionMetadata(db, {
+      identityKey: identityKey ?? null,
+      collection,
+      schemaVersion,
+    })) as { seq?: number } | null;
+    return typeof row?.seq === "number" ? row.seq : null;
+  },
+};
+
+const collectionMetadataSet: SystemFunctionDef = {
+  type: "mutation",
+  handler: async (db, args) => {
+    const { collection, seq, identityKey, schemaVersion } = args as {
+      collection: string;
+      seq: number;
+      identityKey?: string | null;
+      schemaVersion: number;
+    };
+    const existing = await readCollectionMetadata(db, {
+      identityKey: identityKey ?? null,
+      collection,
+      schemaVersion,
+    });
+    const doc = {
+      collection,
+      seq,
+      identityKey: identityKey ?? null,
+      schemaVersion,
+    };
+    if (existing) {
+      db.patch("_resolve_collection_metadata", existing._id as DocumentId, doc);
+    } else {
+      db.insert("_resolve_collection_metadata", doc);
+    }
+    return null;
+  },
+};
+
+const documentMetadataGetBatch: SystemFunctionDef = {
+  type: "query",
+  handler: async (db, args) => {
+    const { collection, docIds, identityKey, schemaVersion } = args as {
+      collection: string;
+      docIds: string[];
+      identityKey?: string | null;
+      schemaVersion: number;
+    };
+    const rows = await allByIndex(
+      db,
+      "_resolve_document_metadata",
+      "by_identity_key_and_collection_and_doc_id",
+      [
+        { type: "Eq", fieldPath: "identityKey", value: identityKey ?? null },
+        { type: "Eq", fieldPath: "collection", value: collection },
+        { type: "Eq", fieldPath: "schemaVersion", value: schemaVersion },
+      ],
+    );
+    const wanted = new Set(docIds);
+    return rows
+      .filter((row) => wanted.has(String((row as any).docId)))
+      .map((row) => ({
+        docId: String((row as any).docId),
+        seq: Number((row as any).seq),
+      }));
+  },
+};
+
+const documentMetadataSetBatch: SystemFunctionDef = {
+  type: "mutation",
+  handler: async (db, args) => {
+    const { collection, entries, identityKey, schemaVersion } = args as {
+      collection: string;
+      entries: Array<{ docId: string; seq: number }>;
+      identityKey?: string | null;
+      schemaVersion: number;
+    };
+    for (const entry of entries) {
+      const existing = await readDocumentMetadata(db, {
+        identityKey: identityKey ?? null,
+        collection,
+        docId: entry.docId,
+        schemaVersion,
+      });
+      const doc = {
+        collection,
+        docId: entry.docId,
+        seq: entry.seq,
+        identityKey: identityKey ?? null,
+        schemaVersion,
+      };
+      if (existing) {
+        db.patch("_resolve_document_metadata", existing._id as DocumentId, doc);
+      } else {
+        db.insert("_resolve_document_metadata", doc);
+      }
+    }
+    return null;
+  },
+};
+
+const documentMetadataDeleteBatch: SystemFunctionDef = {
+  type: "mutation",
+  handler: async (db, args) => {
+    const { collection, docIds, identityKey, schemaVersion } = args as {
+      collection: string;
+      docIds: string[];
+      identityKey?: string | null;
+      schemaVersion: number;
+    };
+    for (const docId of docIds) {
+      const existing = await readDocumentMetadata(db, {
+        identityKey: identityKey ?? null,
+        collection,
+        docId,
+        schemaVersion,
+      });
+      if (existing) {
+        db.delete("_resolve_document_metadata", existing._id as DocumentId);
+      }
+    }
+    return null;
+  },
+};
+
+const documentMetadataClearCollection: SystemFunctionDef = {
+  type: "mutation",
+  handler: async (db, args) => {
+    const { collection, identityKey, schemaVersion } = args as {
+      collection: string;
+      identityKey?: string | null;
+      schemaVersion: number;
+    };
+    for (const doc of await allByIndex(
+      db,
+      "_resolve_document_metadata",
+      "by_identity_key_and_collection_and_doc_id",
+      [
+        { type: "Eq", fieldPath: "identityKey", value: identityKey ?? null },
+        { type: "Eq", fieldPath: "collection", value: collection },
+        { type: "Eq", fieldPath: "schemaVersion", value: schemaVersion },
+      ],
+    )) {
+      db.delete("_resolve_document_metadata", doc._id as DocumentId);
+    }
+    return null;
+  },
+};
+
 // ---------------------------------------------------------------------------
 // Auth state functions (_resolve_auth_state table)
 // ---------------------------------------------------------------------------
 
 const authStateSetActive: SystemFunctionDef = {
   type: "mutation",
-  handler: (db, args) => {
+  handler: async (db, args) => {
     const { activeIdentityKey } = args as {
       activeIdentityKey?: string | null;
     };
 
-    const existing = readActiveAuthState(db);
-    if (existing) {
-      db.patch("_resolve_auth_state", existing._id as DocumentId, {
-        activeIdentityKey: activeIdentityKey ?? null,
-        updatedAt: Date.now(),
-      });
-    } else {
-      db.insert("_resolve_auth_state", {
-        activeIdentityKey: activeIdentityKey ?? null,
-        updatedAt: Date.now(),
-      });
+    const updatedAt = Date.now();
+    const existingRows = await db.listDocumentsAsync("_resolve_auth_state");
+    const singleton = existingRows.find(
+      (row) => row._id === AUTH_STATE_DOCUMENT_ID,
+    );
+    const seed = singleton ?? existingRows[0] ?? null;
+
+    for (const row of existingRows) {
+      if (row._id !== AUTH_STATE_DOCUMENT_ID) {
+        db.delete("_resolve_auth_state", row._id as DocumentId);
+      }
     }
+
+    db.putDocument("_resolve_auth_state", {
+      _id: AUTH_STATE_DOCUMENT_ID,
+      _creationTime:
+        typeof seed?._creationTime === "number"
+          ? seed._creationTime
+          : updatedAt,
+      activeIdentityKey: activeIdentityKey ?? null,
+      updatedAt,
+    });
 
     return null;
   },
@@ -573,17 +864,17 @@ const authStateSetActive: SystemFunctionDef = {
 
 const authStateGetActive: SystemFunctionDef = {
   type: "query",
-  handler: (db) => {
-    const existing = readActiveAuthState(db);
+  handler: async (db) => {
+    const existing = await readActiveAuthState(db);
     return existing?.activeIdentityKey ?? null;
   },
 };
 
 const pendingListIdentityKeys: SystemFunctionDef = {
   type: "query",
-  handler: (db) => {
+  handler: async (db) => {
     const keys = new Set<string>();
-    for (const doc of db.getDocumentsForTable("_resolve_pending")) {
+    for (const doc of await db.listDocumentsAsync("_resolve_pending")) {
       const identityKey = (doc as { identityKey?: string | null }).identityKey;
       if (identityKey) {
         keys.add(identityKey);
@@ -595,15 +886,24 @@ const pendingListIdentityKeys: SystemFunctionDef = {
 
 const identityMoveAnonymousToIdentity: SystemFunctionDef = {
   type: "mutation",
-  handler: (db, args) => {
+  handler: async (db, args) => {
     const { identityKey } = args as { identityKey: string };
 
-    for (const tableName of ["_resolve_id_map", "_resolve_pending"] as const) {
+    for (const tableName of [
+      "_resolve_id_map",
+      "_resolve_pending",
+      "_resolve_collection_metadata",
+      "_resolve_document_metadata",
+    ] as const) {
       const indexName =
         tableName === "_resolve_id_map"
           ? "by_identity_key_and_local_id"
-          : "by_identity_key_and_creation_time";
-      for (const doc of allByIndex(db, tableName, indexName, [
+          : tableName === "_resolve_pending"
+            ? "by_identity_key_and_creation_time"
+            : tableName === "_resolve_collection_metadata"
+              ? "by_identity_key_and_collection"
+              : "by_identity_key_and_collection_and_doc_id";
+      for (const doc of await allByIndex(db, tableName, indexName, [
         { type: "Eq", fieldPath: "identityKey", value: null },
       ])) {
         db.patch(tableName, doc._id as DocumentId, { identityKey });
@@ -644,6 +944,14 @@ export const SYSTEM_FUNCTIONS: Record<string, SystemFunctionDef> = {
   "_system:pendingClear": pendingClear,
   "_system:pendingBlock": pendingBlock,
   "_system:pendingUnblockAll": pendingUnblockAll,
+  "_system:processorHeartbeat": processorHeartbeat,
+  "_system:processorRemove": processorRemove,
+  "_system:collectionMetadataGet": collectionMetadataGet,
+  "_system:collectionMetadataSet": collectionMetadataSet,
+  "_system:documentMetadataGetBatch": documentMetadataGetBatch,
+  "_system:documentMetadataSetBatch": documentMetadataSetBatch,
+  "_system:documentMetadataDeleteBatch": documentMetadataDeleteBatch,
+  "_system:documentMetadataClearCollection": documentMetadataClearCollection,
   "_system:authStateSetActive": authStateSetActive,
   "_system:authStateGetActive": authStateGetActive,
   "_system:pendingListIdentityKeys": pendingListIdentityKeys,
@@ -668,6 +976,14 @@ export const SystemPaths = {
   pendingClear: "_system:pendingClear",
   pendingBlock: "_system:pendingBlock",
   pendingUnblockAll: "_system:pendingUnblockAll",
+  processorHeartbeat: "_system:processorHeartbeat",
+  processorRemove: "_system:processorRemove",
+  collectionMetadataGet: "_system:collectionMetadataGet",
+  collectionMetadataSet: "_system:collectionMetadataSet",
+  documentMetadataGetBatch: "_system:documentMetadataGetBatch",
+  documentMetadataSetBatch: "_system:documentMetadataSetBatch",
+  documentMetadataDeleteBatch: "_system:documentMetadataDeleteBatch",
+  documentMetadataClearCollection: "_system:documentMetadataClearCollection",
   authStateSetActive: "_system:authStateSetActive",
   authStateGetActive: "_system:authStateGetActive",
   pendingListIdentityKeys: "_system:pendingListIdentityKeys",

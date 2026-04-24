@@ -111,8 +111,12 @@ export interface EmbeddedTransport {
  *                 protocol handler exposed by `EmbeddedRuntime`).
  * @returns        `{ url, webSocketConstructor }` suitable for passing
  *                 to `new ConvexClient(url, { webSocketConstructor })`.
+ * @internal
  */
-export function createTransport(runtime: ProtocolHandler): EmbeddedTransport {
+export function createTransport(
+  runtime: ProtocolHandler,
+  ready: Promise<void> = Promise.resolve(),
+): EmbeddedTransport {
   // Track live WebSocket instances so we can close them on shutdown.
   const activeSockets = new Set<LoopbackWebSocket>();
   const sessionRegistry: SessionSocketRegistry = {
@@ -126,6 +130,7 @@ export function createTransport(runtime: ProtocolHandler): EmbeddedTransport {
     let socketRef: LoopbackWebSocket | undefined;
 
     const handler = async (message: string): Promise<string[]> => {
+      await ready;
       // Peek at the message to capture sessionId from Connect.
       try {
         const parsed = JSON.parse(message);

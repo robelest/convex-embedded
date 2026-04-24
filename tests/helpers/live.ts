@@ -1,18 +1,18 @@
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
+
+import { ConvexHttpClient } from "convex/browser";
+
 import schema from "../../convex/schema";
+import { comments, issues, projects } from "../../convex/schema";
+import { getEmbeddedClientEntry } from "../../packages/convex-embedded/src/client/entry";
 import {
   getRemoteState,
   subscribeRemoteState,
 } from "../../packages/convex-embedded/src/client/remote";
-import {
-  createEmbeddedClient,
-  createNoopWriteBroadcast,
-} from "../../packages/convex-embedded/src/index";
 import type { ConvexModuleRegistry } from "../../packages/convex-embedded/src/kernel/modules";
-import type {
-  ConnectivityAdapter,
-  EmbeddedPlatformAdapter,
-} from "../../packages/convex-embedded/src/runtime/platform";
-import { ephemeralStorage } from "../../packages/convex-embedded/src/storage/memory";
+import { createConvexClient } from "../../packages/convex-embedded/src/node/index";
+import type { ConnectivityAdapter } from "../../packages/convex-embedded/src/runtime/platform";
 
 type OnlineCallback = () => void;
 
@@ -66,30 +66,11 @@ export class TestConnectivityController implements ConnectivityAdapter {
   }
 }
 
-export function createNodeTestPlatform(input: {
-  name: string;
-  connectivity: TestConnectivityController;
-}): EmbeddedPlatformAdapter {
-  return {
-    async openPersistence() {
-      return ephemeralStorage();
-    },
-    createWriteBroadcast() {
-      return createNoopWriteBroadcast();
-    },
-    connectivity: input.connectivity,
-    processorIdentity: {
-      getProcessorId() {
-        return `live-${input.name}`;
-      },
-    },
-  };
-}
-
 export function createLiveClient(input: {
   name: string;
   remoteUrl: string;
   connectivity?: TestConnectivityController;
+  databasePath?: string;
 }) {
   Object.defineProperty(globalThis, "__convexAllowFunctionsInBrowser", {
     value: true,
@@ -99,17 +80,25 @@ export function createLiveClient(input: {
 
   const connectivity =
     input.connectivity ?? new TestConnectivityController(true);
-  const client = createEmbeddedClient({
-    options: {
-      modules: createLiveModules(),
-      schema,
-      name: input.name,
-      remote: { url: input.remoteUrl },
+  const client = createConvexClient({
+    convex: { modules: createLiveModules() },
+    schema,
+    name: input.name,
+    remote: { url: input.remoteUrl },
+    connectivity,
+    processorIdentity: {
+      getProcessorId() {
+        return `live-${input.name}`;
+      },
     },
-    platform: createNodeTestPlatform({ name: input.name, connectivity }),
+    databasePath: input.databasePath ?? temporaryDatabasePath(input.name),
   });
 
   return { client, connectivity };
+}
+
+export function createDirectRemoteClient(remoteUrl: string) {
+  return new ConvexHttpClient(remoteUrl);
 }
 
 export async function waitForRemoteStatus(
@@ -197,6 +186,39 @@ export async function pollUntil<T>(input: {
   throw new Error("[convex-embedded] Timed out waiting for live condition.");
 }
 
+export async function waitForMappedRemoteId<T extends string>(
+  client: Awaited<ReturnType<typeof createLiveClient>>["client"],
+  localId: string,
+): Promise<T> {
+  const remoteId = await pollUntil({
+    read: async () => {
+      const entry = getEmbeddedClientEntry(client);
+      if (!entry) {
+        return null;
+      }
+
+      const mappings = (await entry.runtime.executeLocal({
+        kind: "query",
+        path: "_system:idMapGetAll",
+        args: { identityKey: null },
+      })) as Array<{ localId: string; remoteId: string }>;
+
+      return (
+        mappings.find((mapping) => mapping.localId === localId)?.remoteId ??
+        null
+      );
+    },
+    accept: (value) => typeof value === "string",
+  });
+  return remoteId as T;
+}
+
 export function uniqueSuffix(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+export function temporaryDatabasePath(name: string): string {
+  const tmpRoot = join(process.cwd(), "tmp");
+  mkdirSync(tmpRoot, { recursive: true });
+  return join(tmpRoot, `${name}.sqlite`);
 }

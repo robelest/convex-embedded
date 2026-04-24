@@ -6,8 +6,6 @@
  * in the embedded runtime.
  */
 
-import { Fx } from "@robelest/fx";
-
 import type { Database } from "@/runtime/db/database";
 import type { StoreMigrationManifest } from "@/runtime/migrations/types";
 
@@ -78,10 +76,12 @@ export class SchedulerExecutor {
       this._pending.delete(jobId);
       // Fire-and-forget; errors are swallowed to match Convex's
       // scheduled function semantics (failures are logged, not thrown).
-      Fx.detach(
-        () => this._runFunction(functionPath, args),
-        `[SchedulerExecutor] Scheduled function "${functionPath}" failed:`,
-      );
+      this._runFunction(functionPath, args).catch((error) => {
+        console.error(
+          `[SchedulerExecutor] Scheduled function "${functionPath}" failed:`,
+          error,
+        );
+      });
     }, delayMs);
 
     this._pending.set(jobId, { timerId, functionPath, args });

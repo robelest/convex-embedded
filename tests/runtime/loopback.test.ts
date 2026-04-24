@@ -4,7 +4,8 @@ import {
   type LoopbackMessageEvent,
 } from "@embedded/runtime/loopback";
 import { createTransport } from "@embedded/runtime/transport";
-import { afterEach, describe, it, expect, vi } from "vite-plus/test";
+import { afterEach, describe, it, expect } from "@tests/testkit";
+import { vi } from "vitest";
 
 // ---------------------------------------------------------------------------
 // Helpers

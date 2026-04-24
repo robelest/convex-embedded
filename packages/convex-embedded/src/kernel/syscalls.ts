@@ -1,5 +1,3 @@
-import { Fx } from "@robelest/fx";
-import { Cv } from "@robelest/fx/convex";
 /**
  * Syscall routers for the embedded Convex runtime.
  *
@@ -12,7 +10,7 @@ import { Cv } from "@robelest/fx/convex";
  * parameters instead of relying on globals.
  */
 import type { JSONValue, Value } from "convex/values";
-import { convexToJson, jsonToConvex } from "convex/values";
+import { ConvexError, convexToJson, jsonToConvex } from "convex/values";
 
 import type { FunctionPath } from "@/kernel/modules";
 import { resolveFunctionPath, createFunctionHandle } from "@/kernel/modules";
@@ -129,7 +127,7 @@ function dispatchSyncSyscall(
     return handler(request.args);
   }
 
-  throw Cv.error({
+  throw new ConvexError({
     code: "LOCAL_SYSCALL_UNSUPPORTED",
     message:
       `[convex-embedded] Local execution does not support syscall "${request.op}" in alpha. ` +
@@ -148,7 +146,7 @@ async function dispatchAsyncSyscall(
     return await handler(request.args);
   }
 
-  throw Cv.error({
+  throw new ConvexError({
     code: "LOCAL_SYSCALL_UNSUPPORTED",
     message:
       `[convex-embedded] Local execution does not support async syscall "${request.op}" in alpha. ` +
@@ -167,7 +165,7 @@ async function dispatchJsSyscall(
     return await handler(request.args);
   }
 
-  throw Cv.error({
+  throw new ConvexError({
     code: "LOCAL_SYSCALL_UNSUPPORTED",
     message:
       `[convex-embedded] Local execution does not support js syscall "${request.op}" in alpha. ` +
@@ -199,7 +197,7 @@ export function createSyncSyscall(
       for (const dependency of extractQueryDependencies(query)) {
         options?.onDependency?.(dependency);
       }
-      const queryId = db.startQuery(query as SerializedQuery);
+      const queryId = db.startQueryAsync(query as SerializedQuery);
       return JSON.stringify({ queryId });
     },
     "1.0/queryCleanup": (args) => {
@@ -249,6 +247,28 @@ export function createAsyncSyscall(
     onDependency?: (dependency: QueryDependency) => void;
   },
 ): (op: string, jsonArgs: string) => Promise<string> {
+  const resolveTableForWrite = async (
+    database: Database,
+    table: string | undefined,
+    id: string,
+  ): Promise<string> => {
+    if (table !== undefined) {
+      return table;
+    }
+    const fromMap = database.getTableForId(id);
+    if (fromMap !== undefined) {
+      return fromMap;
+    }
+    await database.getAsync(undefined, id as DocumentId);
+    const afterProbe = database.getTableForId(id);
+    if (afterProbe !== undefined) {
+      return afterProbe;
+    }
+    throw new Error(
+      `[convex-embedded] cannot resolve table for document id "${id}" — load the document first or pass the table name explicitly.`,
+    );
+  };
+
   const scheduleHandler: AsyncSyscallHandler = async (args) => {
     const {
       name,
@@ -283,86 +303,77 @@ export function createAsyncSyscall(
       () => {
         options?.activeTimers?.delete(timerId);
 
-        Fx.detach(
-          () =>
-            Fx.run(
-              Fx.gen(function* () {
-                const job = db.get("_scheduled_functions", jobId);
-                const jobState = job?.state as { kind: string } | null;
-                if (job === null || jobState?.kind === "canceled") {
-                  return;
-                }
-                if (jobState?.kind !== "pending") {
-                  throw new Error(
-                    `\`convex-embedded\` invariant error: Unexpected scheduled function state when starting it: ${jobState?.kind}`,
-                  );
-                }
+        void (async () => {
+          try {
+            const job = db.get("_scheduled_functions", jobId);
+            const jobState = job?.state as { kind: string } | null;
+            if (job === null || jobState?.kind === "canceled") {
+              return;
+            }
+            if (jobState?.kind !== "pending") {
+              throw new Error(
+                `\`convex-embedded\` invariant error: Unexpected scheduled function state when starting it: ${jobState?.kind}`,
+              );
+            }
 
-                yield* Fx.bracket(
-                  Fx.sync(() => db.startTransaction()),
-                  () =>
-                    Fx.sync(() => {
-                      db.patch("_scheduled_functions", jobId, {
-                        state: { kind: "inProgress" },
-                      });
-                    }),
-                  () =>
-                    Fx.sync(() => {
-                      db.commit();
-                    }),
-                );
+            db.startTransaction();
+            try {
+              db.patch("_scheduled_functions", jobId, {
+                state: { kind: "inProgress" },
+              });
+              await db.commitAsync();
+            } catch (error) {
+              db.rollbackWrites();
+              throw error;
+            }
 
-                const finalState: string = yield* Fx.from({
-                  ok: () => runUdf("mutation", functionPath, parsedArgs),
-                  err: (e) => e,
-                }).pipe(
-                  Fx.fold({
-                    ok: () => "success" as string,
-                    err: (error) => {
-                      console.error(
-                        `Error when running scheduled function ${functionPath.udfPath}`,
-                        error,
-                      );
-                      return "failed" as string;
-                    },
-                  }),
-                );
+            let finalState: string;
+            try {
+              await runUdf("mutation", functionPath, parsedArgs);
+              finalState = "success";
+            } catch (error) {
+              console.error(
+                `Error when running scheduled function ${functionPath.udfPath}`,
+                error,
+              );
+              finalState = "failed";
+            }
 
-                const finishedJob = db.get("_scheduled_functions", jobId);
-                const finishedState = finishedJob?.state as {
-                  kind: string;
-                } | null;
+            const finishedJob = db.get("_scheduled_functions", jobId);
+            const finishedState = finishedJob?.state as {
+              kind: string;
+            } | null;
 
-                if (
-                  finalState === "failed" ||
-                  (finishedJob !== null && finishedState?.kind === "inProgress")
-                ) {
-                  yield* Fx.bracket(
-                    Fx.sync(() => db.startTransaction()),
-                    () =>
-                      Fx.sync(() => {
-                        db.patch("_scheduled_functions", jobId, {
-                          state: { kind: finalState },
-                          ...(finalState === "failed"
-                            ? { completedTime: Date.now() }
-                            : {}),
-                        });
-                      }),
-                    () =>
-                      Fx.sync(() => {
-                        db.commit();
-                      }),
-                  );
-                }
+            if (
+              finalState === "failed" ||
+              (finishedJob !== null && finishedState?.kind === "inProgress")
+            ) {
+              db.startTransaction();
+              try {
+                db.patch("_scheduled_functions", jobId, {
+                  state: { kind: finalState },
+                  ...(finalState === "failed"
+                    ? { completedTime: Date.now() }
+                    : {}),
+                });
+                await db.commitAsync();
+              } catch (error) {
+                db.rollbackWrites();
+                throw error;
+              }
+            }
 
-                const dbExt = db as unknown as Record<string, unknown>;
-                if (typeof dbExt.jobFinished === "function") {
-                  (dbExt.jobFinished as (id: string) => void)(jobId);
-                }
-              }),
-            ),
-          `[convex-embedded] scheduled function ${functionPath.udfPath}:`,
-        );
+            const dbExt = db as unknown as Record<string, unknown>;
+            if (typeof dbExt.jobFinished === "function") {
+              (dbExt.jobFinished as (id: string) => void)(jobId);
+            }
+          } catch (error) {
+            console.error(
+              `[convex-embedded] scheduled function ${functionPath.udfPath}:`,
+              error,
+            );
+          }
+        })();
       },
       Math.max(0, tsInSecs * 1000 - Date.now()),
     );
@@ -393,14 +404,20 @@ export function createAsyncSyscall(
 
   const handlers: Record<string, AsyncSyscallHandler> = {
     "1.0/get": async (args) => {
-      const { table, id } = args as { table: string; id: string };
-      options?.onDependency?.({ type: "FullTableScan", tableName: table });
-      const doc = db.get(table, id as DocumentId);
+      const { table, id } = args as { table: string | undefined; id: string };
+      const resolvedTable = table ?? db.getTableForId(id);
+      if (resolvedTable !== undefined) {
+        options?.onDependency?.({
+          type: "FullTableScan",
+          tableName: resolvedTable,
+        });
+      }
+      const doc = await db.getAsync(resolvedTable, id as DocumentId);
       return JSON.stringify(convexToJson(doc));
     },
     "1.0/queryStreamNext": async (args) => {
       const { queryId } = args as { queryId: number };
-      const { value, done } = db.queryNext(queryId);
+      const { value, done } = await db.queryNextAsync(queryId);
       return JSON.stringify(convexToJson({ value, done }));
     },
     "1.0/queryPage": async (args) => {
@@ -412,7 +429,7 @@ export function createAsyncSyscall(
       for (const dependency of extractQueryDependencies(query)) {
         options?.onDependency?.(dependency);
       }
-      const { page, isDone, continueCursor } = db.paginate({
+      const { page, isDone, continueCursor } = await db.paginateAsync({
         query: query as any,
         cursor,
         pageSize,
@@ -429,31 +446,37 @@ export function createAsyncSyscall(
     },
     "1.0/shallowMerge": async (args) => {
       const { table, id, value } = args as {
-        table: string;
+        table: string | undefined;
         id: string;
         value: Record<string, unknown>;
       };
-      db.patch(table, id as DocumentId, value);
+      const resolvedTable = await resolveTableForWrite(db, table, id);
+      await db.ensureCommittedDocumentForWrite(resolvedTable, id as DocumentId);
+      db.patch(resolvedTable, id as DocumentId, value);
       return JSON.stringify({});
     },
     "1.0/replace": async (args) => {
       const { table, id, value } = args as {
-        table: string;
+        table: string | undefined;
         id: string;
         value: Record<string, unknown>;
       };
-      db.replace(table, id as DocumentId, value);
+      const resolvedTable = await resolveTableForWrite(db, table, id);
+      await db.ensureCommittedDocumentForWrite(resolvedTable, id as DocumentId);
+      db.replace(resolvedTable, id as DocumentId, value);
       return JSON.stringify({});
     },
     "1.0/remove": async (args) => {
-      const { table, id } = args as { table: string; id: string };
-      db.delete(table, id as DocumentId);
+      const { table, id } = args as { table: string | undefined; id: string };
+      const resolvedTable = await resolveTableForWrite(db, table, id);
+      await db.ensureCommittedDocumentForWrite(resolvedTable, id as DocumentId);
+      db.delete(resolvedTable, id as DocumentId);
       return JSON.stringify({});
     },
     "1.0/count": async (args) => {
       const { table } = args as { table: string };
       options?.onDependency?.({ type: "FullTableScan", tableName: table });
-      return JSON.stringify(db.count(table));
+      return JSON.stringify(await db.countAsync(table));
     },
     "1.0/getUserIdentity": async () => {
       if (options?.getIdentity) {
@@ -480,7 +503,7 @@ export function createAsyncSyscall(
           expressions: unknown;
         };
       };
-      const results = db.vectorSearch(
+      const results = await db.vectorSearchAsync(
         indexName,
         vector,
         (expressions as VectorSearchExpression | null) ?? null,
@@ -525,7 +548,7 @@ export function createAsyncSyscall(
         const result = await runUdf("mutation", functionPath, udfArgs);
         return JSON.stringify(convexToJson(result as Value));
       }
-      throw Cv.error({
+      throw new ConvexError({
         code: "NESTED_UDF_TYPE_UNSUPPORTED",
         message:
           `[convex-embedded] Local execution does not support nested udf type "${udfType}" in alpha. ` +
@@ -618,12 +641,12 @@ export function createJsSyscall(
         sha256: await blobShaBase64(blob, crypto),
         contentType: blob.type || undefined,
       });
-      db.storeFile(storageId, blob);
+      await db.storeFile(storageId, blob);
       return storageId;
     },
     "storage/getBlob": async (args) => {
       const { storageId } = args as { storageId: DocumentId };
-      return db.getFile(storageId);
+      return await db.loadFile(storageId);
     },
   };
 

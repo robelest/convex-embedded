@@ -1,6 +1,28 @@
 import type { SessionBroadcast, SessionEvent } from "@/runtime/platform";
+import { DisposableScope } from "@/utils/scope";
 
 const DEFAULT_CHANNEL_NAME = "convex-embedded-session";
+
+function isValidSessionEvent(value: unknown): value is { type: "authChanged" } {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    "type" in value &&
+    (value as { type: unknown }).type === "authChanged"
+  );
+}
+
+function isValidStoredSessionPayload(
+  value: unknown,
+): value is { event: SessionEvent; sender: string; seq: number } {
+  if (typeof value !== "object" || value === null) return false;
+  const obj = value as Record<string, unknown>;
+  return (
+    isValidSessionEvent(obj.event) &&
+    typeof obj.sender === "string" &&
+    typeof obj.seq === "number"
+  );
+}
 
 export class BrowserSessionBroadcast implements SessionBroadcast {
   private _channelName: string;
@@ -8,6 +30,12 @@ export class BrowserSessionBroadcast implements SessionBroadcast {
   private _callbacks: Set<(event: SessionEvent) => void> = new Set();
   private _storageHandler: ((ev: StorageEvent) => void) | null = null;
   private _closed = false;
+  private _scope = new DisposableScope();
+  private _senderId =
+    typeof globalThis.crypto?.randomUUID === "function"
+      ? globalThis.crypto.randomUUID()
+      : `sender-${Math.random().toString(36).slice(2)}`;
+  private _seq = 0;
 
   constructor(channelName: string = DEFAULT_CHANNEL_NAME) {
     this._channelName = channelName;
@@ -21,9 +49,10 @@ export class BrowserSessionBroadcast implements SessionBroadcast {
       this._bc.postMessage(event);
     } else if (typeof localStorage !== "undefined") {
       try {
+        this._seq += 1;
         localStorage.setItem(
           this._channelName,
-          JSON.stringify({ event, ts: Date.now() }),
+          JSON.stringify({ event, sender: this._senderId, seq: this._seq }),
         );
       } catch {
         // best-effort only
@@ -39,12 +68,7 @@ export class BrowserSessionBroadcast implements SessionBroadcast {
   close(): void {
     if (this._closed) return;
     this._closed = true;
-    this._bc?.close();
-    this._bc = null;
-    if (this._storageHandler && typeof window !== "undefined") {
-      window.removeEventListener("storage", this._storageHandler);
-      this._storageHandler = null;
-    }
+    void this._scope.close();
     this._callbacks.clear();
   }
 
@@ -54,6 +78,10 @@ export class BrowserSessionBroadcast implements SessionBroadcast {
       this._bc.onmessage = (ev: MessageEvent<SessionEvent>) => {
         this._dispatch(ev.data);
       };
+      this._scope.addFinalizer(() => {
+        this._bc?.close();
+        this._bc = null;
+      });
       return;
     }
 
@@ -61,13 +89,21 @@ export class BrowserSessionBroadcast implements SessionBroadcast {
       this._storageHandler = (ev: StorageEvent) => {
         if (ev.key !== this._channelName || ev.newValue === null) return;
         try {
-          const payload = JSON.parse(ev.newValue) as { event: SessionEvent };
-          this._dispatch(payload.event);
+          const parsed = JSON.parse(ev.newValue);
+          if (isValidStoredSessionPayload(parsed)) {
+            this._dispatch(parsed.event);
+          }
         } catch {
           // ignore malformed payload
         }
       };
       window.addEventListener("storage", this._storageHandler);
+      this._scope.addFinalizer(() => {
+        if (this._storageHandler && typeof window !== "undefined") {
+          window.removeEventListener("storage", this._storageHandler);
+          this._storageHandler = null;
+        }
+      });
     }
   }
 

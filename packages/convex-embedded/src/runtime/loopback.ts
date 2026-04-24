@@ -27,22 +27,26 @@ const PING_INTERVAL_MS = 30_000;
 // ---------------------------------------------------------------------------
 
 /** Base event shape for LoopbackWebSocket events. */
+/** @internal */
 export interface LoopbackEvent {
   type: string;
 }
 
 /** Event fired when the WebSocket connection opens. */
+/** @internal */
 export interface LoopbackOpenEvent extends LoopbackEvent {
   type: "open";
 }
 
 /** Event fired when the WebSocket receives a message. */
+/** @internal */
 export interface LoopbackMessageEvent extends LoopbackEvent {
   type: "message";
   data: string;
 }
 
 /** Event fired when the WebSocket connection closes. */
+/** @internal */
 export interface LoopbackCloseEvent extends LoopbackEvent {
   type: "close";
   code: number;
@@ -50,6 +54,7 @@ export interface LoopbackCloseEvent extends LoopbackEvent {
 }
 
 /** Event fired when a WebSocket error occurs. */
+/** @internal */
 export interface LoopbackErrorEvent extends LoopbackEvent {
   type: "error";
   error: unknown;
@@ -65,6 +70,7 @@ export interface LoopbackErrorEvent extends LoopbackEvent {
  *
  * The `handler` callback receives each sent message and returns an array
  * of response strings that are dispatched as `onmessage` events.
+ * @internal
  */
 export class LoopbackWebSocket {
   static readonly CONNECTING = CONNECTING;
@@ -261,6 +267,8 @@ export class LoopbackWebSocket {
  * - A **handler** directly — shared across all instances (legacy behaviour).
  *
  * @param handlerOrFactory  A message handler, or a factory that returns one.
+ * @returns A `WebSocket`-compatible constructor for Convex client wiring.
+ * @internal
  */
 export function LoopbackWebSocketConstructor(
   handlerOrFactory:

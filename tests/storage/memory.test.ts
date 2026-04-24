@@ -1,7 +1,10 @@
+import { OpaqueAdapter } from "@embedded/persistence/opaque/adapter";
 import type { StoredDocument } from "@embedded/runtime/db/types";
-import type { StorageAdapter, CommitBatch } from "@embedded/storage/adapter";
-import { ephemeralStorage } from "@embedded/storage/memory";
-import { describe, it, expect, beforeEach } from "vite-plus/test";
+import type {
+  PersistenceAdapter,
+  CommitBatch,
+} from "@embedded/storage/adapter";
+import { describe, it, expect, beforeEach } from "@tests/testkit";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -28,10 +31,16 @@ function batchPut(
 
 function batch(
   puts: Array<{ doc: StoredDocument; tableName: string }> = [],
-  deletes: string[] = [],
+  deletes: Array<string | { id: string; tableName: string }> = [],
   meta = { timestamp: 1, lastCreationTime: 1000 },
 ): CommitBatch {
-  return { puts, deletes, meta };
+  return {
+    puts,
+    deletes: deletes.map((entry) =>
+      typeof entry === "string" ? { id: entry, tableName: "tasks" } : entry,
+    ),
+    meta,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -39,25 +48,25 @@ function batch(
 // ---------------------------------------------------------------------------
 
 describe("ephemeralStorage", () => {
-  let storage: StorageAdapter;
+  let storage: PersistenceAdapter;
 
   beforeEach(() => {
-    storage = ephemeralStorage();
+    storage = new OpaqueAdapter();
   });
 
   // -- Hydration (empty state) --------------------------------------------
 
   describe("empty state", () => {
     it("getDocuments returns empty array", async () => {
-      expect(await storage.getDocuments()).toEqual([]);
+      expect(await storage.listAll()).toEqual([]);
     });
 
     it("getMeta returns null", async () => {
-      expect(await storage.getMeta()).toBeNull();
+      expect(await storage.meta()).toBeNull();
     });
 
     it("getBlobs returns empty array", async () => {
-      expect(await storage.getBlobs()).toEqual([]);
+      expect(await storage.listBlobs()).toEqual([]);
     });
   });
 
@@ -68,7 +77,7 @@ describe("ephemeralStorage", () => {
       const d = doc("1", "tasks", { text: "hello" });
       await storage.commit(batch([batchPut(d, "tasks")]));
 
-      const docs = await storage.getDocuments();
+      const docs = await storage.listAll();
       expect(docs).toHaveLength(1);
       expect(docs[0]).toEqual({ doc: d, tableName: "tasks" });
     });
@@ -77,7 +86,7 @@ describe("ephemeralStorage", () => {
       const meta = { timestamp: 5, lastCreationTime: 9999 };
       await storage.commit(batch([], [], meta));
 
-      expect(await storage.getMeta()).toEqual(meta);
+      expect(await storage.meta()).toEqual(meta);
     });
 
     it("deletes documents by ID", async () => {
@@ -89,7 +98,7 @@ describe("ephemeralStorage", () => {
 
       await storage.commit(batch([], [d1._id as string]));
 
-      const docs = await storage.getDocuments();
+      const docs = await storage.listAll();
       expect(docs).toHaveLength(1);
       expect(docs[0].doc._id).toBe(d2._id);
     });
@@ -104,7 +113,7 @@ describe("ephemeralStorage", () => {
       const d3 = doc("3", "tasks");
       await storage.commit(batch([batchPut(d3, "tasks")], [d1._id as string]));
 
-      const docs = await storage.getDocuments();
+      const docs = await storage.listAll();
       expect(docs).toHaveLength(2);
       const ids = docs.map((d) => d.doc._id);
       expect(ids).toContain(d2._id);
@@ -118,9 +127,17 @@ describe("ephemeralStorage", () => {
       const updated = { ...d, text: "v2" };
       await storage.commit(batch([batchPut(updated, "tasks")]));
 
-      const docs = await storage.getDocuments();
+      const docs = await storage.listAll();
       expect(docs).toHaveLength(1);
       expect(docs[0].doc.text).toBe("v2");
+    });
+
+    it("gets a document in O(1) storage without scanning tables", async () => {
+      const d = doc("1", "tasks", { text: "hello" });
+      await storage.commit(batch([batchPut(d, "tasks")]));
+
+      await expect(storage.get("tasks", "1")).resolves.toEqual(d);
+      await expect(storage.get("users", "1")).resolves.toBeNull();
     });
 
     it("updates meta on each commit", async () => {
@@ -137,7 +154,7 @@ describe("ephemeralStorage", () => {
         }),
       );
 
-      const meta = await storage.getMeta();
+      const meta = await storage.meta();
       expect(meta).toEqual({
         timestamp: 2,
         lastCreationTime: 200,
@@ -150,26 +167,26 @@ describe("ephemeralStorage", () => {
   describe("blob storage", () => {
     it("storeBlob and getBlobs round-trip", async () => {
       const blob = new Blob(["test content"], { type: "text/plain" });
-      await storage.storeBlob("blob-1", blob);
+      await storage.putBlob("blob-1", blob);
 
-      const blobs = await storage.getBlobs();
+      const blobs = await storage.listBlobs();
       expect(blobs).toHaveLength(1);
       expect(blobs[0].id).toBe("blob-1");
       expect(await blobs[0].blob.text()).toBe("test content");
     });
 
     it("deleteBlob removes the blob", async () => {
-      await storage.storeBlob("blob-1", new Blob(["data"]));
+      await storage.putBlob("blob-1", new Blob(["data"]));
       await storage.deleteBlob("blob-1");
 
-      expect(await storage.getBlobs()).toEqual([]);
+      expect(await storage.listBlobs()).toEqual([]);
     });
 
     it("multiple blobs are stored independently", async () => {
-      await storage.storeBlob("a", new Blob(["aaa"]));
-      await storage.storeBlob("b", new Blob(["bbb"]));
+      await storage.putBlob("a", new Blob(["aaa"]));
+      await storage.putBlob("b", new Blob(["bbb"]));
 
-      const blobs = await storage.getBlobs();
+      const blobs = await storage.listBlobs();
       expect(blobs).toHaveLength(2);
     });
   });
@@ -179,13 +196,13 @@ describe("ephemeralStorage", () => {
   describe("clear", () => {
     it("wipes all documents, meta, and blobs", async () => {
       await storage.commit(batch([batchPut(doc("1", "tasks"), "tasks")]));
-      await storage.storeBlob("blob-1", new Blob(["data"]));
+      await storage.putBlob("blob-1", new Blob(["data"]));
 
       await storage.clear();
 
-      expect(await storage.getDocuments()).toEqual([]);
-      expect(await storage.getMeta()).toBeNull();
-      expect(await storage.getBlobs()).toEqual([]);
+      expect(await storage.listAll()).toEqual([]);
+      expect(await storage.meta()).toBeNull();
+      expect(await storage.listBlobs()).toEqual([]);
     });
   });
 });

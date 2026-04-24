@@ -1,5 +1,5 @@
 import { resolveFunctionPath, type FunctionPath } from "@/kernel/modules";
-import { getFunctionName } from "@/shared/function-refs";
+import { getFunctionName } from "@/shared/refs";
 
 export function asError(err: unknown): Error {
   if (err instanceof Error) {

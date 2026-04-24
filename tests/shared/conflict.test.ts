@@ -1,6 +1,6 @@
 import { createConflict } from "@resolve/shared/conflict";
 import type { ConflictEntry } from "@resolve/shared/types";
-import { describe, it, expect } from "vite-plus/test";
+import { describe, it, expect } from "@tests/testkit";
 
 describe("createConflict", () => {
   it("constructs a Conflict with values array", () => {

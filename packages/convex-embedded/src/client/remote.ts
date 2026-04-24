@@ -1,4 +1,3 @@
-import { Fx } from "@robelest/fx";
 import { ConvexClient } from "convex/browser";
 
 import { patchRoutedConvexClient } from "@/client/adapter";
@@ -14,7 +13,6 @@ import {
   warnModuleLoadFailures,
 } from "@/client/discovery";
 import type { IdMap } from "@/client/ids";
-import type { RouteMode } from "@/client/routing/metadata";
 import {
   planMutationExecution,
   planReadExecution,
@@ -25,17 +23,53 @@ import {
   getFunctionRefPath,
   matchTag,
 } from "@/client/routing/refs";
-import type { ConvexModule } from "@/kernel/modules";
+import type { ResolveInput } from "@/client/services/resolve";
+import type { ConvexInput } from "@/kernel/modules";
 import type { EmbeddedRuntime } from "@/runtime/embedded";
 import type { ConnectivityAdapter } from "@/runtime/platform";
+import type { RouteMode } from "@/shared/route";
+import { PubSub } from "@/utils/pubsub";
+import { DisposableScope } from "@/utils/scope";
 
+/**
+ * Configuration for the embedded remote sync engine.
+ *
+ * @remarks
+ * Pass this object as the `remote` option to `createConvexClient(...)` or the
+ * Expo client factory to enable local-first sync against a hosted Convex
+ * deployment.
+ *
+ * @example
+ * ```ts
+ * const client = createConvexClient({
+ *   convex,
+ *   remote: {
+ *     url: import.meta.env.CONVEX_URL,
+ *     maxRetries: 5,
+ *     retryDelayMs: 1000,
+ *   },
+ * });
+ * ```
+ */
 export interface RemoteOptions {
+  /** Remote Convex deployment URL. */
   url: string;
+  /** Maximum number of resolve retries before surfacing an error state. */
   maxRetries?: number;
+  /** Delay between resolve retries in milliseconds. */
   retryDelayMs?: number;
+  /** Optional upload URL function reference used by local-first file uploads. */
   uploadUrlRef?: unknown;
 }
 
+/**
+ * Snapshot of the embedded remote-sync state machine.
+ *
+ * @remarks
+ * `resolved` is the normal online steady-state. `resolving` appears during the
+ * CRDT catch-up pass after reconnect. `offline` means local writes continue but
+ * remote replay is paused until connectivity returns.
+ */
 export type RemoteState =
   | { status: "idle" }
   | { status: "connecting" }
@@ -51,6 +85,10 @@ type BrowserResolvePhase =
   | { _tag: "Offline" }
   | { _tag: "Error"; error: unknown };
 
+/**
+ * Implementation contract for the lazily loaded resolve engine.
+ * @internal
+ */
 export interface EngineInstance {
   mutation(
     ref: any,
@@ -59,6 +97,11 @@ export interface EngineInstance {
   ): Promise<any>;
   on(event: string, cb: (status: any) => void): void;
   resolveNow?(): Promise<void>;
+  ensureTableReady?(tableName: string): Promise<void>;
+  ensureScopeReady?(
+    tableName: string,
+    scopeArgs?: Record<string, unknown>,
+  ): Promise<void>;
   reloadIdentity?(): Promise<void>;
   start(): void;
   stop(): void;
@@ -66,23 +109,40 @@ export interface EngineInstance {
   readonly idMap?: IdMap;
 }
 
+/**
+ * Internal control hooks returned when remote sync is attached to a client.
+ * @internal
+ */
 export interface ResolveAttachment {
+  /** Forward `setAuth(...)` calls to the hidden remote Convex client. */
   forwardSetAuth: (...args: Parameters<ConvexClient["setAuth"]>) => void;
+  /** Forward `clearAuth()` calls to the hidden remote Convex client. */
   forwardClearAuth: () => void;
+  /** Forward admin-auth calls when available. */
   forwardSetAdminAuth: (...args: any[]) => void;
+  /** Read the number of queued mutations waiting for replay. */
   getPendingCount: () => number;
+  /** Ensure a lazy table is hydrated/resolved before first use. */
+  ensureTableReady: (tableName: string) => Promise<void>;
+  /** Force a remote identity reload / resolve refresh. */
   refresh: () => Promise<void>;
+  /** Tear down the remote engine and release all resources. */
   close: () => Promise<void>;
 }
 
+/**
+ * Internal remote-sync entry stored per browser client.
+ * @internal
+ */
 export interface ResolveEntry {
   engine: EngineInstance | null;
   state: RemoteState;
-  listeners: Set<(state: RemoteState) => void>;
+  stateHub: PubSub<RemoteState>;
   routeModes: Map<string, RouteMode>;
   discovery: Promise<void> | null;
   discoveryReady: boolean;
   closed: boolean;
+  scope: DisposableScope;
 }
 
 type DiscoveryResult =
@@ -98,39 +158,69 @@ type DiscoveryResult =
       routeModes: Map<string, RouteMode>;
       moduleLoadFailures: ModuleLoadFailure[];
       uploadUrl?: string;
-      tables: Record<
-        string,
-        { resolve: string; query: string; schema?: unknown }
-      >;
+      tables: Record<string, { resolve: string; schema?: unknown }>;
     };
 
-const resolveEntries = new WeakMap<ConvexClient, ResolveEntry>();
+const RESOLVE_ENTRIES = Symbol.for(
+  "convex-embedded:client/remote:resolveEntries",
+);
 
-export function getRemoteState(client: ConvexClient): RemoteState {
-  return resolveEntries.get(client)?.state ?? { status: "idle" };
+type RemoteGlobal = typeof globalThis & {
+  [RESOLVE_ENTRIES]?: WeakMap<ConvexClient, ResolveEntry>;
+};
+
+function getResolveEntriesStore() {
+  const globalState = globalThis as RemoteGlobal;
+  globalState[RESOLVE_ENTRIES] ??= new WeakMap<ConvexClient, ResolveEntry>();
+  return globalState[RESOLVE_ENTRIES];
 }
 
+/**
+ * Read the current remote sync state for a browser client.
+ *
+ * @param client - Browser `ConvexClient` instance.
+ * @returns The current remote sync state snapshot.
+ */
+export function getRemoteState(client: ConvexClient): RemoteState {
+  return getResolveEntriesStore().get(client)?.state ?? { status: "idle" };
+}
+
+/**
+ * Subscribe to remote sync state transitions for a browser client.
+ *
+ * @param client - Browser `ConvexClient` instance.
+ * @param callback - Listener invoked whenever the remote sync state changes.
+ * @returns An unsubscribe function.
+ */
 export function subscribeRemoteState(
   client: ConvexClient,
   callback: (state: RemoteState) => void,
 ): () => void {
-  const entry = resolveEntries.get(client);
+  const entry = getResolveEntriesStore().get(client);
   if (!entry) return () => {};
-  entry.listeners.add(callback);
-  return () => entry.listeners.delete(callback);
+
+  return entry.stateHub.subscribe((state) => {
+    try {
+      callback(state);
+    } catch {
+      /* listener error */
+    }
+  });
 }
 
+/**
+ * Remove the remote sync entry associated with a browser client.
+ *
+ * @param client - Browser `ConvexClient` instance.
+ * @internal
+ */
 export function deleteResolveEntry(client: ConvexClient): void {
-  resolveEntries.delete(client);
+  getResolveEntriesStore().delete(client);
 }
 
-function loadEngine(): Promise<any> {
-  return Fx.run(
-    Fx.from({
-      ok: () => import("@/client/engine"),
-      err: (error) => error as Error,
-    }).pipe(Fx.map(({ engine }) => engine)),
-  );
+async function loadEngine(): Promise<any> {
+  const mod = await import("@/client/engine");
+  return mod.engine;
 }
 
 function resolveMutationRoute(entry: ResolveEntry, ref: unknown) {
@@ -149,7 +239,7 @@ function resolveReadRoute(entry: ResolveEntry, ref: unknown) {
   return planReadExecution({ refName, refPath, routeMode });
 }
 
-function executeLocalMutation(
+async function executeLocalMutation(
   entry: ResolveEntry,
   runtime: EmbeddedRuntime,
   ref: unknown,
@@ -160,36 +250,28 @@ function executeLocalMutation(
     return entry.engine.mutation(ref, args, { enqueueForReplay });
   }
 
-  return Fx.run(
-    Fx.from({
-      ok: () =>
-        runtime.executeLocal({
-          kind: "mutation",
-          path: getFunctionRefName(ref),
-          args,
-          applyLocalEffects: true,
-        }),
-      err: (error) => error as Error,
-    }),
-  );
+  return runtime.executeLocal({
+    kind: "mutation",
+    path: getFunctionRefName(ref),
+    args,
+    applyLocalEffects: true,
+  });
 }
 
-function deferUntilDiscovery<T>(
+async function deferUntilDiscovery<T>(
   entry: ResolveEntry,
   run: () => Promise<T>,
 ): Promise<T> {
-  return Fx.run(
-    Fx.gen(function* () {
-      if (entry.discovery) {
-        yield* Fx.from({
-          ok: () => entry.discovery!,
-          err: (err) => err as Error,
-        });
-      }
-
-      return yield* Fx.from({ ok: run, err: (err) => err as Error });
-    }),
-  );
+  if (entry.discovery) {
+    await entry.discovery;
+  }
+  // If discovery ended in an error state, propagate the error so that
+  // deferred mutations and subscriptions surface the failure instead of
+  // silently falling back to local-only execution.
+  if (entry.state.status === "error" && entry.state.error) {
+    throw entry.state.error;
+  }
+  return run();
 }
 
 function toDiscoveryResult(
@@ -218,13 +300,7 @@ function toDiscoveryResult(
 
 function notifyResolveListeners(entry: ResolveEntry, state: RemoteState): void {
   entry.state = state;
-  for (const cb of entry.listeners) {
-    try {
-      cb(state);
-    } catch {
-      /* listener error */
-    }
-  }
+  entry.stateHub.publish(state);
 }
 
 function toErrorMessage(error: unknown): string {
@@ -267,159 +343,126 @@ function toResolvePhase(status: any): BrowserResolvePhase {
 }
 
 function mapStatus(s: any): RemoteState {
-  return Fx.pipe(s, toResolvePhase, (phase) =>
-    matchTag(phase, "_tag", {
-      Idle: (): RemoteState => ({ status: "idle" }),
-      Syncing: (current): RemoteState => ({
-        status: "resolving",
-        progress: current.progress,
-      }),
-      Ready: (): RemoteState => ({ status: "resolved" }),
-      Offline: (): RemoteState => ({ status: "offline" }),
-      Error: (current): RemoteState => ({
-        status: "error",
-        error: asError(current.error),
-      }),
+  const phase = toResolvePhase(s);
+  return matchTag(phase, "_tag", {
+    Idle: (): RemoteState => ({ status: "idle" }),
+    Syncing: (current): RemoteState => ({
+      status: "resolving",
+      progress: current.progress,
     }),
-  );
+    Ready: (): RemoteState => ({ status: "resolved" }),
+    Offline: (): RemoteState => ({ status: "offline" }),
+    Error: (current): RemoteState => ({
+      status: "error",
+      error: asError(current.error),
+    }),
+  });
 }
 
-async function discoverAndStart(input: {
-  entry: ResolveEntry;
-  authEntry: AuthEntry;
-  embedded: {
-    client: ConvexClient;
-    ingestDocuments: (
-      table: string,
-      documents: Array<Record<string, unknown>>,
-    ) => Promise<void>;
-    getDocumentsForTable: (
-      table: string,
-    ) => Promise<Array<Record<string, unknown>>>;
-    executeLocal: EmbeddedRuntime["executeLocal"];
-    getStorageBlob: EmbeddedRuntime["getStorageBlob"];
-    getStorageMetadata: EmbeddedRuntime["getStorageMetadata"];
-    registerUploadUrlSource: EmbeddedRuntime["registerUploadUrlSource"];
-  };
-  remoteClient: ConvexClient;
-  resolveOpts: RemoteOptions;
-  modules: Record<string, () => Promise<ConvexModule>>;
-  getIdentityKeyForSync: () => string | null;
-  getReplayPayloadVersion?: (refName: string) => number;
-  connectivity?: ConnectivityAdapter;
-  processorId?: string;
-}): Promise<void> {
+async function discoverAndStart(input: ResolveInput): Promise<void> {
   const {
     entry,
     authEntry,
     embedded,
     remoteClient,
     resolveOpts,
-    modules,
+    convex,
     getIdentityKeyForSync,
     getReplayPayloadVersion,
     connectivity,
     processorId,
   } = input;
-  const setup = Fx.gen(function* () {
-    const engineFactory = yield* Fx.from({
-      ok: loadEngine,
-      err: (err) => err as Error,
-    });
+
+  try {
+    const engineFactory = await loadEngine();
     if (!engineFactory || entry.closed) return;
 
-    const discovered = yield* Fx.from({
-      ok: async () => {
-        const accumulator = await discoverRemoteMetadata({
-          modules,
-          shouldStop: () => entry.closed,
-        });
-
-        return accumulator === null
-          ? ({ _tag: "Closed" } satisfies DiscoveryResult)
-          : toDiscoveryResult(entry, accumulator);
-      },
-      err: (err) => err as Error,
+    const accumulator = await discoverRemoteMetadata({
+      convex,
+      shouldStop: () => entry.closed,
     });
 
-    return yield* Fx.from({
-      ok: async () => {
-        matchTag(discovered, "_tag", {
-          Closed: () => undefined,
-          Empty: (current) => {
-            entry.routeModes = current.routeModes;
-            warnModuleLoadFailures(current.moduleLoadFailures);
-            if (entry.routeModes.size === 0) {
-              console.warn(
-                "[convex-embedded] remote enabled but no remote metadata found in modules. Make sure your Convex modules export `tasks.resolve` (for example `export const resolve = tasks.resolve`).",
-              );
-            }
-          },
-          Ready: (current) => {
-            entry.routeModes = current.routeModes;
-            warnModuleLoadFailures(current.moduleLoadFailures);
-            const engine: EngineInstance = engineFactory.create({
-              embedded,
-              remoteClient,
-              tables: current.tables,
-              uploadUrlRef: resolveOpts.uploadUrlRef ?? current.uploadUrl,
-              maxRetries: resolveOpts.maxRetries,
-              retryDelayMs: resolveOpts.retryDelayMs,
-              getIdentityKey: getIdentityKeyForSync,
-              getReplayPayloadVersion,
-              connectivity,
-              processorId,
-            });
+    const discovered =
+      accumulator === null
+        ? ({ _tag: "Closed" } satisfies DiscoveryResult)
+        : toDiscoveryResult(entry, accumulator);
 
-            if (entry.closed) {
-              engine.stop();
-              return;
-            }
-
-            entry.engine = engine;
-            engine.on("change", (monitorStatus: any) => {
-              if (entry.closed) return;
-              notifyResolveListeners(entry, mapStatus(monitorStatus));
-
-              if (monitorStatus?.status === "offline") {
-                setOfflineStaleIfNeeded(authEntry);
-                return;
-              }
-
-              if (
-                monitorStatus?.status === "resolving" ||
-                monitorStatus?.status === "resolved"
-              ) {
-                restoreAuthenticatedIfNeeded(authEntry);
-              }
-            });
-            engine.start();
-          },
-        });
+    matchTag(discovered, "_tag", {
+      Closed: () => undefined,
+      Empty: (current) => {
+        entry.routeModes = current.routeModes;
+        warnModuleLoadFailures(current.moduleLoadFailures);
+        if (entry.routeModes.size === 0) {
+          console.warn(
+            "[convex-embedded] remote enabled but no remote metadata found in modules. Make sure your Convex modules export `tasks.resolve` (for example `export const resolve = tasks.resolve`).",
+          );
+        }
       },
-      err: (err) => err as Error,
-    });
-  }).pipe(
-    Fx.inspect((err) =>
-      Fx.sync(() => {
-        if (entry.closed) return;
-        const error =
-          err instanceof Error ? err : new Error(toErrorMessage(err));
-        console.error("[convex-embedded] resolve setup failed", error);
-        notifyResolveListeners(entry, { status: "error", error });
-      }),
-    ),
-  );
+      Ready: (current) => {
+        entry.routeModes = current.routeModes;
+        warnModuleLoadFailures(current.moduleLoadFailures);
+        const engine: EngineInstance = engineFactory.create({
+          embedded,
+          remoteClient,
+          tables: current.tables,
+          uploadUrlRef: resolveOpts.uploadUrlRef ?? current.uploadUrl,
+          maxRetries: resolveOpts.maxRetries,
+          retryDelayMs: resolveOpts.retryDelayMs,
+          getIdentityKey: getIdentityKeyForSync,
+          getReplayPayloadVersion,
+          connectivity,
+          processorId,
+        });
 
-  return Fx.run(setup);
+        if (entry.closed) {
+          engine.stop();
+          return;
+        }
+
+        entry.engine = engine;
+        entry.scope.addFinalizer(() => {
+          engine.stop();
+        });
+        engine.on("change", (monitorStatus: any) => {
+          if (entry.closed) return;
+          notifyResolveListeners(entry, mapStatus(monitorStatus));
+
+          if (monitorStatus?.status === "offline") {
+            setOfflineStaleIfNeeded(authEntry);
+            return;
+          }
+
+          if (
+            monitorStatus?.status === "resolving" ||
+            monitorStatus?.status === "resolved"
+          ) {
+            restoreAuthenticatedIfNeeded(authEntry);
+          }
+        });
+        engine.start();
+      },
+    });
+  } catch (err) {
+    if (entry.closed) return;
+    const error = err instanceof Error ? err : new Error(toErrorMessage(err));
+    console.error("[convex-embedded] resolve setup failed", error);
+    notifyResolveListeners(entry, { status: "error", error });
+  }
 }
 
+/**
+ * Attach the embedded remote sync engine to a browser `ConvexClient`.
+ *
+ * @param input - Runtime, auth, and remote connection wiring for the client.
+ * @returns Control hooks for auth forwarding, refresh, and shutdown.
+ * @internal
+ */
 export function attachResolve(input: {
   client: ConvexClient;
   runtime: EmbeddedRuntime;
   authEntry: AuthEntry;
   resolveOpts: RemoteOptions;
-  modules: Record<string, () => Promise<ConvexModule>>;
+  convex: ConvexInput;
   getIdentityKeyForSync: () => string | null;
   getReplayPayloadVersion?: (refName: string) => number;
   connectivity?: ConnectivityAdapter;
@@ -430,7 +473,7 @@ export function attachResolve(input: {
     runtime,
     authEntry,
     resolveOpts,
-    modules,
+    convex,
     getIdentityKeyForSync,
     getReplayPayloadVersion,
   } = input;
@@ -439,6 +482,7 @@ export function attachResolve(input: {
   const embedded = {
     client,
     ingestDocuments: runtime.ingestDocuments.bind(runtime),
+    canonicalizeMappedCreate: runtime.canonicalizeMappedCreate.bind(runtime),
     getDocumentsForTable: runtime.getDocumentsForTable.bind(runtime),
     hasLocalDocumentId: runtime.hasLocalDocumentId.bind(runtime),
     executeLocal: runtime.executeLocal.bind(runtime),
@@ -450,12 +494,24 @@ export function attachResolve(input: {
   const entry: ResolveEntry = {
     engine: null,
     state: { status: "idle" },
-    listeners: new Set(),
+    stateHub: new PubSub<RemoteState>(),
     routeModes: new Map(),
     discovery: null,
     discoveryReady: false,
     closed: false,
+    scope: new DisposableScope(),
   };
+
+  entry.scope.addFinalizer(async () => {
+    try {
+      await Promise.resolve(remoteClient.close());
+    } catch {
+      // Ignore close errors
+    }
+  });
+  entry.scope.addFinalizer(() => {
+    entry.stateHub.shutdown();
+  });
 
   patchRoutedConvexClient({
     client,
@@ -471,6 +527,16 @@ export function attachResolve(input: {
         refPath: getFunctionRefPath(refName),
         routeMode: entry.routeModes.get(refName) ?? null,
       }),
+    ensureReadReady: async (refName, readArgs) => {
+      const tableName = refName.split(":")[0] ?? "";
+      if (!tableName) return;
+      const scopeArgs =
+        readArgs && Object.keys(readArgs).length > 0
+          ? (entry.engine?.idMap?.translateLocalIdsToRemote(readArgs) ??
+            readArgs)
+          : undefined;
+      await entry.engine?.ensureScopeReady?.(tableName, scopeArgs);
+    },
     executeLocalMutation: (ref, args, enqueueForReplay) =>
       executeLocalMutation(entry, runtime, ref, args, enqueueForReplay),
     translateLocalArgsToRuntime: (args) =>
@@ -482,7 +548,7 @@ export function attachResolve(input: {
     connectivity: input.connectivity,
   });
 
-  resolveEntries.set(client, entry);
+  getResolveEntriesStore().set(client, entry);
 
   const discovery = discoverAndStart({
     entry,
@@ -490,7 +556,7 @@ export function attachResolve(input: {
     embedded,
     remoteClient,
     resolveOpts,
-    modules,
+    convex,
     getIdentityKeyForSync,
     getReplayPayloadVersion,
     connectivity: input.connectivity,
@@ -512,27 +578,14 @@ export function attachResolve(input: {
       (remoteClient as any).setAdminAuth?.(...args);
     },
     getPendingCount: () => entry.engine?.pendingCount?.() ?? 0,
-    refresh: () =>
-      Fx.run(
-        Fx.from({
-          ok: () => entry.engine?.reloadIdentity?.() ?? Promise.resolve(),
-          err: (error) => error as Error,
-        }),
-      ),
-    close: () =>
-      Fx.run(
-        Fx.gen(function* () {
-          yield* Fx.sync(() => {
-            entry.closed = true;
-            if (entry.engine) {
-              entry.engine.stop();
-            }
-          });
-          yield* Fx.from({
-            ok: () => remoteClient.close(),
-            err: (error) => error as Error,
-          });
-        }),
-      ),
+    ensureTableReady: (tableName) =>
+      entry.engine?.ensureTableReady?.(tableName) ?? Promise.resolve(),
+    refresh: async () => {
+      await entry.engine?.reloadIdentity?.();
+    },
+    close: async () => {
+      entry.closed = true;
+      await entry.scope.close();
+    },
   };
 }

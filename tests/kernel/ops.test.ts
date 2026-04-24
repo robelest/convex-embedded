@@ -1,12 +1,6 @@
 import { OpsContext, createOpsContext } from "@embedded/kernel/ops";
-import {
-  describe,
-  it,
-  expect,
-  vi,
-  beforeEach,
-  afterEach,
-} from "vite-plus/test";
+import { describe, it, expect, beforeEach, afterEach } from "@tests/testkit";
+import { vi } from "vitest";
 
 describe("OpsContext", () => {
   // ---------------------------------------------------------------------------

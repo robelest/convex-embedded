@@ -1,6 +1,9 @@
 import * as Y from "yjs";
 
-import { normalizeProseContent, proseContentToYDoc } from "@/crdt/prose";
+import { createEmptyProseContent } from "@/crdt/prose/content";
+import { normalizeProseContent } from "@/crdt/prose/content";
+import { yDocToProseContent } from "@/crdt/prose/yjs";
+import { proseContentToYDoc } from "@/crdt/prose/yjs";
 import type { Definition } from "@/shared/schema";
 import { getCrdtType } from "@/shared/schema";
 import { CrdtType } from "@/shared/types";
@@ -8,6 +11,8 @@ import { CrdtType } from "@/shared/types";
 export function initYjsDoc(
   schemaDef: Definition,
   row: Record<string, unknown>,
+  seq: number = 0,
+  options?: { skipProse?: boolean },
 ): Y.Doc {
   const doc = new Y.Doc();
   const fields = doc.getMap("fields");
@@ -20,12 +25,13 @@ export function initYjsDoc(
     if (crdtType === CrdtType.Omitted) continue;
 
     if (crdtType === CrdtType.Prose) {
+      if (options?.skipProse) continue;
       const seeded = proseContentToYDoc(normalizeProseContent(value), key);
       Y.applyUpdateV2(doc, Y.encodeStateAsUpdateV2(seeded));
       seeded.destroy();
     } else if (crdtType === CrdtType.Register) {
       const registerMap = new Y.Map<{ value: unknown; timestamp: number }>();
-      registerMap.set("_init", { value, timestamp: Date.now() });
+      registerMap.set("_init", { value, timestamp: seq });
       fields.set(key, registerMap);
     } else if (crdtType === CrdtType.Counter) {
       const counterArr = new Y.Array<{
@@ -34,9 +40,7 @@ export function initYjsDoc(
         timestamp: number;
       }>();
       if (typeof value === "number" && value !== 0) {
-        counterArr.push([
-          { client: "_init", delta: value, timestamp: Date.now() },
-        ]);
+        counterArr.push([{ client: "_init", delta: value, timestamp: seq }]);
       }
       fields.set(key, counterArr);
     } else if (crdtType === CrdtType.Set) {
@@ -45,7 +49,7 @@ export function initYjsDoc(
         for (const item of value) {
           const serialized =
             typeof item === "string" ? item : JSON.stringify(item);
-          setMap.set(serialized, { addedBy: "_init", addedAt: Date.now() });
+          setMap.set(serialized, { addedBy: "_init", addedAt: seq });
         }
       }
       fields.set(key, setMap);
@@ -60,8 +64,9 @@ export function initYjsDoc(
 export function encodeDocumentState(
   schemaDef: Definition,
   row: Record<string, unknown>,
+  seq: number = 0,
 ): Uint8Array {
-  const doc = initYjsDoc(schemaDef, row);
+  const doc = initYjsDoc(schemaDef, row, seq);
   return Y.encodeStateAsUpdateV2(doc);
 }
 
@@ -84,4 +89,115 @@ export function isDiffEmpty(update: Uint8Array): boolean {
     (update.byteLength === EMPTY_YJS_V2_UPDATE.length &&
       update.every((value, index) => EMPTY_YJS_V2_UPDATE[index] === value))
   );
+}
+
+function resolveRegisterValue(
+  doc: Y.Doc,
+  fieldName: string,
+  resolver?: (conflict: { latest(): unknown; values: unknown[] }) => unknown,
+): unknown {
+  const fields = doc.getMap("fields");
+  const registerMap = fields.get(fieldName);
+
+  if (!(registerMap instanceof Y.Map)) return undefined;
+
+  const entries: Array<{ value: unknown; timestamp: number }> = [];
+  registerMap.forEach((val: any) => {
+    entries.push({ value: val.value, timestamp: val.timestamp ?? 0 });
+  });
+
+  if (entries.length === 0) return undefined;
+  if (entries.length === 1) return entries[0]!.value;
+
+  const latest = () =>
+    [...entries].sort((a, b) => b.timestamp - a.timestamp)[0]?.value;
+  return resolver
+    ? resolver({ latest, values: entries.map((entry) => entry.value) })
+    : latest();
+}
+
+function getCounterValue(doc: Y.Doc, fieldName: string): number {
+  const fields = doc.getMap("fields");
+  const counterArr = fields.get(fieldName);
+
+  if (!(counterArr instanceof Y.Array)) return 0;
+
+  let sum = 0;
+  for (let index = 0; index < counterArr.length; index += 1) {
+    const entry = counterArr.get(index) as any;
+    if (entry && typeof entry.delta === "number") {
+      sum += entry.delta;
+    }
+  }
+  return sum;
+}
+
+function getSetMembers<T = string>(doc: Y.Doc, fieldName: string): T[] {
+  const fields = doc.getMap("fields");
+  const setMap = fields.get(fieldName);
+
+  if (!(setMap instanceof Y.Map)) return [];
+
+  const members: T[] = [];
+  setMap.forEach((_value: any, key: string) => {
+    try {
+      members.push(JSON.parse(key) as T);
+    } catch {
+      members.push(key as unknown as T);
+    }
+  });
+  return members;
+}
+
+export function materializeYjsDoc(
+  schemaDef: Definition,
+  doc: Y.Doc,
+): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  const fields = doc.getMap("fields");
+
+  for (const [key, fieldDef] of Object.entries(schemaDef.shape)) {
+    const crdtType = getCrdtType(fieldDef);
+
+    if (crdtType === CrdtType.Omitted) {
+      continue;
+    }
+
+    if (crdtType === CrdtType.Prose) {
+      result[key] =
+        doc.getXmlFragment(key).length > 0
+          ? yDocToProseContent(doc, key)
+          : createEmptyProseContent();
+    } else if (crdtType === CrdtType.Register) {
+      result[key] = resolveRegisterValue(
+        doc,
+        key,
+        (fieldDef as { resolve?: ((conflict: any) => unknown) | undefined })
+          ?.resolve,
+      );
+    } else if (crdtType === CrdtType.Counter) {
+      result[key] = getCounterValue(doc, key);
+    } else if (crdtType === CrdtType.Set) {
+      result[key] = getSetMembers(doc, key);
+    } else {
+      result[key] = fields.get(key);
+    }
+  }
+
+  return result;
+}
+
+export function materializeDocumentFromUpdate(input: {
+  schemaDef: Definition;
+  docId: string;
+  docCreationTime: number;
+  update: ArrayBuffer;
+}): Record<string, unknown> {
+  const doc = new Y.Doc();
+  Y.applyUpdateV2(doc, new Uint8Array(input.update));
+  const materialized = materializeYjsDoc(input.schemaDef, doc);
+  materialized._id = input.docId;
+  materialized._creationTime = input.docCreationTime;
+  doc.destroy();
+  return materialized;
 }

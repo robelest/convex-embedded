@@ -2,13 +2,19 @@ import { RuntimeProtocolQueryRegistry } from "@embedded/runtime/registry";
 import { SyncProtocolHandler } from "@embedded/sync/protocol";
 import type { ClientMessage } from "@embedded/sync/protocol";
 import { SubscriptionManager } from "@embedded/sync/subscriptions";
-import { Cv } from "@robelest/fx/convex";
+import { describe, it, expect } from "@tests/testkit";
 import { ConvexError } from "convex/values";
-import { describe, it, expect, vi } from "vite-plus/test";
+import { vi } from "vitest";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+async function flushProtocolWork(): Promise<void> {
+  for (let i = 0; i < 10; i += 1) {
+    await Promise.resolve();
+  }
+}
 
 function createMocks() {
   const executor = {
@@ -216,7 +222,7 @@ describe("SyncProtocolHandler", () => {
           return value;
         });
 
-      await Promise.resolve();
+      await flushProtocolWork();
       expect(modifyResolved).toBe(false);
 
       release();
@@ -890,7 +896,7 @@ describe("SyncProtocolHandler", () => {
     it("query failure includes errorData when UDF throws ConvexError", async () => {
       const { handler, executor } = createHandler();
       executor.runQuery.mockRejectedValue(
-        Cv.error({ code: "NOT_FOUND", id: "abc123" }),
+        new ConvexError({ code: "NOT_FOUND", id: "abc123" }),
       );
 
       const messages = await handler.handleMessage("s1", {
@@ -962,7 +968,7 @@ describe("SyncProtocolHandler", () => {
     it("action failure includes errorData when UDF throws ConvexError", async () => {
       const { handler, executor } = createHandler();
       executor.runAction.mockRejectedValue(
-        Cv.error({ reason: "rate_limited", retryAfter: 30 }),
+        new ConvexError({ reason: "rate_limited", retryAfter: 30 }),
       );
 
       const messages = await handler.handleMessage("s1", {
@@ -1004,7 +1010,7 @@ describe("SyncProtocolHandler", () => {
         ],
         code: 422,
       };
-      executor.runMutation.mockRejectedValue(Cv.error(nestedData));
+      executor.runMutation.mockRejectedValue(new ConvexError(nestedData));
 
       const messages = await handler.handleMessage("s1", {
         type: "Mutation",

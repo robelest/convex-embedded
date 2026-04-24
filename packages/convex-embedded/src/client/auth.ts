@@ -1,7 +1,6 @@
-import { Fx } from "@robelest/fx";
 import type { ConvexClient } from "convex/browser";
 
-import type { UserIdentity } from "@/auth/resolver";
+import type { UserIdentity } from "@/auth";
 import {
   AUTH_STATE_STORE_MIGRATIONS,
   applyAuthIdentity,
@@ -22,6 +21,10 @@ import type {
 } from "@/client/auth/entry";
 import type { EmbeddedRuntime } from "@/runtime/embedded";
 
+/**
+ * Embedded auth entry and configuration types re-exported for advanced
+ * integrations.
+ */
 export type {
   AuthEntry,
   AuthOptions,
@@ -29,6 +32,10 @@ export type {
   AuthTokenFetcher,
   UserIdentitySource,
 } from "@/client/auth/entry";
+/**
+ * Advanced auth controller helpers re-exported for integration code.
+ * @internal
+ */
 export {
   AUTH_STATE_STORE_MIGRATIONS,
   initializeActiveIdentityKey,
@@ -37,84 +44,149 @@ export {
   setOfflineStaleIfNeeded,
 };
 
-const authEntries = new WeakMap<ConvexClient, AuthEntry>();
+const AUTH_ENTRIES = Symbol.for("convex-embedded:client/auth:authEntries");
 
+type AuthGlobal = typeof globalThis & {
+  [AUTH_ENTRIES]?: WeakMap<ConvexClient, AuthEntry>;
+};
+
+function getAuthEntriesStore() {
+  const globalState = globalThis as AuthGlobal;
+  globalState[AUTH_ENTRIES] ??= new WeakMap<ConvexClient, AuthEntry>();
+  return globalState[AUTH_ENTRIES];
+}
+
+/**
+ * Register the auth state container associated with an embedded browser client.
+ *
+ * @param client - Browser `ConvexClient` instance.
+ * @param entry - Internal auth entry backing that client.
+ * @internal
+ */
 export function registerAuthEntry(
   client: ConvexClient,
   entry: AuthEntry,
 ): void {
-  authEntries.set(client, entry);
+  getAuthEntriesStore().set(client, entry);
 }
 
+/**
+ * Remove any auth state container associated with a browser client.
+ *
+ * @param client - Browser `ConvexClient` instance.
+ * @internal
+ */
 export function deleteAuthEntry(client: ConvexClient): void {
-  authEntries.delete(client);
+  getAuthEntriesStore().delete(client);
 }
 
+/**
+ * Look up the internal auth entry for a browser client.
+ *
+ * @param client - Browser `ConvexClient` instance.
+ * @returns The registered auth entry, or `undefined` when auth has not been
+ * installed for the client.
+ * @internal
+ */
 export function getAuthEntry(client: ConvexClient): AuthEntry | undefined {
-  return authEntries.get(client);
+  return getAuthEntriesStore().get(client);
 }
 
+/**
+ * Read the current embedded auth state for a browser client.
+ *
+ * @param client - Browser `ConvexClient` instance.
+ * @returns The current auth state snapshot.
+ */
 export function getAuthState(client: ConvexClient): AuthState {
-  return authEntries.get(client)?.state ?? { status: "idle" };
+  return getAuthEntriesStore().get(client)?.state ?? { status: "idle" };
 }
 
+/**
+ * Subscribe to embedded auth state transitions.
+ *
+ * @param client - Browser `ConvexClient` instance.
+ * @param callback - Listener invoked whenever auth state changes.
+ * @returns An unsubscribe function.
+ */
 export function subscribeAuthState(
   client: ConvexClient,
   callback: (state: AuthState) => void,
 ): () => void {
-  const entry = authEntries.get(client);
+  const entry = getAuthEntriesStore().get(client);
   if (!entry) return () => {};
-  entry.listeners.add(callback);
-  return () => entry.listeners.delete(callback);
+
+  return entry.stateHub.subscribe((state) => {
+    try {
+      callback(state);
+    } catch {
+      // Listener failures should not break auth propagation.
+    }
+  });
 }
 
+/**
+ * Force token refresh and rerun embedded auth reconciliation.
+ *
+ * @param client - Browser `ConvexClient` instance.
+ * @returns A promise that resolves once the refresh flow completes.
+ */
 export async function reauthenticate(client: ConvexClient): Promise<void> {
-  const entry = authEntries.get(client);
+  const entry = getAuthEntriesStore().get(client);
   if (!entry?.currentAuthFetcher) {
     return;
   }
 
-  await Fx.run(
-    Fx.from({
-      ok: () => entry.currentAuthFetcher!({ forceRefreshToken: true }),
-      err: (error) => error as Error,
-    }).pipe(
-      Fx.chain(() =>
-        Fx.from({
-          ok: () => refreshAuthFromSource(entry),
-          err: (error) => error as Error,
-        }),
-      ),
-      Fx.map(() => undefined as void),
-    ),
-  );
+  await entry.currentAuthFetcher({ forceRefreshToken: true });
+  await refreshAuthFromSource(entry);
 }
 
+/**
+ * Read the current embedded user identity for a browser client.
+ *
+ * @param client - Browser `ConvexClient` instance.
+ * @returns The current embedded identity, or `null` when unauthenticated.
+ */
 export function getAuthIdentity(client: ConvexClient): UserIdentity | null {
-  return authEntries.get(client)?.runtime.getIdentity() ?? null;
+  return getAuthEntriesStore().get(client)?.runtime.getIdentity() ?? null;
 }
 
-export function setAuthIdentity(
+/**
+ * Set the embedded identity explicitly.
+ *
+ * @param client - Browser `ConvexClient` instance.
+ * @param identity - Identity to install, or `null` to clear auth state.
+ * @returns A promise that resolves once the local auth state is updated.
+ */
+export async function setAuthIdentity(
   client: ConvexClient,
   identity: UserIdentity | null,
 ): Promise<void> {
-  const entry = authEntries.get(client);
+  const entry = getAuthEntriesStore().get(client);
   if (!entry) {
-    return Promise.resolve();
+    return;
   }
 
-  return Fx.run(
-    Fx.from({
-      ok: () => applyAuthIdentity(entry, identity, true),
-      err: (error) => error as Error,
-    }),
-  );
+  await applyAuthIdentity(entry, identity, true);
 }
 
+/**
+ * Clear the embedded identity for a browser client.
+ *
+ * @param client - Browser `ConvexClient` instance.
+ * @returns A promise that resolves once auth state is cleared.
+ */
 export function logout(client: ConvexClient): Promise<void> {
   return setAuthIdentity(client, null);
 }
 
+/**
+ * Switch the embedded client to a new identity.
+ *
+ * @param client - Browser `ConvexClient` instance.
+ * @param identity - Identity to activate.
+ * @returns A promise that resolves once auth state is updated.
+ */
 export function switchIdentity(
   client: ConvexClient,
   identity: UserIdentity,
@@ -122,6 +194,16 @@ export function switchIdentity(
   return setAuthIdentity(client, identity);
 }
 
+/**
+ * Install the embedded auth controller on top of a browser `ConvexClient`.
+ *
+ * @param client - Browser `ConvexClient` instance to patch.
+ * @param runtime - Embedded runtime backing the client.
+ * @param entry - Internal auth state container for the client.
+ * @param options - Auth controller wiring, including optional remote auth
+ * forwarding hooks.
+ * @internal
+ */
 export function installAuthController(
   client: ConvexClient,
   runtime: EmbeddedRuntime,

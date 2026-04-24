@@ -29,15 +29,16 @@ import {
   type PendingReplayMeta,
   type PendingReplayMigrationStep,
   REMOTE_META,
-  RESOLVE_QUERY_META,
   type RemoteMeta,
-  type ResolveQueryMeta,
 } from "./meta.js";
 
 type EmbeddedIndexMethod = (name: string, fields: string[]) => unknown;
 type EmbeddedSearchIndexMethod = (...args: any[]) => unknown;
 type EmbeddedVectorIndexMethod = (...args: any[]) => unknown;
 
+/**
+ * Mutation builder attached to an embedded table handle.
+ */
 export type EmbeddedMutationBuilder = <
   ArgsValidator extends
     | PropertyValidators
@@ -73,6 +74,9 @@ export type EmbeddedMutationBuilder = <
   ReturnValueForOptionalValidator<ReturnsValidator>
 >;
 
+/**
+ * Query builder attached to an embedded table handle.
+ */
 export type EmbeddedQueryBuilder = <
   ArgsValidator extends
     | PropertyValidators
@@ -100,24 +104,36 @@ export type EmbeddedQueryBuilder = <
   ) =>
     | Awaited<ReturnValueForOptionalValidator<ReturnsValidator>>
     | Promise<Awaited<ReturnValueForOptionalValidator<ReturnsValidator>>>;
-  resolve?: {
-    args?: () => Record<string, unknown>;
-  };
 }) => RegisteredQuery<
   "public",
   ArgsArrayToObject<OneOrZeroArgs>,
   ReturnValueForOptionalValidator<ReturnsValidator>
 >;
 
+/**
+ * Runtime-facing table handle shared by typed and untyped embedded tables.
+ */
 export interface EmbeddedTableRuntimeHandle {
+  /** Canonical table name. */
   readonly table: string;
+  /** Normalized embedded schema definition. */
   readonly schema: Definition;
+  /** Generated resolve query used by the remote sync engine. */
   resolve: RegisteredQuery<"public", DefaultFunctionArgs, any>;
+  /** Table-scoped mutation builder. */
   mutation: EmbeddedMutationBuilder;
+  /** Table-scoped query builder. */
   query: EmbeddedQueryBuilder;
+  /** Build a typed field reference for CRDT helper APIs. */
   field(id: string, field: string): FieldRef<string, string, unknown, string>;
 }
 
+/**
+ * Typed embedded table handle used by application code.
+ *
+ * @typeParam TableName - Canonical table name.
+ * @typeParam Shape - Embedded field descriptor map.
+ */
 export interface EmbeddedTableHandle<
   TableName extends string = string,
   Shape extends Record<string, unknown> = Record<string, unknown>,
@@ -158,6 +174,9 @@ type EmbeddedVectorIndexFn<
     ...args: Parameters<EmbeddedVectorIndexMethod>
   ) => EmbeddedTable<TableName, Shape>);
 
+/**
+ * Full embedded table type returned by `embeddedTable(...)`.
+ */
 export type EmbeddedTable<
   TableName extends string = string,
   Shape extends Record<string, unknown> = Record<string, unknown>,
@@ -177,16 +196,28 @@ export interface RuntimeHooks {
   resolveHandler?: (
     ctx: any,
     args: {
-      documents: Array<{ docId: string; vector: ArrayBuffer }>;
+      collectionSeq: number | null;
+      documents: Array<{
+        docId: string;
+        vector: ArrayBuffer;
+        lastSeq: number | null;
+      }>;
       scopeArgs?: Record<string, unknown>;
+      fullCursor?: string | null;
     },
-  ) => Promise<
-    Array<{
+  ) => Promise<{
+    mode: "full" | "incremental";
+    collectionSeq: number;
+    documents: Array<{
       docId: string;
+      seq: number | null;
       diff?: ArrayBuffer;
       document?: Record<string, unknown>;
-    }>
-  >;
+      deleted?: true;
+    }>;
+    continueCursor?: string | null;
+    isDone?: boolean;
+  }>;
   detectRuntime?: (ctx: any) => Promise<boolean>;
 }
 
@@ -196,6 +227,12 @@ const registry: Map<string, EmbeddedTableRuntimeHandle> = ((globalThis as any)[
   REGISTRY_KEY
 ] ??= new Map());
 
+/**
+ * Read the current global embedded table registry.
+ *
+ * @returns A read-only view of every table declared with `embeddedTable(...)`
+ * in the current process.
+ */
 export function getTableRegistry(): ReadonlyMap<
   string,
   EmbeddedTableRuntimeHandle
@@ -203,10 +240,32 @@ export function getTableRegistry(): ReadonlyMap<
   return registry;
 }
 
+/**
+ * Clear the global embedded table registry.
+ * @internal
+ */
 export function _resetRegistry(): void {
   registry.clear();
 }
 
+/**
+ * Create a new embedded table definition.
+ *
+ * @typeParam TableName - Canonical table name.
+ * @typeParam Shape - Embedded field descriptor map.
+ * @param tableName - Table name used for local storage and generated metadata.
+ * @param shape - Embedded CRDT/schema field definition map.
+ * @param options - Optional schema versioning, defaults, and migration config.
+ * @returns A typed embedded table handle with query/mutation builders and field refs.
+ *
+ * @example
+ * ```ts
+ * const tasks = embeddedTable("tasks", {
+ *   title: register(v.string()),
+ *   body: prose(),
+ * });
+ * ```
+ */
 export function embeddedTable<
   TableName extends string,
   Shape extends Record<string, unknown>,
@@ -265,10 +324,18 @@ export function embeddedTable<
     }),
     enumerable: false,
   });
+  // Track declared indexes so bindTableRuntime can auto-generate a scope
+  // resolver for scoped live subscriptions. Keyed by index descriptor.
+  const declaredIndexes = new Map<string, readonly string[]>();
+  Object.defineProperty(tableDef, "_declaredIndexes", {
+    value: declaredIndexes,
+    enumerable: false,
+  });
   if (originalIndex) {
     Object.defineProperty(tableDef, "index", {
-      value: (...args: Parameters<EmbeddedIndexMethod>) => {
-        originalIndex(...args);
+      value: (name: string, fields: string[]) => {
+        originalIndex(name, fields);
+        declaredIndexes.set(name, [...fields]);
         return tableDef;
       },
       enumerable: false,
@@ -301,27 +368,56 @@ export function embeddedTable<
 
   tableDef._resolveRaw = queryGeneric({
     args: {
-      documents: v.array(v.object({ docId: v.string(), vector: v.bytes() })),
+      collectionSeq: v.union(v.number(), v.null()),
+      documents: v.array(
+        v.object({
+          docId: v.string(),
+          vector: v.bytes(),
+          lastSeq: v.union(v.number(), v.null()),
+        }),
+      ),
       scopeArgs: v.optional(v.any()),
+      fullCursor: v.optional(v.union(v.string(), v.null())),
     },
-    returns: v.array(
-      v.object({
-        docId: v.string(),
-        diff: v.optional(v.bytes()),
-        document: v.optional(v.any()),
-      }),
-    ),
+    returns: v.object({
+      mode: v.union(v.literal("full"), v.literal("incremental")),
+      collectionSeq: v.number(),
+      documents: v.array(
+        v.object({
+          docId: v.string(),
+          seq: v.union(v.number(), v.null()),
+          diff: v.optional(v.bytes()),
+          document: v.optional(v.any()),
+          deleted: v.optional(v.literal(true)),
+        }),
+      ),
+      continueCursor: v.optional(v.union(v.string(), v.null())),
+      isDone: v.optional(v.boolean()),
+    }),
     handler: async (
       ctx: any,
       args: {
-        documents: Array<{ docId: string; vector: ArrayBuffer }>;
+        collectionSeq: number | null;
+        documents: Array<{
+          docId: string;
+          vector: ArrayBuffer;
+          lastSeq: number | null;
+        }>;
         scopeArgs?: Record<string, unknown>;
+        fullCursor?: string | null;
       },
     ) => {
       if (hooks.resolveHandler) {
         return hooks.resolveHandler(ctx, args);
       }
-      return args.documents.map((doc) => ({ docId: doc.docId }));
+      return {
+        mode: "incremental" as const,
+        collectionSeq: args.collectionSeq ?? -1,
+        documents: args.documents.map((doc) => ({
+          docId: doc.docId,
+          seq: doc.lastSeq,
+        })),
+      };
     },
   });
 
@@ -331,7 +427,6 @@ export function embeddedTable<
       table: tableName,
       schema: schemaDef,
       resolveExport: "resolve",
-      listExport: null,
     } satisfies RemoteMeta,
     enumerable: false,
     configurable: true,
@@ -376,7 +471,7 @@ export function embeddedTable<
   };
 
   tableDef.query = function queryBuilder(def: any) {
-    const { args, returns, handler, remote, resolve } = def;
+    const { args, returns, handler, remote } = def;
     const query = queryGeneric({
       args,
       ...(returns !== undefined ? { returns } : {}),
@@ -391,18 +486,6 @@ export function embeddedTable<
         return result;
       },
     } as any) as RegisteredQuery<any, any, any>;
-
-    if (resolve) {
-      Object.defineProperty(query, RESOLVE_QUERY_META, {
-        value: {
-          __brand: "convex-embedded:resolveQueryMeta" as const,
-          table: tableName,
-          getArgs: resolve.args,
-        } satisfies ResolveQueryMeta,
-        enumerable: false,
-        configurable: false,
-      });
-    }
 
     return query;
   };

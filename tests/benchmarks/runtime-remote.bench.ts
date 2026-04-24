@@ -1,5 +1,5 @@
 import { engine } from "@resolve/client/engine";
-import { bench, describe } from "vite-plus/test";
+import { bench, describe } from "@tests/testkit";
 
 function createMockRemoteClient() {
   return {

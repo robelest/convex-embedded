@@ -2,7 +2,7 @@ import { RuntimeProtocolQueryRegistry } from "@embedded/runtime/registry";
 import type { ProtocolExecutor } from "@embedded/sync/protocol";
 import { SyncProtocolHandler } from "@embedded/sync/protocol";
 import { SubscriptionManager } from "@embedded/sync/subscriptions";
-import { bench, describe } from "vite-plus/test";
+import { bench, describe } from "@tests/testkit";
 
 function createExecutor(): ProtocolExecutor {
   return {

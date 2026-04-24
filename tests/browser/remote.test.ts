@@ -1,15 +1,9 @@
 import { createConvexClient } from "@resolve/browser/index";
-import { localOnly, remoteOnly } from "@resolve/server/setup";
+import { localOnly, remoteOnly } from "@resolve/server/table";
+import { afterEach, beforeEach, describe, expect, it } from "@tests/testkit";
 import { makeFunctionReference } from "convex/server";
 import { ConvexError } from "convex/values";
-import {
-  afterEach,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vite-plus/test";
+import { vi } from "vitest";
 
 vi.mock("convex/browser", () => {
   function makeUnsubscribe() {
@@ -119,14 +113,14 @@ const componentActionRef = {
 
 function createModules() {
   return {
-    "./convex/_generated/api.ts": async () => ({}),
-    "./convex/remote.ts": async () => ({
+    "_generated/api": async () => ({}),
+    remote: async () => ({
       publish: remoteOnly(() => "ok"),
       fetch: remoteOnly(() => "ok"),
       run: remoteOnly(() => "ok"),
       watch: remoteOnly(() => "ok"),
     }),
-    "./convex/local.ts": async () => ({
+    local: async () => ({
       create: () => "ok",
       watch: () => ({ source: "local" }),
       paginatedWatch: (_ctx: unknown, args: any) => ({
@@ -138,10 +132,10 @@ function createModules() {
           args.paginationOpts?.cursor === null ? "cursor-2" : "_end_cursor",
       }),
     }),
-    "./convex/localOnly.ts": async () => ({
+    localOnly: async () => ({
       create: localOnly(() => "ok"),
     }),
-    "./convex/forced.ts": async () => ({
+    forced: async () => ({
       publish: remoteOnly(() => "ok"),
     }),
   };
@@ -164,8 +158,8 @@ function createNestedModules() {
   );
 
   return {
-    "./convex/_generated/api.ts": async () => ({}),
-    "./convex/messages/access.ts": async () => ({
+    "_generated/api": async () => ({}),
+    "messages/access": async () => ({
       publish: remoteOnly(() => "ok"),
       resolve: resolveExport,
       list: () => [],
@@ -191,12 +185,14 @@ function createDelayedSyncModules() {
   );
 
   return {
-    modules: {
-      "./convex/_generated/api.ts": async () => ({}),
-      "./convex/tasks.ts": () =>
-        new Promise<Record<string, unknown>>((resolve) => {
-          resolveLoader = resolve;
-        }),
+    convex: {
+      modules: {
+        "_generated/api": async () => ({}),
+        tasks: () =>
+          new Promise<Record<string, unknown>>((resolve) => {
+            resolveLoader = resolve;
+          }),
+      },
     },
     resolveLoader: () =>
       resolveLoader({ resolve: resolveExport, list: () => [] }),
@@ -220,51 +216,13 @@ function createSyncModules() {
   );
 
   return {
-    "./convex/_generated/api.ts": async () => ({}),
-    "./convex/tasks.ts": async () => ({
+    "_generated/api": async () => ({}),
+    tasks: async () => ({
       resolve: resolveExport,
       list: () => [],
     }),
-    "./convex/local.ts": async () => ({
+    local: async () => ({
       create: () => "ok",
-    }),
-  };
-}
-
-function createScopedSyncModules() {
-  const resolveExport = () => {};
-  Object.defineProperty(
-    resolveExport,
-    Symbol.for("convex-embedded:remoteMeta"),
-    {
-      value: {
-        __brand: "convex-embedded:remoteMeta",
-        table: "tasks",
-        resolveExport: "resolve",
-        listExport: null,
-        schema: undefined,
-      },
-    },
-  );
-
-  const listMine = () => [];
-  Object.defineProperty(
-    listMine,
-    Symbol.for("convex-embedded:resolveQueryMeta"),
-    {
-      value: {
-        __brand: "convex-embedded:resolveQueryMeta",
-        table: "tasks",
-        getArgs: () => ({ owner: "alice" }),
-      },
-    },
-  );
-
-  return {
-    "./convex/_generated/api.ts": async () => ({}),
-    "./convex/tasks.ts": async () => ({
-      resolve: resolveExport,
-      listMine,
     }),
   };
 }
@@ -272,7 +230,7 @@ function createScopedSyncModules() {
 function createSyncModulesWithFailure() {
   return {
     ...createSyncModules(),
-    "./convex/broken.ts": async () => {
+    broken: async () => {
       throw new Error("broken module loader");
     },
   };
@@ -317,7 +275,7 @@ describe("remoteOnly routing", () => {
 
   it("routes remoteOnly mutations to remote client", async () => {
     const client = createConvexClient({
-      modules: createModules(),
+      convex: { modules: createModules() },
       remote: { url: REMOTE_URL },
     }) as any;
     clientsToClose.push(client);
@@ -336,7 +294,7 @@ describe("remoteOnly routing", () => {
 
   it("routes remoteOnly mutations to remote client", async () => {
     const client = createConvexClient({
-      modules: createModules(),
+      convex: { modules: createModules() },
       remote: { url: REMOTE_URL },
     }) as any;
     clientsToClose.push(client);
@@ -356,7 +314,7 @@ describe("remoteOnly routing", () => {
 
   it("keeps non-remote mutations on local client", async () => {
     const client = createConvexClient({
-      modules: createModules(),
+      convex: { modules: createModules() },
       remote: { url: REMOTE_URL },
     }) as any;
     clientsToClose.push(client);
@@ -377,7 +335,7 @@ describe("remoteOnly routing", () => {
 
   it("keeps localOnly mutations on the unified local path", async () => {
     const client = createConvexClient({
-      modules: createModules(),
+      convex: { modules: createModules() },
       remote: { url: REMOTE_URL },
     }) as any;
     clientsToClose.push(client);
@@ -400,7 +358,7 @@ describe("remoteOnly routing", () => {
 
   it("throws immediately when remoteOnly mutation is called offline", async () => {
     const client = createConvexClient({
-      modules: createModules(),
+      convex: { modules: createModules() },
       remote: { url: REMOTE_URL },
     }) as any;
     clientsToClose.push(client);
@@ -431,7 +389,7 @@ describe("remoteOnly routing", () => {
 
   it("throws immediately when remoteOnly query is called offline", async () => {
     const client = createConvexClient({
-      modules: createModules(),
+      convex: { modules: createModules() },
       remote: { url: REMOTE_URL },
     }) as any;
     clientsToClose.push(client);
@@ -452,7 +410,7 @@ describe("remoteOnly routing", () => {
 
   it("throws immediately when remoteOnly action is called offline", async () => {
     const client = createConvexClient({
-      modules: createModules(),
+      convex: { modules: createModules() },
       remote: { url: REMOTE_URL },
     }) as any;
     clientsToClose.push(client);
@@ -473,7 +431,7 @@ describe("remoteOnly routing", () => {
 
   it("routes remoteOnly query and onUpdate subscription to remote", async () => {
     const client = createConvexClient({
-      modules: createModules(),
+      convex: { modules: createModules() },
       remote: { url: REMOTE_URL },
     }) as any;
     clientsToClose.push(client);
@@ -503,7 +461,7 @@ describe("remoteOnly routing", () => {
 
   it("routes local onUpdate subscriptions through the runtime facade", async () => {
     const client = createConvexClient({
-      modules: createModules(),
+      convex: { modules: createModules() },
       remote: { url: REMOTE_URL },
     }) as any;
     clientsToClose.push(client);
@@ -538,7 +496,7 @@ describe("remoteOnly routing", () => {
 
   it("routes local paginated subscriptions through the runtime facade", async () => {
     const client = createConvexClient({
-      modules: createModules(),
+      convex: { modules: createModules() },
       remote: { url: REMOTE_URL },
     }) as any;
     clientsToClose.push(client);
@@ -580,7 +538,7 @@ describe("remoteOnly routing", () => {
 
   it("routes top-level component refs to remote", async () => {
     const client = createConvexClient({
-      modules: createModules(),
+      convex: { modules: createModules() },
       remote: { url: REMOTE_URL },
     }) as any;
     clientsToClose.push(client);
@@ -607,7 +565,7 @@ describe("remoteOnly routing", () => {
 
   it("fails immediately offline for component-routed calls", async () => {
     const client = createConvexClient({
-      modules: createModules(),
+      convex: { modules: createModules() },
       remote: { url: REMOTE_URL },
     }) as any;
     clientsToClose.push(client);
@@ -628,7 +586,7 @@ describe("remoteOnly routing", () => {
 
   it("preserves nested module paths for remoteOnly routing", async () => {
     const client = createConvexClient({
-      modules: createNestedModules(),
+      convex: { modules: createNestedModules() },
       remote: { url: REMOTE_URL },
     }) as any;
     clientsToClose.push(client);
@@ -649,7 +607,7 @@ describe("remoteOnly routing", () => {
 
   it("preserves nested module paths for remote table discovery", async () => {
     const client = createConvexClient({
-      modules: createNestedModules(),
+      convex: { modules: createNestedModules() },
       remote: { url: REMOTE_URL },
     }) as any;
     clientsToClose.push(client);
@@ -660,7 +618,6 @@ describe("remoteOnly routing", () => {
       expect.objectContaining({
         tables: {
           messages: {
-            query: "messages/access:list",
             resolve: "messages/access:resolve",
             schema: undefined,
           },
@@ -669,44 +626,9 @@ describe("remoteOnly routing", () => {
     );
   });
 
-  it("uses explicit scoped remote queries when provided", async () => {
-    const client = createConvexClient({
-      modules: createScopedSyncModules(),
-      remote: { url: REMOTE_URL },
-    }) as any;
-    clientsToClose.push(client);
-
-    await settle();
-
-    expect(mockEngineFactory.create).toHaveBeenCalledWith(
-      expect.objectContaining({
-        tables: {
-          tasks: {
-            query: "tasks:listMine",
-            resolveArgs: expect.any(Function),
-            resolve: "tasks:resolve",
-            schema: undefined,
-          },
-        },
-      }),
-    );
-
-    const lastCall = (mockEngineFactory.create as any).mock.calls.at(-1) as
-      | [
-          {
-            tables?: {
-              tasks?: { resolveArgs?: () => Record<string, unknown> };
-            };
-          },
-        ]
-      | undefined;
-    const call = lastCall?.[0];
-    expect(call?.tables?.tasks?.resolveArgs?.()).toEqual({ owner: "alice" });
-  });
-
   it("forwards setAuth to remote client", async () => {
     const client = createConvexClient({
-      modules: createModules(),
+      convex: { modules: createModules() },
       remote: { url: REMOTE_URL },
     }) as any;
     clientsToClose.push(client);
@@ -730,7 +652,7 @@ describe("remoteOnly routing", () => {
   it("does not start a discovered engine after client.close()", async () => {
     const delayed = createDelayedSyncModules();
     const client = createConvexClient({
-      modules: delayed.modules as any,
+      convex: delayed.convex as any,
       remote: { url: REMOTE_URL },
     }) as any;
 
@@ -744,7 +666,7 @@ describe("remoteOnly routing", () => {
 
   it("client.close() stops the discovered engine and closes the remote client", async () => {
     const client = createConvexClient({
-      modules: createSyncModules(),
+      convex: { modules: createSyncModules() },
       remote: { url: REMOTE_URL },
     }) as any;
 
@@ -765,7 +687,7 @@ describe("remoteOnly routing", () => {
 
   it("client.close() is idempotent after discovery completes", async () => {
     const client = createConvexClient({
-      modules: createSyncModules(),
+      convex: { modules: createSyncModules() },
       remote: { url: REMOTE_URL },
     }) as any;
 
@@ -788,7 +710,7 @@ describe("remoteOnly routing", () => {
     });
 
     const client = createConvexClient({
-      modules: createSyncModules(),
+      convex: { modules: createSyncModules() },
       remote: { url: REMOTE_URL },
     }) as any;
     clientsToClose.push(client);
@@ -803,7 +725,7 @@ describe("remoteOnly routing", () => {
 
     try {
       const client = createConvexClient({
-        modules: createSyncModulesWithFailure(),
+        convex: { modules: createSyncModulesWithFailure() },
         remote: { url: REMOTE_URL },
       }) as any;
       clientsToClose.push(client);
@@ -827,7 +749,7 @@ describe("remoteOnly routing", () => {
     });
 
     const client = createConvexClient({
-      modules: createSyncModules(),
+      convex: { modules: createSyncModules() },
       remote: { url: REMOTE_URL },
     }) as any;
     clientsToClose.push(client);

@@ -12,6 +12,9 @@
  * @packageDocumentation
  */
 
+/**
+ * Core schema types and helpers shared by embedded table definitions.
+ */
 export {
   CrdtType,
   define,
@@ -34,7 +37,13 @@ export {
   type SetFieldDescriptor,
   type TypedFieldDescriptor,
 } from "./schema/core.js";
+/**
+ * Create explicit register conflict resolvers for schema fields.
+ */
 export { createConflict } from "./schema/conflict.js";
+/**
+ * CRDT field constructors and the namespace-style `schema` helper.
+ */
 export {
   counter,
   extractValidator,
@@ -45,18 +54,22 @@ export {
   set,
 } from "./schema/fields.js";
 export type { RegisterOptions } from "./schema/fields.js";
+/**
+ * Remote-routing metadata constants used by bound tables and generated queries.
+ */
 export {
   PENDING_REPLAY_META,
   REMOTE_META,
-  RESOLVE_QUERY_META,
   type ComponentBinding,
   type PendingReplayMeta,
   type PendingReplayMigrationContext,
   type PendingReplayMigrationResult,
   type PendingReplayMigrationStep,
   type RemoteMeta,
-  type ResolveQueryMeta,
 } from "./schema/meta.js";
+/**
+ * Embedded table builders, runtime hooks, and registry helpers.
+ */
 export {
   _resetRegistry,
   embeddedTable,

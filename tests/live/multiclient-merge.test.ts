@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it } from "@tests/testkit";
 
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
@@ -7,6 +7,7 @@ import {
   createLiveClient,
   pollUntil,
   type TestConnectivityController,
+  waitForMappedRemoteId,
   uniqueSuffix,
   waitForResolved,
 } from "../helpers/live";
@@ -26,11 +27,19 @@ async function createProjectAndIssue(client: LiveClient) {
     identifier: suffix.slice(-6).toUpperCase(),
     description: `Merge seed ${suffix}`,
   });
-  const issueId = await client.mutation(api.issues.create, {
+  const canonicalProjectId = await waitForMappedRemoteId<Id<"projects">>(
+    client,
     projectId,
+  );
+  const issueId = await client.mutation(api.issues.create, {
+    projectId: canonicalProjectId,
     title: `Issue ${suffix}`,
   });
-  return { projectId, issueId, suffix };
+  const canonicalIssueId = await waitForMappedRemoteId<Id<"issues">>(
+    client,
+    issueId,
+  );
+  return { projectId: canonicalProjectId, issueId: canonicalIssueId, suffix };
 }
 
 async function waitForIssueProjection(
@@ -222,5 +231,5 @@ maybeDescribe("live multi-client merge", () => {
       waitForCommentsBodies(clientBEntry.client as LiveClient, issueId, bodies),
       waitForCommentsBodies(clientCEntry.client as LiveClient, issueId, bodies),
     ]);
-  }, 90_000);
+  }, 180_000);
 });

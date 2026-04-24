@@ -8,7 +8,6 @@
  * from `@robelest/convex-embedded/browser` instead.
  */
 
-import { Fx } from "@robelest/fx";
 import type { ConvexClient } from "convex/browser";
 import * as Y from "yjs";
 
@@ -16,13 +15,24 @@ import { IdMap } from "@/client/ids";
 import { PendingQueue } from "@/client/pending";
 import type { PendingEntry } from "@/client/pending";
 import { materializeYjsDoc } from "@/client/schema";
+import type { EngineResolveInput } from "@/client/services/engine";
+import { SystemPaths } from "@/kernel/system";
 import type { LocalExecutionRequest } from "@/runtime/embedded";
-import type { ConnectivityAdapter } from "@/runtime/platform";
-import { getFunctionName, makeFunctionReference } from "@/shared/function-refs";
+import {
+  createAmbientConnectivityAdapter,
+  type ConnectivityAdapter,
+} from "@/runtime/platform";
 import { createLogger } from "@/shared/logger";
+import { getFunctionName, makeFunctionReference } from "@/shared/refs";
 import { initYjsDoc } from "@/shared/schema";
 import type { Definition } from "@/shared/schema";
-import type { EngineStatus, ResolveProgress } from "@/shared/types";
+import type {
+  EngineStatus,
+  ResolveDocumentResponse,
+  ResolveProgress,
+  ResolveResponse,
+} from "@/shared/types";
+import { retryWithBackoff } from "@/utils/retry";
 
 const log = createLogger("resolve");
 
@@ -56,16 +66,50 @@ function stripOmittedFields(
   });
 }
 
-function unwrapSchemaField(field: unknown): unknown {
-  if (
-    typeof field === "object" &&
-    field !== null &&
-    "validator" in field &&
-    typeof (field as { validator?: unknown }).validator !== "undefined"
-  ) {
-    return (field as { validator: unknown }).validator;
-  }
-  return field;
+/**
+ * Canonicalize scope args into a stable string key for deduplicating
+ * (table, scopeArgs) subscriptions.
+ *
+ * Empty / missing scope args collapse to the table name — i.e. an unscoped
+ * subscription — so existing table-keyed behavior is preserved.
+ */
+function canonicalizeScopeArgs(
+  scopeArgs?: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!scopeArgs) return {};
+  const keys = Object.keys(scopeArgs);
+  if (keys.length === 0) return {};
+  const sorted = keys.sort();
+  const normalized: Record<string, unknown> = {};
+  for (const k of sorted) normalized[k] = scopeArgs[k];
+  return normalized;
+}
+
+function makeScopeKey(
+  tableName: string,
+  scopeArgs?: Record<string, unknown>,
+): string {
+  const normalized = canonicalizeScopeArgs(scopeArgs);
+  if (Object.keys(normalized).length === 0) return tableName;
+  return `${tableName}::${JSON.stringify(normalized)}`;
+}
+
+function getFieldValueByPath(
+  doc: Record<string, unknown>,
+  fieldPath: string,
+): unknown {
+  return fieldPath.split(".").reduce<unknown>((current, segment) => {
+    if (current === null || typeof current !== "object") {
+      return undefined;
+    }
+    return (current as Record<string, unknown>)[segment];
+  }, doc);
+}
+
+interface ActiveScope {
+  tableName: string;
+  scopeArgs: Record<string, unknown>;
+  unsub?: () => void;
 }
 
 function toErrorMessage(error: unknown): string {
@@ -79,140 +123,17 @@ function toErrorMessage(error: unknown): string {
   }
 }
 
-function rewriteKnownIdsResult(
-  value: unknown,
-  field: unknown,
-  localId: string,
-  remoteId: string,
-): { value: unknown; changed: boolean } {
-  const validator = unwrapSchemaField(field) as
-    | {
-        kind?: string;
-        element?: unknown;
-        fields?: Record<string, unknown>;
-        members?: unknown[];
-        value?: unknown;
-      }
-    | undefined;
-
-  if (!validator || value === null || typeof value === "undefined") {
-    return { value, changed: false };
-  }
-
-  switch (validator.kind) {
-    case "id":
-      return value === localId
-        ? { value: remoteId, changed: true }
-        : { value, changed: false };
-    case "array": {
-      if (!Array.isArray(value)) {
-        return { value, changed: false };
-      }
-      let changed = false;
-      const next = value.map((entry) => {
-        const rewritten = rewriteKnownIdsResult(
-          entry,
-          validator.element,
-          localId,
-          remoteId,
-        );
-        changed = changed || rewritten.changed;
-        return rewritten.value;
-      });
-      return { value: changed ? next : value, changed };
-    }
-    case "object": {
-      if (typeof value !== "object" || value === null || Array.isArray(value)) {
-        return { value, changed: false };
-      }
-      let changed = false;
-      const next = Object.fromEntries(
-        Object.entries(value).map(([key, entryValue]) => {
-          const rewritten = rewriteKnownIdsResult(
-            entryValue,
-            validator.fields?.[key],
-            localId,
-            remoteId,
-          );
-          changed = changed || rewritten.changed;
-          return [key, rewritten.value];
-        }),
-      );
-      return { value: changed ? next : value, changed };
-    }
-    case "union": {
-      for (const member of validator.members ?? []) {
-        const rewritten = rewriteKnownIdsResult(
-          value,
-          member,
-          localId,
-          remoteId,
-        );
-        if (rewritten.changed) {
-          return rewritten;
-        }
-      }
-      return { value, changed: false };
-    }
-    case "record": {
-      if (typeof value !== "object" || value === null || Array.isArray(value)) {
-        return { value, changed: false };
-      }
-      let changed = false;
-      const next = Object.fromEntries(
-        Object.entries(value).map(([key, entryValue]) => {
-          const rewritten = rewriteKnownIdsResult(
-            entryValue,
-            validator.value,
-            localId,
-            remoteId,
-          );
-          changed = changed || rewritten.changed;
-          return [key, rewritten.value];
-        }),
-      );
-      return { value: changed ? next : value, changed };
-    }
-    default:
-      return { value, changed: false };
-  }
-}
-
-function rewriteKnownIds(
-  value: unknown,
-  field: unknown,
-  localId: string,
-  remoteId: string,
-): unknown {
-  return rewriteKnownIdsResult(value, field, localId, remoteId).value;
-}
-
-function rewriteDocumentToCanonical(input: {
-  doc: Record<string, unknown>;
-  schema: Definition;
-  localId: string;
-  remoteId: string;
-  rewriteOwnId: boolean;
-}): Record<string, unknown> {
-  const next: Record<string, unknown> = { ...input.doc };
-  for (const [fieldName, field] of Object.entries(input.schema.getShape())) {
-    next[fieldName] = rewriteKnownIds(
-      next[fieldName],
-      field,
-      input.localId,
-      input.remoteId,
-    );
-  }
-  if (input.rewriteOwnId && next._id === input.localId) {
-    next._id = input.remoteId;
-  }
-  return next;
+function runDetached(task: () => Promise<unknown>, label: string): void {
+  void task().catch((error) => {
+    console.error(label, error);
+  });
 }
 
 function createRemoteUpdateHandler(input: {
   ingestDocuments: (
     table: string,
     documents: Array<Record<string, unknown>>,
+    scopeArgs?: Record<string, unknown>,
   ) => Promise<void>;
   getDocumentsForTable: (
     table: string,
@@ -222,52 +143,39 @@ function createRemoteUpdateHandler(input: {
   bufferRemoteSnapshot: (
     table: string,
     docs: Array<Record<string, unknown>>,
+    scopeArgs?: Record<string, unknown>,
   ) => Promise<void>;
   translateRemoteSnapshotToLocal: (
     docs: Array<Record<string, unknown>>,
   ) => Array<Record<string, unknown>>;
   schema: Definition;
+  scopeArgs?: Record<string, unknown>;
   tableName: string;
 }) {
   return (remoteDocs: Array<Record<string, unknown>>) => {
     const cleaned = input.translateRemoteSnapshotToLocal(
       stripOmittedFields(input.schema, remoteDocs),
     );
-    Fx.detach(
-      () =>
-        Fx.run(
-          Fx.from({
-            ok: async () => {
-              const hasPendingForTable = input
-                .getPendingEntries()
-                .some((entry) => entry.table === input.tableName);
-
-              if (!hasPendingForTable) {
-                try {
-                  await input.ingestDocuments(input.tableName, cleaned);
-                } catch {
-                  await input.bufferRemoteSnapshot(input.tableName, cleaned);
-                }
-                return;
-              }
-
-              await input.bufferRemoteSnapshot(input.tableName, cleaned);
-            },
-            err: (e) => e as Error,
-          }).pipe(
-            Fx.inspect((err) =>
-              Fx.sync(() => {
-                log.error(
-                  `sync: failed to ingest remote data for "${input.tableName}"`,
-                  err,
-                );
-              }),
-            ),
-            Fx.recover(() => Fx.unit),
-          ),
-        ),
-      `[sync] ingest ${input.tableName}:`,
-    );
+    runDetached(async () => {
+      try {
+        const hasPendingForTable = input
+          .getPendingEntries()
+          .some((entry) => entry.table === input.tableName);
+        await input.bufferRemoteSnapshot(
+          input.tableName,
+          cleaned,
+          input.scopeArgs,
+        );
+        if (hasPendingForTable) {
+          return;
+        }
+      } catch (err) {
+        log.error(
+          `sync: failed to ingest remote data for "${input.tableName}"`,
+          err,
+        );
+      }
+    }, `[sync] ingest ${input.tableName}:`);
   };
 }
 
@@ -278,6 +186,8 @@ function createRemoteSubscriptionErrorHandler(tableName: string) {
 }
 
 type TableRemoteSyncState = {
+  tableName: string;
+  scopeArgs: Record<string, unknown>;
   bufferedSnapshot: Array<Record<string, unknown>> | null;
   flushScheduled: boolean;
   epoch: number;
@@ -291,13 +201,27 @@ const BUFFERED_SNAPSHOT_RETRY_MAX_MS = 1000;
 
 function extractPendingLogicalId(entry: PendingEntry): string | null {
   try {
-    const args = JSON.parse(entry.args) as { id?: unknown };
+    // For create mutations, localResult is the new doc ID — prefer it
+    // over scanning args (which may contain parent IDs like projectId).
+    const localResult = JSON.parse(entry.localResult) as unknown;
+    if (typeof localResult === "string") {
+      return localResult;
+    }
+
+    // For update/delete mutations (localResult is null), scan args.
+    const args = JSON.parse(entry.args) as Record<string, unknown>;
     if (typeof args.id === "string") {
       return args.id;
     }
-
-    const localResult = JSON.parse(entry.localResult) as unknown;
-    return typeof localResult === "string" ? localResult : null;
+    if (typeof args._id === "string") {
+      return args._id;
+    }
+    for (const [key, value] of Object.entries(args)) {
+      if (typeof value === "string" && /(^|[a-zA-Z])Id$/.test(key)) {
+        return value;
+      }
+    }
+    return null;
   } catch (error) {
     log.warn("sync: failed to parse pending entry identity", error, {
       ref: entry.ref,
@@ -346,6 +270,7 @@ function projectRemoteSnapshot(input: {
   localDocs: Array<Record<string, unknown>>;
   remoteDocs: Array<Record<string, unknown>>;
   pendingEntries: readonly PendingEntry[];
+  recentlyReplayedIds: ReadonlySet<string>;
   tableName: string;
   getAliases: (id: string) => Set<string>;
 }): Array<Record<string, unknown>> {
@@ -366,6 +291,13 @@ function projectRemoteSnapshot(input: {
       continue;
     }
     for (const alias of input.getAliases(logicalId)) {
+      dirtyAliasKeys.add(alias);
+    }
+  }
+  // Also protect docs that were just replayed but whose subscription
+  // hasn't pushed fresh data yet.
+  for (const id of input.recentlyReplayedIds) {
+    for (const alias of input.getAliases(id)) {
       dirtyAliasKeys.add(alias);
     }
   }
@@ -399,28 +331,36 @@ function classifyReplayError(
   error: Error,
 ): "reauthRequired" | "authorizationDenied" | "scopeChanged" | "unknown" {
   const { code, message } = parseErrorMetadata(error);
+  const lowered = message.toLowerCase();
   if (code === "UNAUTHENTICATED") {
     return "reauthRequired";
   }
   if (code === "FORBIDDEN") {
     return "authorizationDenied";
   }
+  // Fallback to message heuristics only for common backend/auth phrasing when
+  // structured codes are unavailable.
   if (
-    message.includes("auth") ||
-    message.includes("token") ||
-    message.includes("unauth")
+    lowered.includes("unauthenticated") ||
+    lowered.includes("invalid token") ||
+    lowered.includes("expired token") ||
+    lowered.includes("authentication required")
   ) {
     return "reauthRequired";
   }
   if (
-    message.includes("forbidden") ||
-    message.includes("not authorized") ||
-    message.includes("permission") ||
-    message.includes("denied")
+    lowered.includes("forbidden") ||
+    lowered.includes("not authorized") ||
+    lowered.includes("permission denied") ||
+    lowered.includes("access denied")
   ) {
     return "authorizationDenied";
   }
-  if (message.includes("scope")) {
+  if (
+    lowered.includes("scope changed") ||
+    lowered.includes("scope mismatch") ||
+    lowered.includes("invalid scope")
+  ) {
     return "scopeChanged";
   }
   return "unknown";
@@ -499,40 +439,65 @@ function startReplayLeaseHeartbeat(input: {
 }
 
 function registerRemoteSubscription(input: {
-  ingestDocuments: (
-    table: string,
-    documents: Array<Record<string, unknown>>,
-  ) => Promise<void>;
-  getDocumentsForTable: (
-    table: string,
-  ) => Promise<Array<Record<string, unknown>>>;
   getPendingEntries: () => readonly PendingEntry[];
   getAliases: (id: string) => Set<string>;
   bufferRemoteSnapshot: (
     table: string,
     docs: Array<Record<string, unknown>>,
+    scopeArgs?: Record<string, unknown>,
   ) => Promise<void>;
   translateRemoteSnapshotToLocal: (
     docs: Array<Record<string, unknown>>,
   ) => Array<Record<string, unknown>>;
   onUnsubscribe: (unsub: () => void) => void;
-  remoteClient: ConvexClient;
+  resolveServices: EngineResolveInput;
   tableConfig: TableConfig;
   tableName: string;
+  scopeArgs?: Record<string, unknown>;
 }) {
-  const unsub = (input.remoteClient as any).onUpdate(
-    input.tableConfig.query,
-    input.tableConfig.resolveArgs?.() ?? {},
-    createRemoteUpdateHandler({
-      ingestDocuments: input.ingestDocuments,
-      getDocumentsForTable: input.getDocumentsForTable,
-      getPendingEntries: input.getPendingEntries,
-      getAliases: input.getAliases,
-      bufferRemoteSnapshot: input.bufferRemoteSnapshot,
-      translateRemoteSnapshotToLocal: input.translateRemoteSnapshotToLocal,
-      schema: input.tableConfig.schema,
-      tableName: input.tableName,
-    }),
+  const remoteClient = input.resolveServices.remoteClient;
+  const baseHandler = createRemoteUpdateHandler({
+    ingestDocuments: (table, documents, scopeArgs) =>
+      input.resolveServices.ingestDocuments(table, documents, scopeArgs),
+    getDocumentsForTable: (table) =>
+      input.resolveServices.getDocumentsForTable(table),
+    getPendingEntries: input.getPendingEntries,
+    getAliases: input.getAliases,
+    bufferRemoteSnapshot: input.bufferRemoteSnapshot,
+    translateRemoteSnapshotToLocal: input.translateRemoteSnapshotToLocal,
+    schema: input.tableConfig.schema,
+    scopeArgs: input.scopeArgs,
+    tableName: input.tableName,
+  });
+
+  // Subscribe to the auto-generated resolve endpoint with stable args. Server
+  // sees no state vectors and always returns "full" mode with a fresh scoped
+  // snapshot of raw documents. Re-fires whenever the collection changes.
+  const unwrapResolveResponse = (response: unknown) => {
+    const docs: Array<Record<string, unknown>> = [];
+    const res = response as {
+      documents?: Array<{ document?: unknown }>;
+    };
+    if (res?.documents) {
+      for (const entry of res.documents) {
+        if (entry.document && typeof entry.document === "object") {
+          docs.push(entry.document as Record<string, unknown>);
+        }
+      }
+    }
+    baseHandler(docs);
+  };
+
+  const unsub = (remoteClient as any).onUpdate(
+    input.tableConfig.resolve,
+    {
+      collectionSeq: null,
+      documents: [],
+      ...(input.scopeArgs && Object.keys(input.scopeArgs).length > 0
+        ? { scopeArgs: input.scopeArgs }
+        : {}),
+    },
+    unwrapResolveResponse,
     createRemoteSubscriptionErrorHandler(input.tableName),
   );
 
@@ -555,20 +520,13 @@ function registerRemoteSubscription(input: {
  *   remote engine diffs them against local state and ingests the changes.
  */
 export interface TableConfig {
-  /** The resolve query reference (from register() output). */
-  resolve: unknown;
-
   /**
-   * The remote query reference to subscribe to while online.
-   *
-   * This should be the same query the app uses locally (e.g.
-   * `api.tasks.list`). The remote `ConvexClient` subscribes to it
-   * reactively and pipes every update into the embedded runtime.
+   * The auto-generated resolve query (from `bindTable`). Used both for
+   * catch-up resolves and as the live subscription target (subscribed with
+   * stable args so the server returns a fresh full snapshot on every
+   * collection mutation).
    */
-  query: unknown;
-
-  /** Optional args factory for the remote resolve-scoped subscription query. */
-  resolveArgs?: () => Record<string, unknown>;
+  resolve: unknown;
 
   /**
    * The schema {@link Definition} for this table (from `schema.define()`).
@@ -598,6 +556,12 @@ export interface EmbeddedClientLike {
     table: string,
     documents: Array<Record<string, unknown>>,
   ): Promise<void>;
+  canonicalizeMappedCreate(input: {
+    localId: string;
+    remoteId: string;
+    tableName: string;
+    schemas: Record<string, Definition>;
+  }): Promise<void>;
 
   /**
    * Return all documents for a table from the local embedded database.
@@ -698,28 +662,34 @@ type LocalYjsEntry = {
 type ResolveDocument = {
   docId: string;
   vector: ArrayBuffer;
+  lastSeq: number | null;
 };
 
 type ResolveArgs = {
+  collectionSeq: number | null;
   documents: Array<ResolveDocument>;
   scopeArgs?: Record<string, unknown>;
 };
 
-type ResolveResultRow = {
-  docId: string;
-  diff?: ArrayBuffer;
-  document?: Record<string, unknown>;
+type ResolveResultRow = ResolveDocumentResponse;
+
+type ResolveMetadata = {
+  collectionSeq: number | null;
+  documentSeqById: Map<string, number>;
 };
 
 type PreparedResolveInput = {
+  localDocs: Array<Record<string, unknown>>;
   localYjsMap: Map<string, LocalYjsEntry>;
   resolveDocuments: Array<ResolveDocument>;
   schemaDef: Definition;
 };
 
 type MergeResolveOutput = {
+  deletedDocIds: string[];
   diffCount: number;
   mergedDocs: Array<Record<string, unknown>>;
+  metadataEntries: Array<{ docId: string; seq: number }>;
 };
 
 type StorageDependency = {
@@ -727,6 +697,20 @@ type StorageDependency = {
   metadata: Record<string, unknown>;
   blob: Blob;
 };
+
+function normalizeResolveResponse(
+  response: ResolveResponse | Array<ResolveResultRow>,
+  fallbackCollectionSeq: number | null,
+): ResolveResponse {
+  if (Array.isArray(response)) {
+    return {
+      mode: "incremental",
+      collectionSeq: fallbackCollectionSeq ?? -1,
+      documents: response,
+    };
+  }
+  return response;
+}
 
 /** @internal */
 export interface EngineInstance {
@@ -756,6 +740,22 @@ export interface EngineInstance {
 
   /** Manually trigger a resolve cycle (e.g., after coming back online). */
   resolveNow(): Promise<void>;
+
+  /** Ensure a table is hydrated/resolved before first use. */
+  ensureTableReady(tableName: string): Promise<void>;
+
+  /**
+   * Ensure a scoped subscription for `(tableName, scopeArgs)` is active.
+   *
+   * An empty or missing `scopeArgs` is equivalent to {@link ensureTableReady}
+   * — the unscoped, table-wide subscription. Different non-empty scope args
+   * produce independent subscriptions so reads against the same table with
+   * different args (e.g. `comments.list({ issueId })`) do not collide.
+   */
+  ensureScopeReady(
+    tableName: string,
+    scopeArgs?: Record<string, unknown>,
+  ): Promise<void>;
 
   /** Re-hydrate identity-scoped state and resume remote for the active identity. */
   reloadIdentity(): Promise<void>;
@@ -804,7 +804,7 @@ export interface EngineInstance {
 function inferTableFromRef(
   ref: unknown,
   tables: Record<string, TableConfig>,
-): string {
+): string | null {
   const name = getFunctionName(ref as any);
 
   // Extract module name (before the colon) and check if it's a known table.
@@ -813,9 +813,7 @@ function inferTableFromRef(
     return moduleName;
   }
 
-  // Fallback: return first registered table (common case: single table app)
-  const tableNames = Object.keys(tables);
-  return tableNames[0] ?? "";
+  return null;
 }
 
 function matchTag<
@@ -887,37 +885,261 @@ function createHydrationAwareOnlineHandler(input: {
   };
 }
 
+function unwrapSchemaField(field: unknown): unknown {
+  if (
+    typeof field === "object" &&
+    field !== null &&
+    "validator" in field &&
+    typeof (field as { validator?: unknown }).validator !== "undefined"
+  ) {
+    return (field as { validator: unknown }).validator;
+  }
+  return field;
+}
+
+function collectReferencedTables(
+  field: unknown,
+  referenced: Set<string>,
+): void {
+  const unwrapped = unwrapSchemaField(field);
+  if (typeof unwrapped !== "object" || unwrapped === null) {
+    return;
+  }
+
+  const validator = unwrapped as Record<string, unknown> & { kind?: string };
+  if (validator.kind === "id") {
+    const tableName = validator.tableName;
+    if (typeof tableName === "string") {
+      referenced.add(tableName);
+    }
+    return;
+  } else if (validator.kind === "array") {
+    collectReferencedTables(validator.element, referenced);
+    return;
+  } else if (validator.kind === "record") {
+    collectReferencedTables(validator.value, referenced);
+    return;
+  } else if (validator.kind === "object") {
+    const fields = validator.fields as Record<string, unknown> | undefined;
+    if (!fields) {
+      return;
+    }
+    for (const nested of Object.values(fields)) {
+      collectReferencedTables(nested, referenced);
+    }
+    return;
+  } else if (validator.kind === "union") {
+    const members = validator.members;
+    if (!Array.isArray(members)) {
+      return;
+    }
+    for (const member of members) {
+      collectReferencedTables(member, referenced);
+    }
+    return;
+  } else if (validator.kind === "optional") {
+    collectReferencedTables(validator.field, referenced);
+    return;
+  }
+}
+
+function orderTablesByDependencies(
+  tables: Record<string, TableConfig>,
+): Array<string> {
+  const tableNames = Object.keys(tables);
+  const dependencyMap = new Map<string, Set<string>>(
+    tableNames.map((tableName) => {
+      const referenced = new Set<string>();
+      const schema = tables[tableName]?.schema;
+      if (schema) {
+        for (const field of Object.values(schema.getShape())) {
+          collectReferencedTables(field, referenced);
+        }
+      }
+      referenced.delete(tableName);
+      return [
+        tableName,
+        new Set([...referenced].filter((dependency) => dependency in tables)),
+      ];
+    }),
+  );
+
+  const ordered: Array<string> = [];
+  const remaining = new Set(tableNames);
+  while (remaining.size > 0) {
+    const ready = tableNames.filter((tableName) => {
+      if (!remaining.has(tableName)) {
+        return false;
+      }
+      const dependencies = dependencyMap.get(tableName);
+      return (
+        !dependencies || [...dependencies].every((dep) => !remaining.has(dep))
+      );
+    });
+
+    if (ready.length === 0) {
+      return tableNames;
+    }
+
+    for (const tableName of ready) {
+      remaining.delete(tableName);
+      ordered.push(tableName);
+    }
+  }
+
+  return ordered;
+}
+
+function rootTablesByDependencies(
+  tables: Record<string, TableConfig>,
+): Array<string> {
+  return Object.entries(tables)
+    .filter(([, tableConfig]) => {
+      const referenced = new Set<string>();
+      const schema = tableConfig?.schema;
+      if (!schema) {
+        return true;
+      }
+      for (const field of Object.values(schema.getShape())) {
+        collectReferencedTables(field, referenced);
+      }
+      return referenced.size === 0;
+    })
+    .map(([tableName]) => tableName);
+}
+
+async function runSpan<A>(input: {
+  name: string;
+  attributes?: Record<string, string | number | boolean | null | undefined>;
+  run: () => Promise<A> | A;
+}): Promise<A> {
+  return Promise.resolve(input.run());
+}
+
+function hasResolvableReferences(
+  value: unknown,
+  field: unknown,
+  hasDocumentId: (id: string) => boolean,
+  getAliases: (id: string) => Set<string>,
+): boolean {
+  const unwrapped = unwrapSchemaField(field);
+  if (value === null || value === undefined) {
+    return true;
+  }
+  if (typeof unwrapped === "string") {
+    return true;
+  }
+  if (typeof unwrapped !== "object" || unwrapped === null) {
+    return true;
+  }
+
+  const validator = unwrapped as Record<string, unknown> & { kind?: string };
+  if (validator.kind === "id") {
+    return (
+      typeof value !== "string" ||
+      hasDocumentId(value) ||
+      Array.from(getAliases(value)).some((alias) => hasDocumentId(alias))
+    );
+  } else if (validator.kind === "array") {
+    return (
+      !Array.isArray(value) ||
+      value.every((entry) =>
+        hasResolvableReferences(
+          entry,
+          validator.element,
+          hasDocumentId,
+          getAliases,
+        ),
+      )
+    );
+  } else if (validator.kind === "record") {
+    return (
+      typeof value !== "object" ||
+      value === null ||
+      Array.isArray(value) ||
+      Object.values(value).every((entry) =>
+        hasResolvableReferences(
+          entry,
+          validator.value,
+          hasDocumentId,
+          getAliases,
+        ),
+      )
+    );
+  } else if (validator.kind === "object") {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return true;
+    }
+    const fields = validator.fields as Record<string, unknown> | undefined;
+    if (!fields) {
+      return true;
+    }
+    return Object.entries(fields).every(([key, nestedField]) =>
+      hasResolvableReferences(
+        (value as Record<string, unknown>)[key],
+        nestedField,
+        hasDocumentId,
+        getAliases,
+      ),
+    );
+  } else if (validator.kind === "union") {
+    const members = validator.members;
+    if (!Array.isArray(members)) {
+      return true;
+    }
+    return members.some((member) =>
+      hasResolvableReferences(value, member, hasDocumentId, getAliases),
+    );
+  } else if (validator.kind === "optional") {
+    return hasResolvableReferences(
+      value,
+      validator.field,
+      hasDocumentId,
+      getAliases,
+    );
+  }
+  return true;
+}
+
+function filterDocumentsWithResolvableReferences(input: {
+  docs: Array<Record<string, unknown>>;
+  schema?: Definition;
+  hasDocumentId: (id: string) => boolean;
+  getAliases?: (id: string) => Set<string>;
+}): {
+  accepted: Array<Record<string, unknown>>;
+  skipped: Array<Record<string, unknown>>;
+} {
+  if (!input.schema) {
+    return { accepted: input.docs, skipped: [] };
+  }
+
+  const accepted: Array<Record<string, unknown>> = [];
+  const skipped: Array<Record<string, unknown>> = [];
+  for (const doc of input.docs) {
+    const resolvable = Object.entries(input.schema.getShape()).every(
+      ([fieldName, field]) =>
+        hasResolvableReferences(
+          doc[fieldName],
+          field,
+          input.hasDocumentId,
+          input.getAliases ?? (() => new Set()),
+        ),
+    );
+    if (resolvable) {
+      accepted.push(doc);
+    } else {
+      skipped.push(doc);
+    }
+  }
+
+  return { accepted, skipped };
+}
+
 function getConnectivityAdapter(
   connectivity?: ConnectivityAdapter,
 ): ConnectivityAdapter {
-  if (connectivity) {
-    return connectivity;
-  }
-
-  return {
-    isOnline() {
-      const hasNavigator =
-        typeof globalThis !== "undefined" && "navigator" in globalThis;
-      const nav = hasNavigator
-        ? (globalThis as { navigator?: { onLine?: boolean } }).navigator
-        : undefined;
-      return nav?.onLine !== false;
-    },
-    onOnline(callback) {
-      if (typeof globalThis.addEventListener !== "function") {
-        return () => {};
-      }
-      globalThis.addEventListener("online", callback);
-      return () => globalThis.removeEventListener("online", callback);
-    },
-    onOffline(callback) {
-      if (typeof globalThis.addEventListener !== "function") {
-        return () => {};
-      }
-      globalThis.addEventListener("offline", callback);
-      return () => globalThis.removeEventListener("offline", callback);
-    },
-  };
+  return connectivity ?? createAmbientConnectivityAdapter();
 }
 
 function toArrayBuffer(data: Uint8Array): ArrayBuffer {
@@ -982,7 +1204,7 @@ async function uploadBlobToRemote(input: {
   uploadUrlRef: unknown;
   blob: Blob;
   contentType?: string;
-}) {
+}): Promise<string> {
   const uploadUrl = (await (input.remoteClient as any).mutation(
     input.uploadUrlRef,
     {},
@@ -994,33 +1216,52 @@ async function uploadBlobToRemote(input: {
     );
   }
 
+  const headers: Record<string, string> = {};
+  if (input.contentType) {
+    headers["content-type"] = input.contentType;
+  }
+
   const response = await fetch(uploadUrl, {
     method: "POST",
-    headers: input.contentType
-      ? { "Content-Type": input.contentType }
-      : undefined,
     body: input.blob,
+    headers,
   });
 
-  const payload = (await response.json()) as {
+  const payloadText = await response.text();
+  let payload: unknown;
+  try {
+    payload = JSON.parse(payloadText);
+  } catch (parseError) {
+    throw new Error(
+      `[convex-embedded] remote blob upload returned invalid JSON: ${String(parseError)}`,
+    );
+  }
+
+  const parsed = payload as {
     storageId?: unknown;
     error?: unknown;
   };
 
-  if (!response.ok || typeof payload.storageId !== "string") {
+  if (response.status >= 200 && response.status < 300) {
+    if (typeof parsed.storageId === "string") {
+      return parsed.storageId;
+    }
     throw new Error(
-      typeof payload.error === "string"
-        ? payload.error
-        : `[convex-embedded] remote blob upload failed with status ${response.status}.`,
+      "[convex-embedded] remote blob upload response did not include a storageId.",
     );
   }
 
-  return payload.storageId;
+  throw new Error(
+    typeof parsed.error === "string"
+      ? parsed.error
+      : `[convex-embedded] remote blob upload failed with status ${response.status}.`,
+  );
 }
 
 function prepareResolveInput(
   schemaDef: Definition,
   localDocs: Array<Record<string, unknown>>,
+  metadata: ResolveMetadata,
 ): PreparedResolveInput {
   return localDocs.reduce<PreparedResolveInput>(
     (acc, doc) => {
@@ -1029,15 +1270,17 @@ function prepareResolveInput(
         return acc;
       }
 
-      const yjsDoc = initYjsDoc(schemaDef, doc);
+      const yjsDoc = initYjsDoc(schemaDef, doc, 0, { skipProse: true });
       acc.localYjsMap.set(docId, { localDoc: doc, yjsDoc });
       acc.resolveDocuments.push({
         docId,
+        lastSeq: metadata.documentSeqById.get(docId) ?? null,
         vector: toArrayBuffer(Y.encodeStateVector(yjsDoc)),
       });
       return acc;
     },
     {
+      localDocs,
       schemaDef,
       localYjsMap: new Map<string, LocalYjsEntry>(),
       resolveDocuments: [],
@@ -1050,34 +1293,78 @@ function createResolveRetrySchedule(input: {
   retryDelayMs: number;
   signal?: AbortSignal;
 }) {
-  return Fx.retry.while(
-    Fx.retry.compose(
-      Fx.retry.jittered(Fx.retry.exponential(input.retryDelayMs)),
-      Fx.retry.recurs(input.maxRetries - 1),
-    ),
-    (meta) => {
-      if (input.signal?.aborted) return false;
-      const err = meta.input as Error;
-      return !(err instanceof DOMException && err.name === "AbortError");
-    },
-  );
+  return async <T>(operation: () => Promise<T>): Promise<T> => {
+    return retryWithBackoff(
+      () => {
+        if (input.signal?.aborted) {
+          throw new DOMException("Aborted", "AbortError");
+        }
+        return operation();
+      },
+      {
+        maxRetries: Math.max(input.maxRetries - 1, 0),
+        baseMs: input.retryDelayMs,
+        jitter: true,
+        signal: input.signal,
+      },
+    );
+  };
 }
 
 function mergeResolveResult(input: {
+  localDocs: Array<Record<string, unknown>>;
   localYjsMap: Map<string, LocalYjsEntry>;
-  resolveResult: Array<ResolveResultRow>;
+  resolveResult: ResolveResponse;
   schemaDef: Definition;
   tableName: string;
   translateRemoteDocument: (
     document: Record<string, unknown>,
   ) => Record<string, unknown>;
 }): MergeResolveOutput {
-  return input.resolveResult.reduce<MergeResolveOutput>(
-    (acc, { docId, diff, document }) => {
+  if (input.resolveResult.mode === "full") {
+    const mergedDocs = input.resolveResult.documents.flatMap((row) => {
+      if (!row.document) {
+        return [];
+      }
+      return [input.translateRemoteDocument(row.document)];
+    });
+    const deletedDocIds = input.resolveResult.documents.flatMap((row) =>
+      row.deleted ? [row.docId] : [],
+    );
+    const metadataEntries = input.resolveResult.documents.flatMap((row) =>
+      typeof row.seq === "number" ? [{ docId: row.docId, seq: row.seq }] : [],
+    );
+    return {
+      deletedDocIds,
+      diffCount: 0,
+      mergedDocs,
+      metadataEntries,
+    };
+  }
+
+  const mergedDocsById = new Map(
+    input.localDocs
+      .filter((doc) => typeof doc._id === "string")
+      .map(
+        (doc) => [String(doc._id), input.translateRemoteDocument(doc)] as const,
+      ),
+  );
+
+  const output = input.resolveResult.documents.reduce<MergeResolveOutput>(
+    (acc, { docId, deleted, diff, document, seq }) => {
+      if (deleted) {
+        mergedDocsById.delete(docId);
+        acc.deletedDocIds.push(docId);
+        return acc;
+      }
+
       const entry = input.localYjsMap.get(docId);
       if (!entry) {
         if (document) {
-          acc.mergedDocs.push(input.translateRemoteDocument(document));
+          mergedDocsById.set(docId, input.translateRemoteDocument(document));
+          if (typeof seq === "number") {
+            acc.metadataEntries.push({ docId, seq });
+          }
           return acc;
         }
         log.warn(
@@ -1089,37 +1376,62 @@ function mergeResolveResult(input: {
       if (diff) {
         Y.applyUpdateV2(entry.yjsDoc, new Uint8Array(diff));
         acc.diffCount += 1;
+      } else {
+        mergedDocsById.set(
+          docId,
+          input.translateRemoteDocument(entry.localDoc),
+        );
+        if (typeof seq === "number") {
+          acc.metadataEntries.push({ docId, seq });
+        }
+        return acc;
       }
 
       const materialized = materializeYjsDoc(input.schemaDef, entry.yjsDoc);
       materialized._id = entry.localDoc._id;
       materialized._creationTime = entry.localDoc._creationTime;
-      acc.mergedDocs.push(input.translateRemoteDocument(materialized));
+      mergedDocsById.set(docId, input.translateRemoteDocument(materialized));
+      if (typeof seq === "number") {
+        acc.metadataEntries.push({ docId, seq });
+      }
       return acc;
     },
-    { diffCount: 0, mergedDocs: [] },
+    {
+      deletedDocIds: [],
+      diffCount: 0,
+      mergedDocs: [],
+      metadataEntries: [],
+    },
   );
+  output.mergedDocs = Array.from(mergedDocsById.values());
+  return output;
 }
 
-function ingestMergedDocsFx(input: {
+async function ingestMergedDocs(input: {
   ingestDocuments: (
     table: string,
     documents: Array<Record<string, unknown>>,
+    scopeArgs?: Record<string, unknown>,
   ) => Promise<void>;
   mergedDocs: Array<Record<string, unknown>>;
+  scopeArgs?: Record<string, unknown>;
   tableName: string;
-}) {
-  return input.mergedDocs.length === 0
-    ? Fx.unit
-    : Fx.from({
-        ok: () => input.ingestDocuments(input.tableName, input.mergedDocs),
-        err: (e) => e as Error,
-      });
+}): Promise<void> {
+  if (input.mergedDocs.length === 0) {
+    return;
+  }
+  await input.ingestDocuments(
+    input.tableName,
+    input.mergedDocs,
+    input.scopeArgs,
+  );
 }
 
 function getQueueEntryRoute(input: {
   entry: PendingEntry | undefined;
-  hasLocalId: (localId: string) => boolean;
+  hasMappedLocalId: (localId: string) => boolean;
+  hasActiveLocalDocument: (localId: string) => boolean;
+  getRemoteId: (localId: string) => string | null;
   isOnline: boolean;
   signal?: AbortSignal;
 }): QueueEntryRoute {
@@ -1128,10 +1440,15 @@ function getQueueEntryRoute(input: {
   }
 
   const localResult = JSON.parse(input.entry.localResult);
+  const remoteId =
+    typeof localResult === "string" ? input.getRemoteId(localResult) : null;
   return input.entry.ref.endsWith(":create") &&
     input.entry.hydrated === true &&
     typeof localResult === "string" &&
-    input.hasLocalId(localResult)
+    input.hasMappedLocalId(localResult) &&
+    !input.hasActiveLocalDocument(localResult) &&
+    remoteId !== null &&
+    input.hasActiveLocalDocument(remoteId)
     ? { _tag: "DropMappedCreate", localResult }
     : { _tag: "Push", localResult };
 }
@@ -1156,8 +1473,68 @@ function createEngine(config: EngineConfig): EngineInstance {
 
   // Destructure the embedded client for convenience.
   const localClient = embedded.client;
-  const ingestDocuments = embedded.ingestDocuments.bind(embedded);
+  const rawIngestDocuments = embedded.ingestDocuments.bind(embedded);
+
+  // Per-table async lock to prevent concurrent ingestion from subscription
+  // and resolve paths racing against each other.
+  const ingestLockMap = new Map<string, Promise<void>>();
+  function ingestDocuments(
+    table: string,
+    docs: Array<Record<string, unknown>>,
+    scopeArgs?: Record<string, unknown>,
+  ): Promise<void> {
+    const prev = ingestLockMap.get(table) ?? Promise.resolve();
+    const next = prev.then(
+      () => rawIngestDocuments(table, docs, scopeArgs),
+      () => rawIngestDocuments(table, docs, scopeArgs),
+    );
+    ingestLockMap.set(table, next);
+    return next;
+  }
+  const canonicalizeMappedCreate =
+    embedded.canonicalizeMappedCreate?.bind(embedded) ??
+    (async () => {
+      throw new Error(
+        "[convex-embedded] Embedded client is missing canonicalizeMappedCreate().",
+      );
+    });
   const getDocumentsForTable = embedded.getDocumentsForTable.bind(embedded);
+  const tableSchemas = Object.fromEntries(
+    Object.entries(tables)
+      .filter(([, tableConfig]) => tableConfig.schema !== undefined)
+      .map(([tableName, tableConfig]) => [tableName, tableConfig.schema]),
+  ) as Record<string, Definition>;
+  const orderedTables = orderTablesByDependencies(tables);
+  const activatedRemoteTables = new Set(rootTablesByDependencies(tables));
+  const processorHeartbeatMs = Math.max(1_000, Math.floor(leaseMs / 3));
+
+  // Doc IDs recently replayed — protected from stale subscription snapshots
+  // for a grace period after replay. Entries expire after REPLAY_GRACE_MS so
+  // the protection doesn't persist forever.
+  const REPLAY_GRACE_MS = 3_000;
+  const recentlyReplayedIds = new Map<string, number>();
+
+  function addRecentlyReplayed(id: string): void {
+    recentlyReplayedIds.set(id, Date.now());
+  }
+
+  function getRecentlyReplayedIdSet(): ReadonlySet<string> {
+    const now = Date.now();
+    const active = new Set<string>();
+    for (const [id, timestamp] of recentlyReplayedIds) {
+      if (now - timestamp < REPLAY_GRACE_MS) {
+        active.add(id);
+      } else {
+        recentlyReplayedIds.delete(id);
+      }
+    }
+    return active;
+  }
+  const resolveServices: EngineResolveInput = {
+    remoteClient,
+    ingestDocuments,
+    getDocumentsForTable,
+  };
   const executeLocal = embedded.executeLocal?.bind(embedded);
   const getStorageBlob = embedded.getStorageBlob?.bind(embedded);
   const getStorageMetadata = embedded.getStorageMetadata?.bind(embedded);
@@ -1186,8 +1563,6 @@ function createEngine(config: EngineConfig): EngineInstance {
           applyLocalEffects: true,
         })
     : undefined;
-
-  const tableNames = Object.keys(tables);
 
   let status: EngineStatus = { status: "idle" };
   const listeners = new Set<ChangeListener>();
@@ -1227,90 +1602,72 @@ function createEngine(config: EngineConfig): EngineInstance {
   let onOffline: (() => void) | null = null;
   let cleanupOnlineListener: (() => void) | null = null;
   let cleanupOfflineListener: (() => void) | null = null;
+  let processorHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  let bufferedFlushScheduled = false;
+  let bufferedFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  // Active remote subscriptions keyed by (table, scopeHash). Each entry owns
+  // its onUpdate unsub and the scope args it was activated with. Unscoped
+  // subscriptions collapse to key === tableName.
+  const activeScopes = new Map<string, ActiveScope>();
 
-  // Active remote reactive subscriptions (unsubscribe functions)
-  const remoteUnsubscribes: Array<() => void> = [];
-  const tableRemoteSyncState = new Map<string, TableRemoteSyncState>();
+  function getRemoteApplyOrder(): string[] {
+    return orderedTables.filter((tableName) =>
+      activatedRemoteTables.has(tableName),
+    );
+  }
 
-  function getTableRemoteSyncState(tableName: string): TableRemoteSyncState {
-    let state = tableRemoteSyncState.get(tableName);
+  function hasActiveSubscriptions(): boolean {
+    return activeScopes.size > 0;
+  }
+  const tableRemoteSyncStateMap = new Map<string, TableRemoteSyncState>();
+
+  function getTableRemoteSyncState(
+    tableName: string,
+    scopeArgs?: Record<string, unknown>,
+  ): TableRemoteSyncState {
+    const normalizedScope = canonicalizeScopeArgs(scopeArgs);
+    const scopeKey = makeScopeKey(tableName, normalizedScope);
+    let state = tableRemoteSyncStateMap.get(scopeKey);
     if (!state) {
       state = {
+        tableName,
+        scopeArgs: normalizedScope,
         bufferedSnapshot: null,
         flushScheduled: false,
         epoch: 0,
         retryTimer: null,
         retryCount: 0,
       };
-      tableRemoteSyncState.set(tableName, state);
+      tableRemoteSyncStateMap.set(scopeKey, state);
     }
     return state;
   }
 
-  async function canonicalizeMappedCreate(input: {
-    localId: string;
-    remoteId: string;
-    tableName: string;
-  }): Promise<void> {
-    const orderedTableNames = [
-      input.tableName,
-      ...tableNames.filter((candidate) => candidate !== input.tableName),
-    ];
-
-    for (const currentTableName of orderedTableNames) {
-      const schema = tables[currentTableName]?.schema;
-      if (!schema) {
-        continue;
-      }
-
-      const currentDocs = await getDocumentsForTable(currentTableName);
-      const rewrittenDocs = currentDocs.map((doc) =>
-        rewriteDocumentToCanonical({
-          doc,
-          schema,
-          localId: input.localId,
-          remoteId: input.remoteId,
-          rewriteOwnId: currentTableName === input.tableName,
-        }),
-      );
-
-      const changed = rewrittenDocs.some(
-        (doc, index) => doc !== currentDocs[index],
-      );
-      if (!changed) {
-        continue;
-      }
-
-      await ingestDocuments(currentTableName, rewrittenDocs);
-    }
-  }
-
-  function scheduleBufferedSnapshotFlush(tableName: string, delayMs = 0): void {
-    const state = getTableRemoteSyncState(tableName);
-    if (state.flushScheduled) {
+  function scheduleBufferedSnapshotFlush(delayMs = 0): void {
+    if (bufferedFlushScheduled) {
       return;
     }
 
-    state.flushScheduled = true;
+    bufferedFlushScheduled = true;
     if (delayMs > 0) {
-      if (state.retryTimer !== null) {
-        clearTimeout(state.retryTimer);
+      if (bufferedFlushTimer !== null) {
+        clearTimeout(bufferedFlushTimer);
       }
-      state.retryTimer = setTimeout(() => {
-        state.retryTimer = null;
-        void flushBufferedSnapshot(tableName);
+      bufferedFlushTimer = setTimeout(() => {
+        bufferedFlushTimer = null;
+        void flushBufferedSnapshots();
       }, delayMs);
       return;
     }
 
-    Fx.detach(
-      () => flushBufferedSnapshot(tableName),
-      `[sync] flush ${tableName}:`,
-    );
+    runDetached(() => flushBufferedSnapshots(), "[sync] flush buffered:");
   }
 
-  async function flushBufferedSnapshot(tableName: string): Promise<void> {
-    const state = getTableRemoteSyncState(tableName);
+  async function flushBufferedSnapshot(scopeKey: string): Promise<void> {
+    const state = tableRemoteSyncStateMap.get(scopeKey);
+    if (!state) {
+      return;
+    }
     if (state.bufferedSnapshot === null) {
       state.flushScheduled = false;
       return;
@@ -1319,17 +1676,71 @@ function createEngine(config: EngineConfig): EngineInstance {
     const snapshot = state.bufferedSnapshot;
     state.bufferedSnapshot = null;
     state.flushScheduled = false;
+    const { scopeArgs, tableName } = state;
 
     const projected = projectRemoteSnapshot({
       localDocs: await getDocumentsForTable(tableName),
       remoteDocs: snapshot,
       pendingEntries: pendingQueue.entries(),
+      recentlyReplayedIds: getRecentlyReplayedIdSet(),
       tableName,
       getAliases: (id) => idMap.getAliases(id),
     });
-
+    const { accepted, skipped } = filterDocumentsWithResolvableReferences({
+      docs: projected,
+      schema: tables[tableName]?.schema,
+      hasDocumentId: (id) => embedded.hasLocalDocumentId?.(id) ?? false,
+      getAliases: (id) => idMap.getAliases(id),
+    });
     try {
-      await ingestDocuments(tableName, projected);
+      if (accepted.length > 0) {
+        await runSpan({
+          name: "convex_embedded.remote.buffered_snapshot.ingest",
+          attributes: {
+            table: tableName,
+            accepted_count: accepted.length,
+            projected_count: projected.length,
+          },
+          run: () =>
+            ingestDocuments(
+              tableName,
+              accepted,
+              Object.keys(scopeArgs).length > 0 ? scopeArgs : undefined,
+            ),
+        });
+      }
+
+      if (skipped.length > 0) {
+        await runSpan({
+          name: "convex_embedded.remote.buffered_snapshot.defer",
+          attributes: {
+            table: tableName,
+            accepted_count: accepted.length,
+            skipped_count: skipped.length,
+            retry_count: state.retryCount,
+          },
+          run: async () => undefined,
+        });
+        state.bufferedSnapshot = skipped;
+        state.flushScheduled = false;
+        if (state.retryCount >= MAX_BUFFERED_SNAPSHOT_RETRIES) {
+          log.error(
+            `sync: giving up buffered snapshot ingest for "${tableName}" after ${state.retryCount} retries due to unresolved references`,
+          );
+          return;
+        }
+        state.retryCount += 1;
+        const delayMs = Math.min(
+          BUFFERED_SNAPSHOT_RETRY_BASE_MS * 2 ** (state.retryCount - 1),
+          BUFFERED_SNAPSHOT_RETRY_MAX_MS,
+        );
+        scheduleBufferedSnapshotFlush(delayMs);
+        log.warn(
+          `sync: deferred ${skipped.length} "${tableName}" snapshot doc(s) with unresolved references`,
+        );
+        return;
+      }
+
       state.retryCount = 0;
     } catch (error) {
       state.bufferedSnapshot = snapshot;
@@ -1348,7 +1759,7 @@ function createEngine(config: EngineConfig): EngineInstance {
         BUFFERED_SNAPSHOT_RETRY_BASE_MS * 2 ** (state.retryCount - 1),
         BUFFERED_SNAPSHOT_RETRY_MAX_MS,
       );
-      scheduleBufferedSnapshotFlush(tableName, delayMs);
+      scheduleBufferedSnapshotFlush(delayMs);
       log.warn(
         `sync: delayed buffered snapshot ingest for "${tableName}" (retry ${state.retryCount}/${MAX_BUFFERED_SNAPSHOT_RETRIES})`,
         error,
@@ -1357,28 +1768,58 @@ function createEngine(config: EngineConfig): EngineInstance {
     }
 
     if (state.bufferedSnapshot !== null && !state.flushScheduled) {
-      scheduleBufferedSnapshotFlush(tableName);
+      scheduleBufferedSnapshotFlush();
+    }
+  }
+
+  async function flushBufferedSnapshots(): Promise<void> {
+    bufferedFlushScheduled = false;
+    const bufferedTables = new Set(
+      Array.from(tableRemoteSyncStateMap.values()).map(
+        (state) => state.tableName,
+      ),
+    );
+    const flushOrder = [
+      ...orderedTables.filter((tableName) => bufferedTables.has(tableName)),
+      ...Array.from(bufferedTables).filter(
+        (tableName) => !orderedTables.includes(tableName),
+      ),
+    ];
+    for (const tableName of flushOrder) {
+      const scopeKeys = Array.from(tableRemoteSyncStateMap.entries())
+        .filter(([, state]) => state.tableName === tableName)
+        .map(([scopeKey]) => scopeKey);
+      for (const scopeKey of scopeKeys) {
+        await flushBufferedSnapshot(scopeKey);
+        await yieldToEventLoop();
+      }
     }
   }
 
   async function bufferRemoteSnapshot(
     tableName: string,
     docs: Array<Record<string, unknown>>,
+    scopeArgs?: Record<string, unknown>,
   ): Promise<void> {
-    const state = getTableRemoteSyncState(tableName);
+    const state = getTableRemoteSyncState(tableName, scopeArgs);
     state.bufferedSnapshot = docs;
     state.retryCount = 0;
-    scheduleBufferedSnapshotFlush(tableName);
+    scheduleBufferedSnapshotFlush();
   }
 
   function clearBufferedSnapshots(): void {
-    for (const state of tableRemoteSyncState.values()) {
+    bufferedFlushScheduled = false;
+    if (bufferedFlushTimer !== null) {
+      clearTimeout(bufferedFlushTimer);
+      bufferedFlushTimer = null;
+    }
+    for (const state of tableRemoteSyncStateMap.values()) {
       if (state.retryTimer !== null) {
         clearTimeout(state.retryTimer);
       }
       state.retryCount = 0;
     }
-    tableRemoteSyncState.clear();
+    tableRemoteSyncStateMap.clear();
   }
 
   function ensureReplayProcessing(): void {
@@ -1386,14 +1827,17 @@ function createEngine(config: EngineConfig): EngineInstance {
       return;
     }
 
-    Fx.detach(async () => {
+    runDetached(async () => {
       await processQueue();
 
       if (pendingQueue.isEmpty) {
-        for (const tableName of tableNames) {
-          void flushBufferedSnapshot(tableName);
+        // Discard any buffered snapshots that arrived before replay completed —
+        // they carry pre-replay state and would overwrite local edits. The live
+        // subscription will push fresh post-replay data momentarily.
+        for (const state of tableRemoteSyncStateMap.values()) {
+          state.bufferedSnapshot = null;
         }
-        if (remoteUnsubscribes.length === 0 && started) {
+        if (!hasActiveSubscriptions() && started) {
           void runSyncCycle();
         }
         return;
@@ -1544,210 +1988,196 @@ function createEngine(config: EngineConfig): EngineInstance {
 
     log.info(`sync: processing ${pendingQueue.length} queued mutation(s)`);
 
-    queueProcessingPromise = Fx.run(
-      Fx.bracket(
-        // Acquire: no-op, queueProcessingPromise is the active guard
-        Fx.unit,
-        // Use: process entries
-        () =>
-          Fx.gen(function* () {
-            while (isOnline && !signal?.aborted) {
-              queueProcessingRequestedWhileActive = false;
+    queueProcessingPromise = (async () => {
+      try {
+        while (isOnline && !signal?.aborted) {
+          queueProcessingRequestedWhileActive = false;
 
-              while (!pendingQueue.isEmpty && isOnline && !signal?.aborted) {
-                const entry = yield* Fx.from({
-                  ok: () =>
-                    pendingQueue.claimNext(processorIdForReplay, leaseMs),
-                  err: (e) => e as Error,
-                });
-                if (!entry) {
-                  break;
-                }
-                activeEntry = entry;
-                if (entry?.state === "blocked") {
-                  log.warn(
-                    `sync: blocked pending entry for ${entry.ref}; halting replay`,
-                  );
-                  break;
-                }
-                const route = getQueueEntryRoute({
-                  entry,
-                  hasLocalId: (localId) => idMap.hasLocalId(localId),
-                  isOnline,
-                  signal,
-                });
-
-                const shouldContinue = yield* matchTag(route, "_tag", {
-                  Stop: () => Fx.succeed(false),
-                  DropMappedCreate: () =>
-                    Fx.from({
-                      ok: () =>
-                        pendingQueue.remove(entry, processorIdForReplay),
-                      err: (e) => e as Error,
-                    }).pipe(
-                      Fx.tap(() =>
-                        Fx.sync(() => {
-                          log.debug(
-                            `sync: dropping already-mapped create mutation (remaining: ${pendingQueue.length})`,
-                          );
-                        }),
-                      ),
-                      Fx.map(() => true),
-                    ),
-                  Push: (current) =>
-                    Fx.from({
-                      ok: async () => {
-                        const ref = makeFunctionReference<"mutation">(
-                          entry!.ref,
-                        );
-                        const originalArgs = JSON.parse(entry!.args) as Record<
-                          string,
-                          unknown
-                        >;
-                        await ensureRemoteStorageMappings(entry, originalArgs);
-                        const translatedArgs =
-                          idMap.translateArgs(originalArgs);
-                        const leaseHeld = await pendingQueue.renewLease(
-                          entry,
-                          processorIdForReplay,
-                          leaseMs,
-                        );
-                        if (!leaseHeld) {
-                          if (entry.hydrated === true) {
-                            activeEntry = null;
-                            log.warn(
-                              `sync: lost replay lease before remote push (table: ${entry!.table})`,
-                            );
-                            return false;
-                          }
-                          log.warn(
-                            `sync: continuing replay for current-session entry after lease renewal miss (table: ${entry!.table})`,
-                          );
-                        }
-                        const heartbeat = startReplayLeaseHeartbeat({
-                          entry,
-                          renew: () =>
-                            pendingQueue.renewLease(
-                              entry,
-                              processorIdForReplay,
-                              leaseMs,
-                            ),
-                          leaseMs,
-                        });
-                        let remoteResult: unknown;
-                        try {
-                          remoteResult = await heartbeat.race(
-                            (remoteClient as any).mutation(ref, translatedArgs),
-                          );
-                        } finally {
-                          heartbeat.stop();
-                        }
-
-                        if (
-                          typeof current.localResult === "string" &&
-                          typeof remoteResult === "string" &&
-                          current.localResult !== remoteResult
-                        ) {
-                          await idMap.set(
-                            current.localResult,
-                            remoteResult,
-                            entry!.table,
-                          );
-                          await pendingQueue.remove(
-                            entry,
-                            processorIdForReplay,
-                          );
-                          activeEntry = null;
-                          await canonicalizeMappedCreate({
-                            localId: current.localResult,
-                            remoteId: remoteResult,
-                            tableName: entry!.table,
-                          });
-                        } else {
-                          await pendingQueue.remove(
-                            entry,
-                            processorIdForReplay,
-                          );
-                          activeEntry = null;
-                        }
-
-                        log.debug(
-                          `sync: pushed mutation to remote (table: ${entry!.table}, remaining: ${pendingQueue.length})`,
-                        );
-                        return true;
-                      },
-                      err: (e) => e as Error,
-                    }).pipe(
-                      Fx.recover((err) =>
-                        Fx.from({
-                          ok: async () => {
-                            if (
-                              entry &&
-                              isAlreadyAppliedReplayError(entry, err as Error)
-                            ) {
-                              await pendingQueue.remove(
-                                entry,
-                                processorIdForReplay,
-                              );
-                              activeEntry = null;
-                              log.debug(
-                                `sync: dropping already-applied mutation (table: ${entry.table}, remaining: ${pendingQueue.length})`,
-                              );
-                              return true;
-                            }
-
-                            if (err instanceof ReplayLeaseLostError) {
-                              activeEntry = null;
-                              log.warn(
-                                `sync: replay lease lost while processing ${entry?.ref ?? "unknown entry"}`,
-                              );
-                              return false;
-                            }
-
-                            const reason = classifyReplayError(err as Error);
-                            if (reason !== "unknown" && entry) {
-                              await pendingQueue.block(entry, reason);
-                              activeEntry = null;
-                            } else if (entry) {
-                              await pendingQueue.release(
-                                entry,
-                                processorIdForReplay,
-                              );
-                              activeEntry = null;
-                            }
-                            log.warn(
-                              "sync: remote push failed, stopping queue processing",
-                              err,
-                            );
-                            return false;
-                          },
-                          err: (cause) => cause as Error,
-                        }),
-                      ),
-                    ),
-                });
-
-                if (!shouldContinue) break;
-              }
-
-              if (
-                !queueProcessingRequestedWhileActive ||
-                pendingQueue.isEmpty ||
-                !isOnline ||
-                signal?.aborted
-              ) {
-                break;
-              }
-
-              log.debug(
-                `sync: continuing queue processing after concurrent enqueue (remaining: ${pendingQueue.length})`,
-              );
+          while (!pendingQueue.isEmpty && isOnline && !signal?.aborted) {
+            const entry = await pendingQueue.claimNext(
+              processorIdForReplay,
+              leaseMs,
+              leaseMs,
+            );
+            if (!entry) {
+              break;
             }
-          }),
-        // Release: no-op, queueProcessingPromise is cleared in finally()
-        () => Fx.unit,
-      ),
-    ).finally(() => {
+            activeEntry = entry;
+            if (entry.state === "blocked") {
+              log.warn(
+                `sync: blocked pending entry for ${entry.ref}; halting replay`,
+              );
+              break;
+            }
+
+            const replayDocId = extractPendingLogicalId(entry);
+            const route = getQueueEntryRoute({
+              entry,
+              hasMappedLocalId: (localId: string) => idMap.hasLocalId(localId),
+              hasActiveLocalDocument: (localId: string) =>
+                embedded.hasLocalDocumentId?.(localId) ?? false,
+              getRemoteId: (localId: string) => idMap.getRemoteId(localId),
+              isOnline,
+              signal,
+            });
+            await runSpan({
+              name: "convex_embedded.replay.route_decision",
+              attributes: {
+                "replay.route": route._tag,
+                "replay.ref": entry.ref,
+                "replay.table": entry.table,
+                "replay.hydrated": entry.hydrated === true,
+              },
+              run: async () => undefined,
+            });
+
+            let shouldContinue = false;
+            if (route._tag === "Stop") {
+              shouldContinue = false;
+            } else if (route._tag === "DropMappedCreate") {
+              await pendingQueue.remove(entry, processorIdForReplay);
+              if (replayDocId) addRecentlyReplayed(replayDocId);
+              await cleanupMappedCreateAlias(route.localResult);
+              log.debug(
+                `sync: dropping already-mapped create mutation (remaining: ${pendingQueue.length})`,
+              );
+              shouldContinue = true;
+            } else if (route._tag === "Push") {
+              try {
+                const ref = makeFunctionReference<"mutation">(entry.ref);
+                const originalArgs = JSON.parse(entry.args) as Record<
+                  string,
+                  unknown
+                >;
+                await ensureRemoteStorageMappings(entry, originalArgs);
+                const translatedArgs = idMap.translateArgs(originalArgs);
+                const leaseHeld = await pendingQueue.renewLease(
+                  entry,
+                  processorIdForReplay,
+                  leaseMs,
+                );
+                if (!leaseHeld) {
+                  if (entry.hydrated === true) {
+                    activeEntry = null;
+                    log.warn(
+                      `sync: lost replay lease before remote push (table: ${entry.table})`,
+                    );
+                    shouldContinue = false;
+                    // Skip the rest of the Push branch — equivalent to
+                    // the original `break` out of the switch case.
+                  } else {
+                    log.warn(
+                      `sync: continuing replay for current-session entry after lease renewal miss (table: ${entry.table})`,
+                    );
+                  }
+                }
+
+                // Only proceed with remote push if we didn't bail above
+                // (i.e. shouldContinue was not explicitly set to false
+                // by the hydrated lease-lost path).
+                if (!(entry.hydrated === true && !leaseHeld)) {
+                  const heartbeat = startReplayLeaseHeartbeat({
+                    entry,
+                    renew: () =>
+                      pendingQueue.renewLease(
+                        entry,
+                        processorIdForReplay,
+                        leaseMs,
+                      ),
+                    leaseMs,
+                  });
+                  let remoteResult: unknown;
+                  try {
+                    remoteResult = await heartbeat.race(
+                      (remoteClient as any).mutation(ref, translatedArgs),
+                    );
+                  } finally {
+                    heartbeat.stop();
+                  }
+
+                  if (
+                    typeof route.localResult === "string" &&
+                    typeof remoteResult === "string" &&
+                    route.localResult !== remoteResult
+                  ) {
+                    await canonicalizeMappedCreate({
+                      localId: route.localResult,
+                      remoteId: remoteResult,
+                      tableName: entry.table,
+                      schemas: tableSchemas,
+                    });
+                    await idMap.set(
+                      route.localResult,
+                      remoteResult,
+                      entry.table,
+                    );
+                    await pendingQueue.remove(entry, processorIdForReplay);
+                    if (replayDocId) addRecentlyReplayed(replayDocId);
+                    activeEntry = null;
+                  } else {
+                    await pendingQueue.remove(entry, processorIdForReplay);
+                    if (replayDocId) addRecentlyReplayed(replayDocId);
+                    activeEntry = null;
+                  }
+
+                  log.debug(
+                    `sync: pushed mutation to remote (table: ${entry.table}, remaining: ${pendingQueue.length})`,
+                  );
+                  shouldContinue = true;
+                }
+              } catch (err) {
+                if (isAlreadyAppliedReplayError(entry, err as Error)) {
+                  await pendingQueue.remove(entry, processorIdForReplay);
+                  if (replayDocId) addRecentlyReplayed(replayDocId);
+                  activeEntry = null;
+                  log.debug(
+                    `sync: dropping already-applied mutation (table: ${entry.table}, remaining: ${pendingQueue.length})`,
+                  );
+                  shouldContinue = true;
+                } else if (err instanceof ReplayLeaseLostError) {
+                  activeEntry = null;
+                  log.warn(
+                    `sync: replay lease lost while processing ${entry.ref}`,
+                  );
+                  shouldContinue = false;
+                } else {
+                  const reason = classifyReplayError(err as Error);
+                  if (reason !== "unknown") {
+                    await pendingQueue.block(entry, reason);
+                    activeEntry = null;
+                  } else {
+                    await pendingQueue.release(entry, processorIdForReplay);
+                    activeEntry = null;
+                  }
+                  log.warn(
+                    "sync: remote push failed, stopping queue processing",
+                    err,
+                  );
+                  shouldContinue = false;
+                }
+              }
+            }
+
+            if (!shouldContinue) break;
+          }
+
+          if (
+            !queueProcessingRequestedWhileActive ||
+            pendingQueue.isEmpty ||
+            !isOnline ||
+            signal?.aborted
+          ) {
+            break;
+          }
+
+          log.debug(
+            `sync: continuing queue processing after concurrent enqueue (remaining: ${pendingQueue.length})`,
+          );
+        }
+      } catch {
+        // Swallow – matches original Effect.catch behavior
+      }
+    })().finally(() => {
       queueProcessingPromise = null;
     });
 
@@ -1765,12 +2195,9 @@ function createEngine(config: EngineConfig): EngineInstance {
     abortController = new AbortController();
     const signal = abortController.signal;
 
-    syncCyclePromise = Fx.run(
-      Fx.gen(function* () {
-        yield* Fx.from({
-          ok: () => processQueue(signal),
-          err: (e) => e as Error,
-        });
+    syncCyclePromise = (async () => {
+      try {
+        await processQueue(signal);
 
         const route = getSyncCycleRoute({
           aborted: signal.aborted,
@@ -1780,21 +2207,16 @@ function createEngine(config: EngineConfig): EngineInstance {
           started,
         });
 
-        yield* matchTag(route, "_tag", {
-          Skip: () => Fx.unit,
-          DeferUntilQueueDrains: () =>
-            Fx.sync(() => {
-              stopRemoteSubscriptions();
-              log.warn(
-                "sync: deferring resolve and remote subscriptions until pending queue drains",
-              );
-            }),
-          Resolve: () =>
-            Fx.from({
-              ok: () => resolveAll(signal),
-              err: (e) => e as Error,
-            }),
-        });
+        if (route._tag === "Skip") {
+          // no-op
+        } else if (route._tag === "DeferUntilQueueDrains") {
+          stopRemoteSubscriptions();
+          log.warn(
+            "sync: deferring resolve and remote subscriptions until pending queue drains",
+          );
+        } else if (route._tag === "Resolve") {
+          await resolveAll(signal);
+        }
 
         if (
           shouldStartRemoteSubscriptions({
@@ -1807,17 +2229,12 @@ function createEngine(config: EngineConfig): EngineInstance {
         ) {
           startRemoteSubscriptions();
         }
-      }).pipe(
-        Fx.inspect((err) =>
-          Fx.sync(() => {
-            if (!(err instanceof DOMException && err.name === "AbortError")) {
-              log.error("sync: online cycle failed", err);
-            }
-          }),
-        ),
-        Fx.recover(() => Fx.unit),
-      ),
-    ).finally(() => {
+      } catch (err) {
+        if (!(err instanceof DOMException && err.name === "AbortError")) {
+          log.error("sync: online cycle failed", err);
+        }
+      }
+    })().finally(() => {
       syncCyclePromise = null;
       if (abortController?.signal === signal) {
         abortController = null;
@@ -1831,67 +2248,73 @@ function createEngine(config: EngineConfig): EngineInstance {
   // Resolve — pulls remote state via CRDT diff
   // -------------------------------------------------------------------------
 
-  function resolveAll(signal?: AbortSignal): Promise<void> {
+  async function resolveAll(signal?: AbortSignal): Promise<void> {
+    const remoteApplyOrder = getRemoteApplyOrder();
+    const scopedResolves = Array.from(activeScopes.values())
+      .filter((entry) => Object.keys(entry.scopeArgs).length > 0)
+      .sort(
+        (left, right) =>
+          orderedTables.indexOf(left.tableName) -
+          orderedTables.indexOf(right.tableName),
+      );
     const progress: ResolveProgress = {
-      tables: [...tableNames],
+      tables: [
+        ...remoteApplyOrder,
+        ...scopedResolves.map((entry) =>
+          makeScopeKey(entry.tableName, entry.scopeArgs),
+        ),
+      ],
       completed: 0,
-      total: tableNames.length,
+      total: remoteApplyOrder.length + scopedResolves.length,
     };
 
     emit({ status: "resolving", progress });
 
-    return Fx.run(
-      Fx.each(tableNames, (tableName) =>
-        Fx.defer(() => {
-          if (signal?.aborted) {
-            return Fx.fail(new DOMException("Aborted", "AbortError"));
-          }
-          return resolveTableFx(tableName, tables[tableName]!, signal).pipe(
-            Fx.tap(() =>
-              Fx.sync(() => {
-                progress.completed++;
-                emit({ status: "resolving", progress: { ...progress } });
-              }),
-            ),
-          );
-        }),
-      ).pipe(
-        Fx.tap(() =>
-          Fx.sync(() => {
-            emit({ status: "resolved" });
-            log.info("sync: all tables resolved successfully");
-          }),
-        ),
-        Fx.inspect((err) =>
-          Fx.sync(() => {
-            if (signal?.aborted) return;
-            if (err instanceof DOMException && err.name === "AbortError")
-              return;
-            log.error("sync: resolve failed", err);
-            emit({
-              status: "error",
-              error: err instanceof Error ? err : new Error(String(err)),
-            });
-          }),
-        ),
-        // Recover so the outer promise doesn't reject for resolve failures
-        // (they're already surfaced via status emission)
-        Fx.recover((err) => {
-          if (err instanceof DOMException && err.name === "AbortError") {
-            return Fx.unit as any;
-          }
-          return Fx.unit as any;
-        }),
-        Fx.map(() => undefined as void),
-      ),
-    );
+    try {
+      for (const tableName of remoteApplyOrder) {
+        if (signal?.aborted) {
+          throw new DOMException("Aborted", "AbortError");
+        }
+        await resolveTableFx(tableName, tables[tableName]!, signal);
+        progress.completed++;
+        emit({ status: "resolving", progress: { ...progress } });
+        await yieldToEventLoop();
+      }
+      for (const entry of scopedResolves) {
+        if (signal?.aborted) {
+          throw new DOMException("Aborted", "AbortError");
+        }
+        await resolveTableFx(
+          entry.tableName,
+          tables[entry.tableName]!,
+          signal,
+          entry.scopeArgs,
+        );
+        progress.completed++;
+        emit({ status: "resolving", progress: { ...progress } });
+        await yieldToEventLoop();
+      }
+      emit({ status: "resolved" });
+      log.info("sync: all tables resolved successfully");
+    } catch (err) {
+      if (signal?.aborted) return;
+      if (err instanceof DOMException && err.name === "AbortError") {
+        return;
+      }
+      log.error("sync: resolve failed", err);
+      emit({
+        status: "error",
+        error: err instanceof Error ? err : new Error(String(err)),
+      });
+    }
   }
 
-  function resolveTableFx(
+  async function resolveTableFx(
     tableName: string,
     tableConfig: TableConfig,
     signal?: AbortSignal,
-  ) {
+    scopeArgs?: Record<string, unknown>,
+  ): Promise<void> {
     let attempts = 0;
     const retrySchedule = createResolveRetrySchedule({
       maxRetries,
@@ -1899,63 +2322,106 @@ function createEngine(config: EngineConfig): EngineInstance {
       signal,
     });
 
-    return Fx.gen(function* () {
-      // ------------------------------------------------------------------
-      // 1. Read local documents and encode Yjs state vectors.
-      // ------------------------------------------------------------------
+    const localDocs = await getDocumentsForTable(tableName);
+    const scopedLocalDocs =
+      scopeArgs && Object.keys(scopeArgs).length > 0
+        ? localDocs.filter((doc) =>
+            Object.entries(scopeArgs).every(
+              ([fieldPath, expected]) =>
+                getFieldValueByPath(doc, fieldPath) === expected,
+            ),
+          )
+        : localDocs;
+    const metadata = await readResolveMetadata(
+      tableName,
+      tableConfig,
+      scopedLocalDocs.flatMap((doc) =>
+        typeof doc._id === "string" ? [String(doc._id)] : [],
+      ),
+    );
 
-      const localDocs = yield* Fx.from({
-        ok: () => getDocumentsForTable(tableName),
-        err: (e) => e as Error,
-      });
+    const { schemaDef, localYjsMap, resolveDocuments } = prepareResolveInput(
+      tableConfig.schema,
+      scopedLocalDocs,
+      metadata,
+    );
 
-      const { schemaDef, localYjsMap, resolveDocuments } = prepareResolveInput(
-        tableConfig.schema,
-        localDocs,
-      );
+    log.debug(
+      `sync: resolving "${tableName}" with ${resolveDocuments.length} local doc(s)`,
+    );
 
-      log.debug(
-        `sync: resolving "${tableName}" with ${resolveDocuments.length} local doc(s)`,
-      );
+    // ------------------------------------------------------------------
+    // 2. Call the remote resolve query with retry.
+    // ------------------------------------------------------------------
 
-      // ------------------------------------------------------------------
-      // 2. Call the remote resolve query with retry.
-      // ------------------------------------------------------------------
-
-      const resolveResult: Array<ResolveResultRow> = yield* Fx.defer(() => {
+    const fetchResolvePage = async (fullCursor?: string | null) => {
+      const rawResolveResult = await retrySchedule<
+        ResolveResponse | Array<ResolveResultRow>
+      >(async () => {
         if (signal?.aborted) {
-          return Fx.fail(new DOMException("Aborted", "AbortError"));
+          throw new DOMException("Aborted", "AbortError");
         }
         attempts++;
-        return Fx.from({
-          ok: () =>
-            (remoteClient as any).query(tableConfig.resolve, {
-              documents: resolveDocuments,
-              ...(tableConfig.resolveArgs
-                ? { scopeArgs: tableConfig.resolveArgs() }
-                : {}),
-            } satisfies ResolveArgs) as Promise<Array<ResolveResultRow>>,
-          err: (err) => err as Error,
-        });
-      }).pipe(
-        Fx.inspect((err) =>
-          Fx.sync(() => {
-            if (!(err instanceof DOMException && err.name === "AbortError")) {
-              log.warn(
-                `sync: resolve attempt ${attempts}/${maxRetries} failed for "${tableName}"`,
-                err,
-              );
-            }
-          }),
-        ),
-        Fx.retry(retrySchedule),
-      );
+        try {
+          return (remoteClient as any).query(tableConfig.resolve, {
+            collectionSeq: metadata.collectionSeq,
+            documents: resolveDocuments,
+            ...(scopeArgs && Object.keys(scopeArgs).length > 0
+              ? { scopeArgs }
+              : {}),
+            ...(fullCursor !== undefined ? { fullCursor } : {}),
+          } satisfies ResolveArgs) as Promise<
+            ResolveResponse | Array<ResolveResultRow>
+          >;
+        } catch (err) {
+          if (!(err instanceof DOMException && err.name === "AbortError")) {
+            log.warn(
+              `sync: resolve attempt ${attempts}/${maxRetries} failed for "${tableName}"`,
+              err,
+            );
+          }
+          throw err;
+        }
+      });
+      return normalizeResolveResponse(rawResolveResult, metadata.collectionSeq);
+    };
 
-      // ------------------------------------------------------------------
-      // 3. Apply diffs, materialize, and ingest.
-      // ------------------------------------------------------------------
+    const firstResolveResult = await fetchResolvePage();
+    let resolveResult = firstResolveResult;
+    if (
+      firstResolveResult.mode === "full" &&
+      firstResolveResult.isDone === false
+    ) {
+      const fullDocuments = [...firstResolveResult.documents];
+      let continueCursor = firstResolveResult.continueCursor ?? null;
 
-      const { mergedDocs, diffCount } = mergeResolveResult({
+      while (continueCursor !== null) {
+        if (signal?.aborted) {
+          throw new DOMException("Aborted", "AbortError");
+        }
+        const page = await fetchResolvePage(continueCursor);
+        if (page.mode !== "full") {
+          throw new Error(
+            `[convex-embedded] resolve pagination changed mode unexpectedly for "${tableName}".`,
+          );
+        }
+        fullDocuments.push(...page.documents);
+        continueCursor = page.continueCursor ?? null;
+        resolveResult = {
+          ...page,
+          documents: fullDocuments,
+          continueCursor,
+        };
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // 3. Apply diffs, materialize, and ingest.
+    // ------------------------------------------------------------------
+
+    const { deletedDocIds, mergedDocs, diffCount, metadataEntries } =
+      mergeResolveResult({
+        localDocs: scopedLocalDocs,
         localYjsMap,
         resolveResult,
         schemaDef,
@@ -1963,24 +2429,72 @@ function createEngine(config: EngineConfig): EngineInstance {
         translateRemoteDocument: (document) =>
           stripOmittedFields(schemaDef, [document])[0] ?? document,
       });
-
-      // ------------------------------------------------------------------
-      // 4. Ingest the merged documents.
-      //    ingestDocuments diffs against local state, so docs that didn't
-      //    change will be no-ops (no unnecessary writes).
-      // ------------------------------------------------------------------
-
-      yield* ingestMergedDocsFx({
-        ingestDocuments,
-        mergedDocs,
-        tableName,
+    const { accepted: resolvableDocs, skipped: unresolvedDocs } =
+      filterDocumentsWithResolvableReferences({
+        docs: mergedDocs,
+        schema: tableConfig.schema,
+        hasDocumentId: (id) => embedded.hasLocalDocumentId?.(id) ?? false,
+        getAliases: (id) => idMap.getAliases(id),
       });
-
-      log.debug(
-        `sync: resolved table "${tableName}" — ` +
-          `${resolveResult.length} doc(s), ${diffCount} diff(s) applied`,
+    if (unresolvedDocs.length > 0) {
+      await runSpan({
+        name: "convex_embedded.resolve.unresolved_documents",
+        attributes: {
+          table: tableName,
+          unresolved_count: unresolvedDocs.length,
+          merged_count: mergedDocs.length,
+        },
+        run: async () => undefined,
+      });
+      log.warn(
+        `sync: skipped ${unresolvedDocs.length} "${tableName}" resolve doc(s) with unresolved references`,
       );
+    }
+    const resolvableDocIds = new Set(
+      resolvableDocs.flatMap((doc) =>
+        typeof doc._id === "string" ? [String(doc._id)] : [],
+      ),
+    );
+    const resolvableMetadataEntries = metadataEntries.filter((entry) =>
+      resolvableDocIds.has(entry.docId),
+    );
+
+    // ------------------------------------------------------------------
+    // 4. Ingest the merged documents.
+    //    ingestDocuments diffs against local state, so docs that didn't
+    //    change will be no-ops (no unnecessary writes).
+    // ------------------------------------------------------------------
+
+    await runSpan({
+      name: "convex_embedded.resolve.ingest",
+      attributes: {
+        table: tableName,
+        resolved_doc_count: resolveResult.documents.length,
+        diff_count: diffCount,
+        ingest_count: resolvableDocs.length,
+      },
+      run: () =>
+        ingestMergedDocs({
+          ingestDocuments,
+          mergedDocs: resolvableDocs,
+          scopeArgs,
+          tableName,
+        }),
     });
+
+    await persistResolveMetadata({
+      tableConfig,
+      tableName,
+      resolveResult,
+      metadataEntries: resolvableMetadataEntries,
+      deletedDocIds,
+    });
+
+    log.debug(
+      `sync: resolved table "${tableName}" — ` +
+        `${resolveResult.documents.length} doc(s), ${diffCount} diff(s) applied`,
+    );
+    return;
   }
 
   // -------------------------------------------------------------------------
@@ -2003,40 +2517,131 @@ function createEngine(config: EngineConfig): EngineInstance {
     // Avoid duplicate subscriptions.
     stopRemoteSubscriptions();
 
-    for (const [tableName, tableConfig] of Object.entries(tables)) {
+    const remoteApplyOrder = getRemoteApplyOrder();
+    for (const tableName of remoteApplyOrder) {
+      const tableConfig = tables[tableName];
+      if (!tableConfig) {
+        continue;
+      }
+      const scopeArgs: Record<string, unknown> = {};
+      const key = makeScopeKey(tableName, scopeArgs);
+      const entry = activeScopes.get(key) ?? { tableName, scopeArgs };
+      entry.tableName = tableName;
+      entry.scopeArgs = scopeArgs;
+      activeScopes.set(key, entry);
+    }
+
+    const orderedScopes = Array.from(activeScopes.entries()).sort(
+      ([leftKey, left], [rightKey, right]) => {
+        const leftOrder = orderedTables.indexOf(left.tableName);
+        const rightOrder = orderedTables.indexOf(right.tableName);
+        if (leftOrder !== rightOrder) {
+          return leftOrder - rightOrder;
+        }
+        return leftKey.localeCompare(rightKey);
+      },
+    );
+
+    for (const [, entry] of orderedScopes) {
+      if (entry.unsub) {
+        continue;
+      }
+      const tableConfig = tables[entry.tableName];
+      if (!tableConfig) {
+        continue;
+      }
       registerRemoteSubscription({
-        ingestDocuments,
-        getDocumentsForTable,
         getPendingEntries: () => pendingQueue.entries(),
         getAliases: (id) => idMap.getAliases(id),
         bufferRemoteSnapshot,
         translateRemoteSnapshotToLocal: (docs) => docs,
-        onUnsubscribe: (unsub) => remoteUnsubscribes.push(unsub),
-        remoteClient,
+        onUnsubscribe: (unsub) => {
+          entry.unsub = unsub;
+        },
+        resolveServices,
         tableConfig,
-        tableName,
+        tableName: entry.tableName,
+        scopeArgs: entry.scopeArgs,
       });
+      void yieldToEventLoop();
     }
 
-    log.info(`sync: subscribed to ${tableNames.length} remote table(s)`);
+    log.info(`sync: subscribed to ${orderedScopes.length} remote table(s)`);
   }
 
   /**
    * Unsubscribe from all active remote reactive subscriptions.
    */
   function stopRemoteSubscriptions(): void {
-    if (remoteUnsubscribes.length === 0) return;
+    if (activeScopes.size === 0) return;
 
-    for (const unsub of remoteUnsubscribes) {
+    for (const entry of activeScopes.values()) {
       try {
-        unsub();
+        entry.unsub?.();
       } catch {
         // Ignore — the remote client may already be closed.
       }
+      entry.unsub = undefined;
     }
-    remoteUnsubscribes.length = 0;
 
     log.info("sync: unsubscribed from remote tables");
+  }
+
+  async function yieldToEventLoop(): Promise<void> {
+    return;
+  }
+
+  async function activateScope(
+    tableName: string,
+    scopeArgs?: Record<string, unknown>,
+  ): Promise<void> {
+    if (!(tableName in tables)) {
+      return;
+    }
+
+    const normalizedScope = canonicalizeScopeArgs(scopeArgs);
+    const key = makeScopeKey(tableName, normalizedScope);
+    const existing = activeScopes.get(key);
+    if (existing?.unsub) {
+      return;
+    }
+    const entry: ActiveScope = existing ?? {
+      tableName,
+      scopeArgs: normalizedScope,
+    };
+    entry.tableName = tableName;
+    entry.scopeArgs = normalizedScope;
+    activeScopes.set(key, entry);
+    if (!isOnline || !started || !pendingQueue.isEmpty) {
+      return;
+    }
+
+    const tableConfig = tables[tableName];
+    if (!tableConfig) {
+      return;
+    }
+
+    await resolveTableFx(
+      tableName,
+      tableConfig,
+      abortController?.signal ?? undefined,
+      normalizedScope,
+    );
+    await yieldToEventLoop();
+
+    registerRemoteSubscription({
+      getPendingEntries: () => pendingQueue.entries(),
+      getAliases: (id) => idMap.getAliases(id),
+      bufferRemoteSnapshot,
+      translateRemoteSnapshotToLocal: (docs) => docs,
+      onUnsubscribe: (unsub) => {
+        entry.unsub = unsub;
+      },
+      resolveServices,
+      tableConfig,
+      tableName,
+      scopeArgs: normalizedScope,
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -2049,7 +2654,7 @@ function createEngine(config: EngineConfig): EngineInstance {
 
     // Process the serial queue, pull remote state, then start reactive
     // subscriptions so we receive ongoing changes from other clients.
-    Fx.detach(() => runSyncCycle(), "[sync] handleOnline:");
+    runDetached(() => runSyncCycle(), "[sync] handleOnline:");
   }
 
   function handleOffline() {
@@ -2062,18 +2667,193 @@ function createEngine(config: EngineConfig): EngineInstance {
     emit({ status: "offline" });
   }
 
-  function hydrateIdentityState(): Promise<void> {
-    return Fx.run(
-      Fx.zip(
-        Fx.from({ ok: () => idMap.hydrate(), err: (e) => e as Error }),
-        Fx.from({ ok: () => pendingQueue.hydrate(), err: (e) => e as Error }),
-      ).pipe(
-        Fx.inspect((err) =>
-          Fx.sync(() => log.warn("sync: hydration failed", err)),
-        ),
-        Fx.recover(() => Fx.unit),
-        Fx.map(() => undefined as void),
+  async function hydrateIdentityState(): Promise<void> {
+    try {
+      await Promise.all([idMap.hydrate(), pendingQueue.hydrate()]);
+    } catch (err) {
+      log.warn("sync: hydration failed", err);
+    }
+  }
+
+  function getCurrentIdentityKey(): string | null {
+    return getIdentityKey?.() ?? null;
+  }
+
+  async function runLocalSystemMutation(
+    path: string,
+    args: Record<string, unknown>,
+  ): Promise<void> {
+    if (executeLocal) {
+      await executeLocal({
+        kind: "mutation",
+        path,
+        args,
+        applyLocalEffects: true,
+      });
+      return;
+    }
+    await (localClient as any).mutation(path, args);
+  }
+
+  async function runLocalSystemQuery<T>(
+    path: string,
+    args: Record<string, unknown>,
+  ): Promise<T> {
+    if (executeLocal) {
+      return (await executeLocal({
+        kind: "query",
+        path,
+        args,
+      })) as T;
+    }
+    return (await (localClient as any).query(path, args)) as T;
+  }
+
+  async function readResolveMetadata(
+    tableName: string,
+    tableConfig: TableConfig,
+    docIds: string[],
+  ): Promise<ResolveMetadata> {
+    const schemaVersion = tableConfig.schema.version;
+    const identityKey = getCurrentIdentityKey();
+    const [collectionSeq, documentEntries] = await Promise.all([
+      runLocalSystemQuery<number | null>(SystemPaths.collectionMetadataGet, {
+        collection: tableName,
+        identityKey,
+        schemaVersion,
+      }),
+      runLocalSystemQuery<Array<{ docId: string; seq: number }>>(
+        SystemPaths.documentMetadataGetBatch,
+        {
+          collection: tableName,
+          docIds,
+          identityKey,
+          schemaVersion,
+        },
       ),
+    ]);
+
+    return {
+      collectionSeq: collectionSeq ?? null,
+      documentSeqById: new Map(
+        (documentEntries ?? []).map((entry) => [entry.docId, entry.seq]),
+      ),
+    };
+  }
+
+  async function persistResolveMetadata(input: {
+    tableConfig: TableConfig;
+    tableName: string;
+    resolveResult: ResolveResponse;
+    metadataEntries: Array<{ docId: string; seq: number }>;
+    deletedDocIds: string[];
+  }): Promise<void> {
+    const schemaVersion = input.tableConfig.schema.version;
+    const identityKey = getCurrentIdentityKey();
+
+    // Only advance collection seq, never regress — subscription and resolve
+    // handlers can race; the higher seq must win.
+    const currentMeta = await readResolveMetadata(
+      input.tableName,
+      input.tableConfig,
+      [],
+    );
+    const newCollectionSeq = input.resolveResult.collectionSeq;
+    const operations: Array<Promise<void>> = [];
+    if (
+      currentMeta.collectionSeq === null ||
+      newCollectionSeq > currentMeta.collectionSeq
+    ) {
+      operations.push(
+        runLocalSystemMutation(SystemPaths.collectionMetadataSet, {
+          collection: input.tableName,
+          seq: newCollectionSeq,
+          identityKey,
+          schemaVersion,
+        }),
+      );
+    }
+
+    if (input.resolveResult.mode === "full") {
+      operations.push(
+        runLocalSystemMutation(SystemPaths.documentMetadataClearCollection, {
+          collection: input.tableName,
+          identityKey,
+          schemaVersion,
+        }),
+      );
+    }
+
+    if (input.metadataEntries.length > 0) {
+      operations.push(
+        runLocalSystemMutation(SystemPaths.documentMetadataSetBatch, {
+          collection: input.tableName,
+          entries: input.metadataEntries,
+          identityKey,
+          schemaVersion,
+        }),
+      );
+    }
+
+    if (input.deletedDocIds.length > 0) {
+      operations.push(
+        runLocalSystemMutation(SystemPaths.documentMetadataDeleteBatch, {
+          collection: input.tableName,
+          docIds: input.deletedDocIds,
+          identityKey,
+          schemaVersion,
+        }),
+      );
+    }
+
+    await Promise.all(operations);
+  }
+
+  async function cleanupMappedCreateAlias(localId: string): Promise<void> {
+    if (embedded.hasLocalDocumentId?.(localId) ?? false) {
+      return;
+    }
+    if (!idMap.hasLocalId(localId)) {
+      return;
+    }
+    await idMap.delete(localId);
+  }
+
+  async function heartbeatProcessor(): Promise<void> {
+    await runLocalSystemMutation(SystemPaths.processorHeartbeat, {
+      processorId: processorIdForReplay,
+      identityKey: getCurrentIdentityKey(),
+    });
+  }
+
+  async function heartbeatProcessorSafe(): Promise<void> {
+    try {
+      await heartbeatProcessor();
+    } catch {}
+  }
+
+  function startProcessorHeartbeat(): void {
+    runDetached(heartbeatProcessorSafe, "[sync] processor heartbeat:");
+    if (processorHeartbeatTimer !== null) {
+      clearInterval(processorHeartbeatTimer);
+    }
+    processorHeartbeatTimer = setInterval(() => {
+      runDetached(heartbeatProcessorSafe, "[sync] processor heartbeat:");
+    }, processorHeartbeatMs);
+  }
+
+  function stopProcessorHeartbeat(): void {
+    if (processorHeartbeatTimer !== null) {
+      clearInterval(processorHeartbeatTimer);
+      processorHeartbeatTimer = null;
+    }
+    runDetached(
+      () =>
+        runLocalSystemMutation(SystemPaths.processorRemove, {
+          processorId: processorIdForReplay,
+          identityKey: getCurrentIdentityKey(),
+        }),
+      "[sync] processor cleanup:",
     );
   }
 
@@ -2087,6 +2867,7 @@ function createEngine(config: EngineConfig): EngineInstance {
       started = true;
 
       log.info("sync: started");
+      startProcessorHeartbeat();
 
       // Hydrate ID map and pending queue from embedded DB.
       // This is fire-and-forget — the queue processor will wait
@@ -2129,13 +2910,14 @@ function createEngine(config: EngineConfig): EngineInstance {
       started = false;
 
       log.info("sync: stopped");
+      stopProcessorHeartbeat();
 
       abortController?.abort();
       abortController = null;
       if (activeEntry) {
         const entry = activeEntry;
         activeEntry = null;
-        Fx.detach(
+        runDetached(
           () => pendingQueue.release(entry, processorIdForReplay),
           "[sync] release pending claim:",
         );
@@ -2164,7 +2946,7 @@ function createEngine(config: EngineConfig): EngineInstance {
       return status;
     },
 
-    mutation(
+    async mutation(
       ref: unknown,
       args: Record<string, unknown>,
       options?: { enqueueForReplay?: boolean },
@@ -2178,52 +2960,44 @@ function createEngine(config: EngineConfig): EngineInstance {
         ? executeLocalMutationWithEffects
         : (r: unknown, a: Record<string, unknown>) =>
             (localClient as any).mutation(r, a) as Promise<unknown>;
-      return Fx.run(
-        Fx.from({
-          ok: async () => {
-            const refName = getFunctionName(ref as any);
-            const localArgs = idMap.translateRemoteIdsToLocal(args);
-            const localResult = await executeMutationLocally(ref, localArgs);
 
-            if (isLocalUploadUrl(localResult)) {
-              registerUploadUrlSource?.(localResult, refName);
-              return localResult;
-            }
+      const refName = getFunctionName(ref as any);
+      const localArgs = idMap.translateRemoteIdsToLocal(args);
+      const localResult = await executeMutationLocally(ref, localArgs);
 
-            if (enqueueForReplay) {
-              try {
-                const table = inferTableFromRef(ref, tables);
-                await pendingQueue.push(
-                  ref,
-                  args,
-                  localResult,
-                  table,
-                  getReplayPayloadVersion?.(refName) ?? 1,
-                );
+      if (isLocalUploadUrl(localResult)) {
+        registerUploadUrlSource?.(localResult, refName);
+        return localResult;
+      }
 
-                if (isOnline) {
-                  if (
-                    refName.endsWith(":create") &&
-                    typeof localResult === "string"
-                  ) {
-                    await processQueue();
-                  } else {
-                    ensureReplayProcessing();
-                  }
-                } else {
-                  log.debug("sync: offline — mutation queued for later push");
-                }
-              } catch (err) {
-                log.warn("sync: failed to queue mutation", err);
-                throw err;
-              }
-            }
+      if (enqueueForReplay) {
+        try {
+          const table = inferTableFromRef(ref, tables);
+          if (!table) {
+            throw new Error(
+              `[convex-embedded] could not infer table for mutation ref "${refName}".`,
+            );
+          }
+          await pendingQueue.push(
+            ref,
+            args,
+            localResult,
+            table,
+            getReplayPayloadVersion?.(refName) ?? 1,
+          );
 
-            return idMap.translateResult(localResult);
-          },
-          err: (e) => e as Error,
-        }),
-      );
+          if (isOnline) {
+            ensureReplayProcessing();
+          } else {
+            log.debug("sync: offline — mutation queued for later push");
+          }
+        } catch (err) {
+          log.warn("sync: failed to queue mutation", err);
+          throw err;
+        }
+      }
+
+      return localResult;
     },
 
     resolveNow(): Promise<void> {
@@ -2231,6 +3005,17 @@ function createEngine(config: EngineConfig): EngineInstance {
         stopRemoteSubscriptions();
       }
       return runSyncCycle({ forceResolve: true });
+    },
+
+    ensureTableReady(tableName: string): Promise<void> {
+      return activateScope(tableName);
+    },
+
+    ensureScopeReady(
+      tableName: string,
+      scopeArgs?: Record<string, unknown>,
+    ): Promise<void> {
+      return activateScope(tableName, scopeArgs);
     },
 
     async reloadIdentity(): Promise<void> {

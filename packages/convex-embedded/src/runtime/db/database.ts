@@ -1,17 +1,21 @@
-import { Fx } from "@robelest/fx";
 import type { JSONValue, Value } from "convex/values";
 import { jsonToConvex } from "convex/values";
 
+import type { PersistenceAdapter } from "@/persistence/adapter";
 import {
   createAmbientCryptoProvider,
   type EmbeddedCryptoProvider,
 } from "@/runtime/crypto";
+import type { AsyncReadBackend } from "@/runtime/db/async_backend";
 import { compareValues } from "@/runtime/db/compare";
 import { QueryEngine } from "@/runtime/db/query";
 import {
   evaluateFieldPath,
   evaluateNormalizedFilter,
   normalizeFilter,
+  type AsyncQueryReader,
+  type AsyncSourceReader,
+  type AsyncTableCountReader,
   type DocumentIterator,
   type FilterNode,
   type QueryReader,
@@ -33,6 +37,7 @@ import {
   type SearchOverlayState,
   type SearchIndexState,
 } from "@/runtime/db/search";
+import { sourceTableName } from "@/runtime/db/sql_pushdown";
 /**
  * Core in-memory database engine with MVCC timestamps.
  *
@@ -65,9 +70,13 @@ import {
   type VectorOverlayState,
   type VectorIndexState,
 } from "@/runtime/db/vector";
-import type { CommitBatch, StorageAdapter } from "@/storage/adapter";
+import { createStore } from "@/runtime/store";
+import type { Store } from "@/runtime/store";
+import { createLogger } from "@/shared/logger";
+import type { CommitBatch } from "@/storage/adapter";
 
 const IDENTITY_SCOPE_FIELD = "__identityKey";
+const log = createLogger("db");
 
 type IdentityScopedDocument = StoredDocument & {
   [IDENTITY_SCOPE_FIELD]?: string | null;
@@ -79,6 +88,31 @@ type CommittedStateChange = {
   before: IdentityScopedDocument | null;
   after: IdentityScopedDocument | null;
 };
+
+type CommittedRowChange = {
+  tableName: string;
+  id: DocumentId;
+  before: IdentityScopedDocument | null;
+  after: IdentityScopedDocument | null;
+  shouldMaterialize: boolean;
+};
+
+type CommittedWriteArtifacts = {
+  puts: Array<{ doc: StoredDocument; tableName: string }>;
+  deletes: Array<{ id: string; tableName: string }>;
+  rowChanges: CommittedRowChange[];
+  stateChanges: CommittedStateChange[];
+  invalidation: CommitInvalidationBatch;
+};
+
+export interface CommitInvalidationBatch {
+  tables: Set<string>;
+  changes: Array<{
+    tableName: string;
+    before: StoredDocument | null;
+    after: StoredDocument | null;
+  }>;
+}
 
 type PendingTableState = {
   shadowedIds: Set<string>;
@@ -108,6 +142,37 @@ const SYSTEM_INDEX_DEFINITIONS: Record<
       fields: ["identityKey", "_creationTime", "_id"],
     },
   ],
+  _resolve_processors: [
+    {
+      indexName: "by_identity_key_and_processor_id",
+      fields: ["identityKey", "processorId", "_creationTime", "_id"],
+    },
+  ],
+  _resolve_collection_metadata: [
+    {
+      indexName: "by_identity_key_and_collection",
+      fields: [
+        "identityKey",
+        "collection",
+        "schemaVersion",
+        "_creationTime",
+        "_id",
+      ],
+    },
+  ],
+  _resolve_document_metadata: [
+    {
+      indexName: "by_identity_key_and_collection_and_doc_id",
+      fields: [
+        "identityKey",
+        "collection",
+        "docId",
+        "schemaVersion",
+        "_creationTime",
+        "_id",
+      ],
+    },
+  ],
   _resolve_schema_versions: [
     {
       indexName: "by_table",
@@ -125,11 +190,7 @@ const SYSTEM_INDEX_DEFINITIONS: Record<
 export interface DatabaseCommitResult {
   timestamp: Timestamp;
   tablesWritten: Set<string>;
-  changes: Array<{
-    tableName: string;
-    before: StoredDocument | null;
-    after: StoredDocument | null;
-  }>;
+  invalidation: CommitInvalidationBatch;
   persisted: Promise<void>;
 }
 
@@ -182,6 +243,8 @@ export class Database {
 
   /** Blob storage keyed by `_storage` document ID. */
   private _blobStorage: Record<DocumentId, Blob> = {};
+  private _allBlobsHydrated = false;
+  private _blobHydration: Promise<void> | null = null;
 
   /** Committed document IDs grouped by table for faster per-table iteration. */
   private _tableDocuments: Map<string, Set<string>> = new Map();
@@ -230,7 +293,9 @@ export class Database {
   // ---- Storage adapter ----------------------------------------------------
 
   /** Optional durable storage backend. */
-  private _storage: StorageAdapter | null = null;
+  private _storage: PersistenceAdapter | null = null;
+  private _fullyHydrated = false;
+  private readonly _hydrationAttemptedTables = new Set<string>();
 
   private readonly _crypto: EmbeddedCryptoProvider;
 
@@ -263,6 +328,7 @@ export class Database {
   // ---- Query engine -------------------------------------------------------
 
   readonly queryEngine: QueryEngine;
+  private readonly _store: Store = createStore();
 
   // -------------------------------------------------------------------------
   // Constructor
@@ -270,12 +336,13 @@ export class Database {
 
   constructor(
     schema: ParsedSchema | null,
-    storage?: StorageAdapter,
+    storage?: PersistenceAdapter,
     crypto?: EmbeddedCryptoProvider,
   ) {
     this._schema = schema;
     this._storage = storage ?? null;
     this._crypto = crypto ?? createAmbientCryptoProvider();
+    this._store.setPersistence(this._storage);
 
     if (schema !== null) {
       validateSchemaDefinition(schema);
@@ -287,9 +354,15 @@ export class Database {
     };
     const countTable: TableCountReader = (tableName) =>
       this.getDocumentsForTable(tableName).length;
+    const countTableAsync: AsyncTableCountReader = async (tableName) =>
+      this.getDocumentsForTable(tableName).length;
     const readQuery: QueryReader = (query) => this._readOptimizedQuery(query);
+    const readQueryAsync: AsyncQueryReader = (query) =>
+      this._readOptimizedQueryAsync(query);
     const readSource: SourceReader = (source, limit) =>
       this._readOptimizedSource(source, limit);
+    const readSourceAsync: AsyncSourceReader = (source, limit) =>
+      this._readOptimizedSourceAsync(source, limit);
 
     this.queryEngine = new QueryEngine(
       schema,
@@ -297,6 +370,9 @@ export class Database {
       countTable,
       readQuery,
       readSource,
+      countTableAsync,
+      readQueryAsync,
+      readSourceAsync,
     );
   }
 
@@ -311,8 +387,14 @@ export class Database {
    * (e.g. a wa-sqlite worker) after the `Database` is constructed.
    * After calling this, invoke {@link hydrate} to load persisted data.
    */
-  setStorage(storage: StorageAdapter): void {
+  setStorage(storage: PersistenceAdapter): void {
     this._storage = storage;
+    this._store.setPersistence(storage);
+    this._resetBlobState();
+  }
+
+  setReadBackendForTests(readBackend: AsyncReadBackend | null): void {
+    this._store.setReadBackendForTests(readBackend);
   }
 
   setActiveIdentityKey(identityKey: string | null): void {
@@ -331,29 +413,60 @@ export class Database {
    * Hydrate the database from durable storage.
    *
    * Must be called (and awaited) before the first transaction when a
-   * {@link StorageAdapter} is configured. No-op when running without
+   * {@link PersistenceAdapter} is configured. No-op when running without
    * storage.
    */
-  async hydrate(): Promise<void> {
+  async hydrate(options?: { tables?: string[] }): Promise<void> {
     if (this._storage === null) return;
 
-    const [documents, meta, blobs] = await Promise.all([
-      this._storage.getDocuments(),
-      this._storage.getMeta(),
-      this._storage.getBlobs(),
-    ]);
+    const started = globalThis.performance?.now?.() ?? Date.now();
 
-    // Restore documents and rebuild ID→table map.
+    const tableNames = options?.tables;
+    const scopedHydration = tableNames !== undefined;
+    if (!scopedHydration || tableNames.includes("_storage")) {
+      this._resetBlobState();
+    }
+    const { documents, meta } = await this._store.load(
+      scopedHydration ? { tables: tableNames } : undefined,
+    );
+    const fetched = globalThis.performance?.now?.() ?? Date.now();
+
+    if (scopedHydration) {
+      for (const tableName of tableNames) {
+        this._clearCommittedTable(tableName);
+        this._hydrationAttemptedTables.add(tableName);
+      }
+    } else {
+      this._documents = {};
+      this._idTableMap.clear();
+      this._tableDocuments.clear();
+      this._fullyHydrated = true;
+    }
+
     for (const { doc, tableName } of documents) {
-      this._documents[doc._id] = doc;
       if (tableName) {
         this._idTableMap.set(doc._id as string, tableName);
-        this._addCommittedIdToTable(tableName, doc._id as string);
+      }
+      if (!tableName || !this._store.isAuthoritative(tableName)) {
+        this._documents[doc._id] = doc;
+        if (tableName) {
+          this._addCommittedIdToTable(tableName, doc._id as string);
+        }
       }
     }
-    this._rebuildAllIndexes();
-    this._rebuildAllSearchIndexes();
-    this._rebuildAllVectorIndexes();
+    if (scopedHydration) {
+      for (const tableName of tableNames) {
+        if (!this._store.isAuthoritative(tableName)) {
+          this._rebuildTableIndexes(tableName);
+          this._rebuildTableSearchIndexes(tableName);
+          this._rebuildTableVectorIndexes(tableName);
+        }
+      }
+    } else {
+      this._rebuildAllIndexes();
+      this._rebuildAllSearchIndexes();
+      this._rebuildAllVectorIndexes();
+    }
 
     // Restore metadata counters.
     if (meta !== null) {
@@ -361,10 +474,14 @@ export class Database {
       this._lastCreationTime = meta.lastCreationTime;
     }
 
-    // Restore blobs.
-    for (const { id, blob } of blobs) {
-      this._blobStorage[id as DocumentId] = blob;
-    }
+    const ended = globalThis.performance?.now?.() ?? Date.now();
+    log.info(
+      `hydrate: docs=${documents.length}, scope=${tableNames?.length ? tableNames.join(",") : "all"}, blobs=lazy, fetch=${(fetched - started).toFixed(1)}ms total=${(ended - started).toFixed(1)}ms`,
+    );
+  }
+
+  isTableHydrationAttempted(tableName: string): boolean {
+    return this._fullyHydrated || this._hydrationAttemptedTables.has(tableName);
   }
 
   /**
@@ -380,27 +497,26 @@ export class Database {
   async syncTable(tableName: string): Promise<void> {
     if (this._storage === null) return;
 
-    const [docs, meta] = await Promise.all([
-      this._storage.getDocumentsByTable(tableName),
-      this._storage.getMeta(),
-    ]);
+    const { docs, meta } = await this._store.refreshTable({ tableName });
 
-    // Remove all current in-memory docs for this table.
-    for (const id of this._tableDocuments.get(tableName) ?? []) {
-      delete this._documents[id as DocumentId];
-      this._idTableMap.delete(id);
-    }
-    this._tableDocuments.set(tableName, new Set());
+    if (docs !== null && !this._store.isAuthoritative(tableName)) {
+      // Remove all current in-memory docs for this table.
+      for (const id of this._tableDocuments.get(tableName) ?? []) {
+        delete this._documents[id as DocumentId];
+        this._idTableMap.delete(id);
+      }
+      this._tableDocuments.set(tableName, new Set());
 
-    // Replace with what's in storage and rebuild map entries.
-    for (const doc of docs) {
-      this._documents[doc._id] = doc;
-      this._idTableMap.set(doc._id as string, tableName);
-      this._addCommittedIdToTable(tableName, doc._id as string);
+      // Replace with what's in storage and rebuild map entries.
+      for (const doc of docs) {
+        this._documents[doc._id] = doc;
+        this._idTableMap.set(doc._id as string, tableName);
+        this._addCommittedIdToTable(tableName, doc._id as string);
+      }
+      this._rebuildTableIndexes(tableName);
+      this._rebuildTableSearchIndexes(tableName);
+      this._rebuildTableVectorIndexes(tableName);
     }
-    this._rebuildTableIndexes(tableName);
-    this._rebuildTableSearchIndexes(tableName);
-    this._rebuildTableVectorIndexes(tableName);
 
     // Sync metadata counters so timestamps remain monotonic across tabs.
     if (meta !== null) {
@@ -434,37 +550,29 @@ export class Database {
   }
 
   /**
-   * Commit the current transaction level.
+   * Commit the current transaction level synchronously.
    *
-   * - If this is a nested transaction, writes merge into the parent level.
-   * - If this is the outermost transaction, writes are applied to committed
-   *   storage and the MVCC timestamp bumps.
-   *
-   * Returns the new timestamp and the set of tables that were written so
-   * that callers can invalidate subscriptions.
+   * Top-level callers should use {@link commitAsync} so SQL-backed adapters can
+   * authoritatively apply the commit and serve subsequent committed reads.
+   * This synchronous path remains for nested commits and opaque storage.
    */
   commit(): DatabaseCommitResult {
-    const lastWrites = this._writes.pop();
-    const lastWriteCount = this._writeCounts.pop();
-    const _lastWriteTables = this._writeTables.pop();
-    if (lastWrites === undefined) {
-      throw new Error("Transaction already committed or rolled back");
-    }
-    this._pendingWriteCount -= lastWriteCount ?? 0;
-    this._pendingTableState.clear();
-
-    // Track which tables are affected by this commit level.
-    for (const id of Object.keys(lastWrites)) {
-      const table = this._idTableMap.get(id);
-      if (table !== undefined) {
-        this._tablesWritten.add(table);
-      }
-    }
+    const lastWrites = this._popCommittedWriteLevel();
 
     if (this._writes.length === 0) {
+      if (
+        this._store.usesExternalCommitPath() &&
+        this._tablesWritten.size > 0
+      ) {
+        throw new Error(
+          "SQL-backed outer commits with adapter apply support must use commitAsync()",
+        );
+      }
+
       // Outermost commit — apply writes to in-memory storage.
-      const { puts, deletes, changes, stateChanges } =
-        this._applyCommittedWrites(lastWrites);
+      const { puts, deletes, rowChanges, stateChanges, invalidation } =
+        this._buildCommittedWriteArtifacts(lastWrites);
+      this._applyCommittedRowChanges(rowChanges);
 
       // Bump timestamp only if there were actual writes.
       const tablesWritten = new Set(this._tablesWritten);
@@ -484,20 +592,92 @@ export class Database {
         },
       });
 
-      return { timestamp: this._timestamp, tablesWritten, changes, persisted };
+      return {
+        timestamp: this._timestamp,
+        tablesWritten,
+        invalidation,
+        persisted,
+      };
     }
 
-    // Nested commit — merge writes into the parent level.
-    for (const [id, write] of Object.entries(lastWrites)) {
-      this._addWriteRaw(id as DocumentId, write);
+    return this._mergeNestedCommittedWriteLevel(lastWrites);
+  }
+
+  async commitAsync(): Promise<DatabaseCommitResult> {
+    const isSqlCommit = this._store.usesExternalCommitPath();
+    if (!isSqlCommit) {
+      return this.commit();
     }
 
-    // Return the *current* (not yet bumped) timestamp; the outermost
-    // commit is what actually increments it.
+    if (this._writes.length === 0) {
+      throw new Error("Transaction already committed or rolled back");
+    }
+
+    if (this._writes.length > 1) {
+      const lastWrites = this._popCommittedWriteLevel();
+      return this._mergeNestedCommittedWriteLevel(lastWrites);
+    }
+
+    const lastWrites = this._writes[this._writes.length - 1] ?? {};
+    const tablesWritten = new Set(this._tablesWritten);
+    for (const id of Object.keys(lastWrites)) {
+      const tableName = this._idTableMap.get(id);
+      if (tableName !== undefined) {
+        tablesWritten.add(tableName);
+      }
+    }
+
+    if (tablesWritten.size === 0) {
+      this._popCommittedWriteLevel();
+      this._tablesWritten.clear();
+      return {
+        timestamp: this._timestamp,
+        tablesWritten,
+        invalidation: { tables: new Set(), changes: [] },
+        persisted: Promise.resolve(),
+      };
+    }
+
+    const { puts, deletes, rowChanges } =
+      this._buildCommittedWriteArtifacts(lastWrites);
+    const nextTimestamp = this._timestamp + 1;
+
+    const batch = {
+      puts,
+      deletes,
+      meta: {
+        timestamp: nextTimestamp,
+        lastCreationTime: this._lastCreationTime,
+      },
+    } satisfies CommitBatch;
+
+    const materializedTables = Array.from(tablesWritten).filter(
+      (tableName) => !this._store.isAuthoritative(tableName),
+    );
+    const applied = await this._store.applyTopLevelCommit(batch, {
+      materializedTables,
+      tableSearchIndexes: this._collectTableSearchIndexes(),
+      tableVectorIndexes: this._collectTableVectorIndexes(),
+    });
+    if (applied === null) {
+      throw new Error(
+        "[convex-embedded] expected committed store to apply external top-level commit",
+      );
+    }
+
+    this._popCommittedWriteLevel();
+    this._applyCommittedIdHints(rowChanges);
+    this._timestamp = applied.meta.timestamp;
+    this._lastCreationTime = applied.meta.lastCreationTime;
+    for (const snapshot of applied.tables) {
+      this._replaceCommittedTableSnapshot(snapshot.tableName, snapshot.docs);
+    }
+    this._tablesWritten.clear();
+
     return {
       timestamp: this._timestamp,
-      tablesWritten: new Set(this._tablesWritten),
-      changes: [],
+      tablesWritten,
+      invalidation: { tables: tablesWritten, changes: [] },
       persisted: Promise.resolve(),
     };
   }
@@ -544,7 +724,22 @@ export class Database {
   /** Insert a new document. Returns the generated UUID `_id`. */
   insert(table: TableName, value: Record<string, unknown>): DocumentId {
     this._validate(table, value as GenericDocument);
-    const _id = this._crypto.randomUUID() as unknown as DocumentId;
+    let _id: DocumentId | null = null;
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const candidate = this._crypto.randomUUID() as unknown as DocumentId;
+      if (
+        !this._idTableMap.has(candidate as string) &&
+        this._getRaw(candidate) === null
+      ) {
+        _id = candidate;
+        break;
+      }
+    }
+    if (_id === null) {
+      throw new Error(
+        `[convex-embedded] Failed to allocate a unique document id for table "${table}".`,
+      );
+    }
     this._idTableMap.set(_id as string, table);
     const now = Date.now();
     const _creationTime =
@@ -565,7 +760,7 @@ export class Database {
   ): void {
     const idText = formatValueForError(id);
     if (!this._validateId(tableName, id)) {
-      throw new Error(`Patch on non-existent document with ID "${idText}"`);
+      throw this._patchMissingDocError("Patch", tableName, idText);
     }
 
     if (typeof value !== "object" || value === null) {
@@ -579,7 +774,7 @@ export class Database {
       rawDocument === null ||
       !this._isVisibleInScope(tableName, rawDocument)
     ) {
-      throw new Error(`Patch on non-existent document with ID "${idText}"`);
+      throw this._patchMissingDocError("Patch", tableName, idText);
     }
     const document = this._stripIdentityScope(rawDocument);
 
@@ -630,7 +825,7 @@ export class Database {
   ): void {
     const idText = formatValueForError(id);
     if (!this._validateId(tableName, id)) {
-      throw new Error(`Replace on non-existent document with ID "${idText}"`);
+      throw this._patchMissingDocError("Replace", tableName, idText);
     }
 
     if (typeof value !== "object" || value === null) {
@@ -644,7 +839,7 @@ export class Database {
       rawDocument === null ||
       !this._isVisibleInScope(tableName, rawDocument)
     ) {
-      throw new Error(`Replace on non-existent document with ID "${idText}"`);
+      throw this._patchMissingDocError("Replace", tableName, idText);
     }
     const document = this._stripIdentityScope(rawDocument);
 
@@ -724,11 +919,19 @@ export class Database {
   putDocument(
     table: TableName,
     doc: Record<string, unknown> & { _id: string; _creationTime: number },
+    options: { validate?: boolean } = {},
   ): void {
-    const { _id, _creationTime, ...userFields } = doc;
+    const {
+      _id,
+      _creationTime,
+      [IDENTITY_SCOPE_FIELD]: _scopedKey,
+      ...userFields
+    } = doc;
     const docId = _id as unknown as DocumentId;
 
-    this._validate(table, userFields as GenericDocument);
+    if (options.validate ?? true) {
+      this._validate(table, userFields as GenericDocument);
+    }
 
     const existingTable = this._idTableMap.get(_id);
 
@@ -864,16 +1067,11 @@ export class Database {
   // File / blob storage
   // -------------------------------------------------------------------------
 
-  storeFile(storageId: DocumentId, blob: Blob): void {
+  async storeFile(storageId: DocumentId, blob: Blob): Promise<void> {
     this._blobStorage[storageId] = blob;
 
-    // Persist to durable storage (fire-and-forget).
     if (this._storage) {
-      const storage = this._storage;
-      Fx.detach(
-        () => storage.storeBlob(storageId as string, blob),
-        "[convex-embedded] blob persist failed:",
-      );
+      await this._storage.putBlob(storageId as string, blob);
     }
   }
 
@@ -882,11 +1080,9 @@ export class Database {
 
     // Remove from durable storage (fire-and-forget).
     if (this._storage) {
-      const storage = this._storage;
-      Fx.detach(
-        () => storage.deleteBlob(storageId),
-        "[convex-embedded] blob delete failed:",
-      );
+      this._storage.deleteBlob(storageId).catch((error) => {
+        console.error("[convex-embedded] blob delete failed:", error);
+      });
     }
   }
 
@@ -894,6 +1090,44 @@ export class Database {
     if (this.get("_storage", storageId) === null) {
       return null;
     }
+    return this._blobStorage[storageId] ?? null;
+  }
+
+  async loadFile(storageId: DocumentId): Promise<Blob | null> {
+    if (this.get("_storage", storageId) === null) {
+      return null;
+    }
+
+    const cached = this._blobStorage[storageId] ?? null;
+    if (cached !== null) {
+      return cached;
+    }
+
+    if (this._storage === null) {
+      return null;
+    }
+
+    if (this._storage.getBlob) {
+      const blob = await this._storage.getBlob(storageId as string);
+      if (blob !== null) {
+        this._blobStorage[storageId] = blob;
+      }
+      return blob;
+    }
+
+    if (!this._allBlobsHydrated) {
+      this._blobHydration ??= (async () => {
+        const blobs = await this._storage!.listBlobs();
+        for (const { id, blob } of blobs) {
+          this._blobStorage[id as DocumentId] = blob;
+        }
+        this._allBlobsHydrated = true;
+      })().finally(() => {
+        this._blobHydration = null;
+      });
+      await this._blobHydration;
+    }
+
     return this._blobStorage[storageId] ?? null;
   }
 
@@ -905,11 +1139,22 @@ export class Database {
     return this.queryEngine.startQuery(query);
   }
 
+  startQueryAsync(query: SerializedQuery): QueryId {
+    return this.queryEngine.startQueryAsync(query);
+  }
+
   queryNext(queryId: QueryId): {
     value: GenericDocument | null;
     done: boolean;
   } {
     return this.queryEngine.queryNext(queryId);
+  }
+
+  queryNextAsync(queryId: QueryId): Promise<{
+    value: GenericDocument | null;
+    done: boolean;
+  }> {
+    return this.queryEngine.queryNextAsync(queryId);
   }
 
   queryCleanup(queryId: QueryId): void {
@@ -920,12 +1165,113 @@ export class Database {
     query: SerializedQuery;
     cursor: string | null;
     pageSize: number;
-  }): { page: GenericDocument[]; isDone: boolean; continueCursor: string } {
+  }): {
+    page: GenericDocument[];
+    isDone: boolean;
+    continueCursor: string;
+  } {
     return this.queryEngine.paginate(args);
+  }
+
+  paginateAsync(args: {
+    query: SerializedQuery;
+    cursor: string | null;
+    pageSize: number;
+  }): Promise<{
+    page: GenericDocument[];
+    isDone: boolean;
+    continueCursor: string;
+  }> {
+    return this.queryEngine.paginateAsync(args);
   }
 
   count(tableName: string): number {
     return this.queryEngine.count(tableName);
+  }
+
+  countAsync(tableName: string): Promise<number> {
+    if (!this._hasPendingWritesForTable(tableName)) {
+      return this._store
+        .countDocuments(tableName as TableName)
+        .then((count) => count ?? this.count(tableName));
+    }
+    return Promise.resolve(this.count(tableName));
+  }
+
+  async getAsync(
+    tableName: TableName | undefined,
+    id: DocumentId,
+    options: { countRead?: boolean } = {},
+  ): Promise<StoredDocument | null> {
+    let resolvedTable =
+      tableName ??
+      (this._idTableMap.get(id as string) as TableName | undefined);
+    if (resolvedTable === undefined) {
+      resolvedTable = (await this._findTableForIdViaBackend(id)) as
+        | TableName
+        | undefined;
+    }
+    if (
+      resolvedTable !== undefined &&
+      !this._hasPendingWritesForTable(resolvedTable)
+    ) {
+      const document = await this._store.getDocument(resolvedTable, id);
+      if (document !== null) {
+        this._rememberCommittedLookup(resolvedTable, [document]);
+      }
+      if (document !== null) {
+        return document;
+      }
+    }
+    return this.get(resolvedTable, id, options);
+  }
+
+  private async _findTableForIdViaBackend(
+    id: DocumentId,
+  ): Promise<string | undefined> {
+    if (!this._schema) {
+      return undefined;
+    }
+    for (const [tableName] of this._schema.tables) {
+      if (this._isSystemTable(tableName)) {
+        continue;
+      }
+      const found = await this._store.getDocument(tableName, id);
+      if (found !== null) {
+        this._idTableMap.set(id as string, tableName);
+        return tableName;
+      }
+    }
+    return undefined;
+  }
+
+  async ensureCommittedDocumentForWrite(
+    tableName: TableName,
+    id: DocumentId,
+  ): Promise<boolean> {
+    if (this._getRaw(id) !== null) {
+      return true;
+    }
+
+    const document = await this._store.getDocument(tableName, id);
+    if (document === null) {
+      return false;
+    }
+
+    this._idTableMap.set(id, tableName);
+    this._cacheCommittedDocument(tableName, document);
+    return true;
+  }
+
+  async listDocumentsAsync(tableName: TableName): Promise<StoredDocument[]> {
+    if (!this._hasPendingWritesForTable(tableName)) {
+      const docs = await this._store.listDocuments(tableName);
+      if (docs !== null) {
+        this._rememberCommittedLookup(tableName, docs);
+        return docs;
+      }
+    }
+    return this.getDocumentsForTable(tableName);
   }
 
   getCommittedTableCount(tableName: string): number {
@@ -950,7 +1296,32 @@ export class Database {
         `Cannot use index "${indexName}" for table "${tableName}" because it is not declared in the schema.`,
       );
     }
-    return ids
+    const duplicateIds = new Set<string>();
+    const uniqueIds: string[] = [];
+    const seenIds = new Set<string>();
+    for (const id of ids) {
+      const key = id as string;
+      if (seenIds.has(key)) {
+        duplicateIds.add(key);
+        continue;
+      }
+      seenIds.add(key);
+      uniqueIds.push(key);
+    }
+
+    if (duplicateIds.size > 0) {
+      log.warn(
+        `duplicate committed ids detected for ${indexKey}: ${Array.from(duplicateIds).join(", ")}; rebuilding index`,
+      );
+      this._rebuildTableIndexes(tableName);
+      const rebuiltIds = this._indexDocuments.get(indexKey) ?? [];
+      return rebuiltIds
+        .map((id) => this._documents[id as DocumentId])
+        .filter((doc): doc is StoredDocument => doc !== undefined)
+        .map((doc) => this._stripIdentityScope(doc as IdentityScopedDocument));
+    }
+
+    return uniqueIds
       .map((id) => this._documents[id as DocumentId])
       .filter((doc): doc is StoredDocument => doc !== undefined)
       .map((doc) => this._stripIdentityScope(doc as IdentityScopedDocument));
@@ -963,6 +1334,7 @@ export class Database {
     limit?: number,
   ): Array<{ _id: string; _score: number }> {
     const [tableName, indexName] = tableAndIndexName.split(".");
+    this._assertSyncAllowedForTable(tableName, "vectorSearch");
     const state = this._vectorIndexes.get(`${tableName}.${indexName}`);
     if (state) {
       resolveVectorIndexDefinition(
@@ -998,6 +1370,62 @@ export class Database {
       filter,
       limit,
     );
+  }
+
+  async vectorSearchAsync(
+    tableAndIndexName: string,
+    vector: number[],
+    filter: VectorSearchExpression | null,
+    limit?: number,
+  ): Promise<Array<{ _id: string; _score: number }>> {
+    const [tableName, indexName] = tableAndIndexName.split(".");
+    const definition = resolveVectorIndexDefinition(
+      this._schema?.tables.get(tableName)?.vectorIndexes,
+      tableName,
+      indexName,
+    );
+
+    if (this._store.isAuthoritative(tableName)) {
+      const candidates =
+        (await this._store.readVectorCandidates({
+          tableName,
+          indexName,
+          definition,
+          filter,
+          activeIdentityKey: this._activeIdentityKey,
+        })) ?? [];
+      this._rememberCommittedLookup(tableName, candidates);
+      const baseState = buildVectorIndexState({
+        docs: candidates.map((doc) => {
+          const raw = (doc as Record<string, unknown>)[IDENTITY_SCOPE_FIELD];
+          return {
+            doc,
+            identityKey: typeof raw === "string" ? raw : null,
+          };
+        }),
+        definition,
+      });
+      if (!this._hasPendingWritesForTable(tableName)) {
+        return executeVectorSearch(baseState, {
+          vector,
+          limit,
+          filter,
+          activeIdentityKey: this._activeIdentityKey,
+        });
+      }
+      return executeOverlayVectorSearch(
+        baseState,
+        this._buildPendingVectorOverlay(tableName, baseState),
+        {
+          vector,
+          limit,
+          filter,
+          activeIdentityKey: this._activeIdentityKey,
+        },
+      );
+    }
+
+    return this.vectorSearch(tableAndIndexName, vector, filter, limit);
   }
 
   // -------------------------------------------------------------------------
@@ -1047,6 +1475,24 @@ export class Database {
     }
 
     return true;
+  }
+
+  private _patchMissingDocError(
+    op: "Patch" | "Replace",
+    tableName: TableName | undefined,
+    idText: string,
+  ): Error {
+    if (
+      typeof tableName === "string" &&
+      this._store.isAuthoritative(tableName) &&
+      !this._tableDocuments.has(tableName)
+    ) {
+      return new Error(
+        `[convex-embedded] ${op} on SQL-backed table "${tableName}" requires the document to be hydrated first (id ${idText}). ` +
+          `Await a read (e.g. db.get / db.query) on this table before calling ${op.toLowerCase()} so committed rows are materialized.`,
+      );
+    }
+    return new Error(`${op} on non-existent document with ID "${idText}"`);
   }
 
   // -------------------------------------------------------------------------
@@ -1116,80 +1562,163 @@ export class Database {
     writes[id] = newValue;
   }
 
-  private _applyCommittedWrites(
+  private _popCommittedWriteLevel(): Record<DocumentId, StoredDocument | null> {
+    const lastWrites = this._writes.pop();
+    const lastWriteCount = this._writeCounts.pop();
+    this._writeTables.pop();
+    if (lastWrites === undefined) {
+      throw new Error("Transaction already committed or rolled back");
+    }
+    this._pendingWriteCount -= lastWriteCount ?? 0;
+    this._pendingTableState.clear();
+
+    for (const id of Object.keys(lastWrites)) {
+      const table = this._idTableMap.get(id);
+      if (table !== undefined) {
+        this._tablesWritten.add(table);
+      }
+    }
+
+    return lastWrites;
+  }
+
+  private _mergeNestedCommittedWriteLevel(
     lastWrites: Record<DocumentId, StoredDocument | null>,
-  ): {
-    puts: Array<{ doc: StoredDocument; tableName: string }>;
-    deletes: string[];
-    changes: Array<{
-      tableName: string;
-      before: StoredDocument | null;
-      after: StoredDocument | null;
-    }>;
-    stateChanges: CommittedStateChange[];
-  } {
-    return Object.entries(lastWrites).reduce(
+  ): DatabaseCommitResult {
+    for (const [id, write] of Object.entries(lastWrites)) {
+      this._addWriteRaw(id as DocumentId, write);
+    }
+
+    return {
+      timestamp: this._timestamp,
+      tablesWritten: new Set(this._tablesWritten),
+      invalidation: { tables: new Set(), changes: [] },
+      persisted: Promise.resolve(),
+    };
+  }
+
+  private _buildCommittedWriteArtifacts(
+    lastWrites: Record<DocumentId, StoredDocument | null>,
+  ): CommittedWriteArtifacts {
+    return Object.entries(lastWrites).reduce<CommittedWriteArtifacts>(
       (acc, [id, write]) => {
         const docId = id as DocumentId;
         const tableName = this._idTableMap.get(id) ?? "";
+        const shouldMaterialize = tableName
+          ? !this._store.isAuthoritative(tableName)
+          : true;
         const before =
           (this._documents[docId] as IdentityScopedDocument | undefined) ??
           null;
 
         if (write === null) {
-          delete this._documents[docId];
-          if (tableName !== undefined) {
-            this._removeCommittedIdFromTable(tableName, id);
-          }
-          this._idTableMap.delete(id);
-          acc.deletes.push(id);
+          acc.deletes.push({ id, tableName });
+          acc.rowChanges.push({
+            tableName,
+            id: docId,
+            before,
+            after: null,
+            shouldMaterialize,
+          });
           if (tableName) {
-            acc.changes.push({
-              tableName,
-              before: before ? this._stripIdentityScope(before) : null,
-              after: null,
-            });
-            acc.stateChanges.push({
-              tableName,
-              id: docId,
-              before,
-              after: null,
-            });
+            if (shouldMaterialize) {
+              acc.invalidation.changes.push({
+                tableName,
+                before: before ? this._stripIdentityScope(before) : null,
+                after: null,
+              });
+              acc.invalidation.tables.add(tableName);
+            }
+            if (shouldMaterialize) {
+              acc.stateChanges.push({
+                tableName,
+                id: docId,
+                before,
+                after: null,
+              });
+            }
           }
           return acc;
         }
 
-        this._documents[docId] = write;
-        if (tableName) {
-          this._addCommittedIdToTable(tableName, id);
-        }
         acc.puts.push({ doc: write, tableName });
+        acc.rowChanges.push({
+          tableName,
+          id: docId,
+          before,
+          after: write as IdentityScopedDocument,
+          shouldMaterialize,
+        });
         if (tableName) {
-          acc.changes.push({
-            tableName,
-            before: before ? this._stripIdentityScope(before) : null,
-            after: this._stripIdentityScope(write as IdentityScopedDocument),
-          });
-          acc.stateChanges.push({
-            tableName,
-            id: docId,
-            before,
-            after: write as IdentityScopedDocument,
-          });
+          if (shouldMaterialize) {
+            acc.invalidation.changes.push({
+              tableName,
+              before: before ? this._stripIdentityScope(before) : null,
+              after: this._stripIdentityScope(write as IdentityScopedDocument),
+            });
+            acc.invalidation.tables.add(tableName);
+          }
+          if (shouldMaterialize) {
+            acc.stateChanges.push({
+              tableName,
+              id: docId,
+              before,
+              after: write as IdentityScopedDocument,
+            });
+          }
         }
         return acc;
       },
       {
         puts: [] as Array<{ doc: StoredDocument; tableName: string }>,
-        deletes: [] as string[],
-        changes: [] as Array<{
-          tableName: string;
-          before: StoredDocument | null;
-          after: StoredDocument | null;
-        }>,
+        deletes: [] as Array<{ id: string; tableName: string }>,
+        rowChanges: [] as CommittedRowChange[],
         stateChanges: [] as CommittedStateChange[],
+        invalidation: { tables: new Set<string>(), changes: [] },
       },
     );
+  }
+
+  private _applyCommittedRowChanges(changes: CommittedRowChange[]): void {
+    for (const change of changes) {
+      const { tableName, id, after, shouldMaterialize } = change;
+      if (after === null) {
+        delete this._documents[id];
+        if (tableName) {
+          this._removeCommittedIdFromTable(tableName, id);
+        }
+        this._idTableMap.delete(id);
+        continue;
+      }
+
+      if (shouldMaterialize) {
+        this._documents[id] = after;
+        if (tableName) {
+          this._addCommittedIdToTable(tableName, id);
+        }
+      } else {
+        delete this._documents[id];
+        if (tableName) {
+          this._removeCommittedIdFromTable(tableName, id);
+        }
+      }
+      if (tableName) {
+        this._idTableMap.set(id, tableName);
+      }
+    }
+  }
+
+  private _applyCommittedIdHints(changes: CommittedRowChange[]): void {
+    for (const change of changes) {
+      const { tableName, id, after } = change;
+      if (after === null) {
+        this._idTableMap.delete(id);
+        continue;
+      }
+      if (tableName) {
+        this._idTableMap.set(id, tableName);
+      }
+    }
   }
 
   private _persistCommitBatch(batch: CommitBatch): Promise<void> {
@@ -1402,6 +1931,29 @@ export class Database {
     return docs;
   }
 
+  private _rememberCommittedLookup(
+    tableName: string,
+    docs: readonly StoredDocument[],
+  ): void {
+    for (const doc of docs) {
+      if (typeof doc._id === "string") {
+        this._idTableMap.set(doc._id, tableName);
+        if (!this._store.isAuthoritative(tableName)) {
+          this._cacheCommittedDocument(tableName, doc);
+        }
+      }
+    }
+  }
+
+  private _cacheCommittedDocument(
+    tableName: string,
+    doc: StoredDocument,
+  ): void {
+    const scoped = this._withIdentityScope(tableName, doc);
+    this._documents[doc._id as DocumentId] = scoped;
+    this._addCommittedIdToTable(tableName, doc._id);
+  }
+
   private _addCommittedIdToTable(tableName: string, id: string): void {
     let ids = this._tableDocuments.get(tableName);
     if (!ids) {
@@ -1422,6 +1974,35 @@ export class Database {
     }
   }
 
+  private _clearCommittedTable(tableName: string): void {
+    for (const id of this._tableDocuments.get(tableName) ?? []) {
+      delete this._documents[id as DocumentId];
+      this._idTableMap.delete(id);
+    }
+    this._tableDocuments.set(tableName, new Set());
+  }
+
+  private _replaceCommittedTableSnapshot(
+    tableName: string,
+    docs: readonly StoredDocument[],
+  ): void {
+    this._clearCommittedTable(tableName);
+    for (const doc of docs) {
+      this._documents[doc._id] = this._withIdentityScope(tableName, doc);
+      this._idTableMap.set(doc._id as string, tableName);
+      this._addCommittedIdToTable(tableName, doc._id as string);
+    }
+    this._rebuildTableIndexes(tableName);
+    this._rebuildTableSearchIndexes(tableName);
+    this._rebuildTableVectorIndexes(tableName);
+  }
+
+  private _resetBlobState(): void {
+    this._blobStorage = {};
+    this._allBlobsHydrated = false;
+    this._blobHydration = null;
+  }
+
   private _readOptimizedSource(
     source: SerializedQuery["source"],
     limit?: number | null,
@@ -1430,6 +2011,7 @@ export class Database {
     fieldPathsToSortBy: string[];
     order: "asc" | "desc";
   } | null {
+    this._assertSyncAllowedForSource(source, "_readOptimizedSource");
     if (source.type === "FullTableScan") {
       const indexName =
         source.order === "desc" ? "by_creation_time_desc" : "by_creation_time";
@@ -1535,12 +2117,83 @@ export class Database {
     return null;
   }
 
+  private async _readOptimizedSourceAsync(
+    source: SerializedQuery["source"],
+    limit?: number | null,
+  ): Promise<{
+    results: StoredDocument[];
+    fieldPathsToSortBy: string[];
+    order: "asc" | "desc";
+  } | null> {
+    if (!this._hasPendingWritesForAnySource(source)) {
+      const searchDefinition =
+        source.type === "Search"
+          ? resolveSearchIndexDefinition(
+              this._schema?.tables.get(source.indexName.split(".")[0])
+                ?.searchIndexes,
+              source.indexName.split(".")[0],
+              source.indexName.split(".")[1],
+            )
+          : undefined;
+      const indexFields =
+        source.type === "IndexRange"
+          ? (this._getIndexDefinitions(source.indexName.split(".")[0]).find(
+              (entry) => entry.indexName === source.indexName.split(".")[1],
+            )?.fields ?? null)
+          : null;
+      const results = await this._store.readSource(source, {
+        limit,
+        indexFields: indexFields ?? undefined,
+        searchDefinition,
+        activeIdentityKey: this._activeIdentityKey,
+      });
+      if (results !== null) {
+        this._rememberCommittedLookup(sourceTableName(source), results);
+        const order =
+          source.type === "Search" ? "asc" : (source.order ?? "asc");
+        return {
+          results,
+          fieldPathsToSortBy:
+            source.type === "FullTableScan" ? ["_creationTime"] : [],
+          order,
+        };
+      }
+    }
+
+    if (
+      source.type === "FullTableScan" &&
+      !this._hasPendingWritesForTable(source.tableName)
+    ) {
+      const docs = await this._store.listDocuments(source.tableName);
+      if (docs !== null) {
+        this._rememberCommittedLookup(source.tableName, docs);
+        return {
+          results: docs,
+          fieldPathsToSortBy: ["_creationTime"],
+          order: source.order ?? "asc",
+        };
+      }
+    }
+
+    const sourceTable = sourceTableName(source);
+    if (
+      this._hasPendingWritesForAnySource(source) &&
+      this._store.isAuthoritative(sourceTable) &&
+      !this.isTableHydrationAttempted(sourceTable)
+    ) {
+      await this.hydrate({ tables: [sourceTable] });
+    }
+
+    return this._readOptimizedSource(source, limit);
+  }
+
   private _readOptimizedQuery(
     query: SerializedQuery,
   ): Array<GenericDocument> | null {
     const { filters, limit } = this._extractNormalizedOperators(
       query.operators,
     );
+    this._assertSyncAllowedForSource(query.source, "_readOptimizedQuery");
 
     if (query.source.type === "FullTableScan") {
       const indexName =
@@ -1618,6 +2271,112 @@ export class Database {
     return null;
   }
 
+  private async _readOptimizedQueryAsync(
+    query: SerializedQuery,
+  ): Promise<Array<GenericDocument> | null> {
+    const { filters, limit } = this._extractNormalizedOperators(
+      query.operators,
+    );
+
+    if (
+      (query.source.type === "FullTableScan" ||
+        query.source.type === "IndexRange") &&
+      !this._hasPendingWritesForAnySource(query.source)
+    ) {
+      const indexFields =
+        query.source.type === "IndexRange"
+          ? (this._getIndexDefinitions(
+              query.source.indexName.split(".")[0],
+            ).find(
+              (entry) =>
+                query.source.type === "IndexRange" &&
+                entry.indexName === query.source.indexName.split(".")[1],
+            )?.fields ?? null)
+          : null;
+      const pushedDown = await this._store.readQuery({
+        source: query.source,
+        filters,
+        limit,
+        indexFields: indexFields ?? undefined,
+        searchDefinition: undefined,
+        activeIdentityKey: this._activeIdentityKey,
+      });
+      if (pushedDown !== null) {
+        this._rememberCommittedLookup(
+          sourceTableName(query.source),
+          pushedDown,
+        );
+        return pushedDown;
+      }
+    }
+
+    if (
+      (query.source.type === "FullTableScan" ||
+        query.source.type === "IndexRange" ||
+        query.source.type === "Search") &&
+      !this._hasPendingWritesForAnySource(query.source)
+    ) {
+      const searchDefinition =
+        query.source.type === "Search"
+          ? resolveSearchIndexDefinition(
+              this._schema?.tables.get(query.source.indexName.split(".")[0])
+                ?.searchIndexes,
+              query.source.indexName.split(".")[0],
+              query.source.indexName.split(".")[1],
+            )
+          : undefined;
+      let indexFields: string[] | null | undefined;
+      if (query.source.type === "IndexRange") {
+        const [tbl, idx] = query.source.indexName.split(".");
+        indexFields =
+          this._getIndexDefinitions(tbl).find(
+            (entry) => entry.indexName === idx,
+          )?.fields ?? null;
+      }
+      const sourceResults = await this._store.readSource(query.source, {
+        limit,
+        indexFields: indexFields ?? undefined,
+        searchDefinition,
+        activeIdentityKey: this._activeIdentityKey,
+      });
+      if (sourceResults !== null) {
+        this._rememberCommittedLookup(
+          sourceTableName(query.source),
+          sourceResults,
+        );
+        return null;
+      }
+    }
+
+    if (
+      query.source.type === "FullTableScan" &&
+      !this._hasPendingWritesForTable(query.source.tableName)
+    ) {
+      const docs = await this._store.listDocuments(query.source.tableName);
+      if (docs !== null) {
+        this._rememberCommittedLookup(query.source.tableName, docs);
+        const orderedDocs =
+          query.source.order === "desc" ? [...docs].reverse() : docs;
+        return this._filterOrderedDocs(orderedDocs, filters, limit);
+      }
+    }
+
+    return this._readOptimizedQuery(query);
+  }
+
+  private _hasPendingWritesForAnySource(
+    source: SerializedQuery["source"],
+  ): boolean {
+    if (source.type === "FullTableScan") {
+      return this._hasPendingWritesForTable(source.tableName);
+    }
+    if (source.type === "IndexRange" || source.type === "Search") {
+      const [tableName] = source.indexName.split(".");
+      return this._hasPendingWritesForTable(tableName);
+    }
+    return this._hasPendingWrites();
+  }
+
   private _extractNormalizedOperators(
     operators: SerializedQuery["operators"],
   ): {
@@ -1648,9 +2407,13 @@ export class Database {
     order: "asc" | "desc" = "asc",
   ): StoredDocument[] {
     const results: StoredDocument[] = [];
+    const seenIds = new Set<string>();
     const iterate = order === "desc" ? [...docs].reverse() : docs;
 
     for (const doc of iterate) {
+      if (seenIds.has(doc._id as string)) {
+        continue;
+      }
       if (!predicate(doc)) {
         continue;
       }
@@ -1661,6 +2424,7 @@ export class Database {
         continue;
       }
       results.push(doc);
+      seenIds.add(doc._id as string);
       if (limit !== null && results.length >= limit) {
         break;
       }
@@ -1698,6 +2462,7 @@ export class Database {
     const committedIds =
       this._indexDocuments.get(`${tableName}.${indexName}`) ?? [];
     const results: StoredDocument[] = [];
+    const seenIds = new Set<string>();
 
     let committedIndex = 0;
     let pendingIndex = 0;
@@ -1723,6 +2488,9 @@ export class Database {
     };
 
     const maybePush = (doc: StoredDocument): boolean => {
+      if (seenIds.has(doc._id as string)) {
+        return false;
+      }
       if (
         filters.length > 0 &&
         !filters.every((filter) => evaluateNormalizedFilter(doc, filter))
@@ -1730,6 +2498,7 @@ export class Database {
         return false;
       }
       results.push(doc);
+      seenIds.add(doc._id as string);
       return limit !== null && results.length >= limit;
     };
 
@@ -1789,6 +2558,7 @@ export class Database {
     const committedIds =
       this._indexDocuments.get(`${tableName}.${indexName}`) ?? [];
     const results: StoredDocument[] = [];
+    const seenIds = new Set<string>();
     let committedIndex = 0;
     let pendingIndex = 0;
 
@@ -1823,6 +2593,9 @@ export class Database {
     };
 
     const maybePush = (doc: StoredDocument): boolean => {
+      if (seenIds.has(doc._id as string)) {
+        return false;
+      }
       if (!compareBounds(doc) || !predicate(doc)) {
         return false;
       }
@@ -1833,6 +2606,7 @@ export class Database {
         return false;
       }
       results.push(doc);
+      seenIds.add(doc._id as string);
       return limit !== null && results.length >= limit;
     };
 
@@ -1972,6 +2746,7 @@ export class Database {
     compare: (left: StoredDocument, right: StoredDocument) => number,
   ): StoredDocument[] {
     const merged: StoredDocument[] = [];
+    const seenIds = new Set<string>();
     let leftIndex = 0;
     let rightIndex = 0;
 
@@ -1999,20 +2774,34 @@ export class Database {
 
     while (leftDoc !== null && rightIndex < rightDocs.length) {
       if (compare(leftDoc, rightDocs[rightIndex]!) <= 0) {
-        merged.push(leftDoc);
+        if (!seenIds.has(leftDoc._id as string)) {
+          merged.push(leftDoc);
+          seenIds.add(leftDoc._id as string);
+        }
         leftDoc = nextLeftDoc();
       } else {
-        merged.push(rightDocs[rightIndex]!);
+        const doc = rightDocs[rightIndex]!;
+        if (!seenIds.has(doc._id as string)) {
+          merged.push(doc);
+          seenIds.add(doc._id as string);
+        }
         rightIndex += 1;
       }
     }
 
     while (leftDoc !== null) {
-      merged.push(leftDoc);
+      if (!seenIds.has(leftDoc._id as string)) {
+        merged.push(leftDoc);
+        seenIds.add(leftDoc._id as string);
+      }
       leftDoc = nextLeftDoc();
     }
     while (rightIndex < rightDocs.length) {
-      merged.push(rightDocs[rightIndex]!);
+      const doc = rightDocs[rightIndex]!;
+      if (!seenIds.has(doc._id as string)) {
+        merged.push(doc);
+        seenIds.add(doc._id as string);
+      }
       rightIndex += 1;
     }
 
@@ -2031,6 +2820,40 @@ export class Database {
     for (const tableName of this._tableDocuments.keys()) {
       this._rebuildTableSearchIndexes(tableName);
     }
+  }
+
+  private _collectTableSearchIndexes(): Record<
+    string,
+    import("@/runtime/db/schema").SearchIndexDefinition[]
+  > {
+    const result: Record<
+      string,
+      import("@/runtime/db/schema").SearchIndexDefinition[]
+    > = {};
+    if (!this._schema) return result;
+    for (const [tableName, tableSchema] of this._schema.tables) {
+      if (tableSchema.searchIndexes && tableSchema.searchIndexes.length > 0) {
+        result[tableName] = [...tableSchema.searchIndexes];
+      }
+    }
+    return result;
+  }
+
+  private _collectTableVectorIndexes(): Record<
+    string,
+    import("@/runtime/db/schema").VectorIndexDefinition[]
+  > {
+    const result: Record<
+      string,
+      import("@/runtime/db/schema").VectorIndexDefinition[]
+    > = {};
+    if (!this._schema) return result;
+    for (const [tableName, tableSchema] of this._schema.tables) {
+      if (tableSchema.vectorIndexes && tableSchema.vectorIndexes.length > 0) {
+        result[tableName] = [...tableSchema.vectorIndexes];
+      }
+    }
+    return result;
   }
 
   private _rebuildAllVectorIndexes(): void {
@@ -2139,6 +2962,10 @@ export class Database {
     }
 
     for (const [tableName, tableChanges] of changesByTable) {
+      if (this._store.isAuthoritative(tableName)) {
+        continue;
+      }
+
       const committedCount = this.getCommittedTableCount(tableName);
       const hasCommittedState = this._indexDocuments.has(
         `${tableName}.by_creation_time`,
@@ -2160,6 +2987,29 @@ export class Database {
     }
   }
 
+  private _isSystemTable(tableName: string): boolean {
+    return tableName.startsWith("_");
+  }
+
+  private _assertSyncAllowedForTable(tableName: string, site: string): void {
+    if (!this._store.isAuthoritative(tableName)) {
+      return;
+    }
+    if (this._tableDocuments.has(tableName)) {
+      return;
+    }
+    throw new Error(
+      `[convex-embedded] ${site}: synchronous reads are not supported for SQL-backed table "${tableName}". Use the async variant so reads route through the adapter read backend.`,
+    );
+  }
+
+  private _assertSyncAllowedForSource(
+    source: SerializedQuery["source"],
+    site: string,
+  ): void {
+    this._assertSyncAllowedForTable(sourceTableName(source), site);
+  }
+
   private _applyIncrementalIndexChanges(
     tableName: string,
     changes: CommittedStateChange[],
@@ -2173,8 +3023,12 @@ export class Database {
 
       for (const change of changes) {
         if (change.before !== null) {
-          const position = ids.indexOf(change.id as string);
-          if (position !== -1) {
+          const id = change.id as string;
+          for (
+            let position = ids.indexOf(id);
+            position !== -1;
+            position = ids.indexOf(id)
+          ) {
             ids.splice(position, 1);
           }
         }
@@ -2191,6 +3045,23 @@ export class Database {
           change.after,
         );
         ids.splice(insertAt, 0, change.id as string);
+      }
+
+      const seenIds = new Set<string>();
+      let hasDuplicates = false;
+      for (const id of ids) {
+        if (seenIds.has(id)) {
+          hasDuplicates = true;
+          break;
+        }
+        seenIds.add(id);
+      }
+
+      if (hasDuplicates) {
+        log.warn(
+          `duplicate incremental ids detected for ${key}; rebuilding index`,
+        );
+        this._rebuildTableIndexes(tableName);
       }
     }
   }

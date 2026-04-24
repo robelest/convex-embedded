@@ -1,10 +1,11 @@
 import { readFile } from "node:fs/promises";
 
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it } from "@tests/testkit";
 
 const entryFiles = [
   "packages/convex-embedded/src/index.ts",
   "packages/convex-embedded/src/browser/index.ts",
+  "packages/convex-embedded/src/node/index.ts",
   "packages/convex-embedded/src/react.ts",
   "packages/convex-embedded/src/expo/index.ts",
   "packages/convex-embedded/src/server/index.ts",

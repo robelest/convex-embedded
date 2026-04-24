@@ -1,6 +1,5 @@
-import { Fx } from "@robelest/fx";
-import { Cv } from "@robelest/fx/convex";
 import type { ConvexClient } from "convex/browser";
+import { ConvexError } from "convex/values";
 
 import {
   assertRemotePlanOnline,
@@ -8,7 +7,10 @@ import {
   type ReadPlan,
 } from "@/client/routing/plan";
 import type { EmbeddedRuntime } from "@/runtime/embedded";
-import type { ConnectivityAdapter } from "@/runtime/platform";
+import {
+  isConnectivityOffline,
+  type ConnectivityAdapter,
+} from "@/runtime/platform";
 
 function createNoopUnsubscribe(): any {
   const noop = (() => {}) as any;
@@ -18,18 +20,116 @@ function createNoopUnsubscribe(): any {
   return noop;
 }
 
-function isOffline(connectivity?: ConnectivityAdapter): boolean {
-  if (connectivity) {
-    return connectivity.isOnline() === false;
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object") {
+    return false;
   }
 
-  return typeof navigator !== "undefined" && navigator.onLine === false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === null || prototype === Object.prototype;
+}
+
+function getStringId(value: unknown): string | null {
+  return isPlainObject(value) && typeof value._id === "string"
+    ? value._id
+    : null;
+}
+
+function dedupeTranslatedArray(
+  rawValues: unknown[],
+  translatedValues: unknown[],
+): unknown[] {
+  const groups = new Map<
+    string,
+    { indexes: number[]; rawIds: Set<string>; translatedIds: Set<string> }
+  >();
+
+  for (let index = 0; index < translatedValues.length; index += 1) {
+    const translatedId = getStringId(translatedValues[index]);
+    if (translatedId === null) {
+      continue;
+    }
+    const rawId = getStringId(rawValues[index]);
+    const group = groups.get(translatedId) ?? {
+      indexes: [],
+      rawIds: new Set<string>(),
+      translatedIds: new Set<string>(),
+    };
+    group.indexes.push(index);
+    group.translatedIds.add(translatedId);
+    if (rawId !== null) {
+      group.rawIds.add(rawId);
+    }
+    groups.set(translatedId, group);
+  }
+
+  const keep = new Set<number>(translatedValues.map((_, index) => index));
+  let changed = false;
+
+  for (const group of groups.values()) {
+    if (group.indexes.length < 2) {
+      continue;
+    }
+
+    // Only collapse duplicates introduced by translation. If the raw result
+    // already exposed the same _id multiple times, preserve that behavior.
+    if (group.rawIds.size <= 1 && group.translatedIds.size === 1) {
+      continue;
+    }
+
+    changed = true;
+    const lastIndex = group.indexes[group.indexes.length - 1]!;
+    for (const index of group.indexes) {
+      if (index !== lastIndex) {
+        keep.delete(index);
+      }
+    }
+  }
+
+  return changed
+    ? translatedValues.filter((_, index) => keep.has(index))
+    : translatedValues;
+}
+
+function normalizeClientResult(
+  rawValue: unknown,
+  translatedValue: unknown,
+): unknown {
+  if (Array.isArray(translatedValue)) {
+    const rawItems = Array.isArray(rawValue) ? rawValue : [];
+    const normalizedItems = translatedValue.map((entryValue, index) =>
+      normalizeClientResult(rawItems[index], entryValue),
+    );
+    return dedupeTranslatedArray(rawItems, normalizedItems);
+  }
+
+  if (!isPlainObject(translatedValue)) {
+    return translatedValue;
+  }
+
+  const rawEntries = isPlainObject(rawValue) ? rawValue : {};
+
+  return Object.fromEntries(
+    Object.entries(translatedValue).map(([key, entryValue]) => [
+      key,
+      normalizeClientResult(rawEntries[key], entryValue),
+    ]),
+  );
+}
+
+function toClientResult<T>(value: T, translate?: <U>(value: U) => U): T {
+  const translated = translate?.(value) ?? value;
+  return normalizeClientResult(value, translated) as T;
 }
 
 function createRuntimeLocalOnUpdate(input: {
   runtime: EmbeddedRuntime;
   getRefName: (ref: unknown) => string;
   asError: (error: unknown) => Error;
+  ensureReadReady?: (
+    refName: string,
+    readArgs?: Record<string, unknown>,
+  ) => Promise<void>;
   translateLocalArgsToRuntime?: (
     args: Record<string, unknown>,
   ) => Record<string, unknown>;
@@ -41,18 +141,19 @@ function createRuntimeLocalOnUpdate(input: {
     callback: (result: unknown, meta?: unknown) => unknown,
     onError?: (error: Error, meta?: unknown) => unknown,
   ) => {
+    const refName = input.getRefName(ref);
+    void input.ensureReadReady?.(refName, args ?? {});
     const translatedArgs =
       input.translateLocalArgsToRuntime?.(args ?? {}) ?? args ?? {};
-    const watch = input.runtime.watchLocalQuery(
-      input.getRefName(ref),
-      translatedArgs,
-    );
+    const watch = input.runtime.watchLocalQuery(refName, translatedArgs);
 
     const notify = () => {
       try {
         callback(
-          input.translateLocalResultToClient?.(watch.localQueryResult()) ??
+          toClientResult(
             watch.localQueryResult(),
+            input.translateLocalResultToClient,
+          ),
           "Second argument to onUpdate callback is reserved for later use",
         );
       } catch (error) {
@@ -71,8 +172,10 @@ function createRuntimeLocalOnUpdate(input: {
     const unsubscribe = watch.onUpdate(notify) as any;
     unsubscribe.unsubscribe = unsubscribe;
     unsubscribe.getCurrentValue = () =>
-      input.translateLocalResultToClient?.(watch.localQueryResult()) ??
-      watch.localQueryResult();
+      toClientResult(
+        watch.localQueryResult(),
+        input.translateLocalResultToClient,
+      );
     unsubscribe.getQueryLogs = () => watch.localQueryLogs();
     return unsubscribe;
   };
@@ -82,6 +185,10 @@ function createRuntimeLocalPaginatedOnUpdate(input: {
   runtime: EmbeddedRuntime;
   getRefName: (ref: unknown) => string;
   asError: (error: unknown) => Error;
+  ensureReadReady?: (
+    refName: string,
+    readArgs?: Record<string, unknown>,
+  ) => Promise<void>;
   translateLocalArgsToRuntime?: (
     args: Record<string, unknown>,
   ) => Record<string, unknown>;
@@ -94,10 +201,12 @@ function createRuntimeLocalPaginatedOnUpdate(input: {
     callback: (result: unknown, meta?: unknown) => unknown,
     onError?: (error: Error, meta?: unknown) => unknown,
   ) => {
+    const refName = input.getRefName(ref);
+    void input.ensureReadReady?.(refName, args ?? {});
     const translatedArgs =
       input.translateLocalArgsToRuntime?.(args ?? {}) ?? args ?? {};
     const watch = input.runtime.watchLocalPaginatedQuery(
-      input.getRefName(ref),
+      refName,
       translatedArgs,
       options,
     );
@@ -105,8 +214,10 @@ function createRuntimeLocalPaginatedOnUpdate(input: {
     const notify = () => {
       try {
         callback(
-          input.translateLocalResultToClient?.(watch.localQueryResult()) ??
+          toClientResult(
             watch.localQueryResult(),
+            input.translateLocalResultToClient,
+          ),
           "Second argument to onUpdate callback is reserved for later use",
         );
       } catch (error) {
@@ -125,8 +236,10 @@ function createRuntimeLocalPaginatedOnUpdate(input: {
     const unsubscribe = watch.onUpdate(notify) as any;
     unsubscribe.unsubscribe = unsubscribe;
     unsubscribe.getCurrentValue = () =>
-      input.translateLocalResultToClient?.(watch.localQueryResult()) ??
-      watch.localQueryResult();
+      toClientResult(
+        watch.localQueryResult(),
+        input.translateLocalResultToClient,
+      );
     unsubscribe.getQueryLogs = () => watch.localQueryLogs();
     return unsubscribe;
   };
@@ -136,6 +249,10 @@ function patchBaseClientLocalQueryAccess(input: {
   client: ConvexClient;
   runtime: EmbeddedRuntime;
   resolveReadPlanByName: (refName: string) => ReadPlan;
+  ensureReadReady?: (
+    refName: string,
+    readArgs?: Record<string, unknown>,
+  ) => Promise<void>;
   translateLocalArgsToRuntime?: (
     args: Record<string, unknown>,
   ) => Record<string, unknown>;
@@ -161,10 +278,11 @@ function patchBaseClientLocalQueryAccess(input: {
 
       const translatedArgs =
         input.translateLocalArgsToRuntime?.(args ?? {}) ?? args ?? {};
+      void input.ensureReadReady?.(refName, args ?? {});
       const result = input.runtime
         .watchLocalQuery(refName, translatedArgs)
         .localQueryResult();
-      return input.translateLocalResultToClient?.(result) ?? result;
+      return toClientResult(result, input.translateLocalResultToClient);
     };
   }
 
@@ -215,46 +333,39 @@ function deferSubscription(input: {
     return undefined;
   };
 
-  Fx.detach(
-    () =>
-      Fx.run(
-        Fx.from({
-          ok: () => input.factory(),
-          err: (error) => input.asError(error),
-        }).pipe(
-          Fx.tap((actual) =>
-            Fx.sync(() => {
-              if (cancelled) {
-                if (typeof actual === "function") {
-                  actual();
-                } else if (actual && typeof actual.unsubscribe === "function") {
-                  actual.unsubscribe();
-                }
-                return;
-              }
-              inner = actual;
-            }),
-          ),
-          Fx.recover((error) =>
-            Fx.sync(() => {
-              if (input.onInitError) {
-                try {
-                  input.onInitError(error);
-                  return;
-                } catch {
-                  /* listener error */
-                }
-              }
-              console.error(
-                "[convex-embedded] failed to initialize subscription",
-                error,
-              );
-            }),
-          ),
-        ),
-      ),
-    "[adapter] deferSubscription:",
-  );
+  void input
+    .factory()
+    .then(
+      (actual) => {
+        if (cancelled) {
+          if (typeof actual === "function") {
+            actual();
+          } else if (actual && typeof actual.unsubscribe === "function") {
+            actual.unsubscribe();
+          }
+          return;
+        }
+        inner = actual;
+      },
+      (error) => {
+        const normalized = input.asError(error);
+        if (input.onInitError) {
+          try {
+            input.onInitError(normalized);
+            return;
+          } catch {
+            /* listener error */
+          }
+        }
+        console.error(
+          "[convex-embedded] failed to initialize subscription",
+          normalized,
+        );
+      },
+    )
+    .catch((error: unknown) => {
+      console.error("[adapter] deferSubscription:", error);
+    });
 
   return unsubscribe;
 }
@@ -275,6 +386,10 @@ export function patchRoutedConvexClient(input: {
     args: Record<string, unknown>,
     enqueueForReplay: boolean,
   ) => Promise<unknown>;
+  ensureReadReady?: (
+    refName: string,
+    readArgs?: Record<string, unknown>,
+  ) => Promise<void>;
   translateLocalArgsToRuntime?: (
     args: Record<string, unknown>,
   ) => Record<string, unknown>;
@@ -287,6 +402,7 @@ export function patchRoutedConvexClient(input: {
     client: input.client,
     runtime: input.runtime,
     resolveReadPlanByName: input.resolveReadPlanByName,
+    ensureReadReady: input.ensureReadReady,
     translateLocalArgsToRuntime: input.translateLocalArgsToRuntime,
     translateLocalResultToClient: input.translateLocalResultToClient,
   });
@@ -295,6 +411,7 @@ export function patchRoutedConvexClient(input: {
     runtime: input.runtime,
     getRefName: input.getRefName,
     asError: input.asError,
+    ensureReadReady: input.ensureReadReady,
     translateLocalArgsToRuntime: input.translateLocalArgsToRuntime,
     translateLocalResultToClient: input.translateLocalResultToClient,
   });
@@ -302,6 +419,7 @@ export function patchRoutedConvexClient(input: {
     runtime: input.runtime,
     getRefName: input.getRefName,
     asError: input.asError,
+    ensureReadReady: input.ensureReadReady,
     translateLocalArgsToRuntime: input.translateLocalArgsToRuntime,
     translateLocalResultToClient: input.translateLocalResultToClient,
   });
@@ -309,27 +427,22 @@ export function patchRoutedConvexClient(input: {
   const waitUntilReady = input.waitUntilReady ?? ((run) => run());
   const isReady = input.isReady ?? (() => true);
 
-  const executeLocalRead = (
+  const executeLocalRead = async (
     ref: unknown,
     args: Record<string, unknown>,
     kind: "query" | "action",
   ) => {
     const translatedArgs = input.translateLocalArgsToRuntime?.(args) ?? args;
-    return Fx.run(
-      Fx.from({
-        ok: () =>
-          input.runtime.executeLocal({
-            kind,
-            path: input.getRefName(ref),
-            args: translatedArgs,
-          }),
-        err: (error) => input.asError(error),
-      }).pipe(
-        Fx.map(
-          (result) => input.translateLocalResultToClient?.(result) ?? result,
-        ),
-      ),
-    );
+    try {
+      const result = await input.runtime.executeLocal({
+        kind,
+        path: input.getRefName(ref),
+        args: translatedArgs,
+      });
+      return toClientResult(result, input.translateLocalResultToClient);
+    } catch (error) {
+      throw input.asError(error);
+    }
   };
 
   const createSubscriptionFactory = (
@@ -346,10 +459,10 @@ export function patchRoutedConvexClient(input: {
         throw route.error;
       }
 
-      if (isOffline(input.connectivity)) {
+      if (isConnectivityOffline(input.connectivity)) {
         let error: Error;
         try {
-          assertRemotePlanOnline(route);
+          assertRemotePlanOnline(route, input.connectivity);
           error = new Error("unreachable");
         } catch (current) {
           error = input.asError(current);
@@ -383,129 +496,122 @@ export function patchRoutedConvexClient(input: {
   (input.client as any).mutation = function patchedMutation(
     ...args: Parameters<typeof input.client.mutation>
   ): Promise<any> {
-    return waitUntilReady(() => {
+    return waitUntilReady(async () => {
       const route = input.resolveMutationPlan(args[0]);
-      return Fx.run(
-        Fx.defer(() => {
-          if (route.kind === "error") {
-            return Fx.fail(route.error);
-          }
-          if (route.kind === "local") {
-            return Fx.from({
-              ok: () =>
-                input.executeLocalMutation(
-                  args[0],
-                  (args[1] ?? {}) as Record<string, unknown>,
-                  route.enqueueForReplay,
-                ),
-              err: (error) => input.asError(error),
-            });
-          }
+      if (route.kind === "error") {
+        throw route.error;
+      }
+      if (route.kind === "local") {
+        try {
+          return await input.executeLocalMutation(
+            args[0],
+            (args[1] ?? {}) as Record<string, unknown>,
+            route.enqueueForReplay,
+          );
+        } catch (error) {
+          throw input.asError(error);
+        }
+      }
 
-          return Fx.from({
-            ok: () => {
-              assertRemotePlanOnline(route);
-              if (!remoteClient) {
-                throw Cv.error({
-                  code: "REMOTE_CLIENT_UNAVAILABLE",
-                  message:
-                    "[convex-embedded] Remote mutation execution was requested, but no remote client is configured. " +
-                    "Add ClientOptions.remote or remove remoteOnly().",
-                  kind: "mutation",
-                });
-              }
-              return (remoteClient as any).mutation(...args);
-            },
-            err: (error) => input.asError(error),
+      try {
+        assertRemotePlanOnline(route, input.connectivity);
+        if (!remoteClient) {
+          throw new ConvexError({
+            code: "REMOTE_CLIENT_UNAVAILABLE",
+            message:
+              "[convex-embedded] Remote mutation execution was requested, but no remote client is configured. " +
+              "Add ClientOptions.remote or remove remoteOnly().",
+            kind: "mutation",
           });
-        }),
-      );
+        }
+        return await (remoteClient as any).mutation(...args);
+      } catch (error) {
+        throw input.asError(error);
+      }
     });
   };
 
   (input.client as any).query = function patchedQuery(
     ...args: Parameters<typeof input.client.query>
   ): Promise<any> {
-    return waitUntilReady(() => {
+    return waitUntilReady(async () => {
       const route = input.resolveReadPlan(args[0]);
-      return Fx.run(
-        Fx.defer(() => {
-          if (route.kind === "error") {
-            return Fx.fail(route.error);
-          }
-          if (route.kind === "local") {
-            return Fx.from({
-              ok: () =>
-                executeLocalRead(
-                  args[0],
-                  (args[1] ?? {}) as Record<string, unknown>,
-                  "query",
-                ),
-              err: (error) => input.asError(error),
-            });
-          }
+      if (route.kind === "error") {
+        throw route.error;
+      }
+      if (route.kind === "local") {
+        try {
+          await input.ensureReadReady?.(
+            input.getRefName(args[0]),
+            (args[1] ?? {}) as Record<string, unknown>,
+          );
+          return await executeLocalRead(
+            args[0],
+            (args[1] ?? {}) as Record<string, unknown>,
+            "query",
+          );
+        } catch (error) {
+          throw input.asError(error);
+        }
+      }
 
-          return Fx.from({
-            ok: () => {
-              assertRemotePlanOnline(route);
-              if (!remoteClient) {
-                throw Cv.error({
-                  code: "REMOTE_CLIENT_UNAVAILABLE",
-                  message:
-                    "[convex-embedded] Remote query execution was requested, but no remote client is configured. " +
-                    "Add ClientOptions.remote or remove remoteOnly().",
-                  kind: "query",
-                });
-              }
-              return (remoteClient as any).query(...args);
-            },
-            err: (error) => input.asError(error),
+      try {
+        assertRemotePlanOnline(route, input.connectivity);
+        if (!remoteClient) {
+          throw new ConvexError({
+            code: "REMOTE_CLIENT_UNAVAILABLE",
+            message:
+              "[convex-embedded] Remote query execution was requested, but no remote client is configured. " +
+              "Add ClientOptions.remote or remove remoteOnly().",
+            kind: "query",
           });
-        }),
-      );
+        }
+        return await (remoteClient as any).query(...args);
+      } catch (error) {
+        throw input.asError(error);
+      }
     });
   };
 
   (input.client as any).action = function patchedAction(
     ...args: Parameters<typeof input.client.action>
   ): Promise<any> {
-    return waitUntilReady(() => {
+    return waitUntilReady(async () => {
       const route = input.resolveReadPlan(args[0]);
-      return Fx.run(
-        Fx.defer(() => {
-          if (route.kind === "error") {
-            return Fx.fail(route.error);
-          }
-          if (route.kind === "local") {
-            return Fx.from({
-              ok: () =>
-                executeLocalRead(
-                  args[0],
-                  (args[1] ?? {}) as Record<string, unknown>,
-                  "action",
-                ),
-              err: (error) => input.asError(error),
-            });
-          }
+      if (route.kind === "error") {
+        throw route.error;
+      }
+      if (route.kind === "local") {
+        try {
+          await input.ensureReadReady?.(
+            input.getRefName(args[0]),
+            (args[1] ?? {}) as Record<string, unknown>,
+          );
+          return await executeLocalRead(
+            args[0],
+            (args[1] ?? {}) as Record<string, unknown>,
+            "action",
+          );
+        } catch (error) {
+          throw input.asError(error);
+        }
+      }
 
-          return Fx.from({
-            ok: () => {
-              assertRemotePlanOnline(route);
-              if (!remoteClient) {
-                throw Cv.error({
-                  code: "REMOTE_CLIENT_UNAVAILABLE",
-                  message:
-                    "[convex-embedded] Remote action execution was requested, but no remote client is configured. " +
-                    "Add ClientOptions.remote or remove remoteOnly().",
-                  kind: "action",
-                });
-              }
-              return (remoteClient as any).action(...args);
-            },
-            err: (error) => input.asError(error),
+      try {
+        assertRemotePlanOnline(route, input.connectivity);
+        if (!remoteClient) {
+          throw new ConvexError({
+            code: "REMOTE_CLIENT_UNAVAILABLE",
+            message:
+              "[convex-embedded] Remote action execution was requested, but no remote client is configured. " +
+              "Add ClientOptions.remote or remove remoteOnly().",
+            kind: "action",
           });
-        }),
-      );
+        }
+        return await (remoteClient as any).action(...args);
+      } catch (error) {
+        throw input.asError(error);
+      }
     });
   };
 

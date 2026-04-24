@@ -1,15 +1,11 @@
-import { createTestIdentity } from "@embedded/auth/resolver";
 import { BrowserWriteBroadcast } from "@embedded/browser/write";
 import { EmbeddedRuntime } from "@embedded/runtime/embedded";
+import type { Definition } from "@embedded/shared/schema";
+import { createTestIdentity } from "@embedded/test";
+import { mockAdapter } from "@tests/helpers/test-adapter";
+import { describe, it, expect, beforeEach, afterEach } from "@tests/testkit";
 import { makeFunctionReference } from "convex/server";
-import {
-  describe,
-  it,
-  expect,
-  vi,
-  beforeEach,
-  afterEach,
-} from "vite-plus/test";
+import { vi } from "vitest";
 
 // ---------------------------------------------------------------------------
 // Mock BroadcastChannel (copied from browser/write.test.ts)
@@ -60,8 +56,20 @@ class MockBroadcastChannel {
  * a `_generated` directory entry.
  */
 const STUB_MODULES: Record<string, () => Promise<any>> = {
-  "./convex/_generated/api.ts": () => Promise.resolve({}),
+  "_generated/api": () => Promise.resolve({}),
 };
+
+function createMockSchema(overrides?: Partial<Definition>): Definition {
+  return {
+    version: 1,
+    shape: { title: "string" },
+    defaults: {},
+    getShape: () => ({ title: "string" }),
+    getCrdtFields: () => new Map(),
+    getOmittedFields: () => [],
+    ...overrides,
+  } as Definition;
+}
 
 function deferredPromise<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -73,8 +81,86 @@ function deferredPromise<T>() {
   return { promise, resolve, reject };
 }
 
+function createSqlPersistence(
+  rowsByTable: Record<string, Array<Record<string, unknown>>>,
+) {
+  const getDocumentsByTable = vi.fn(async (tableName: string) => [
+    ...(rowsByTable[tableName] ?? []),
+  ]);
+  const getDocument = vi.fn(async (tableName: string, id: string) => {
+    return (
+      rowsByTable[tableName]?.find((row) => String(row._id) === id) ?? null
+    );
+  });
+  const listDocuments = vi.fn(async (tableName: string) => [
+    ...(rowsByTable[tableName] ?? []),
+  ]);
+  const countDocuments = vi.fn(
+    async (tableName: string) => rowsByTable[tableName]?.length ?? 0,
+  );
+  const readSource = vi.fn(async (source: any) => {
+    const tableName =
+      source.type === "FullTableScan"
+        ? source.tableName
+        : String(source.indexName).split(".")[0];
+    let rows = [...(rowsByTable[tableName] ?? [])];
+    if (source.type === "IndexRange") {
+      rows = rows.filter((row) =>
+        source.range.every(
+          (entry: any) =>
+            entry.type !== "Eq" || row[entry.fieldPath] === entry.value,
+        ),
+      );
+    }
+    return rows;
+  });
+
+  const persistence = {
+    listAll: async () =>
+      Object.entries(rowsByTable).flatMap(([tableName, docs]) =>
+        docs.map((doc) => ({ tableName, doc })),
+      ),
+    list: listDocuments,
+    get: getDocument,
+    hasAnyDocuments: vi.fn(
+      async (tableName: string) => (rowsByTable[tableName]?.length ?? 0) > 0,
+    ),
+    listMany: vi.fn(async (tableNames: string[]) =>
+      tableNames.flatMap((tableName) =>
+        (rowsByTable[tableName] ?? []).map((doc) => ({ tableName, doc })),
+      ),
+    ),
+    meta: async () => ({ timestamp: 0, lastCreationTime: 0 }),
+    count: countDocuments,
+    source: readSource,
+    query: vi.fn(async () => null),
+    listBlobs: async () => [],
+    getBlob: async () => null,
+    commit: vi.fn(async (batch) => {
+      for (const put of batch.puts) {
+        const tableRows = rowsByTable[put.tableName] ?? [];
+        const next = tableRows.filter((row) => row._id !== put.doc._id);
+        next.push(put.doc);
+        rowsByTable[put.tableName] = next;
+      }
+      for (const deletion of batch.deletes) {
+        rowsByTable[deletion.tableName] = (
+          rowsByTable[deletion.tableName] ?? []
+        ).filter((row) => row._id !== deletion.id);
+      }
+    }),
+    putBlob: async () => undefined,
+    deleteBlob: async () => undefined,
+    clear: async () => undefined,
+  };
+
+  // Expose the `list` mock that mockAdapter actually wires. Tests destructure
+  // as `{ list: someName }` and assert on it.
+  return { persistence, list: listDocuments, readSource, getDocument };
+}
+
 async function flushRuntimeWatch(): Promise<void> {
-  for (let i = 0; i < 5; i += 1) {
+  for (let i = 0; i < 10; i += 1) {
     await Promise.resolve();
   }
 }
@@ -88,7 +174,7 @@ let runtime: EmbeddedRuntime;
 beforeEach(() => {
   MockBroadcastChannel.reset();
   vi.stubGlobal("BroadcastChannel", MockBroadcastChannel);
-  runtime = new EmbeddedRuntime({ modules: STUB_MODULES });
+  runtime = new EmbeddedRuntime({ convex: { modules: STUB_MODULES } });
 });
 
 afterEach(() => {
@@ -118,6 +204,127 @@ describe("Construction", () => {
     expect(runtime.writeFanout).toBeDefined();
     expect(runtime.auth).toBeDefined();
     expect(runtime.scheduler).toBeDefined();
+  });
+
+  it("surfaces storage hydration failures instead of swallowing them", async () => {
+    const failingRuntime = new EmbeddedRuntime({
+      convex: { modules: STUB_MODULES },
+      persistence: mockAdapter({
+        kind: "opaque",
+        listAll: async () => {
+          throw new Error("boom");
+        },
+        list: async () => [],
+        meta: async () => null,
+        listBlobs: async () => [],
+        commit: async () => undefined,
+        putBlob: async () => undefined,
+        deleteBlob: async () => undefined,
+        clear: async () => undefined,
+      }),
+    });
+
+    try {
+      await expect(failingRuntime.hydrate()).rejects.toThrow("boom");
+    } finally {
+      failingRuntime.shutdown();
+    }
+  });
+});
+
+describe("Action execution", () => {
+  it("serializes top-level actions", async () => {
+    const firstGate = deferredPromise<void>();
+    const events: string[] = [];
+    const serialRuntime = new EmbeddedRuntime({
+      convex: {
+        modules: {
+          api: () =>
+            Promise.resolve({
+              first: {
+                isAction: true,
+                handler: async () => {
+                  events.push("first:start");
+                  await firstGate.promise;
+                  events.push("first:end");
+                  return "first";
+                },
+              },
+              second: {
+                isAction: true,
+                handler: async () => {
+                  events.push("second:start");
+                  events.push("second:end");
+                  return "second";
+                },
+              },
+            }),
+          _generated: () => Promise.resolve({}),
+          "_generated/api": () => Promise.resolve({}),
+        },
+      },
+    });
+
+    try {
+      const first = serialRuntime.executeLocal({
+        kind: "action",
+        path: "api:first",
+        args: {},
+      });
+      await flushRuntimeWatch();
+      const second = serialRuntime.executeLocal({
+        kind: "action",
+        path: "api:second",
+        args: {},
+      });
+      await flushRuntimeWatch();
+
+      expect(events).toEqual(["first:start"]);
+
+      firstGate.resolve();
+
+      await expect(first).resolves.toBe("first");
+      await expect(second).resolves.toBe("second");
+      expect(events).toEqual([
+        "first:start",
+        "first:end",
+        "second:start",
+        "second:end",
+      ]);
+    } finally {
+      serialRuntime.shutdown();
+    }
+  });
+});
+
+describe("Blob storage", () => {
+  it("rolls back metadata when durable blob storage fails", async () => {
+    const blobRuntime = new EmbeddedRuntime({
+      convex: { modules: STUB_MODULES },
+      persistence: mockAdapter({
+        kind: "opaque",
+        listAll: async () => [],
+        list: async () => [],
+        meta: async () => ({ timestamp: 0, lastCreationTime: 0 }),
+        listBlobs: async () => [],
+        commit: async () => undefined,
+        putBlob: async () => {
+          throw new Error("disk full");
+        },
+        deleteBlob: async () => undefined,
+        clear: async () => undefined,
+      }),
+    });
+
+    try {
+      await blobRuntime.hydrate();
+      await expect(
+        blobRuntime.storeUploadedBlob(new Blob(["data"])),
+      ).rejects.toThrow("disk full");
+      expect(blobRuntime.db.getDocumentsForTable("_storage")).toEqual([]);
+    } finally {
+      blobRuntime.shutdown();
+    }
   });
 });
 
@@ -208,7 +415,7 @@ describe("onMutationCommit", () => {
 
     runtime.onMutationCommit({
       tablesWritten: new Set(["users"]),
-      changes: [],
+      invalidation: { tables: new Set(["users"]), changes: [] },
       persisted: Promise.resolve(),
       timestamp: 1,
     });
@@ -222,7 +429,7 @@ describe("onMutationCommit", () => {
 
     runtime.onMutationCommit({
       tablesWritten: new Set(),
-      changes: [],
+      invalidation: { tables: new Set(), changes: [] },
       persisted: Promise.resolve(),
       timestamp: 0,
     });
@@ -236,7 +443,7 @@ describe("onMutationCommit", () => {
 
     runtime.onMutationCommit({
       tablesWritten: new Set(["users"]),
-      changes: [],
+      invalidation: { tables: new Set(["users"]), changes: [] },
       persisted: new Promise<void>((resolve) => {
         resolvePersist = resolve;
       }),
@@ -247,8 +454,7 @@ describe("onMutationCommit", () => {
     expect(notifySpy).not.toHaveBeenCalled();
 
     resolvePersist();
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushRuntimeWatch();
 
     expect(notifySpy).toHaveBeenCalledWith(new Set(["users"]));
   });
@@ -259,7 +465,7 @@ describe("onMutationCommit", () => {
 
     runtime.onMutationCommit({
       tablesWritten: new Set(["users"]),
-      changes: [],
+      invalidation: { tables: new Set(["users"]), changes: [] },
       persisted: Promise.reject(new Error("disk full")),
       timestamp: 1,
     });
@@ -273,11 +479,11 @@ describe("onMutationCommit", () => {
 
   it("cross-tab fanout refreshes another runtime after persistence settles", async () => {
     const runtimeA = new EmbeddedRuntime({
-      modules: STUB_MODULES,
+      convex: { modules: STUB_MODULES },
       writeBroadcast: new BrowserWriteBroadcast("shared-runtime"),
     });
     const runtimeB = new EmbeddedRuntime({
-      modules: STUB_MODULES,
+      convex: { modules: STUB_MODULES },
       writeBroadcast: new BrowserWriteBroadcast("shared-runtime"),
     });
 
@@ -293,7 +499,7 @@ describe("onMutationCommit", () => {
         .mockResolvedValue(new Map());
       runtimeA.onMutationCommit({
         tablesWritten: new Set(["tasks"]),
-        changes: [],
+        invalidation: { tables: new Set(["tasks"]), changes: [] },
         persisted: Promise.resolve(),
         timestamp: 1,
       });
@@ -312,11 +518,11 @@ describe("onMutationCommit", () => {
 
   it("multiple cross-tab commits converge on the latest runtime refresh", async () => {
     const runtimeA = new EmbeddedRuntime({
-      modules: STUB_MODULES,
+      convex: { modules: STUB_MODULES },
       writeBroadcast: new BrowserWriteBroadcast("shared-runtime-burst"),
     });
     const runtimeB = new EmbeddedRuntime({
-      modules: STUB_MODULES,
+      convex: { modules: STUB_MODULES },
       writeBroadcast: new BrowserWriteBroadcast("shared-runtime-burst"),
     });
 
@@ -329,13 +535,13 @@ describe("onMutationCommit", () => {
         .mockResolvedValue(undefined as never);
       runtimeA.onMutationCommit({
         tablesWritten: new Set(["tasks"]),
-        changes: [],
+        invalidation: { tables: new Set(["tasks"]), changes: [] },
         persisted: Promise.resolve(),
         timestamp: 1,
       });
       runtimeA.onMutationCommit({
         tablesWritten: new Set(["tasks"]),
-        changes: [],
+        invalidation: { tables: new Set(["tasks"]), changes: [] },
         persisted: Promise.resolve(),
         timestamp: 2,
       });
@@ -359,31 +565,33 @@ describe("transaction locking", () => {
       firstStarted = resolve;
     });
     const localRuntime = new EmbeddedRuntime({
-      modules: {
-        ...STUB_MODULES,
-        "./convex/tasks.ts": () =>
-          Promise.resolve({
-            create: {
-              isMutation: true,
-              _handler: async () => {
-                order.push("first:start");
-                firstStarted();
-                await new Promise<void>((resolve) => {
-                  releaseFirst = resolve;
-                });
-                order.push("first:end");
-                return "first";
+      convex: {
+        modules: {
+          ...STUB_MODULES,
+          tasks: () =>
+            Promise.resolve({
+              create: {
+                isMutation: true,
+                _handler: async () => {
+                  order.push("first:start");
+                  firstStarted();
+                  await new Promise<void>((resolve) => {
+                    releaseFirst = resolve;
+                  });
+                  order.push("first:end");
+                  return "first";
+                },
               },
-            },
-            update: {
-              isMutation: true,
-              _handler: async () => {
-                order.push("second:start");
-                order.push("second:end");
-                return "second";
+              update: {
+                isMutation: true,
+                _handler: async () => {
+                  order.push("second:start");
+                  order.push("second:end");
+                  return "second";
+                },
               },
-            },
-          }),
+            }),
+        },
       },
     });
 
@@ -423,6 +631,116 @@ describe("transaction locking", () => {
     ]);
 
     localRuntime.shutdown();
+  });
+});
+
+describe("sql persistence hydration", () => {
+  it("does not hydrate sql-backed tables on demand for local query watches", async () => {
+    const getDocumentsByTable = vi.fn(async () => []);
+    const getDocumentsByTables = vi.fn(async () => []);
+    const localRuntime = new EmbeddedRuntime({
+      convex: { modules: STUB_MODULES },
+      persistence: mockAdapter({
+        kind: "sql",
+        listAll: async () => [],
+        list: getDocumentsByTable,
+        get: async () => null,
+        getDocumentsByTables,
+        hasAnyDocuments: async () => false,
+        meta: async () => ({ timestamp: 0, lastCreationTime: 0 }),
+        listDocuments: async () => [],
+        count: async () => 0,
+        source: async () => [],
+        query: async () => [],
+        listBlobs: async () => [],
+        getBlob: async () => null,
+        commit: async () => undefined,
+        putBlob: async () => undefined,
+        deleteBlob: async () => undefined,
+        clear: async () => undefined,
+      }),
+    });
+
+    try {
+      await localRuntime.hydrate();
+      vi.spyOn(localRuntime as any, "_evaluateLocalQuery").mockResolvedValue({
+        result: [],
+        tablesRead: new Set(["tasks"]),
+        dependencies: [{ type: "FullTableScan", tableName: "tasks" }],
+      });
+
+      localRuntime.watchLocalQuery("tasks:list", {});
+      await flushRuntimeWatch();
+
+      expect(getDocumentsByTables).not.toHaveBeenCalled();
+      expect(getDocumentsByTable).not.toHaveBeenCalled();
+    } finally {
+      localRuntime.shutdown();
+    }
+  });
+
+  it("eagerly hydrates via listAll during startup", async () => {
+    const listAll = vi.fn(async () => []);
+    const getDocumentsByTable = vi.fn(async () => []);
+    const localRuntime = new EmbeddedRuntime({
+      convex: { modules: STUB_MODULES },
+      persistence: mockAdapter({
+        kind: "sql",
+        listAll,
+        list: getDocumentsByTable,
+        get: async () => null,
+        hasAnyDocuments: async () => false,
+        meta: async () => ({ timestamp: 0, lastCreationTime: 0 }),
+        listDocuments: async () => [],
+        count: async () => 0,
+        source: async () => [],
+        query: async () => [],
+        listBlobs: async () => [],
+        getBlob: async () => null,
+        commit: async () => undefined,
+        putBlob: async () => undefined,
+        deleteBlob: async () => undefined,
+        clear: async () => undefined,
+      }),
+    });
+
+    try {
+      await localRuntime.hydrate();
+      // Eager hydration uses listAll (batch) rather than per-table list.
+      expect(listAll).toHaveBeenCalled();
+    } finally {
+      localRuntime.shutdown();
+    }
+  });
+
+  it("does not hydrate sql-backed tables before ingestDocuments diffs", async () => {
+    const {
+      persistence,
+      list: getDocumentsByTable,
+      readSource,
+    } = createSqlPersistence({
+      tasks: [{ _id: "task-1", _creationTime: 1, title: "Persisted" }],
+    });
+    const localRuntime = new EmbeddedRuntime({
+      convex: { modules: STUB_MODULES },
+      persistence: mockAdapter(persistence),
+    });
+
+    try {
+      await localRuntime.hydrate();
+      const readSourceCallsBeforeIngest = readSource.mock.calls.length;
+
+      await localRuntime.ingestDocuments("tasks", [
+        { _id: "task-1", _creationTime: 1, title: "Persisted" },
+      ]);
+
+      // ingestDocuments diffs against local state — it shouldn't force a
+      // full hydration of the table or go through source pushdown.
+      expect(readSource.mock.calls.length).toBe(readSourceCallsBeforeIngest);
+      expect(getDocumentsByTable).toHaveBeenCalledWith("tasks");
+    } finally {
+      localRuntime.shutdown();
+    }
   });
 });
 
@@ -555,6 +873,54 @@ describe("ingestDocuments", () => {
     runtime.setIdentity(null);
     expect(await runtime.getDocumentsForTable("tasks")).toEqual([]);
   });
+
+  it("canonicalizes a mapped create atomically across owning and referencing tables", async () => {
+    await runtime.hydrate();
+
+    await runtime.ingestDocuments("tasks", [
+      { _id: "local-task", _creationTime: 1, title: "Local title" },
+      { _id: "remote-task", _creationTime: 1, title: "Remote title" },
+    ]);
+    await runtime.ingestDocuments("comments", [
+      {
+        _id: "comment-1",
+        _creationTime: 2,
+        issueId: "local-task",
+        body: "linked",
+      },
+    ]);
+
+    await runtime.canonicalizeMappedCreate({
+      localId: "local-task",
+      remoteId: "remote-task",
+      tableName: "tasks",
+      schemas: {
+        tasks: createMockSchema(),
+        comments: createMockSchema({
+          shape: {
+            issueId: { kind: "id", tableName: "tasks" },
+            body: "string",
+          },
+          getShape: () => ({
+            issueId: { kind: "id", tableName: "tasks" },
+            body: "string",
+          }),
+        }),
+      },
+    });
+
+    expect(await runtime.getDocumentsForTable("tasks")).toEqual([
+      { _id: "remote-task", _creationTime: 1, title: "Local title" },
+    ]);
+    expect(await runtime.getDocumentsForTable("comments")).toEqual([
+      {
+        _id: "comment-1",
+        _creationTime: 2,
+        issueId: "remote-task",
+        body: "linked",
+      },
+    ]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -574,6 +940,189 @@ describe("executeLocal query", () => {
 
     expect(Array.isArray(result)).toBe(true);
     expect(result).toHaveLength(0);
+  });
+
+  it("reads persisted sql-backed id map rows through system queries", async () => {
+    const {
+      persistence,
+      list: getDocumentsByTable,
+      readSource,
+    } = createSqlPersistence({
+      _resolve_id_map: [
+        {
+          _id: "map-1",
+          _creationTime: 1,
+          localId: "local-1",
+          remoteId: "remote-1",
+          table: "tasks",
+          identityKey: "user:a",
+        },
+      ],
+    });
+    const localRuntime = new EmbeddedRuntime({
+      convex: { modules: STUB_MODULES },
+      persistence: mockAdapter(persistence),
+    });
+
+    try {
+      await localRuntime.hydrate();
+
+      expect(getDocumentsByTable).not.toHaveBeenCalledWith("_resolve_id_map");
+
+      const result = await localRuntime.executeLocal({
+        kind: "query",
+        path: "_system:idMapGetAll",
+        args: { identityKey: "user:a" },
+      });
+
+      expect(result).toEqual([
+        {
+          localId: "local-1",
+          remoteId: "remote-1",
+          table: "tasks",
+          identityKey: "user:a",
+        },
+      ]);
+      expect(getDocumentsByTable).not.toHaveBeenCalledWith("_resolve_id_map");
+      expect(readSource).toHaveBeenCalled();
+    } finally {
+      localRuntime.shutdown();
+    }
+  });
+
+  it("reads sql-backed collection and document metadata through system queries", async () => {
+    const {
+      persistence,
+      readSource,
+      list: getDocumentsByTable,
+    } = createSqlPersistence({
+      _resolve_collection_metadata: [
+        {
+          _id: "collection-meta-1",
+          _creationTime: 1,
+          collection: "tasks",
+          seq: 7,
+          identityKey: "user:a",
+          schemaVersion: 1,
+        },
+      ],
+      _resolve_document_metadata: [
+        {
+          _id: "doc-meta-1",
+          _creationTime: 1,
+          collection: "tasks",
+          docId: "task-1",
+          seq: 3,
+          identityKey: "user:a",
+          schemaVersion: 1,
+        },
+      ],
+    });
+    const localRuntime = new EmbeddedRuntime({
+      convex: { modules: STUB_MODULES },
+      persistence: mockAdapter(persistence),
+    });
+
+    try {
+      await localRuntime.hydrate();
+
+      const collectionSeq = await localRuntime.executeLocal({
+        kind: "query",
+        path: "_system:collectionMetadataGet",
+        args: {
+          collection: "tasks",
+          identityKey: "user:a",
+          schemaVersion: 1,
+        },
+      });
+      const docMetadata = await localRuntime.executeLocal({
+        kind: "query",
+        path: "_system:documentMetadataGetBatch",
+        args: {
+          collection: "tasks",
+          docIds: ["task-1"],
+          identityKey: "user:a",
+          schemaVersion: 1,
+        },
+      });
+
+      expect(collectionSeq).toBe(7);
+      expect(docMetadata).toEqual([{ docId: "task-1", seq: 3 }]);
+      expect(readSource).toHaveBeenCalled();
+      expect(getDocumentsByTable).not.toHaveBeenCalledWith(
+        "_resolve_collection_metadata",
+      );
+      expect(getDocumentsByTable).not.toHaveBeenCalledWith(
+        "_resolve_document_metadata",
+      );
+    } finally {
+      localRuntime.shutdown();
+    }
+  });
+
+  it("reads sql-backed auth state and pending identity keys through system queries", async () => {
+    const { persistence, list: getDocumentsByTable } = createSqlPersistence({
+      _resolve_auth_state: [
+        {
+          _id: "auth-1",
+          _creationTime: 1,
+          activeIdentityKey: "user:a",
+          updatedAt: 1,
+        },
+      ],
+      _resolve_pending: [
+        {
+          _id: "pending-1",
+          _creationTime: 1,
+          createdAt: 1,
+          ref: "tasks:create",
+          args: JSON.stringify({}),
+          localResult: JSON.stringify(null),
+          table: "tasks",
+          payloadVersion: 1,
+          identityKey: "user:b",
+          state: "pending",
+        },
+        {
+          _id: "pending-2",
+          _creationTime: 2,
+          createdAt: 2,
+          ref: "tasks:update",
+          args: JSON.stringify({}),
+          localResult: JSON.stringify(null),
+          table: "tasks",
+          payloadVersion: 1,
+          identityKey: "user:a",
+          state: "pending",
+        },
+      ],
+    });
+    const localRuntime = new EmbeddedRuntime({
+      convex: { modules: STUB_MODULES },
+      persistence: mockAdapter(persistence),
+    });
+
+    try {
+      await localRuntime.hydrate();
+
+      const activeIdentity = await localRuntime.executeLocal({
+        kind: "query",
+        path: "_system:authStateGetActive",
+        args: {},
+      });
+      const identityKeys = await localRuntime.executeLocal({
+        kind: "query",
+        path: "_system:pendingListIdentityKeys",
+        args: {},
+      });
+
+      expect(activeIdentity).toBe("user:a");
+      expect(identityKeys).toEqual(["user:a", "user:b"]);
+      // Eager `listAll` seeds memory on startup; system queries read from the
+      // materialized view rather than pushing `list(tableName)` down per-read.
+    } finally {
+      localRuntime.shutdown();
+    }
   });
 });
 
@@ -632,21 +1181,26 @@ describe("runtime query helpers", () => {
   });
 });
 
-describe("replica startup", () => {
-  it("seeds the runtime from replica data before first reads", async () => {
+describe("prefetch startup", () => {
+  it("seeds the runtime from prefetched data before first reads", async () => {
     const seededRuntime = new EmbeddedRuntime({
-      modules: STUB_MODULES,
-      replica: {
-        version: 1,
+      convex: { modules: STUB_MODULES },
+      prefetch: {
         identityKey: null,
         tables: {
           tasks: [
             {
               _id: "task-1",
               _creationTime: 1,
-              title: "From replica",
+              title: "From prefetch",
             },
           ],
+        },
+        metadata: {
+          tasks: {
+            collectionSeq: 1,
+            documents: [{ docId: "task-1", seq: 1 }],
+          },
         },
       },
     });
@@ -657,40 +1211,265 @@ describe("replica startup", () => {
       {
         _id: "task-1",
         _creationTime: 1,
-        title: "From replica",
+        title: "From prefetch",
       },
     ]);
 
     seededRuntime.shutdown();
   });
+
+  it("allows manual prefetch ingest when no initial prefetch is provided", async () => {
+    const deferredRuntime = new EmbeddedRuntime({
+      convex: { modules: STUB_MODULES },
+    });
+
+    try {
+      await deferredRuntime.hydrate();
+
+      expect(await deferredRuntime.getDocumentsForTable("tasks")).toEqual([]);
+      expect(deferredRuntime.getIdentityKey()).toBeNull();
+
+      await deferredRuntime.ingestPrefetch({
+        identityKey: "user-1",
+        tables: {
+          tasks: [
+            {
+              _id: "task-1",
+              _creationTime: 1,
+              title: "Deferred prefetch",
+            },
+          ],
+        },
+        metadata: {
+          tasks: {
+            collectionSeq: 1,
+            documents: [{ docId: "task-1", seq: 1 }],
+          },
+        },
+      });
+
+      expect(await deferredRuntime.getDocumentsForTable("tasks")).toEqual([
+        {
+          _id: "task-1",
+          _creationTime: 1,
+          title: "Deferred prefetch",
+        },
+      ]);
+      expect(deferredRuntime.getIdentityKey()).toBe("user-1");
+    } finally {
+      deferredRuntime.shutdown();
+    }
+  });
+
+  it("does not overwrite persisted local data with prefetched rows", async () => {
+    const persistedRuntime = new EmbeddedRuntime({
+      convex: { modules: STUB_MODULES },
+      persistence: mockAdapter({
+        kind: "opaque",
+        listAll: async () =>
+          [
+            {
+              tableName: "tasks",
+              doc: {
+                _id: "task-local",
+                _creationTime: 1,
+                title: "Persisted local row",
+              },
+            },
+          ] as any,
+        list: async (tableName) =>
+          tableName === "tasks"
+            ? ([
+                {
+                  _id: "task-local",
+                  _creationTime: 1,
+                  title: "Persisted local row",
+                },
+              ] as any)
+            : ([] as any),
+        meta: async () => ({ timestamp: 1, lastCreationTime: 1 }),
+        listBlobs: async () => [],
+        commit: async () => undefined,
+        putBlob: async () => undefined,
+        deleteBlob: async () => undefined,
+        clear: async () => undefined,
+      }),
+      prefetch: {
+        identityKey: "prefetch-user",
+        tables: {
+          tasks: [
+            {
+              _id: "task-prefetch",
+              _creationTime: 2,
+              title: "Prefetched row",
+            },
+          ],
+        },
+        metadata: {
+          tasks: {
+            collectionSeq: 2,
+            documents: [{ docId: "task-prefetch", seq: 2 }],
+          },
+        },
+      },
+    });
+
+    try {
+      await persistedRuntime.hydrate();
+
+      expect(await persistedRuntime.getDocumentsForTable("tasks")).toEqual([
+        {
+          _id: "task-local",
+          _creationTime: 1,
+          title: "Persisted local row",
+        },
+      ]);
+      expect(persistedRuntime.getIdentityKey()).toBeNull();
+    } finally {
+      persistedRuntime.shutdown();
+    }
+  });
+
+  it("seeds resolve metadata from prefetched rows", async () => {
+    const seededRuntime = new EmbeddedRuntime({
+      convex: { modules: STUB_MODULES },
+      prefetch: {
+        identityKey: "user-1",
+        tables: {
+          tasks: [
+            {
+              _id: "task-1",
+              _creationTime: 1,
+              title: "From prefetch",
+            },
+          ],
+        },
+        metadata: {
+          tasks: {
+            collectionSeq: 9,
+            documents: [{ docId: "task-1", seq: 9 }],
+          },
+        },
+      },
+    });
+
+    try {
+      await seededRuntime.hydrate();
+
+      expect(
+        seededRuntime.db.getDocumentsForTable("_resolve_collection_metadata"),
+      ).toEqual([
+        expect.objectContaining({
+          collection: "tasks",
+          seq: 9,
+          identityKey: "user-1",
+          schemaVersion: 1,
+        }),
+      ]);
+      expect(
+        seededRuntime.db.getDocumentsForTable("_resolve_document_metadata"),
+      ).toEqual([
+        expect.objectContaining({
+          collection: "tasks",
+          docId: "task-1",
+          seq: 9,
+          identityKey: "user-1",
+          schemaVersion: 1,
+        }),
+      ]);
+    } finally {
+      seededRuntime.shutdown();
+    }
+  });
+
+  it("persists prefetched sql rows during direct runtime startup", async () => {
+    const rowsByTable: Record<string, Array<Record<string, unknown>>> = {};
+    const { persistence } = createSqlPersistence(rowsByTable);
+    const localRuntime = new EmbeddedRuntime({
+      convex: { modules: STUB_MODULES },
+      persistence: mockAdapter(persistence),
+      prefetch: {
+        identityKey: null,
+        tables: {
+          tasks: [
+            {
+              _id: "task-prefetch",
+              _creationTime: 1,
+              title: "Prefetched",
+            },
+          ],
+        },
+        metadata: {
+          tasks: {
+            collectionSeq: 1,
+            documents: [{ docId: "task-prefetch", seq: 1 }],
+          },
+        },
+      },
+    });
+
+    try {
+      await localRuntime.hydrate();
+      expect(rowsByTable.tasks).toEqual([
+        {
+          __identityKey: null,
+          _id: "task-prefetch",
+          _creationTime: 1,
+          title: "Prefetched",
+        },
+      ]);
+    } finally {
+      localRuntime.shutdown();
+    }
+  });
 });
 
 describe("watchLocalQuery", () => {
   it("waits for hydration before evaluating the first local result", async () => {
-    const gate = deferredPromise<void>();
-    runtime.setHydrationGate(gate.promise);
+    const gate =
+      deferredPromise<
+        Array<{ tableName: string; doc: Record<string, unknown> }>
+      >();
+    const localRuntime = new EmbeddedRuntime({
+      convex: { modules: STUB_MODULES },
+      persistence: mockAdapter({
+        kind: "opaque",
+        listAll: async () => gate.promise,
+        list: async () => [],
+        meta: async () => null,
+        listBlobs: async () => [],
+        commit: async () => undefined,
+        putBlob: async () => undefined,
+        deleteBlob: async () => undefined,
+        clear: async () => undefined,
+      }),
+    });
 
     const evaluateSpy = vi
-      .spyOn(runtime as any, "_evaluateLocalQuery")
+      .spyOn(localRuntime as any, "_evaluateLocalQuery")
       .mockResolvedValue({
         result: [{ _id: "task-1" }],
         tablesRead: new Set(["tasks"]),
         dependencies: [{ type: "FullTableScan", tableName: "tasks" }],
       });
 
-    const watch = runtime.watchLocalQuery("tasks:list", {});
+    const watch = localRuntime.watchLocalQuery("tasks:list", {});
 
-    await flushRuntimeWatch();
+    try {
+      await flushRuntimeWatch();
 
-    expect(evaluateSpy).not.toHaveBeenCalled();
-    expect(watch.localQueryResult()).toBeUndefined();
+      expect(evaluateSpy).not.toHaveBeenCalled();
+      expect(watch.localQueryResult()).toBeUndefined();
 
-    gate.resolve();
-    await gate.promise;
-    await flushRuntimeWatch();
+      gate.resolve([]);
+      await localRuntime.hydrate();
+      await flushRuntimeWatch();
 
-    expect(evaluateSpy).toHaveBeenCalledWith("tasks:list", {});
-    expect(watch.localQueryResult()).toEqual([{ _id: "task-1" }]);
+      expect(evaluateSpy).toHaveBeenCalledWith("tasks:list", {});
+      expect(watch.localQueryResult()).toEqual([{ _id: "task-1" }]);
+    } finally {
+      localRuntime.shutdown();
+    }
   });
 
   it("returns undefined until the first evaluation completes", async () => {
@@ -743,25 +1522,45 @@ describe("watchLocalQuery", () => {
   });
 
   it("does not miss the first callback when subscribed before hydration completes", async () => {
-    const gate = deferredPromise<void>();
-    runtime.setHydrationGate(gate.promise);
+    const gate =
+      deferredPromise<
+        Array<{ tableName: string; doc: Record<string, unknown> }>
+      >();
+    const localRuntime = new EmbeddedRuntime({
+      convex: { modules: STUB_MODULES },
+      persistence: mockAdapter({
+        kind: "opaque",
+        listAll: async () => gate.promise,
+        list: async () => [],
+        meta: async () => null,
+        listBlobs: async () => [],
+        commit: async () => undefined,
+        putBlob: async () => undefined,
+        deleteBlob: async () => undefined,
+        clear: async () => undefined,
+      }),
+    });
 
-    vi.spyOn(runtime as any, "_evaluateLocalQuery").mockResolvedValue({
+    vi.spyOn(localRuntime as any, "_evaluateLocalQuery").mockResolvedValue({
       result: [{ _id: "task-1" }],
       tablesRead: new Set(["tasks"]),
       dependencies: [{ type: "FullTableScan", tableName: "tasks" }],
     });
 
-    const watch = runtime.watchLocalQuery("tasks:list", {});
+    const watch = localRuntime.watchLocalQuery("tasks:list", {});
     const callback = vi.fn();
     watch.onUpdate(callback);
 
-    gate.resolve();
-    await gate.promise;
-    await flushRuntimeWatch();
+    try {
+      gate.resolve([]);
+      await localRuntime.hydrate();
+      await flushRuntimeWatch();
 
-    expect(callback).toHaveBeenCalledOnce();
-    expect(watch.localQueryResult()).toEqual([{ _id: "task-1" }]);
+      expect(callback).toHaveBeenCalledOnce();
+      expect(watch.localQueryResult()).toEqual([{ _id: "task-1" }]);
+    } finally {
+      localRuntime.shutdown();
+    }
   });
 
   it("re-evaluates after matching local writes invalidate tracked dependencies", async () => {
@@ -789,7 +1588,7 @@ describe("watchLocalQuery", () => {
 
     runtime.onMutationCommit({
       tablesWritten: new Set(["tasks"]),
-      changes: [],
+      invalidation: { tables: new Set(["tasks"]), changes: [] },
       persisted: Promise.resolve(),
       timestamp: 1,
     });
@@ -801,6 +1600,52 @@ describe("watchLocalQuery", () => {
     expect(watch.localQueryResult()).toEqual([
       { _id: "task-1", title: "after" },
     ]);
+  });
+
+  it("updates local watches before persistence settles for cold sql-backed tables", async () => {
+    await runtime.hydrate();
+
+    const evaluateSpy = vi
+      .spyOn(runtime as any, "_evaluateLocalQuery")
+      .mockResolvedValueOnce({
+        result: [{ _id: "task-1", title: "before" }],
+        tablesRead: new Set(["tasks"]),
+        dependencies: [{ type: "FullTableScan", tableName: "tasks" }],
+      })
+      .mockResolvedValueOnce({
+        result: [{ _id: "task-1", title: "after" }],
+        tablesRead: new Set(["tasks"]),
+        dependencies: [{ type: "FullTableScan", tableName: "tasks" }],
+      });
+
+    const watch = runtime.watchLocalQuery("tasks:list", {});
+    const callback = vi.fn();
+    watch.onUpdate(callback);
+
+    await flushRuntimeWatch();
+    expect(callback).toHaveBeenCalledTimes(1);
+
+    const persisted = deferredPromise<void>();
+    runtime.onMutationCommit({
+      tablesWritten: new Set(["tasks"]),
+      invalidation: { tables: new Set(["tasks"]), changes: [] },
+      persisted: persisted.promise,
+      timestamp: 1,
+    });
+
+    await flushRuntimeWatch();
+
+    expect(evaluateSpy).toHaveBeenCalledTimes(2);
+    expect(callback).toHaveBeenCalledTimes(2);
+    expect(watch.localQueryResult()).toEqual([
+      { _id: "task-1", title: "after" },
+    ]);
+
+    persisted.resolve();
+    await flushRuntimeWatch();
+
+    expect(evaluateSpy).toHaveBeenCalledTimes(2);
+    expect(callback).toHaveBeenCalledTimes(2);
   });
 
   it("throws the latest evaluation error from localQueryResult", async () => {
@@ -879,7 +1724,7 @@ describe("protocol auth", () => {
   it("uses verifyToken hook when provided", async () => {
     const identity = createTestIdentity({ subject: "verified" });
     const runtime = new EmbeddedRuntime({
-      modules: { "./convex/_generated/api.ts": async () => ({}) },
+      convex: { modules: { "_generated/api": async () => ({}) } },
       verifyToken: async (token) => (token === "good" ? identity : null),
     });
 
@@ -920,6 +1765,187 @@ describe("executeLocal system mutation", () => {
     });
 
     expect(result).toBe("remote-xyz");
+  });
+
+  it("claims persisted sql-backed pending entries through system mutations", async () => {
+    const { persistence, readSource } = createSqlPersistence({
+      _resolve_pending: [
+        {
+          _id: "pending-1",
+          _creationTime: 1,
+          createdAt: 1,
+          ref: "tasks:create",
+          args: JSON.stringify({ title: "hello" }),
+          localResult: JSON.stringify({ ok: true }),
+          table: "tasks",
+          payloadVersion: 1,
+          identityKey: "user:a",
+          state: "pending",
+        },
+      ],
+    });
+    const localRuntime = new EmbeddedRuntime({
+      convex: { modules: STUB_MODULES },
+      persistence: mockAdapter(persistence),
+    });
+
+    try {
+      localRuntime.db.setReadBackendForTests(persistence);
+      await localRuntime.hydrate();
+
+      const claimed = (await localRuntime.executeLocal({
+        kind: "mutation",
+        path: "_system:pendingClaimNext",
+        args: {
+          identityKey: "user:a",
+          owner: "processor-a",
+          leaseMs: 1000,
+        },
+        applyLocalEffects: false,
+      })) as Record<string, unknown> | null;
+
+      expect(claimed?._id).toBe("pending-1");
+      expect(claimed?.state).toBe("processing");
+      expect(claimed?.owner).toBe("processor-a");
+      expect(typeof claimed?.leaseExpiresAt).toBe("number");
+
+      const pending = (await localRuntime.executeLocal({
+        kind: "query",
+        path: "_system:pendingGetAll",
+        args: { identityKey: "user:a" },
+      })) as Array<Record<string, unknown>>;
+
+      expect(pending).toHaveLength(1);
+      expect(pending[0]?._id).toBe("pending-1");
+      expect(pending[0]?.state).toBe("processing");
+      expect(pending[0]?.owner).toBe("processor-a");
+      expect(readSource).toHaveBeenCalled();
+    } finally {
+      localRuntime.shutdown();
+    }
+  });
+
+  it("updates sql-backed collection and document metadata through system mutations", async () => {
+    const { persistence, readSource } = createSqlPersistence({
+      _resolve_collection_metadata: [],
+      _resolve_document_metadata: [],
+    });
+    const localRuntime = new EmbeddedRuntime({
+      convex: { modules: STUB_MODULES },
+      persistence: mockAdapter(persistence),
+    });
+
+    try {
+      localRuntime.db.setReadBackendForTests(persistence);
+      await localRuntime.hydrate();
+
+      await localRuntime.executeLocal({
+        kind: "mutation",
+        path: "_system:collectionMetadataSet",
+        args: {
+          collection: "tasks",
+          seq: 11,
+          identityKey: "user:a",
+          schemaVersion: 1,
+        },
+        applyLocalEffects: false,
+      });
+      await localRuntime.executeLocal({
+        kind: "mutation",
+        path: "_system:documentMetadataSetBatch",
+        args: {
+          collection: "tasks",
+          entries: [{ docId: "task-1", seq: 4 }],
+          identityKey: "user:a",
+          schemaVersion: 1,
+        },
+        applyLocalEffects: false,
+      });
+
+      const collectionSeq = await localRuntime.executeLocal({
+        kind: "query",
+        path: "_system:collectionMetadataGet",
+        args: {
+          collection: "tasks",
+          identityKey: "user:a",
+          schemaVersion: 1,
+        },
+      });
+      const docMetadata = await localRuntime.executeLocal({
+        kind: "query",
+        path: "_system:documentMetadataGetBatch",
+        args: {
+          collection: "tasks",
+          docIds: ["task-1"],
+          identityKey: "user:a",
+          schemaVersion: 1,
+        },
+      });
+
+      expect(collectionSeq).toBe(11);
+      expect(docMetadata).toEqual([{ docId: "task-1", seq: 4 }]);
+
+      await localRuntime.executeLocal({
+        kind: "mutation",
+        path: "_system:documentMetadataDeleteBatch",
+        args: {
+          collection: "tasks",
+          docIds: ["task-1"],
+          identityKey: "user:a",
+          schemaVersion: 1,
+        },
+        applyLocalEffects: false,
+      });
+
+      const afterDelete = await localRuntime.executeLocal({
+        kind: "query",
+        path: "_system:documentMetadataGetBatch",
+        args: {
+          collection: "tasks",
+          docIds: ["task-1"],
+          identityKey: "user:a",
+          schemaVersion: 1,
+        },
+      });
+      expect(afterDelete).toEqual([]);
+
+      await localRuntime.executeLocal({
+        kind: "mutation",
+        path: "_system:documentMetadataSetBatch",
+        args: {
+          collection: "tasks",
+          entries: [{ docId: "task-2", seq: 5 }],
+          identityKey: "user:a",
+          schemaVersion: 1,
+        },
+        applyLocalEffects: false,
+      });
+      await localRuntime.executeLocal({
+        kind: "mutation",
+        path: "_system:documentMetadataClearCollection",
+        args: {
+          collection: "tasks",
+          identityKey: "user:a",
+          schemaVersion: 1,
+        },
+        applyLocalEffects: false,
+      });
+
+      const afterClear = await localRuntime.executeLocal({
+        kind: "query",
+        path: "_system:documentMetadataGetBatch",
+        args: {
+          collection: "tasks",
+          docIds: ["task-2"],
+          identityKey: "user:a",
+          schemaVersion: 1,
+        },
+      });
+      expect(afterClear).toEqual([]);
+      expect(readSource).toHaveBeenCalled();
+    } finally {
+      localRuntime.shutdown();
+    }
   });
 });
 

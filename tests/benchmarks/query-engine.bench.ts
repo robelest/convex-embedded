@@ -1,6 +1,6 @@
 import { Database } from "@embedded/runtime/db/database";
 import type { ParsedSchema } from "@embedded/runtime/db/schema";
-import { bench, describe } from "vite-plus/test";
+import { bench, describe } from "@tests/testkit";
 
 const schemaWithIndex: ParsedSchema = {
   schemaValidation: false,

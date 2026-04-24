@@ -1,6 +1,6 @@
 import { SYSTEM_FUNCTIONS, SystemPaths } from "@embedded/kernel/system";
 import { Database } from "@embedded/runtime/db/database";
-import { describe, it, expect, beforeEach } from "vite-plus/test";
+import { describe, it, expect, beforeEach } from "@tests/testkit";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -17,9 +17,9 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 describe("ID Map", () => {
-  it("idMapSet inserts a new mapping and returns null", () => {
+  it("idMapSet inserts a new mapping and returns null", async () => {
     db.startTransaction();
-    const result = SYSTEM_FUNCTIONS[SystemPaths.idMapSet].handler(db, {
+    const result = await SYSTEM_FUNCTIONS[SystemPaths.idMapSet].handler(db, {
       localId: "local-1",
       remoteId: "remote-1",
       table: "tasks",
@@ -30,7 +30,7 @@ describe("ID Map", () => {
 
     // Verify the mapping was persisted by reading it back.
     db.startTransaction();
-    const remoteId = SYSTEM_FUNCTIONS[SystemPaths.idMapGet].handler(db, {
+    const remoteId = await SYSTEM_FUNCTIONS[SystemPaths.idMapGet].handler(db, {
       localId: "local-1",
     });
     db.rollbackWrites();
@@ -38,9 +38,9 @@ describe("ID Map", () => {
     expect(remoteId).toBe("remote-1");
   });
 
-  it("idMapSet updates an existing mapping when the same localId is set again", () => {
+  it("idMapSet updates an existing mapping when the same localId is set again", async () => {
     db.startTransaction();
-    SYSTEM_FUNCTIONS[SystemPaths.idMapSet].handler(db, {
+    await SYSTEM_FUNCTIONS[SystemPaths.idMapSet].handler(db, {
       localId: "local-1",
       remoteId: "remote-1",
       table: "tasks",
@@ -48,7 +48,7 @@ describe("ID Map", () => {
     db.commit();
 
     db.startTransaction();
-    SYSTEM_FUNCTIONS[SystemPaths.idMapSet].handler(db, {
+    await SYSTEM_FUNCTIONS[SystemPaths.idMapSet].handler(db, {
       localId: "local-1",
       remoteId: "remote-2",
       table: "notes",
@@ -56,7 +56,7 @@ describe("ID Map", () => {
     db.commit();
 
     db.startTransaction();
-    const remoteId = SYSTEM_FUNCTIONS[SystemPaths.idMapGet].handler(db, {
+    const remoteId = await SYSTEM_FUNCTIONS[SystemPaths.idMapGet].handler(db, {
       localId: "local-1",
     });
     db.rollbackWrites();
@@ -65,10 +65,10 @@ describe("ID Map", () => {
 
     // Should still be a single mapping, not two.
     db.startTransaction();
-    const all = SYSTEM_FUNCTIONS[SystemPaths.idMapGetAll].handler(
+    const all = (await SYSTEM_FUNCTIONS[SystemPaths.idMapGetAll].handler(
       db,
       {},
-    ) as Array<{
+    )) as Array<{
       localId: string;
       remoteId: string;
       table: string;
@@ -83,9 +83,9 @@ describe("ID Map", () => {
     });
   });
 
-  it("idMapGet returns remoteId for a known localId", () => {
+  it("idMapGet returns remoteId for a known localId", async () => {
     db.startTransaction();
-    SYSTEM_FUNCTIONS[SystemPaths.idMapSet].handler(db, {
+    await SYSTEM_FUNCTIONS[SystemPaths.idMapSet].handler(db, {
       localId: "local-a",
       remoteId: "remote-a",
       table: "items",
@@ -93,7 +93,7 @@ describe("ID Map", () => {
     db.commit();
 
     db.startTransaction();
-    const result = SYSTEM_FUNCTIONS[SystemPaths.idMapGet].handler(db, {
+    const result = await SYSTEM_FUNCTIONS[SystemPaths.idMapGet].handler(db, {
       localId: "local-a",
     });
     db.rollbackWrites();
@@ -101,9 +101,9 @@ describe("ID Map", () => {
     expect(result).toBe("remote-a");
   });
 
-  it("idMapGet returns null for an unknown localId", () => {
+  it("idMapGet returns null for an unknown localId", async () => {
     db.startTransaction();
-    const result = SYSTEM_FUNCTIONS[SystemPaths.idMapGet].handler(db, {
+    const result = await SYSTEM_FUNCTIONS[SystemPaths.idMapGet].handler(db, {
       localId: "does-not-exist",
     });
     db.rollbackWrites();
@@ -111,9 +111,9 @@ describe("ID Map", () => {
     expect(result).toBeNull();
   });
 
-  it("idMapGetAll returns all mappings", () => {
+  it("idMapGetAll returns all mappings", async () => {
     db.startTransaction();
-    SYSTEM_FUNCTIONS[SystemPaths.idMapSet].handler(db, {
+    await SYSTEM_FUNCTIONS[SystemPaths.idMapSet].handler(db, {
       localId: "l1",
       remoteId: "r1",
       table: "tasks",
@@ -121,7 +121,7 @@ describe("ID Map", () => {
     db.commit();
 
     db.startTransaction();
-    SYSTEM_FUNCTIONS[SystemPaths.idMapSet].handler(db, {
+    await SYSTEM_FUNCTIONS[SystemPaths.idMapSet].handler(db, {
       localId: "l2",
       remoteId: "r2",
       table: "notes",
@@ -129,10 +129,10 @@ describe("ID Map", () => {
     db.commit();
 
     db.startTransaction();
-    const all = SYSTEM_FUNCTIONS[SystemPaths.idMapGetAll].handler(
+    const all = (await SYSTEM_FUNCTIONS[SystemPaths.idMapGetAll].handler(
       db,
       {},
-    ) as Array<{
+    )) as Array<{
       localId: string;
       remoteId: string;
       table: string;
@@ -148,17 +148,17 @@ describe("ID Map", () => {
     );
   });
 
-  it("idMapGetAll returns an empty array when no mappings exist", () => {
+  it("idMapGetAll returns an empty array when no mappings exist", async () => {
     db.startTransaction();
-    const all = SYSTEM_FUNCTIONS[SystemPaths.idMapGetAll].handler(db, {});
+    const all = await SYSTEM_FUNCTIONS[SystemPaths.idMapGetAll].handler(db, {});
     db.rollbackWrites();
 
     expect(all).toEqual([]);
   });
 
-  it("idMapDelete removes a mapping by localId", () => {
+  it("idMapDelete removes a mapping by localId", async () => {
     db.startTransaction();
-    SYSTEM_FUNCTIONS[SystemPaths.idMapSet].handler(db, {
+    await SYSTEM_FUNCTIONS[SystemPaths.idMapSet].handler(db, {
       localId: "local-x",
       remoteId: "remote-x",
       table: "tasks",
@@ -166,7 +166,9 @@ describe("ID Map", () => {
     db.commit();
 
     db.startTransaction();
-    const deleteResult = SYSTEM_FUNCTIONS[SystemPaths.idMapDelete].handler(db, {
+    const deleteResult = await SYSTEM_FUNCTIONS[
+      SystemPaths.idMapDelete
+    ].handler(db, {
       localId: "local-x",
     });
     db.commit();
@@ -175,7 +177,7 @@ describe("ID Map", () => {
 
     // Confirm it was removed.
     db.startTransaction();
-    const lookup = SYSTEM_FUNCTIONS[SystemPaths.idMapGet].handler(db, {
+    const lookup = await SYSTEM_FUNCTIONS[SystemPaths.idMapGet].handler(db, {
       localId: "local-x",
     });
     db.rollbackWrites();
@@ -183,9 +185,9 @@ describe("ID Map", () => {
     expect(lookup).toBeNull();
   });
 
-  it("idMapDelete is a no-op for an unknown localId", () => {
+  it("idMapDelete is a no-op for an unknown localId", async () => {
     db.startTransaction();
-    const result = SYSTEM_FUNCTIONS[SystemPaths.idMapDelete].handler(db, {
+    const result = await SYSTEM_FUNCTIONS[SystemPaths.idMapDelete].handler(db, {
       localId: "nonexistent",
     });
     db.commit();
@@ -193,9 +195,9 @@ describe("ID Map", () => {
     expect(result).toBeNull();
   });
 
-  it("idMap functions are scoped by identityKey", () => {
+  it("idMap functions are scoped by identityKey", async () => {
     db.startTransaction();
-    SYSTEM_FUNCTIONS[SystemPaths.idMapSet].handler(db, {
+    await SYSTEM_FUNCTIONS[SystemPaths.idMapSet].handler(db, {
       localId: "shared-local",
       remoteId: "remote-a",
       table: "tasks",
@@ -204,7 +206,7 @@ describe("ID Map", () => {
     db.commit();
 
     db.startTransaction();
-    SYSTEM_FUNCTIONS[SystemPaths.idMapSet].handler(db, {
+    await SYSTEM_FUNCTIONS[SystemPaths.idMapSet].handler(db, {
       localId: "shared-local",
       remoteId: "remote-b",
       table: "tasks",
@@ -213,10 +215,10 @@ describe("ID Map", () => {
     db.commit();
 
     db.startTransaction();
-    const allA = SYSTEM_FUNCTIONS[SystemPaths.idMapGetAll].handler(db, {
+    const allA = await SYSTEM_FUNCTIONS[SystemPaths.idMapGetAll].handler(db, {
       identityKey: "user:a",
     });
-    const allB = SYSTEM_FUNCTIONS[SystemPaths.idMapGetAll].handler(db, {
+    const allB = await SYSTEM_FUNCTIONS[SystemPaths.idMapGetAll].handler(db, {
       identityKey: "user:b",
     });
     db.rollbackWrites();
@@ -252,9 +254,9 @@ describe("Pending Queue", () => {
     table: "tasks",
   };
 
-  it("pendingPush inserts an entry and returns the document ID", () => {
+  it("pendingPush inserts an entry and returns the document ID", async () => {
     db.startTransaction();
-    const id = SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(
+    const id = await SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(
       db,
       sampleEntry,
     );
@@ -264,19 +266,19 @@ describe("Pending Queue", () => {
     expect((id as string).length).toBeGreaterThan(0);
   });
 
-  it("pendingGetAll returns all entries with expected fields", () => {
+  it("pendingGetAll returns all entries with expected fields", async () => {
     db.startTransaction();
-    const id = SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(
+    const id = await SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(
       db,
       sampleEntry,
     );
     db.commit();
 
     db.startTransaction();
-    const all = SYSTEM_FUNCTIONS[SystemPaths.pendingGetAll].handler(
+    const all = (await SYSTEM_FUNCTIONS[SystemPaths.pendingGetAll].handler(
       db,
       {},
-    ) as Array<Record<string, unknown>>;
+    )) as Array<Record<string, unknown>>;
     db.rollbackWrites();
 
     expect(all).toHaveLength(1);
@@ -290,55 +292,63 @@ describe("Pending Queue", () => {
     expect(typeof entry.createdAt).toBe("number");
   });
 
-  it("pendingGetAll returns an empty array when no entries exist", () => {
+  it("pendingGetAll returns an empty array when no entries exist", async () => {
     db.startTransaction();
-    const all = SYSTEM_FUNCTIONS[SystemPaths.pendingGetAll].handler(db, {});
+    const all = await SYSTEM_FUNCTIONS[SystemPaths.pendingGetAll].handler(
+      db,
+      {},
+    );
     db.rollbackWrites();
 
     expect(all).toEqual([]);
   });
 
-  it("pendingRemove removes an entry by ID", () => {
+  it("pendingRemove removes an entry by ID", async () => {
     db.startTransaction();
-    const id = SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(
+    const id = (await SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(
       db,
       sampleEntry,
-    ) as string;
+    )) as string;
     db.commit();
 
     db.startTransaction();
-    const removeResult = SYSTEM_FUNCTIONS[SystemPaths.pendingRemove].handler(
-      db,
-      { id },
-    );
+    const removeResult = await SYSTEM_FUNCTIONS[
+      SystemPaths.pendingRemove
+    ].handler(db, { id });
     db.commit();
 
     expect(removeResult).toBeNull();
 
     db.startTransaction();
-    const all = SYSTEM_FUNCTIONS[SystemPaths.pendingGetAll].handler(db, {});
+    const all = await SYSTEM_FUNCTIONS[SystemPaths.pendingGetAll].handler(
+      db,
+      {},
+    );
     db.rollbackWrites();
 
     expect(all).toEqual([]);
   });
 
-  it("pendingRemove is a no-op for an unknown ID", () => {
+  it("pendingRemove is a no-op for an unknown ID", async () => {
     db.startTransaction();
-    const result = SYSTEM_FUNCTIONS[SystemPaths.pendingRemove].handler(db, {
-      id: "00000000-0000-0000-0000-000000000000",
-    });
+    const result = await SYSTEM_FUNCTIONS[SystemPaths.pendingRemove].handler(
+      db,
+      {
+        id: "00000000-0000-0000-0000-000000000000",
+      },
+    );
     db.commit();
 
     expect(result).toBeNull();
   });
 
-  it("pendingClear removes all entries", () => {
+  it("pendingClear removes all entries", async () => {
     db.startTransaction();
-    SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, sampleEntry);
+    await SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, sampleEntry);
     db.commit();
 
     db.startTransaction();
-    SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, {
+    await SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, {
       ...sampleEntry,
       ref: "mutations:deleteTask",
     });
@@ -346,53 +356,61 @@ describe("Pending Queue", () => {
 
     // Confirm two entries exist.
     db.startTransaction();
-    const before = SYSTEM_FUNCTIONS[SystemPaths.pendingGetAll].handler(
+    const before = (await SYSTEM_FUNCTIONS[SystemPaths.pendingGetAll].handler(
       db,
       {},
-    ) as Array<unknown>;
+    )) as Array<unknown>;
     db.rollbackWrites();
     expect(before).toHaveLength(2);
 
     db.startTransaction();
-    const clearResult = SYSTEM_FUNCTIONS[SystemPaths.pendingClear].handler(
-      db,
-      {},
-    );
+    const clearResult = await SYSTEM_FUNCTIONS[
+      SystemPaths.pendingClear
+    ].handler(db, {});
     db.commit();
 
     expect(clearResult).toBeNull();
 
     db.startTransaction();
-    const after = SYSTEM_FUNCTIONS[SystemPaths.pendingGetAll].handler(db, {});
+    const after = await SYSTEM_FUNCTIONS[SystemPaths.pendingGetAll].handler(
+      db,
+      {},
+    );
     db.rollbackWrites();
 
     expect(after).toEqual([]);
   });
 
-  it("pendingClear is a no-op when the queue is empty", () => {
+  it("pendingClear is a no-op when the queue is empty", async () => {
     db.startTransaction();
-    const result = SYSTEM_FUNCTIONS[SystemPaths.pendingClear].handler(db, {});
+    const result = await SYSTEM_FUNCTIONS[SystemPaths.pendingClear].handler(
+      db,
+      {},
+    );
     db.commit();
 
     expect(result).toBeNull();
 
     db.startTransaction();
-    const all = SYSTEM_FUNCTIONS[SystemPaths.pendingGetAll].handler(db, {});
+    const all = await SYSTEM_FUNCTIONS[SystemPaths.pendingGetAll].handler(
+      db,
+      {},
+    );
     db.rollbackWrites();
 
     expect(all).toEqual([]);
   });
 
-  it("pending queue functions are scoped by identityKey", () => {
+  it("pending queue functions are scoped by identityKey", async () => {
     db.startTransaction();
-    SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, {
+    await SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, {
       ...sampleEntry,
       identityKey: "user:a",
     });
     db.commit();
 
     db.startTransaction();
-    SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, {
+    await SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, {
       ...sampleEntry,
       ref: "mutations:other",
       identityKey: "user:b",
@@ -400,12 +418,18 @@ describe("Pending Queue", () => {
     db.commit();
 
     db.startTransaction();
-    const allA = SYSTEM_FUNCTIONS[SystemPaths.pendingGetAll].handler(db, {
-      identityKey: "user:a",
-    }) as Array<Record<string, unknown>>;
-    const allB = SYSTEM_FUNCTIONS[SystemPaths.pendingGetAll].handler(db, {
-      identityKey: "user:b",
-    }) as Array<Record<string, unknown>>;
+    const allA = (await SYSTEM_FUNCTIONS[SystemPaths.pendingGetAll].handler(
+      db,
+      {
+        identityKey: "user:a",
+      },
+    )) as Array<Record<string, unknown>>;
+    const allB = (await SYSTEM_FUNCTIONS[SystemPaths.pendingGetAll].handler(
+      db,
+      {
+        identityKey: "user:b",
+      },
+    )) as Array<Record<string, unknown>>;
     db.rollbackWrites();
 
     expect(allA).toHaveLength(1);
@@ -416,18 +440,18 @@ describe("Pending Queue", () => {
     expect(allB[0]?.ref).toBe("mutations:other");
   });
 
-  it("pendingListIdentityKeys returns distinct pending identity keys", () => {
+  it("pendingListIdentityKeys returns distinct pending identity keys", async () => {
     db.startTransaction();
-    SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, {
+    await SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, {
       ...sampleEntry,
       identityKey: "user:b",
     });
-    SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, {
+    await SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, {
       ...sampleEntry,
       ref: "mutations:other",
       identityKey: "user:a",
     });
-    SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, {
+    await SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, {
       ...sampleEntry,
       ref: "mutations:third",
       identityKey: "user:b",
@@ -435,22 +459,21 @@ describe("Pending Queue", () => {
     db.commit();
 
     db.startTransaction();
-    const keys = SYSTEM_FUNCTIONS[SystemPaths.pendingListIdentityKeys].handler(
-      db,
-      {},
-    );
+    const keys = await SYSTEM_FUNCTIONS[
+      SystemPaths.pendingListIdentityKeys
+    ].handler(db, {});
     db.rollbackWrites();
 
     expect(keys).toEqual(["user:a", "user:b"]);
   });
 
-  it("identityMoveAnonymousToIdentity migrates anonymous pending and id map state", () => {
+  it("identityMoveAnonymousToIdentity migrates anonymous pending and id map state", async () => {
     db.startTransaction();
-    SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, {
+    await SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, {
       ...sampleEntry,
       identityKey: null,
     });
-    SYSTEM_FUNCTIONS[SystemPaths.idMapSet].handler(db, {
+    await SYSTEM_FUNCTIONS[SystemPaths.idMapSet].handler(db, {
       localId: "local-anon",
       remoteId: "remote-anon",
       table: "tasks",
@@ -459,18 +482,24 @@ describe("Pending Queue", () => {
     db.commit();
 
     db.startTransaction();
-    SYSTEM_FUNCTIONS[SystemPaths.identityMoveAnonymousToIdentity].handler(db, {
-      identityKey: "user:a",
-    });
+    await SYSTEM_FUNCTIONS[SystemPaths.identityMoveAnonymousToIdentity].handler(
+      db,
+      {
+        identityKey: "user:a",
+      },
+    );
     db.commit();
 
     db.startTransaction();
-    const pending = SYSTEM_FUNCTIONS[SystemPaths.pendingGetAll].handler(db, {
+    const pending = (await SYSTEM_FUNCTIONS[SystemPaths.pendingGetAll].handler(
+      db,
+      {
+        identityKey: "user:a",
+      },
+    )) as Array<Record<string, unknown>>;
+    const idMap = (await SYSTEM_FUNCTIONS[SystemPaths.idMapGetAll].handler(db, {
       identityKey: "user:a",
-    }) as Array<Record<string, unknown>>;
-    const idMap = SYSTEM_FUNCTIONS[SystemPaths.idMapGetAll].handler(db, {
-      identityKey: "user:a",
-    }) as Array<Record<string, unknown>>;
+    })) as Array<Record<string, unknown>>;
     db.rollbackWrites();
 
     expect(pending).toHaveLength(1);
@@ -479,60 +508,65 @@ describe("Pending Queue", () => {
     expect(idMap[0]?.identityKey).toBe("user:a");
   });
 
-  it("pendingBlock and pendingUnblockAll update replay state", () => {
+  it("pendingBlock and pendingUnblockAll update replay state", async () => {
     db.startTransaction();
-    const id = SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, {
+    const id = (await SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, {
       ...sampleEntry,
       identityKey: "user:a",
-    }) as string;
+    })) as string;
     db.commit();
 
     db.startTransaction();
-    SYSTEM_FUNCTIONS[SystemPaths.pendingBlock].handler(db, {
+    await SYSTEM_FUNCTIONS[SystemPaths.pendingBlock].handler(db, {
       id,
       reason: "authorizationDenied",
     });
     db.commit();
 
     db.startTransaction();
-    let pending = SYSTEM_FUNCTIONS[SystemPaths.pendingGetAll].handler(db, {
-      identityKey: "user:a",
-    }) as Array<Record<string, unknown>>;
+    let pending = (await SYSTEM_FUNCTIONS[SystemPaths.pendingGetAll].handler(
+      db,
+      {
+        identityKey: "user:a",
+      },
+    )) as Array<Record<string, unknown>>;
     db.rollbackWrites();
 
     expect(pending[0]?.state).toBe("blocked");
     expect(pending[0]?.blockedReason).toBe("authorizationDenied");
 
     db.startTransaction();
-    SYSTEM_FUNCTIONS[SystemPaths.pendingUnblockAll].handler(db, {
+    await SYSTEM_FUNCTIONS[SystemPaths.pendingUnblockAll].handler(db, {
       identityKey: "user:a",
     });
     db.commit();
 
     db.startTransaction();
-    pending = SYSTEM_FUNCTIONS[SystemPaths.pendingGetAll].handler(db, {
+    pending = (await SYSTEM_FUNCTIONS[SystemPaths.pendingGetAll].handler(db, {
       identityKey: "user:a",
-    }) as Array<Record<string, unknown>>;
+    })) as Array<Record<string, unknown>>;
     db.rollbackWrites();
 
     expect(pending[0]?.state).toBe("pending");
     expect(pending[0]?.blockedReason).toBeUndefined();
   });
 
-  it("pendingClaimNext claims the next pending entry with a lease", () => {
+  it("pendingClaimNext claims the next pending entry with a lease", async () => {
     db.startTransaction();
-    SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, {
+    await SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, {
       ...sampleEntry,
       identityKey: "user:a",
     });
     db.commit();
 
     db.startTransaction();
-    const claimed = SYSTEM_FUNCTIONS[SystemPaths.pendingClaimNext].handler(db, {
+    const claimed = (await SYSTEM_FUNCTIONS[
+      SystemPaths.pendingClaimNext
+    ].handler(db, {
       identityKey: "user:a",
       owner: "processor-a",
       leaseMs: 1_000,
-    }) as Record<string, unknown>;
+    })) as Record<string, unknown>;
     db.commit();
 
     expect(claimed.owner).toBe("processor-a");
@@ -540,16 +574,16 @@ describe("Pending Queue", () => {
     expect(typeof claimed.leaseExpiresAt).toBe("number");
   });
 
-  it("pendingRenewLease extends an owned processing lease", () => {
+  it("pendingRenewLease extends an owned processing lease", async () => {
     db.startTransaction();
-    const id = SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, {
+    const id = (await SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, {
       ...sampleEntry,
       identityKey: "user:a",
-    }) as string;
+    })) as string;
     db.commit();
 
     db.startTransaction();
-    SYSTEM_FUNCTIONS[SystemPaths.pendingClaimNext].handler(db, {
+    await SYSTEM_FUNCTIONS[SystemPaths.pendingClaimNext].handler(db, {
       identityKey: "user:a",
       owner: "processor-a",
       leaseMs: 100,
@@ -557,44 +591,46 @@ describe("Pending Queue", () => {
     db.commit();
 
     db.startTransaction();
-    let pending = SYSTEM_FUNCTIONS[SystemPaths.pendingGetAll].handler(db, {
-      identityKey: "user:a",
-    }) as Array<Record<string, unknown>>;
+    let pending = (await SYSTEM_FUNCTIONS[SystemPaths.pendingGetAll].handler(
+      db,
+      {
+        identityKey: "user:a",
+      },
+    )) as Array<Record<string, unknown>>;
     db.rollbackWrites();
     const before = pending[0]?.leaseExpiresAt as number;
 
     db.startTransaction();
-    const renewed = SYSTEM_FUNCTIONS[SystemPaths.pendingRenewLease].handler(
-      db,
-      {
-        id,
-        owner: "processor-a",
-        leaseMs: 5_000,
-      },
-    );
+    const renewed = await SYSTEM_FUNCTIONS[
+      SystemPaths.pendingRenewLease
+    ].handler(db, {
+      id,
+      owner: "processor-a",
+      leaseMs: 5_000,
+    });
     db.commit();
 
     expect(renewed).toBe(true);
 
     db.startTransaction();
-    pending = SYSTEM_FUNCTIONS[SystemPaths.pendingGetAll].handler(db, {
+    pending = (await SYSTEM_FUNCTIONS[SystemPaths.pendingGetAll].handler(db, {
       identityKey: "user:a",
-    }) as Array<Record<string, unknown>>;
+    })) as Array<Record<string, unknown>>;
     db.rollbackWrites();
 
     expect((pending[0]?.leaseExpiresAt as number) > before).toBe(true);
   });
 
-  it("pendingRenewLease returns false for a non-owner", () => {
+  it("pendingRenewLease returns false for a non-owner", async () => {
     db.startTransaction();
-    const id = SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, {
+    const id = (await SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, {
       ...sampleEntry,
       identityKey: "user:a",
-    }) as string;
+    })) as string;
     db.commit();
 
     db.startTransaction();
-    SYSTEM_FUNCTIONS[SystemPaths.pendingClaimNext].handler(db, {
+    await SYSTEM_FUNCTIONS[SystemPaths.pendingClaimNext].handler(db, {
       identityKey: "user:a",
       owner: "processor-a",
       leaseMs: 100,
@@ -602,29 +638,28 @@ describe("Pending Queue", () => {
     db.commit();
 
     db.startTransaction();
-    const renewed = SYSTEM_FUNCTIONS[SystemPaths.pendingRenewLease].handler(
-      db,
-      {
-        id,
-        owner: "processor-b",
-        leaseMs: 5_000,
-      },
-    );
+    const renewed = await SYSTEM_FUNCTIONS[
+      SystemPaths.pendingRenewLease
+    ].handler(db, {
+      id,
+      owner: "processor-b",
+      leaseMs: 5_000,
+    });
     db.commit();
 
     expect(renewed).toBe(false);
   });
 
-  it("pendingRelease clears processing ownership and lease", () => {
+  it("pendingRelease clears processing ownership and lease", async () => {
     db.startTransaction();
-    const id = SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, {
+    const id = (await SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, {
       ...sampleEntry,
       identityKey: "user:a",
-    }) as string;
+    })) as string;
     db.commit();
 
     db.startTransaction();
-    SYSTEM_FUNCTIONS[SystemPaths.pendingClaimNext].handler(db, {
+    await SYSTEM_FUNCTIONS[SystemPaths.pendingClaimNext].handler(db, {
       identityKey: "user:a",
       owner: "processor-a",
       leaseMs: 1_000,
@@ -632,16 +667,19 @@ describe("Pending Queue", () => {
     db.commit();
 
     db.startTransaction();
-    SYSTEM_FUNCTIONS[SystemPaths.pendingRelease].handler(db, {
+    await SYSTEM_FUNCTIONS[SystemPaths.pendingRelease].handler(db, {
       id,
       owner: "processor-a",
     });
     db.commit();
 
     db.startTransaction();
-    const pending = SYSTEM_FUNCTIONS[SystemPaths.pendingGetAll].handler(db, {
-      identityKey: "user:a",
-    }) as Array<Record<string, unknown>>;
+    const pending = (await SYSTEM_FUNCTIONS[SystemPaths.pendingGetAll].handler(
+      db,
+      {
+        identityKey: "user:a",
+      },
+    )) as Array<Record<string, unknown>>;
     db.rollbackWrites();
 
     expect(pending[0]?.state).toBe("pending");
@@ -649,20 +687,20 @@ describe("Pending Queue", () => {
     expect(pending[0]?.leaseExpiresAt).toBeUndefined();
   });
 
-  it("pendingClaimNext can reclaim an expired processing lease", () => {
+  it("pendingClaimNext can reclaim an expired processing lease", async () => {
     const originalNow = Date.now;
     let now = 1_000;
     Date.now = () => now;
     try {
       db.startTransaction();
-      SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, {
+      await SYSTEM_FUNCTIONS[SystemPaths.pendingPush].handler(db, {
         ...sampleEntry,
         identityKey: "user:a",
       });
       db.commit();
 
       db.startTransaction();
-      SYSTEM_FUNCTIONS[SystemPaths.pendingClaimNext].handler(db, {
+      await SYSTEM_FUNCTIONS[SystemPaths.pendingClaimNext].handler(db, {
         identityKey: "user:a",
         owner: "processor-a",
         leaseMs: 100,
@@ -672,14 +710,13 @@ describe("Pending Queue", () => {
       now += 200;
 
       db.startTransaction();
-      const claimed = SYSTEM_FUNCTIONS[SystemPaths.pendingClaimNext].handler(
-        db,
-        {
-          identityKey: "user:a",
-          owner: "processor-b",
-          leaseMs: 100,
-        },
-      ) as Record<string, unknown>;
+      const claimed = (await SYSTEM_FUNCTIONS[
+        SystemPaths.pendingClaimNext
+      ].handler(db, {
+        identityKey: "user:a",
+        owner: "processor-b",
+        leaseMs: 100,
+      })) as Record<string, unknown>;
       db.commit();
 
       expect(claimed.owner).toBe("processor-b");
@@ -691,15 +728,15 @@ describe("Pending Queue", () => {
 });
 
 describe("Auth State", () => {
-  it("persists and returns the active identity key", () => {
+  it("persists and returns the active identity key", async () => {
     db.startTransaction();
-    SYSTEM_FUNCTIONS[SystemPaths.authStateSetActive].handler(db, {
+    await SYSTEM_FUNCTIONS[SystemPaths.authStateSetActive].handler(db, {
       activeIdentityKey: "user:a",
     });
     db.commit();
 
     db.startTransaction();
-    const key = SYSTEM_FUNCTIONS[SystemPaths.authStateGetActive].handler(
+    const key = await SYSTEM_FUNCTIONS[SystemPaths.authStateGetActive].handler(
       db,
       {},
     );
@@ -708,21 +745,21 @@ describe("Auth State", () => {
     expect(key).toBe("user:a");
   });
 
-  it("updates the active identity key in place", () => {
+  it("updates the active identity key in place", async () => {
     db.startTransaction();
-    SYSTEM_FUNCTIONS[SystemPaths.authStateSetActive].handler(db, {
+    await SYSTEM_FUNCTIONS[SystemPaths.authStateSetActive].handler(db, {
       activeIdentityKey: "user:a",
     });
     db.commit();
 
     db.startTransaction();
-    SYSTEM_FUNCTIONS[SystemPaths.authStateSetActive].handler(db, {
+    await SYSTEM_FUNCTIONS[SystemPaths.authStateSetActive].handler(db, {
       activeIdentityKey: "user:b",
     });
     db.commit();
 
     db.startTransaction();
-    const key = SYSTEM_FUNCTIONS[SystemPaths.authStateGetActive].handler(
+    const key = await SYSTEM_FUNCTIONS[SystemPaths.authStateGetActive].handler(
       db,
       {},
     );
@@ -737,8 +774,8 @@ describe("Auth State", () => {
 // ---------------------------------------------------------------------------
 
 describe("SYSTEM_FUNCTIONS registry", () => {
-  it("contains exactly 17 entries", () => {
-    expect(Object.keys(SYSTEM_FUNCTIONS)).toHaveLength(17);
+  it("contains exactly 25 entries", () => {
+    expect(Object.keys(SYSTEM_FUNCTIONS)).toHaveLength(25);
   });
 
   it("has all expected keys", () => {
@@ -760,6 +797,14 @@ describe("SYSTEM_FUNCTIONS registry", () => {
       "_system:authStateGetActive",
       "_system:pendingListIdentityKeys",
       "_system:identityMoveAnonymousToIdentity",
+      "_system:processorHeartbeat",
+      "_system:processorRemove",
+      "_system:collectionMetadataGet",
+      "_system:collectionMetadataSet",
+      "_system:documentMetadataGetBatch",
+      "_system:documentMetadataSetBatch",
+      "_system:documentMetadataDeleteBatch",
+      "_system:documentMetadataClearCollection",
     ];
 
     for (const key of expectedKeys) {
@@ -793,6 +838,12 @@ describe("SYSTEM_FUNCTIONS registry", () => {
       SystemPaths.pendingClear,
       SystemPaths.pendingBlock,
       SystemPaths.pendingUnblockAll,
+      SystemPaths.processorHeartbeat,
+      SystemPaths.processorRemove,
+      SystemPaths.collectionMetadataSet,
+      SystemPaths.documentMetadataSetBatch,
+      SystemPaths.documentMetadataDeleteBatch,
+      SystemPaths.documentMetadataClearCollection,
       SystemPaths.authStateSetActive,
       SystemPaths.identityMoveAnonymousToIdentity,
     ];
@@ -801,6 +852,8 @@ describe("SYSTEM_FUNCTIONS registry", () => {
       SystemPaths.idMapGet,
       SystemPaths.idMapGetAll,
       SystemPaths.pendingGetAll,
+      SystemPaths.collectionMetadataGet,
+      SystemPaths.documentMetadataGetBatch,
       SystemPaths.authStateGetActive,
       SystemPaths.pendingListIdentityKeys,
     ];

@@ -1,6 +1,9 @@
+import { OpaqueAdapter } from "@embedded/persistence/opaque/adapter";
 import { Database } from "@embedded/runtime/db/database";
 import type { ParsedSchema } from "@embedded/runtime/db/schema";
-import { describe, it, expect } from "vite-plus/test";
+import { mockAdapter } from "@tests/helpers/test-adapter";
+import { describe, it, expect } from "@tests/testkit";
+import { vi } from "vitest";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -35,6 +38,24 @@ function createSchemaDb(): Database {
   return new Database(schema);
 }
 
+function createIndexedDb(): Database {
+  const schema: ParsedSchema = {
+    schemaValidation: false,
+    tables: new Map([
+      [
+        "tasks",
+        {
+          indexes: [{ indexDescriptor: "by_status", fields: ["status"] }],
+          vectorIndexes: [],
+          searchIndexes: [],
+          documentType: { type: "any" },
+        },
+      ],
+    ]),
+  };
+  return new Database(schema);
+}
+
 // ---------------------------------------------------------------------------
 // ID generation
 // ---------------------------------------------------------------------------
@@ -59,6 +80,32 @@ describe("Database — ID generation", () => {
     expect(id1).not.toBe(id2);
     expect(id1).not.toBe(id3);
     expect(id2).not.toBe(id3);
+    db.commit();
+  });
+
+  it("retries id generation when the crypto provider returns a duplicate", () => {
+    const db = new Database(null, undefined, {
+      randomUUID: (() => {
+        const values = [
+          "00000000-0000-4000-8000-000000000001",
+          "00000000-0000-4000-8000-000000000001",
+          "00000000-0000-4000-8000-000000000002",
+        ];
+        let index = 0;
+        return () => values[index++] ?? crypto.randomUUID();
+      })(),
+      getRandomValues: (bytes: Uint8Array) => crypto.getRandomValues(bytes),
+      sha256: async () => new Uint8Array(),
+      encryptAesGcm: async () => new Uint8Array(),
+      decryptAesGcm: async () => new Uint8Array(),
+    });
+
+    db.startTransaction();
+    const id1 = db.insert("tasks", { title: "a" });
+    const id2 = db.insert("tasks", { title: "b" });
+
+    expect(id1).toBe("00000000-0000-4000-8000-000000000001");
+    expect(id2).toBe("00000000-0000-4000-8000-000000000002");
     db.commit();
   });
 });
@@ -257,6 +304,175 @@ describe("Database — MVCC timestamps", () => {
   });
 });
 
+describe("Database — async read backend", () => {
+  it("startQueryAsync uses backend IndexRange reads when available", async () => {
+    const db = createIndexedDb();
+    const docs = [
+      {
+        _id: "a" as any,
+        _creationTime: 1,
+        status: "active",
+        title: "first",
+      },
+      {
+        _id: "b" as any,
+        _creationTime: 2,
+        status: "done",
+        title: "second",
+      },
+      {
+        _id: "c" as any,
+        _creationTime: 3,
+        status: "active",
+        title: "third",
+      },
+    ];
+    const readSource = vi.fn(async () => [docs[0]!, docs[2]!]);
+    db.setReadBackendForTests({
+      readSource,
+      listDocuments: async () => docs,
+      get: async () => null,
+      count: async () => docs.length,
+    });
+
+    const queryId = db.startQueryAsync({
+      source: {
+        type: "IndexRange",
+        indexName: "tasks.by_status",
+        range: [{ type: "Eq", fieldPath: "status", value: "active" }],
+        order: "asc",
+      },
+      operators: [],
+    });
+
+    const first = await db.queryNextAsync(queryId);
+    const second = await db.queryNextAsync(queryId);
+    const done = await db.queryNextAsync(queryId);
+
+    expect(readSource).toHaveBeenCalled();
+    expect(first.value).toMatchObject({ title: "first" });
+    expect(second.value).toMatchObject({ title: "third" });
+    expect(done.done).toBe(true);
+  });
+
+  it("startQueryAsync uses backend query pushdown for simple filters and limit", async () => {
+    const db = createIndexedDb();
+    const docs = [
+      {
+        _id: "a" as any,
+        _creationTime: 1,
+        status: "active",
+        title: "first",
+      },
+      {
+        _id: "c" as any,
+        _creationTime: 3,
+        status: "active",
+        title: "third",
+      },
+    ];
+    const readQuery = vi.fn(async () => [docs[0]!]);
+    db.setReadBackendForTests({
+      readQuery,
+      source: async () => docs,
+      listDocuments: async () => docs,
+      get: async () => null,
+      count: async () => docs.length,
+    });
+
+    const queryId = db.startQueryAsync({
+      source: {
+        type: "FullTableScan",
+        tableName: "tasks",
+        order: "asc",
+      },
+      operators: [
+        { filter: { $eq: [{ $field: "status" }, { $literal: "active" }] } },
+        { limit: 1 },
+      ],
+    });
+
+    const first = await db.queryNextAsync(queryId);
+    const done = await db.queryNextAsync(queryId);
+
+    expect(readQuery).toHaveBeenCalled();
+    expect(first.value).toMatchObject({ title: "first" });
+    expect(done.done).toBe(true);
+  });
+
+  it("vectorSearchAsync uses backend vector candidates when available", async () => {
+    const vectorSchema: ParsedSchema = {
+      schemaValidation: false,
+      tables: new Map([
+        [
+          "tasks",
+          {
+            indexes: [],
+            searchIndexes: [],
+            vectorIndexes: [
+              {
+                indexDescriptor: "by_embedding",
+                vectorField: "embedding",
+                dimensions: 2,
+                filterFields: ["status"],
+              },
+            ],
+            documentType: { type: "any" },
+          },
+        ],
+      ]),
+    };
+    const vectorDb = new Database(vectorSchema);
+    const readVectorCandidates = vi.fn(async () => [
+      {
+        _id: "a" as any,
+        _creationTime: 1,
+        status: "active",
+        embedding: [1, 0],
+      },
+      {
+        _id: "b" as any,
+        _creationTime: 2,
+        status: "active",
+        embedding: [0.5, 0.5],
+      },
+    ]);
+    vectorDb.setReadBackendForTests({
+      readVectorCandidates,
+    });
+    vectorDb.setStorage(
+      mockAdapter({
+        kind: "sql",
+        listAll: async () => [],
+        list: async () => [],
+        meta: async () => null,
+        listBlobs: async () => [],
+        get: async () => null,
+        count: async () => 0,
+        listDocuments: async () => [],
+        source: async () => [],
+        query: async () => [],
+        readVectorCandidates,
+        commit: async () => undefined,
+        putBlob: async () => undefined,
+        deleteBlob: async () => undefined,
+        clear: async () => undefined,
+      }),
+    );
+
+    const results = await vectorDb.vectorSearchAsync(
+      "tasks.by_embedding",
+      [1, 0],
+      { $eq: [{ $field: "status" }, { $literal: "active" }] },
+      5,
+    );
+
+    expect(readVectorCandidates).toHaveBeenCalled();
+    expect(results.map((result) => result._id)).toEqual(["a", "b"]);
+    expect(results[0]!._score).toBeGreaterThan(results[1]!._score);
+  });
+});
+
 // ---------------------------------------------------------------------------
 // tablesWritten tracking
 // ---------------------------------------------------------------------------
@@ -287,6 +503,233 @@ describe("Database — tablesWritten", () => {
     db.startTransaction();
     const { tablesWritten } = db.commit();
     expect(tablesWritten.size).toBe(0);
+  });
+});
+
+describe("Database — committed indexes", () => {
+  it("dedupes duplicate ids in committed index reads", () => {
+    const db = createDb();
+    db.startTransaction();
+    const id = db.insert("tasks", { title: "a" });
+    db.commit();
+
+    const state = db as any;
+    state._indexDocuments.set("tasks.by_creation_time", [id, id]);
+
+    const docs = db.getIndexedDocuments("tasks", "by_creation_time");
+    expect(docs).toHaveLength(1);
+    expect(docs[0]!._id).toBe(id);
+  });
+});
+
+describe("Database — sql committed state authority", () => {
+  it("does not materialize cold sql-backed user tables on outer commit", async () => {
+    const applyCommitSpy = vi.fn(async (batch) => ({
+      meta: batch.meta,
+      tables: [],
+    }));
+    const db = createDb();
+    db.setStorage(
+      mockAdapter({
+        kind: "sql",
+        listAll: async () => [],
+        list: async () => [],
+        meta: async () => null,
+        listBlobs: async () => [],
+        get: async () => null,
+        count: async () => 0,
+        listDocuments: async () => [],
+        source: async () => [],
+        query: async () => [],
+        commit: async () => undefined,
+        atomicCommit: applyCommitSpy,
+        putBlob: async () => undefined,
+        deleteBlob: async () => undefined,
+        clear: async () => undefined,
+      }),
+    );
+
+    db.startTransaction();
+    db.insert("tasks", { title: "persisted" });
+    const commit = await db.commitAsync();
+
+    expect(commit.tablesWritten.has("tasks")).toBe(true);
+    expect(commit.invalidation).toEqual({
+      tables: new Set(["tasks"]),
+      changes: [],
+    });
+    expect(db.hasDocumentsForTable("tasks")).toBe(false);
+
+    await commit.persisted;
+    expect(applyCommitSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports coarse deletes for cold sql-backed tables without materializing them", async () => {
+    const applyCommitSpy = vi.fn(async (batch) => ({
+      meta: batch.meta,
+      tables: [],
+    }));
+    const db = createDb();
+    db.setStorage(
+      mockAdapter({
+        kind: "sql",
+        listAll: async () => [],
+        list: async () => [],
+        meta: async () => null,
+        listBlobs: async () => [],
+        get: async () => null,
+        count: async () => 0,
+        listDocuments: async () => [],
+        source: async () => [],
+        query: async () => [],
+        commit: async () => undefined,
+        atomicCommit: applyCommitSpy,
+        putBlob: async () => undefined,
+        deleteBlob: async () => undefined,
+        clear: async () => undefined,
+      }),
+    );
+
+    const state = db as any;
+    state._idTableMap.set("task-1", "tasks");
+
+    db.startTransaction();
+    state._addWriteRaw("task-1", null);
+    const commit = await db.commitAsync();
+
+    expect(commit.tablesWritten.has("tasks")).toBe(true);
+    expect(commit.invalidation).toEqual({
+      tables: new Set(["tasks"]),
+      changes: [],
+    });
+
+    await commit.persisted;
+    expect(applyCommitSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves the transaction until an outer sql commit succeeds", async () => {
+    const db = createDb();
+    db.setStorage(
+      mockAdapter({
+        atomicCommit: vi.fn(async () => {
+          throw new Error("sql write failed");
+        }),
+        listAll: async () => [],
+        list: async () => [],
+        meta: async () => null,
+        listBlobs: async () => [],
+        get: async () => null,
+        count: async () => 0,
+        query: async () => [],
+        source: async () => [],
+        vectorSearch: async () => [],
+        commit: async () => undefined,
+        putBlob: async () => undefined,
+        deleteBlob: async () => undefined,
+        clear: async () => undefined,
+      }),
+    );
+
+    db.startTransaction();
+    db.insert("tasks", { title: "pending" });
+
+    await expect(db.commitAsync()).rejects.toThrow("sql write failed");
+    expect(() => db.rollbackWrites()).not.toThrow();
+    expect(db.timestamp).toBe(0);
+  });
+});
+
+describe("Database — hydrate", () => {
+  it("replaces existing in-memory state on full hydration", async () => {
+    const storage = new OpaqueAdapter();
+    const db = createDb();
+
+    db.startTransaction();
+    const ghostId = db.insert("tasks", { title: "ghost" });
+    db.commit();
+
+    const persisted = new Database(null, storage);
+    persisted.startTransaction();
+    const persistedId = persisted.insert("tasks", { title: "persisted" });
+    const persistedCommit = persisted.commit();
+    await persistedCommit.persisted;
+
+    db.setStorage(storage);
+    await db.hydrate();
+
+    expect(db.get("tasks", ghostId as any)).toBeNull();
+    expect(db.get("tasks", persistedId as any)).toEqual(
+      expect.objectContaining({
+        _id: persistedId,
+        title: "persisted",
+      }),
+    );
+    expect(db.getDocumentsForTable("tasks")).toHaveLength(1);
+  });
+
+  it("replaces only the requested tables on scoped hydration", async () => {
+    const storage = new OpaqueAdapter();
+    const db = createDb();
+
+    db.startTransaction();
+    const staleTaskId = db.insert("tasks", { title: "stale task" });
+    const localUserId = db.insert("users", { name: "Local user" });
+    db.commit();
+
+    const persisted = new Database(null, storage);
+    persisted.startTransaction();
+    const persistedTaskId = persisted.insert("tasks", {
+      title: "persisted task",
+    });
+    const persistedCommit = persisted.commit();
+    await persistedCommit.persisted;
+
+    db.setStorage(storage);
+    await db.hydrate({ tables: ["tasks"] });
+
+    expect(db.get("tasks", staleTaskId as any)).toBeNull();
+    expect(db.get("tasks", persistedTaskId as any)).toEqual(
+      expect.objectContaining({
+        _id: persistedTaskId,
+        title: "persisted task",
+      }),
+    );
+    expect(db.get("users", localUserId as any)).toEqual(
+      expect.objectContaining({
+        _id: localUserId,
+        name: "Local user",
+      }),
+    );
+  });
+
+  it("clears cached blobs when the storage adapter is replaced", async () => {
+    const storageId = "blob-1";
+    const storage1 = new OpaqueAdapter();
+    const storage2 = new OpaqueAdapter();
+    const fileDoc = { _id: storageId as any, _creationTime: 1 };
+
+    await storage1.commit({
+      puts: [{ tableName: "_storage", doc: fileDoc }],
+      deletes: [],
+      meta: { timestamp: 1, lastCreationTime: 1 },
+    });
+    await storage1.putBlob(storageId, new Blob(["one"]));
+
+    await storage2.commit({
+      puts: [{ tableName: "_storage", doc: fileDoc }],
+      deletes: [],
+      meta: { timestamp: 1, lastCreationTime: 1 },
+    });
+    await storage2.putBlob(storageId, new Blob(["two"]));
+
+    const db = createDb();
+    db.setStorage(storage1);
+    await db.hydrate();
+    expect(await (await db.loadFile(storageId as any))?.text()).toBe("one");
+
+    db.setStorage(storage2);
+    await db.hydrate();
+    expect(await (await db.loadFile(storageId as any))?.text()).toBe("two");
   });
 });
 

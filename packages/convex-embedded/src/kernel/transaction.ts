@@ -12,9 +12,8 @@
  *    backoff + jitter.
  */
 
-import { Fx } from "@robelest/fx";
-
 import type { DocumentId, Timestamp } from "@/runtime/db/types";
+import { retryWithBackoff } from "@/utils/retry";
 
 // ---------------------------------------------------------------------------
 // TransactionDatabase — the interface OccTransaction expects
@@ -26,7 +25,7 @@ import type { DocumentId, Timestamp } from "@/runtime/db/types";
  */
 export interface TransactionDatabase {
   startTransaction(): void;
-  commit(): void;
+  commitAsync(): Promise<unknown>;
   rollbackWrites(): void;
   getDocumentTimestamp(id: DocumentId): Timestamp | null;
   getTableLastWriteTimestamp(tableName: string): Timestamp | null;
@@ -208,37 +207,40 @@ export class OccTransaction {
    * conflict, using exponential backoff with jitter.
    */
   async execute<T>(fn: () => Promise<T>): Promise<T> {
-    const retrySchedule = Fx.retry.compose(
-      Fx.retry.jittered(Fx.retry.exponential(OCC_BASE_DELAY_MS)),
-      Fx.retry.recurs(this._maxRetries),
-    );
+    return retryWithBackoff(
+      async () => {
+        this._readSet.clear();
+        this._tablesRead.clear();
 
-    const attempt = Fx.defer(() => {
-      // Reset read tracking for each attempt.
-      this._readSet.clear();
-      this._tablesRead.clear();
+        this._db.startTransaction();
 
-      this._db.startTransaction();
-
-      return Fx.from({ ok: () => fn(), err: (e) => e }).pipe(
-        Fx.chain((result) =>
-          Fx.from({
-            ok: () => {
-              this._validateReadSet();
-              this._db.commit();
-              return result;
-            },
-            err: (e) => e,
-          }),
-        ),
-        Fx.recover((err) => {
+        let result: T;
+        try {
+          result = await fn();
+        } catch (err) {
           this._db.rollbackWrites();
-          return err instanceof OccConflictError ? Fx.fail(err) : Fx.fatal(err);
-        }),
-      );
-    });
+          throw err;
+        }
 
-    return Fx.run(attempt.pipe(Fx.retry(retrySchedule)));
+        try {
+          this._validateReadSet();
+          await this._db.commitAsync();
+          return result;
+        } catch (err) {
+          this._db.rollbackWrites();
+          if (err instanceof OccConflictError) {
+            throw err;
+          }
+          throw err;
+        }
+      },
+      {
+        maxRetries: this._maxRetries,
+        baseMs: OCC_BASE_DELAY_MS,
+        jitter: true,
+        shouldRetry: (err) => err instanceof OccConflictError,
+      },
+    );
   }
 
   // -------------------------------------------------------------------------

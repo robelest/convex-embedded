@@ -1,5 +1,5 @@
-import { createTestIdentity } from "@embedded/auth/resolver";
 import { EmbeddedRuntime } from "@embedded/runtime/embedded";
+import { createTestIdentity } from "@embedded/test";
 import {
   createConvexClient,
   getAuthState,
@@ -9,15 +9,9 @@ import {
   subscribeAuthState,
   switchIdentity,
 } from "@resolve/browser/index";
+import { afterEach, beforeEach, describe, expect, it } from "@tests/testkit";
 import { ConvexClient } from "convex/browser";
-import {
-  afterEach,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vite-plus/test";
+import { vi } from "vitest";
 
 vi.mock("convex/browser", () => {
   class MockConvexClient {
@@ -88,8 +82,8 @@ class MockBroadcastChannel {
 
 function createModules() {
   return {
-    "./convex/_generated/api.ts": async () => ({}),
-    "./convex/tasks.ts": async () => ({
+    "_generated/api": async () => ({}),
+    tasks: async () => ({
       list: () => [],
     }),
   };
@@ -137,7 +131,7 @@ describe("auth state accessors", () => {
     const setIdentitySpy = vi.spyOn(EmbeddedRuntime.prototype, "setIdentity");
 
     const client = createConvexClient({
-      modules: createModules(),
+      convex: { modules: createModules() },
       auth: {
         getUserIdentity: vi.fn(async () => identity),
       },
@@ -160,7 +154,7 @@ describe("auth state accessors", () => {
     const fetchToken = vi.fn(async () => "token");
 
     const client = createConvexClient({
-      modules: createModules(),
+      convex: { modules: createModules() },
       auth: {
         fetchToken,
         getUserIdentity: vi.fn(async () => identity),
@@ -193,7 +187,7 @@ describe("auth state accessors", () => {
     const setIdentitySpy = vi.spyOn(EmbeddedRuntime.prototype, "setIdentity");
 
     const client = createConvexClient({
-      modules: createModules(),
+      convex: { modules: createModules() },
       auth: {
         fetchToken: vi.fn(async () => null),
         getUserIdentity: vi.fn(async () => createTestIdentity()),
@@ -221,7 +215,7 @@ describe("auth state accessors", () => {
     );
 
     const client = createConvexClient({
-      modules: createModules(),
+      convex: { modules: createModules() },
       auth: {
         getUserIdentity: vi.fn(async () => identity),
         getIdentityKey: (current) =>
@@ -244,7 +238,7 @@ describe("auth state accessors", () => {
     const identity = createTestIdentity({ subject: "dana" });
 
     const client = createConvexClient({
-      modules: createModules(),
+      convex: { modules: createModules() },
       auth: {
         getUserIdentity: vi.fn(async () => identity),
       },
@@ -260,7 +254,7 @@ describe("auth state accessors", () => {
     const identity = createTestIdentity({ subject: "erin" });
 
     const client = createConvexClient({
-      modules: createModules(),
+      convex: { modules: createModules() },
       auth: {
         getUserIdentity: vi.fn(async () => identity),
       },
@@ -279,7 +273,7 @@ describe("auth state accessors", () => {
     const bob = createTestIdentity({ subject: "bob" });
 
     const client = createConvexClient({
-      modules: createModules(),
+      convex: { modules: createModules() },
       auth: {
         getUserIdentity: vi.fn(async () => alice),
       },
@@ -302,7 +296,7 @@ describe("auth state accessors", () => {
     const fetchToken = vi.fn(async () => "token");
 
     const client = createConvexClient({
-      modules: createModules(),
+      convex: { modules: createModules() },
       auth: {
         fetchToken,
         getUserIdentity: async () => identity,
@@ -319,7 +313,7 @@ describe("auth state accessors", () => {
     const identity = createTestIdentity({ subject: "grace" });
 
     const client = createConvexClient({
-      modules: createModules(),
+      convex: { modules: createModules() },
       remote: { url: "https://remote.example.convex.cloud" },
       auth: {
         getUserIdentity: vi.fn(async () => identity),
@@ -346,12 +340,12 @@ describe("auth state accessors", () => {
     let currentIdentity = createTestIdentity({ subject: "alice" });
 
     const clientA = createConvexClient({
-      modules: createModules(),
+      convex: { modules: createModules() },
       name: "shared-app",
       auth: { getUserIdentity: async () => currentIdentity },
     });
     const clientB = createConvexClient({
-      modules: createModules(),
+      convex: { modules: createModules() },
       name: "shared-app",
       auth: { getUserIdentity: async () => currentIdentity },
     });
@@ -366,6 +360,73 @@ describe("auth state accessors", () => {
       status: "authenticated",
       identity: currentIdentity,
       identityKey: currentIdentity.tokenIdentifier,
+    });
+  });
+
+  it("delivers auth updates in order and isolates listener exceptions", async () => {
+    const alice = createTestIdentity({ subject: "alice" });
+    const bob = createTestIdentity({ subject: "bob" });
+
+    const client = createConvexClient({
+      convex: { modules: createModules() },
+      auth: {
+        getUserIdentity: vi.fn(async () => alice),
+      },
+    });
+    clientsToClose.push(client as any);
+
+    await settle();
+
+    const noisyListener = vi.fn(() => {
+      throw new Error("listener boom");
+    });
+    const observedStates: string[] = [];
+    const unsubscribeNoisy = subscribeAuthState(client, noisyListener);
+    const unsubscribeObserved = subscribeAuthState(client, (state) => {
+      observedStates.push(state.status);
+    });
+
+    await switchIdentity(client, bob);
+    await settle();
+    await logout(client);
+    await settle();
+
+    unsubscribeNoisy();
+    unsubscribeObserved();
+
+    expect(noisyListener).toHaveBeenCalledTimes(2);
+    expect(observedStates).toEqual(["authenticated", "unauthenticated"]);
+  });
+
+  it("stops delivering auth updates after unsubscribe", async () => {
+    const alice = createTestIdentity({ subject: "alice" });
+    const bob = createTestIdentity({ subject: "bob" });
+
+    const client = createConvexClient({
+      convex: { modules: createModules() },
+      auth: {
+        getUserIdentity: vi.fn(async () => alice),
+      },
+    });
+    clientsToClose.push(client as any);
+
+    await settle();
+
+    const callback = vi.fn();
+    const unsubscribe = subscribeAuthState(client, callback);
+
+    await switchIdentity(client, bob);
+    await settle();
+    unsubscribe();
+
+    await logout(client);
+    await settle();
+
+    expect(callback).toHaveBeenCalledTimes(1);
+    expect(callback).toHaveBeenLastCalledWith({
+      status: "authenticated",
+      identity: bob,
+      identityKey: bob.tokenIdentifier,
     });
   });
 });

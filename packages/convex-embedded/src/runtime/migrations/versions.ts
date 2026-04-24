@@ -1,4 +1,5 @@
 import type { Database } from "@/runtime/db/database";
+import type { DocumentId } from "@/runtime/db/types";
 import type {
   StoreMigrationScope,
   StoreVersionRecord,
@@ -6,28 +7,51 @@ import type {
 
 export const STORE_VERSION_TABLE = "_resolve_store_versions";
 
-function matchesVersionRecord(
-  row: Record<string, unknown>,
+async function readVersionRows(
+  db: Database,
   input: {
     store: string;
     scope: StoreMigrationScope;
     identityKey: string | null;
   },
-): boolean {
-  return (
-    row.store === input.store &&
-    row.scope === input.scope &&
-    (input.scope === "global"
-      ? row.identityKey === undefined || row.identityKey === null
-      : row.identityKey === input.identityKey)
-  );
+): Promise<Record<string, unknown>[]> {
+  const qid = db.startQueryAsync({
+    source: {
+      type: "IndexRange",
+      indexName: `${STORE_VERSION_TABLE}.by_store_scope_and_identity`,
+      range: [
+        { type: "Eq", fieldPath: "store", value: input.store },
+        { type: "Eq", fieldPath: "scope", value: input.scope },
+        {
+          type: "Eq",
+          fieldPath: "identityKey",
+          value: withVersionIdentityKey(input.scope, input.identityKey),
+        },
+      ],
+      order: "asc",
+    } as never,
+    operators: [],
+  });
+
+  const rows: Record<string, unknown>[] = [];
+  try {
+    while (true) {
+      const next = await db.queryNextAsync(qid);
+      if (next.done) {
+        return rows;
+      }
+      rows.push(next.value as Record<string, unknown>);
+    }
+  } finally {
+    db.queryCleanup(qid);
+  }
 }
 
 function withVersionIdentityKey(
   scope: StoreMigrationScope,
   identityKey: string | null,
 ): string | null | undefined {
-  return scope === "identity" ? identityKey : undefined;
+  return scope === "identity" ? identityKey : null;
 }
 
 async function writeVersionRows(
@@ -39,9 +63,7 @@ async function writeVersionRows(
     version: number;
   },
 ): Promise<void> {
-  const existing = db
-    .getDocumentsForTable(STORE_VERSION_TABLE)
-    .filter((row) => matchesVersionRecord(row, input));
+  const existing = await readVersionRows(db, input);
 
   const doc = {
     store: input.store,
@@ -56,9 +78,9 @@ async function writeVersionRows(
   }
 
   const [primary, ...duplicates] = existing;
-  db.patch(undefined, primary._id, doc);
+  db.patch(undefined, primary._id as DocumentId, doc);
   for (const stale of duplicates) {
-    db.delete(undefined, stale._id);
+    db.delete(undefined, stale._id as DocumentId);
   }
 }
 
@@ -70,9 +92,7 @@ export async function getStoredVersion(
     identityKey: string | null;
   },
 ): Promise<number | null> {
-  const rows = db
-    .getDocumentsForTable(STORE_VERSION_TABLE)
-    .filter((row) => matchesVersionRecord(row, input));
+  const rows = await readVersionRows(db, input);
   const versions = rows
     .map((row) => Number(row.version))
     .filter(Number.isFinite);
@@ -91,7 +111,7 @@ export async function setStoredVersion(
   db.startTransaction();
   try {
     await writeVersionRows(db, input);
-    db.commit();
+    await db.commitAsync();
   } catch (error) {
     db.rollbackWrites();
     throw error;
@@ -101,7 +121,7 @@ export async function setStoredVersion(
 export async function listStoredVersions(
   db: Database,
 ): Promise<StoreVersionRecord[]> {
-  return db.getDocumentsForTable(STORE_VERSION_TABLE).map((row) => ({
+  return (await db.listDocumentsAsync(STORE_VERSION_TABLE)).map((row) => ({
     store:
       typeof row.store === "string"
         ? row.store

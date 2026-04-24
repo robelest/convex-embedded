@@ -3,15 +3,14 @@
  *
  * The discovery pass extracts route modes, embedded-table bindings, and
  * storage upload URL metadata without executing any remote sync logic.
- * It is used by both live remote attachment and SSR replica creation.
+ * It is used by both live remote attachment and SSR prefetch flows.
  *
  * @internal
  */
-import { Fx } from "@robelest/fx";
 
-import { getRouteMode, type RouteMode } from "@/client/routing/metadata";
 import { asError } from "@/client/routing/refs";
-import type { ConvexModule } from "@/kernel/modules";
+import type { ConvexInput, ConvexModule } from "@/kernel/modules";
+import { getRouteMode, type RouteMode } from "@/shared/route";
 
 export interface ModuleLoadFailure {
   path: string;
@@ -20,8 +19,6 @@ export interface ModuleLoadFailure {
 
 export interface DiscoveryTable {
   resolve: string;
-  query: string;
-  resolveArgs?: () => Record<string, unknown>;
   schema?: unknown;
 }
 
@@ -39,6 +36,25 @@ function createDiscoveryAccumulator(): DiscoveredRemoteMetadata {
     moduleLoadFailures: [],
     uploadUrl: undefined,
   };
+}
+
+async function loadManifestTableSchema(input: {
+  convex: ConvexInput;
+  schemaModule?: string;
+  schemaExport?: string;
+}): Promise<unknown> {
+  if (!input.schemaModule || !input.schemaExport) {
+    return undefined;
+  }
+  const loader = input.convex.modules[input.schemaModule];
+  if (!loader) {
+    return undefined;
+  }
+  const mod = await loader();
+  const exported = (mod as Record<string, unknown>)[input.schemaExport] as
+    | { schema?: unknown }
+    | undefined;
+  return exported?.schema;
 }
 
 function collectTableDependencies(
@@ -153,7 +169,6 @@ function scanModuleExports(
   accumulator: DiscoveredRemoteMetadata,
 ): void {
   const REMOTE_META = Symbol.for("convex-embedded:remoteMeta");
-  const RESOLVE_QUERY_META = Symbol.for("convex-embedded:resolveQueryMeta");
   const STORAGE_UPLOAD_URL_META = Symbol.for(
     "convex-embedded:storageUploadUrlMeta",
   );
@@ -183,26 +198,7 @@ function scanModuleExports(
       syncMetaTagged = true;
       accumulator.tables[meta.table] = {
         resolve: `${moduleName}:${meta.resolveExport}`,
-        query: meta.listExport
-          ? `${moduleName}:${meta.listExport}`
-          : `${moduleName}:list`,
         schema: meta.schema,
-      };
-    }
-
-    const resolveQueryMeta = exportValue[RESOLVE_QUERY_META];
-    if (
-      resolveQueryMeta &&
-      resolveQueryMeta.__brand === "convex-embedded:resolveQueryMeta"
-    ) {
-      accumulator.tables[resolveQueryMeta.table] = {
-        ...(accumulator.tables[resolveQueryMeta.table] ?? {
-          resolve: `${moduleName}:bind`,
-          query: `${moduleName}:list`,
-          schema: undefined,
-        }),
-        query: `${moduleName}:${exportName}`,
-        resolveArgs: resolveQueryMeta.getArgs,
       };
     }
 
@@ -224,59 +220,73 @@ function scanModuleExports(
  *
  * @param input - Discovery options including the lazy module registry.
  * @param input.modules - Canonical Convex module registry to inspect.
- * @param input.shouldStop - Optional cancellation probe used during bootstrap.
+ * @param input.shouldStop - Optional cancellation probe used during discovery.
  * @returns Collected remote metadata, or `null` when discovery was cancelled.
  *
  * @see warnModuleLoadFailures
  */
 export async function discoverRemoteMetadata(input: {
-  modules: Record<string, () => Promise<ConvexModule>>;
+  convex: ConvexInput;
   shouldStop?: () => boolean;
 }): Promise<DiscoveredRemoteMetadata | null> {
+  const manifest = input.convex.manifest?.remote;
+  if (manifest) {
+    const tableEntries = await Promise.all(
+      Object.entries(manifest.tables).map(
+        async ([tableName, table]) =>
+          [
+            tableName,
+            {
+              resolve: table.resolve,
+              schema: await loadManifestTableSchema({
+                convex: input.convex,
+                schemaModule: table.schemaModule,
+                schemaExport: table.schemaExport,
+              }),
+            },
+          ] as const,
+      ),
+    );
+
+    return {
+      routeModes: new Map(Object.entries(manifest.routeModes ?? {})),
+      tables: sortDiscoveredTables(Object.fromEntries(tableEntries)),
+      moduleLoadFailures: [],
+      uploadUrl: manifest.uploadUrl,
+    };
+  }
+
   const accumulator = createDiscoveryAccumulator();
 
-  const result = await Fx.run(
-    Fx.each(Object.entries(input.modules), ([moduleName, loader]) => {
-      if (
-        input.shouldStop?.() ||
-        moduleName === "_generated" ||
-        moduleName.startsWith("_generated/")
-      ) {
-        return Fx.unit;
-      }
+  for (const [moduleName, loader] of Object.entries(input.convex.modules)) {
+    if (
+      input.shouldStop?.() ||
+      moduleName === "_generated" ||
+      moduleName.startsWith("_generated/")
+    ) {
+      continue;
+    }
 
-      return Fx.from({
-        ok: () => loader(),
-        err: (err) => err as Error,
-      }).pipe(
-        Fx.tap((mod) =>
-          Fx.sync(() => {
-            if (input.shouldStop?.()) {
-              return;
-            }
-            scanModuleExports(moduleName, mod, accumulator);
-          }),
-        ),
-        Fx.recover((err) =>
-          Fx.sync(() => {
-            accumulator.moduleLoadFailures.push({
-              path: moduleName,
-              error: asError(err),
-            });
-          }),
-        ),
-        Fx.map(() => undefined as void),
-      );
-    }).pipe(Fx.map(() => accumulator)),
-  );
+    try {
+      const mod = await loader();
+      if (!input.shouldStop?.()) {
+        scanModuleExports(moduleName, mod, accumulator);
+      }
+    } catch (err) {
+      accumulator.moduleLoadFailures.push({
+        path: moduleName,
+        error: asError(err),
+      });
+    }
+  }
 
   if (input.shouldStop?.()) {
     return null;
   }
 
   return {
-    ...result,
-    tables: sortDiscoveredTables(result.tables),
+    ...accumulator,
+    tables: sortDiscoveredTables(accumulator.tables),
   };
 }
 

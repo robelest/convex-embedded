@@ -1,7 +1,8 @@
-import { access } from "node:fs/promises";
+import { access, readdir, readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it } from "@tests/testkit";
 
 const hasBuildArtifacts = await access(
   new URL("../../packages/convex-embedded/dist/index.js", import.meta.url),
@@ -12,6 +13,7 @@ const hasBuildArtifacts = await access(
 const importableSpecifiers = [
   "@robelest/convex-embedded",
   "@robelest/convex-embedded/browser",
+  "@robelest/convex-embedded/node",
   "@robelest/convex-embedded/react",
   "@robelest/convex-embedded/server",
   "@robelest/convex-embedded/client",
@@ -51,6 +53,33 @@ async function resolveSpecifier(specifier: string): Promise<string> {
         const module = await import(resolved);
         expect(module).toBeDefined();
       }
+    });
+
+    it("keeps the browser sqlite worker co-located with the emitted chunk that loads it", async () => {
+      const workerPath = fileURLToPath(
+        new URL(
+          "../../packages/convex-embedded/dist/worker.js",
+          import.meta.url,
+        ),
+      );
+      const distDir = dirname(workerPath);
+
+      await access(workerPath);
+
+      const topLevelJsFiles = (await readdir(distDir)).filter((entry) =>
+        entry.endsWith(".js"),
+      );
+      let referencingFile: string | null = null;
+
+      for (const fileName of topLevelJsFiles) {
+        const content = await readFile(join(distDir, fileName), "utf8");
+        if (content.includes('new URL("./worker.js", import.meta.url)')) {
+          referencingFile = fileName;
+          break;
+        }
+      }
+
+      expect(referencingFile).not.toBeNull();
     });
   },
 );

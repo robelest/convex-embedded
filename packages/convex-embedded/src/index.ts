@@ -2,8 +2,8 @@
  * @robelest/convex-embedded
  *
  * Lightweight embedded Convex runtime for local-first applications.
- * Runs locally in-memory and can be seeded from a remote-backed replica for
- * SSR/bootstrap flows. The root package exposes framework-agnostic runtime and
+ * Runs locally in-memory and can be seeded from remote-backed prefetch data for
+ * SSR/prefetch flows. The root package exposes framework-agnostic runtime and
  * client primitives rather than a React-specific wrapper.
  *
  * The root package also exports the platform-agnostic client factory and
@@ -51,18 +51,32 @@ export type {
   LoopbackErrorEvent,
 } from "@/runtime/loopback";
 
-export type { ConvexModuleRegistry } from "@/kernel/modules";
+export type {
+  ConvexInput,
+  ConvexManifest,
+  ConvexModuleRegistry,
+} from "@/kernel/modules";
 
-export { AuthResolver, createTestIdentity } from "@/auth/resolver";
-export type { UserIdentity } from "@/auth/resolver";
+export { AuthResolver, getIdentityKey } from "@/auth";
+export type { UserIdentity } from "@/auth";
+
+// Public persistence API — class-based. The legacy `PersistenceAdapter`
+// interface + `kind` union previously re-exported from here is now internal
+// only; construct adapters via the class API below.
+export {
+  PersistenceAdapter,
+  OpaqueAdapter,
+  SqliteAdapter,
+  type CommitBatch,
+  type DatabaseMeta,
+  type AtomicCommitOptions,
+  type AtomicCommitResult,
+} from "@/persistence";
 
 export type {
-  StorageAdapter,
-  CommitBatch,
-  DatabaseMeta,
-} from "@/storage/adapter";
-
-export { ephemeralStorage } from "@/storage/memory";
+  SqliteDriver,
+  SqliteStatement,
+} from "@/persistence/sqlite/driver";
 
 export { SubscriptionManager } from "@/sync/subscriptions";
 
@@ -97,14 +111,14 @@ import {
  *
  * This is the primary entry point. Pass a lazy ESM registry keyed by your
  * Convex module ids, optionally your schema definition, and optionally a
- * remote-backed replica for SSR/bootstrap.
+ * remote-backed prefetch data for SSR/prefetch.
  *
  * @param options.modules  Lazy ESM registry keyed by canonical module id.
  * @param options.schema   Default export from your `convex/schema.ts`.
- * @param options.replica  Optional replica created by `createReplica(...)`.
+ * @param options.prefetch Optional prefetch data created by `createEmbeddedPrefetch(...)`.
  * @returns An {@link EmbeddedRuntime} instance.
  *
- * @see createReplica
+ * @see createEmbeddedPrefetch
  * @category Factory
  */
 export function createEmbeddedRuntime(

@@ -3,8 +3,8 @@ import {
   planMutationExecution,
   planReadExecution,
 } from "@resolve/client/routing/plan";
+import { afterEach, beforeEach, describe, expect, it } from "@tests/testkit";
 import { ConvexError } from "convex/values";
-import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 
 describe("routing plan guardrails", () => {
   let originalNavigator: Navigator | undefined;
@@ -83,17 +83,16 @@ describe("routing plan guardrails", () => {
   });
 
   it("fails remote plans immediately when offline", () => {
-    Object.defineProperty(globalThis, "navigator", {
-      value: { onLine: false },
-      writable: true,
-      configurable: true,
-    });
-
     try {
-      assertRemotePlanOnline({
-        refName: "messages:publish",
-        cause: "remote-routed",
-      });
+      assertRemotePlanOnline(
+        {
+          refName: "messages:publish",
+          cause: "remote-routed",
+        },
+        {
+          isOnline: () => false,
+        },
+      );
       throw new Error("expected offline routing guardrail to throw");
     } catch (error) {
       expect(error).toBeInstanceOf(ConvexError);

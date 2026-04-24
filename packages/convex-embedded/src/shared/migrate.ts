@@ -3,7 +3,6 @@
  *
  * @module
  */
-import { Fx } from "@robelest/fx";
 
 import { createLogger } from "@/shared/logger";
 import type { Definition } from "@/shared/schema";
@@ -216,7 +215,7 @@ async function runLocalMigration(
  * Check the current schema version and run any pending migrations.
  * Returns true if migrations were run, false if already up to date.
  *
- * This should be called during app startup, before rendering.
+ * This should be called during app load, before rendering.
  * It blocks until all migrations complete.
  *
  * @param ctx - A Convex mutation context (ctx from a mutation handler)
@@ -263,70 +262,47 @@ export async function runMigrations(
 
     const migrationFn = migrations[v];
 
-    const stepResult = await Fx.run(
-      Fx.gen(function* () {
-        if (migrationFn) {
-          if (typeof migrationFn === "function") {
-            yield* Fx.from({
-              ok: () =>
-                runLocalMigration(ctx, table, schemaDef, v, migrationFn),
-              err: (e) => e as Error,
-            });
-          } else {
-            yield* Fx.from({
-              ok: () => ctx.runMutation(migrationFn, {}),
-              err: (e) => e as Error,
-            });
-          }
-          log.info(`runMigrations: ${table} v${v} migration completed`);
+    let stepResult: "ok" | "recovered";
+    try {
+      if (migrationFn) {
+        if (typeof migrationFn === "function") {
+          await runLocalMigration(ctx, table, schemaDef, v, migrationFn);
         } else {
-          yield* Fx.from({
-            ok: () => applyDefaults(ctx, table, schemaDef, v),
-            err: (e) => e as Error,
-          });
-          log.info(`runMigrations: ${table} v${v} defaults applied`);
+          await Promise.resolve(ctx.runMutation(migrationFn, {}));
         }
+        log.info(`runMigrations: ${table} v${v} migration completed`);
+      } else {
+        await applyDefaults(ctx, table, schemaDef, v);
+        log.info(`runMigrations: ${table} v${v} defaults applied`);
+      }
 
-        yield* Fx.from({
-          ok: () => setStoredVersion(ctx, table, v),
-          err: (e) => e as Error,
-        });
+      await setStoredVersion(ctx, table, v);
 
-        return "ok" as const;
-      }).pipe(
-        Fx.recover((err) =>
-          Fx.gen(function* () {
-            log.error(`runMigrations: ${table} v${v} migration failed`, err);
+      stepResult = "ok";
+    } catch (err) {
+      log.error(`runMigrations: ${table} v${v} migration failed`, err);
 
-            if (onMigrationError) {
-              const recoveryCtx: RecoveryContext = {
-                canResetSafely: true,
-                currentVersion: v - 1,
-                targetVersion,
-              };
+      if (onMigrationError) {
+        const recoveryCtx: RecoveryContext = {
+          canResetSafely: true,
+          currentVersion: v - 1,
+          targetVersion,
+        };
 
-              const recovery = yield* Fx.from({
-                ok: () =>
-                  onMigrationError(
-                    err instanceof Error ? err : new Error(String(err)),
-                    recoveryCtx,
-                  ),
-                err: (e) => e as Error,
-              });
+        const recovery = await Promise.resolve(
+          onMigrationError(
+            err instanceof Error ? err : new Error(String(err)),
+            recoveryCtx,
+          ),
+        );
 
-              yield* Fx.from({
-                ok: () => handleRecovery(ctx, table, recovery, targetVersion),
-                err: (e) => e as Error,
-              });
-            } else {
-              return yield* Fx.fail(err);
-            }
+        await handleRecovery(ctx, table, recovery, targetVersion);
 
-            return "recovered" as const;
-          }),
-        ),
-      ),
-    );
+        stepResult = "recovered";
+      } else {
+        throw err;
+      }
+    }
 
     if (stepResult === "recovered") {
       return true;
@@ -344,30 +320,27 @@ async function getStoredVersion(
   ctx: MigrationCtx,
   table: string,
 ): Promise<number | null> {
-  return Fx.run(
-    Fx.from({
-      ok: async () => {
-        const records = await ctx.db
-          .query(VERSION_TABLE)
-          .withIndex("by_table", (q) => q.eq("table", table))
-          .collect();
+  try {
+    const records = await ctx.db
+      .query(VERSION_TABLE)
+      .withIndex("by_table", (q) => q.eq("table", table))
+      .collect();
 
-        if (records.length === 0) return null;
-        if (records.length > 1) {
-          log.warn(
-            `getStoredVersion: found ${records.length} version rows for ${table}`,
-          );
-        }
+    if (records.length === 0) return null;
+    if (records.length > 1) {
+      log.warn(
+        `getStoredVersion: found ${records.length} version rows for ${table}`,
+      );
+    }
 
-        const versions = records
-          .map((record) => Number(record.version))
-          .filter(Number.isFinite);
+    const versions = records
+      .map((record) => Number(record.version))
+      .filter(Number.isFinite);
 
-        return versions.length > 0 ? Math.max(...versions) : null;
-      },
-      err: (e) => e as Error,
-    }).pipe(Fx.recover(() => Fx.succeed(null))),
-  );
+    return versions.length > 0 ? Math.max(...versions) : null;
+  } catch {
+    return null;
+  }
 }
 
 async function setStoredVersion(
@@ -375,52 +348,44 @@ async function setStoredVersion(
   table: string,
   version: number,
 ): Promise<void> {
-  const effect = Fx.from({
-    ok: async () => {
-      const existing = await ctx.db
-        .query(VERSION_TABLE)
-        .withIndex("by_table", (q) => q.eq("table", table))
-        .collect();
+  try {
+    const existing = await ctx.db
+      .query(VERSION_TABLE)
+      .withIndex("by_table", (q) => q.eq("table", table))
+      .collect();
 
-      if (existing.length === 0) {
-        await ctx.db.insert(VERSION_TABLE, { table, version });
-        return;
-      }
+    if (existing.length === 0) {
+      await ctx.db.insert(VERSION_TABLE, { table, version });
+      return;
+    }
 
-      const [primary, ...duplicates] = existing;
-      let staleRows = duplicates;
+    const [primary, ...duplicates] = existing;
+    let staleRows = duplicates;
 
-      try {
-        await ctx.db.patch(primary._id, { version });
-      } catch (patchError) {
-        log.warn(
-          `setStoredVersion: patch failed for ${table}, inserting replacement row`,
-          patchError,
-        );
-        await ctx.db.insert(VERSION_TABLE, { table, version });
-        staleRows = [primary, ...duplicates];
-      }
+    try {
+      await ctx.db.patch(primary._id, { version });
+    } catch (patchError) {
+      log.warn(
+        `setStoredVersion: patch failed for ${table}, inserting replacement row`,
+        patchError,
+      );
+      await ctx.db.insert(VERSION_TABLE, { table, version });
+      staleRows = [primary, ...duplicates];
+    }
 
-      for (const stale of staleRows) {
-        await ctx.db.delete(stale._id);
-      }
+    for (const stale of staleRows) {
+      await ctx.db.delete(stale._id);
+    }
 
-      if (staleRows.length > 0) {
-        log.warn(
-          `setStoredVersion: removed ${staleRows.length} stale version row(s) for ${table}`,
-        );
-      }
-    },
-    err: (err) => err as Error,
-  }).pipe(
-    Fx.inspect((err) =>
-      Fx.sync(() =>
-        log.warn(`setStoredVersion: could not store version for ${table}`, err),
-      ),
-    ),
-  );
-
-  await Fx.run(effect);
+    if (staleRows.length > 0) {
+      log.warn(
+        `setStoredVersion: removed ${staleRows.length} stale version row(s) for ${table}`,
+      );
+    }
+  } catch (err) {
+    log.warn(`setStoredVersion: could not store version for ${table}`, err);
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -471,31 +436,32 @@ async function handleRecovery(
   recovery: RecoveryAction,
   targetVersion: number,
 ): Promise<void> {
-  switch (recovery.action) {
-    case "reset":
-      // Wipe all local data for this table and set version to target
-      log.info(`recovery: resetting ${table} — wiping local data`);
+  if (recovery.action === "reset") {
+    // Wipe all local data for this table and set version to target
+    log.info(`recovery: resetting ${table} — wiping local data`);
+    if (ctx.local) {
+      await ctx.local.transaction(async () => {
+        const docs = await ctx.local!.list(table);
+        for (const doc of docs) {
+          await ctx.local!.delete(table, doc._id);
+        }
+      });
+    } else {
       const docs = await ctx.db.query(table).collect();
       for (const doc of docs) {
         await ctx.db.delete(doc._id);
       }
-      await setStoredVersion(ctx, table, targetVersion);
-      break;
-
-    case "keep-old-schema":
-      log.warn(`recovery: keeping old schema for ${table}`);
-      // Don't update the version — limp along with stale shape
-      break;
-
-    case "retry":
-      log.info(`recovery: will retry migration for ${table} on next startup`);
-      // Don't update version — next startup will retry
-      break;
-
-    case "custom":
-      log.info(`recovery: running custom handler for ${table}`);
-      await recovery.handler();
-      break;
+    }
+    await setStoredVersion(ctx, table, targetVersion);
+  } else if (recovery.action === "keep-old-schema") {
+    log.warn(`recovery: keeping old schema for ${table}`);
+    // Don't update the version — limp along with stale shape
+  } else if (recovery.action === "retry") {
+    log.info(`recovery: will retry migration for ${table} on next load`);
+    // Don't update version — next load will retry
+  } else if (recovery.action === "custom") {
+    log.info(`recovery: running custom handler for ${table}`);
+    await recovery.handler();
   }
 }
 

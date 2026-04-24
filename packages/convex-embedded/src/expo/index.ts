@@ -9,14 +9,12 @@
 import type { BaseConvexClientOptions } from "convex/browser";
 
 import type { AuthOptions, AuthState } from "@/client/auth";
+import type { Prefetch } from "@/client/prefetch";
 import type { RemoteOptions, RemoteState } from "@/client/remote";
-import type { Replica } from "@/client/replica";
-import type { ConvexModuleRegistry } from "@/kernel/modules";
-import type { EncryptionOptions } from "@/storage/encrypted";
+import type { ConvexInput } from "@/kernel/modules";
 
-export type { EncryptionOptions };
 export type { AuthOptions, AuthState, RemoteOptions, RemoteState };
-export type { ConvexModuleRegistry } from "@/kernel/modules";
+export type { ConvexInput } from "@/kernel/modules";
 
 /**
  * Options for {@link createConvexClient} in Expo environments.
@@ -29,8 +27,8 @@ export type { ConvexModuleRegistry } from "@/kernel/modules";
  * @category Configuration
  */
 export interface ClientOptions {
-  /** Lazy ESM registry keyed by canonical Convex module id. */
-  modules: ConvexModuleRegistry;
+  /** Generated Convex input containing modules and manifest metadata. */
+  convex: ConvexInput;
 
   /** Optional Convex schema definition used for local validation. */
   schema?: unknown;
@@ -55,16 +53,13 @@ export interface ClientOptions {
   auth?: AuthOptions;
 
   /**
-   * Optional remote-backed replica used to seed the embedded database.
+   * Optional remote-backed prefetch data used to seed the embedded database.
    *
    * This is primarily useful when an Expo app participates in the same
-   * SSR/bootstrap flow as a browser client and should start from the same
+   * SSR/prefetch flow as a browser client and should start from the same
    * authoritative embedded data.
    */
-  replica?: Replica;
-
-  /** Optional at-rest encryption for persisted local state. */
-  encryption?: Omit<EncryptionOptions, "getIdentityKey">;
+  prefetch?: Prefetch;
 
   /** Optional custom directory for the Expo SQLite database files. */
   databaseDirectory?: string;
@@ -88,7 +83,7 @@ ensureConvexAllowFunctionsInBrowser();
  * @example
  * ```ts
  * const client = createConvexClient({
- *   modules,
+ *   convex,
  *   schema,
  *   remote: { url: process.env.EXPO_PUBLIC_CONVEX_URL! },
  * });
@@ -111,7 +106,20 @@ export function createConvexClient(options: ClientOptions) {
     databaseDirectory: options.databaseDirectory,
     filesDirectory: options.filesDirectory,
   });
-  return wrapConvexClientForReact(createEmbeddedClient({ options, platform }));
+  return wrapConvexClientForReact(
+    createEmbeddedClient({
+      options: {
+        convex: options.convex,
+        schema: options.schema,
+        clientOptions: options.clientOptions,
+        name: options.name,
+        remote: options.remote,
+        auth: options.auth,
+        prefetch: options.prefetch,
+      },
+      platform,
+    }),
+  );
 }
 
 export {

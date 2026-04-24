@@ -8,14 +8,16 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "noEmit": true,
-    "lib": ["ES2022", "DOM"],
+    "lib": ["ES2022", "DOM", "ESNext.Disposable"],
+    "types": ["vitest/globals", "node"],
     "paths": {
       "@/*": ["../packages/convex-embedded/src/*"],
       "@embedded/*": ["../packages/convex-embedded/src/*"],
       "@resolve/*": ["../packages/convex-embedded/src/*"],
-      "@convex/*": ["../convex/*"]
+      "@convex/*": ["../convex/*"],
+      "@tests/*": ["./*"]
     }
   },
-  "include": ["**/*.test.ts"],
+  "include": ["**/*.test.ts", "testkit.ts"],
   "exclude": ["node_modules"]
 }

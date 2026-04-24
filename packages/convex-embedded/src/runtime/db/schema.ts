@@ -309,7 +309,7 @@ export function validateFieldNames(validator: ValidatorJSON): void {
 /** Shape of the object returned by a Convex SchemaDefinition's internal export. */
 export interface SchemaExport {
   schemaValidation: boolean;
-  tables: Record<string, { export(): TableSchema }>;
+  tables: Record<string, unknown>;
 }
 
 export function parseSchema(schema: SchemaExport): ParsedSchema {
@@ -317,10 +317,18 @@ export function parseSchema(schema: SchemaExport): ParsedSchema {
     schemaValidation: schema.schemaValidation,
     tables: new Map(
       Object.entries(schema.tables).map(
-        ([name, tableSchema]: [string, { export(): TableSchema }]) => [
-          name,
-          tableSchema.export(),
-        ],
+        ([name, tableSchema]: [string, unknown]) => {
+          if (
+            typeof tableSchema !== "object" ||
+            tableSchema === null ||
+            typeof (tableSchema as { export?: unknown }).export !== "function"
+          ) {
+            throw new Error(
+              `[convex-embedded] schema table "${name}" does not expose a Convex export() method.`,
+            );
+          }
+          return [name, (tableSchema as { export(): TableSchema }).export()];
+        },
       ),
     ),
   };

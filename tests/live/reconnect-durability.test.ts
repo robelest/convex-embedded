@@ -1,11 +1,13 @@
-import { afterEach, describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it } from "@tests/testkit";
 
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import { DEMO_WORKSPACE_ID } from "../../convex/workspace";
 import {
+  createDirectRemoteClient,
   createLiveClient,
   pollUntil,
+  waitForMappedRemoteId,
   type TestConnectivityController,
   uniqueSuffix,
   waitForOffline,
@@ -27,13 +29,21 @@ async function createProjectAndIssue(client: ClosableClient) {
     identifier: suffix.slice(-6).toUpperCase(),
     description: `Durability seed ${suffix}`,
   });
+  const canonicalProjectId = await waitForMappedRemoteId<Id<"projects">>(
+    client,
+    projectId,
+  );
 
   const issueId = await client.mutation(api.issues.create, {
-    projectId,
+    projectId: canonicalProjectId,
     title: `Issue ${suffix}`,
   });
+  const canonicalIssueId = await waitForMappedRemoteId<Id<"issues">>(
+    client,
+    issueId,
+  );
 
-  return { projectId, issueId, suffix };
+  return { projectId: canonicalProjectId, issueId: canonicalIssueId, suffix };
 }
 
 async function waitForCommentsCount(
@@ -211,4 +221,91 @@ maybeDescribe("live reconnect durability", () => {
       }),
     ]);
   }, 90_000);
+
+  it("falls back to a full reconnect sync after collection tail compaction", async () => {
+    const clientAEntry = createLiveClient({
+      name: uniqueSuffix("fallback-a"),
+      remoteUrl: CONVEX_URL!,
+    });
+    const clientBEntry = createLiveClient({
+      name: uniqueSuffix("fallback-b"),
+      remoteUrl: CONVEX_URL!,
+    });
+
+    clientsToClose.push(clientAEntry.client as ClosableClient);
+    clientsToClose.push(clientBEntry.client as ClosableClient);
+    connectivities.push(clientAEntry.connectivity, clientBEntry.connectivity);
+
+    await Promise.all([
+      waitForResolved(clientAEntry.client),
+      waitForResolved(clientBEntry.client),
+    ]);
+
+    const { projectId, issueId, suffix } = await createProjectAndIssue(
+      clientBEntry.client as ClosableClient,
+    );
+
+    await waitForResolved(clientBEntry.client);
+    await pollUntil({
+      read: async () =>
+        (await clientAEntry.client.query(api.comments.forIssue, {
+          issueId,
+        })) as Array<{ _id: string }>,
+      accept: () => true,
+      timeoutMs: 40_000,
+      intervalMs: 250,
+    });
+    const canonicalIssueId = await pollUntil({
+      read: async () =>
+        (await clientAEntry.client.query(api.issues.forProject, {
+          projectId,
+        })) as {
+          issues: Array<{ _id: Id<"issues">; title: string }>;
+        },
+      accept: (result) =>
+        result.issues.some(
+          (candidate) => candidate.title === `Issue ${suffix}`,
+        ),
+      timeoutMs: 40_000,
+      intervalMs: 250,
+    }).then((result) => {
+      const found = result.issues.find(
+        (candidate) => candidate.title === `Issue ${suffix}`,
+      );
+      if (!found) {
+        throw new Error("[convex-embedded] missing canonical issue after sync");
+      }
+      return found._id;
+    });
+
+    clientAEntry.connectivity.setOnline(false);
+    await waitForOffline(clientAEntry.client);
+
+    // Exceed the default collection tail retention (256) with a small buffer so
+    // the test still forces full fallback without spending extra time on writes.
+    const expectedCount = 270;
+    const directRemoteClient = createDirectRemoteClient(CONVEX_URL!);
+    for (let index = 0; index < expectedCount; index += 1) {
+      await directRemoteClient.mutation(api.comments.create, {
+        issueId: canonicalIssueId,
+        body: `fallback-comment-${index}`,
+      });
+    }
+
+    clientAEntry.connectivity.setOnline(true);
+    await Promise.all([
+      waitForResolved(clientAEntry.client, 60_000),
+      waitForResolved(clientBEntry.client, 60_000),
+    ]);
+
+    const comments = await waitForCommentsCount(
+      clientAEntry.client as ClosableClient,
+      canonicalIssueId,
+      expectedCount,
+    );
+
+    expect(new Set(comments.map((comment) => comment.body)).size).toBe(
+      expectedCount,
+    );
+  }, 300_000);
 });

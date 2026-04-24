@@ -1,5 +1,6 @@
 import { IdMap } from "@resolve/client/ids";
-import { describe, it, expect, vi, beforeEach } from "vite-plus/test";
+import { describe, it, expect, beforeEach } from "@tests/testkit";
+import { vi } from "vitest";
 
 describe("IdMap", () => {
   let mockClient: {
@@ -234,6 +235,27 @@ describe("IdMap", () => {
 
       await idMap.set("local-2", "remote-2", "tasks");
       expect(idMap.size).toBe(2);
+    });
+
+    it("prefers a canonical local document over a provisional alias", async () => {
+      mockClient.mutation.mockResolvedValue(null);
+      const hasLocalDocumentId = vi.fn((id: string) => id === "remote-1");
+      idMap = new IdMap(
+        mockClient as any,
+        undefined,
+        undefined,
+        () => activeIdentityKey,
+        hasLocalDocumentId,
+      );
+
+      await idMap.set("local-1", "remote-1", "tasks");
+
+      expect(idMap.translateRemoteIdsToLocal({ issueId: "remote-1" })).toEqual({
+        issueId: "remote-1",
+      });
+      expect(
+        idMap.translateClientIdsToRuntime({ issueId: "remote-1" }),
+      ).toEqual({ issueId: "remote-1" });
     });
   });
 

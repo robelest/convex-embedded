@@ -1,8 +1,9 @@
 import type { ConvexClient } from "convex/browser";
 
-import type { UserIdentity } from "@/auth/resolver";
+import type { UserIdentity } from "@/auth";
 import type { EmbeddedRuntime } from "@/runtime/embedded";
 import type { SessionBroadcast } from "@/runtime/platform";
+import { PubSub } from "@/utils/pubsub";
 
 export type AuthTokenFetcher = Parameters<ConvexClient["setAuth"]>[0];
 export type UserIdentitySource = () => Promise<UserIdentity | null>;
@@ -38,7 +39,7 @@ export interface AuthEntry {
   activeIdentityKey: string | null;
   sessionBroadcast?: SessionBroadcast;
   state: AuthState;
-  listeners: Set<(state: AuthState) => void>;
+  stateHub: PubSub<AuthState>;
 }
 
 interface AuthSnapshot {
@@ -87,12 +88,10 @@ export function getAuthSnapshot(state: AuthState): AuthSnapshot {
 
 export function notifyAuthListeners(entry: AuthEntry, state: AuthState): void {
   entry.state = state;
-  for (const listener of entry.listeners) {
-    try {
-      listener(state);
-    } catch {
-      // Listener failures should not break auth propagation.
-    }
+  try {
+    entry.stateHub.publish(state);
+  } catch {
+    // Publish failures should not break auth propagation.
   }
 }
 

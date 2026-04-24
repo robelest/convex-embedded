@@ -1,7 +1,8 @@
 import { runMigrations, migration } from "@resolve/server/migration";
 import { define, register as registerField } from "@resolve/server/schema";
+import { describe, it, expect } from "@tests/testkit";
 import { v } from "convex/values";
-import { describe, it, expect, vi } from "vite-plus/test";
+import { vi } from "vitest";
 
 // ---------------------------------------------------------------------------
 // Mock Convex context
@@ -467,6 +468,49 @@ describe("runMigrations()", () => {
     });
 
     // Tasks should be wiped
+    expect(ctx._tables["tasks"]).toHaveLength(0);
+  });
+
+  it("uses the local adapter for reset recovery when available", async () => {
+    const ctx = createMockCtx();
+    const schemaDef = define({
+      version: 2,
+      shape: { title: registerField(v.string()) },
+    });
+
+    ctx._tables["_resolve_schema_versions"] = [
+      { _id: "v1", table: "tasks", version: 1 },
+    ];
+    ctx._tables["tasks"] = [{ _id: "t1", _creationTime: 1, title: "Task 1" }];
+    ctx.runMutation.mockRejectedValue(new Error("migration failed"));
+
+    const local = {
+      transaction: vi.fn(async (work: () => Promise<unknown>) => await work()),
+      list: vi.fn(async (table: string) => ctx._tables[table] ?? []),
+      patch: vi.fn(async () => undefined),
+      replace: vi.fn(async () => undefined),
+      delete: vi.fn(async (table: string, id: string) => {
+        ctx._tables[table] = (ctx._tables[table] ?? []).filter(
+          (row) => row._id !== id,
+        );
+      }),
+    };
+
+    await runMigrations(
+      {
+        ...(ctx as any),
+        local,
+      },
+      {
+        table: "tasks",
+        schema: schemaDef,
+        migrations: { 2: { _name: "failing" } as any },
+        onMigrationError: async () => ({ action: "reset" as const }),
+      },
+    );
+
+    expect(local.transaction).toHaveBeenCalled();
+    expect(local.delete).toHaveBeenCalledWith("tasks", "t1");
     expect(ctx._tables["tasks"]).toHaveLength(0);
   });
 });

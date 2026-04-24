@@ -16,6 +16,7 @@
     "outDir": "dist",
     "rootDir": "src",
     "lib": ["ES2022", "DOM", "ESNext.Disposable"],
+    "types": ["node"],
     "paths": {
       "@/*": ["./src/*"]
     }

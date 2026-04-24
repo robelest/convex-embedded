@@ -17,8 +17,8 @@ import {
   isDiffEmpty,
 } from "@resolve/shared/schema";
 import { CrdtType } from "@resolve/shared/types";
+import { describe, it, expect } from "@tests/testkit";
 import { v } from "convex/values";
-import { describe, it, expect } from "vite-plus/test";
 import * as Y from "yjs";
 
 // ---------------------------------------------------------------------------

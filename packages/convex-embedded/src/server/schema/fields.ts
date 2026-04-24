@@ -16,10 +16,26 @@ import {
   type SetFieldDescriptor,
 } from "./core.js";
 
+/**
+ * Options for {@link register} fields.
+ *
+ * @typeParam T - Register value type.
+ */
 export interface RegisterOptions<T> {
+  /**
+   * Optional custom conflict resolver invoked when multiple register values are
+   * present for the same field.
+   */
   resolve?: (conflict: Conflict<T>) => T;
 }
 
+/**
+ * Extract the Convex validator that should be used for a field shape entry.
+ *
+ * @param value - Plain validator or embedded CRDT field descriptor.
+ * @returns The validator that should be fed into `defineTable(...)`.
+ * @internal
+ */
 export function extractValidator(value: unknown): any {
   if (isCrdtField(value)) {
     switch (getCrdtType(value)) {
@@ -40,6 +56,11 @@ export function extractValidator(value: unknown): any {
   return value;
 }
 
+/**
+ * Create a prose CRDT field descriptor.
+ *
+ * @returns A descriptor for rich-text fields backed by Yjs prose state.
+ */
 export function prose(): ProseFieldDescriptor & { [CRDT_FIELD]: true } {
   return {
     [CRDT_FIELD]: true as const,
@@ -48,6 +69,14 @@ export function prose(): ProseFieldDescriptor & { [CRDT_FIELD]: true } {
   };
 }
 
+/**
+ * Create a register CRDT field descriptor.
+ *
+ * @typeParam T - Register value type.
+ * @param validator - Convex validator for the stored value.
+ * @param options - Optional conflict-resolution behavior.
+ * @returns A descriptor for a last-write-wins register field.
+ */
 export function register<T>(
   validator: Validator<T, any, any>,
   options?: RegisterOptions<T>,
@@ -60,6 +89,11 @@ export function register<T>(
   };
 }
 
+/**
+ * Create a counter CRDT field descriptor.
+ *
+ * @returns A descriptor for numeric counters merged by summing deltas.
+ */
 export function counter(): CounterFieldDescriptor & { [CRDT_FIELD]: true } {
   return {
     [CRDT_FIELD]: true as const,
@@ -68,6 +102,13 @@ export function counter(): CounterFieldDescriptor & { [CRDT_FIELD]: true } {
   };
 }
 
+/**
+ * Create a set CRDT field descriptor.
+ *
+ * @typeParam T - Set member type.
+ * @param validator - Convex validator for each set member.
+ * @returns A descriptor for an add-wins set field.
+ */
 export function set<T>(
   validator: Validator<T, any, any>,
 ): SetFieldDescriptor<T> & { [CRDT_FIELD]: true } {
@@ -78,6 +119,16 @@ export function set<T>(
   };
 }
 
+/**
+ * Create an omitted field descriptor.
+ *
+ * Omitted fields are validated remotely but excluded from local embedded CRDT
+ * materialization.
+ *
+ * @typeParam T - Omitted value type.
+ * @param validator - Convex validator for the omitted field.
+ * @returns A descriptor for a remote-only field.
+ */
 export function omit<T>(
   validator: Validator<T, any, any>,
 ): OmittedFieldDescriptor<T> & { [CRDT_FIELD]: true } {
@@ -88,6 +139,17 @@ export function omit<T>(
   };
 }
 
+/**
+ * Namespace-style schema helper collection.
+ *
+ * @example
+ * ```ts
+ * const tasks = embeddedTable("tasks", {
+ *   title: schema.register(v.string()),
+ *   body: schema.prose(),
+ * });
+ * ```
+ */
 export const schema = {
   define,
   prose,

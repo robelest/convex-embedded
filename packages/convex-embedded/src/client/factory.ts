@@ -1,13 +1,10 @@
 /**
  * Platform-agnostic embedded client factory.
  *
- * This module contains the lower-level client bootstrap used by the browser
- * entry point. It accepts an {@link EmbeddedPlatformAdapter}, wires together
- * persistence, embedded transport, auth, and remote sync, then returns a
+ * This module composes runtime, persistence, auth, and remote sync into a
  * standard `ConvexClient` instance.
  */
 
-import { Fx } from "@robelest/fx";
 import { ConvexClient } from "convex/browser";
 import type { BaseConvexClientOptions } from "convex/browser";
 
@@ -15,6 +12,7 @@ import { patchRoutedConvexClient } from "@/client/adapter";
 import {
   type AuthEntry,
   type AuthOptions,
+  type AuthState,
   AUTH_STATE_STORE_MIGRATIONS,
   deleteAuthEntry,
   initializeActiveIdentityKey,
@@ -28,206 +26,286 @@ import {
   registerEmbeddedClientEntry,
 } from "@/client/entry";
 import { ID_MAP_STORE_MIGRATIONS } from "@/client/ids";
-import { PENDING_STORE_MIGRATIONS } from "@/client/pending";
+import type { Prefetch } from "@/client/prefetch";
 import {
   attachResolve,
   deleteResolveEntry,
   type RemoteOptions,
+  type ResolveAttachment,
 } from "@/client/remote";
 import { discoverPendingReplayMetadata } from "@/client/replay";
-import type { Replica } from "@/client/replica";
 import { asError, getFunctionRefName } from "@/client/routing/refs";
-import {
-  type ConvexModule,
-  type ConvexModuleRegistry,
-  normalizeModuleRegistry,
-} from "@/kernel/modules";
+import { type ConvexInput, normalizeModuleRegistry } from "@/kernel/modules";
 import { STORAGE_METADATA_STORE_MIGRATIONS } from "@/kernel/syscalls";
 import { createAmbientCryptoProvider } from "@/runtime/crypto";
 import { EmbeddedRuntime } from "@/runtime/embedded";
 import type { EmbeddedRuntimeOptions } from "@/runtime/embedded";
-import { runLocalMigrations } from "@/runtime/migrations/coordinator";
-import { attachPlatformPersistence } from "@/runtime/persistence";
+import { LoadCoordinator } from "@/runtime/load";
+import { PENDING_STORE_MIGRATIONS } from "@/runtime/migrations/pending";
 import type { EmbeddedPlatformAdapter } from "@/runtime/platform";
 import { SCHEDULED_FUNCTIONS_STORE_MIGRATIONS } from "@/scheduler/executor";
 import { createLogger } from "@/shared/logger";
 import type { PendingReplayMeta } from "@/shared/symbols";
-import type { EncryptionOptions } from "@/storage/encrypted";
+import { PubSub } from "@/utils/pubsub";
+import { DisposableScope } from "@/utils/scope";
 
 const log = createLogger("setup");
 
-/**
- * Platform-agnostic options for {@link createEmbeddedClient}.
- *
- * Use this shape when you are building a custom environment wrapper such as
- * Electron, React Native, or a browser-specific helper.
- *
- * @example
- * ```ts
- * const client = createEmbeddedClient({
- *   options: {
- *     modules,
- *     remote: { url: import.meta.env.CONVEX_URL },
- *   },
- *   platform,
- * });
- * ```
- */
+interface PlatformConfig {
+  readonly runtime: EmbeddedRuntime;
+  readonly platform: EmbeddedPlatformAdapter;
+  readonly name: string;
+  readonly sessionBroadcast: ReturnType<
+    NonNullable<EmbeddedPlatformAdapter["createSessionBroadcast"]>
+  > | null;
+  readonly writeBroadcast: ReturnType<
+    NonNullable<EmbeddedPlatformAdapter["createWriteBroadcast"]>
+  > | null;
+  readonly connectivity: EmbeddedPlatformAdapter["connectivity"];
+  readonly processorId: string | undefined;
+  readonly clientClosed: () => boolean;
+}
+
+function installStorageSurface(
+  platformConfig: PlatformConfig,
+): { close(): void } | null {
+  const { runtime, platform, name, clientClosed } = platformConfig;
+
+  if (clientClosed()) {
+    log.info("skipping storage surface install after client close");
+    return null;
+  }
+
+  const storageSurface =
+    platform.createStorageSurface?.({
+      runtime,
+      name,
+      crypto: runtime.crypto,
+    }) ?? null;
+
+  if (clientClosed()) {
+    storageSurface?.close();
+    return null;
+  }
+
+  runtime.setStorageSurface(storageSurface);
+  log.info(
+    `storage surface installed after persistence attach (${storageSurface ? "enabled" : "none"})`,
+  );
+  return storageSurface;
+}
+
+function createAuthEntry(
+  platformConfig: PlatformConfig,
+): Pick<
+  AuthEntry,
+  | "runtime"
+  | "getPendingCount"
+  | "refreshSync"
+  | "activeIdentityKey"
+  | "sessionBroadcast"
+  | "state"
+  | "stateHub"
+> {
+  const { runtime, sessionBroadcast } = platformConfig;
+  return {
+    runtime,
+    getPendingCount: () => 0,
+    refreshSync: () => Promise.resolve(),
+    activeIdentityKey: null,
+    sessionBroadcast: sessionBroadcast ?? undefined,
+    state: { status: "idle" } as AuthState,
+    stateHub: new PubSub<AuthState>(),
+  };
+}
+
+function createResolveAttachment(input: {
+  client: ConvexClient;
+  authEntry: AuthEntry;
+  resolveOpts: RemoteOptions;
+  convex: ConvexInput;
+  getIdentityKeyForSync: () => string | null;
+  getReplayPayloadVersion: (refName: string) => number;
+  platformConfig: PlatformConfig;
+}): ResolveAttachment {
+  const { runtime, connectivity, processorId } = input.platformConfig;
+
+  return attachResolve({
+    client: input.client,
+    runtime,
+    authEntry: input.authEntry,
+    resolveOpts: input.resolveOpts,
+    convex: input.convex,
+    getIdentityKeyForSync: input.getIdentityKeyForSync,
+    getReplayPayloadVersion: input.getReplayPayloadVersion,
+    connectivity,
+    processorId,
+  });
+}
+
+function installSessionFanout(
+  authEntry: AuthEntry,
+  platformConfig: PlatformConfig,
+): () => void {
+  const { sessionBroadcast } = platformConfig;
+  if (!sessionBroadcast) {
+    return () => {};
+  }
+
+  return sessionBroadcast.onNotification(() => {
+    void refreshAuthFromSource(authEntry);
+  });
+}
+
 export interface EmbeddedClientOptions {
-  /** Lazy ESM registry of Convex modules keyed by canonical module id. */
-  modules: ConvexModuleRegistry;
-
-  /** Optional schema export used for local validation and storage layout. */
+  convex: ConvexInput;
   schema?: unknown;
-
-  /** Options forwarded to the underlying `ConvexClient` constructor. */
   clientOptions?: Omit<
     Partial<BaseConvexClientOptions>,
     "webSocketConstructor"
   >;
-
-  /** Persistent database name shared by tabs or windows using the same store. */
   name?: string;
-
-  /** Enable local-first remote sync against a hosted Convex deployment. */
   remote?: RemoteOptions;
-
-  /** Optional embedded auth hooks used to mirror remote identity state. */
   auth?: AuthOptions;
-
-  /**
-   * Optional remote-backed replica used to seed the embedded database.
-   *
-   * Pass the value returned by `createReplica(...)` to start the embedded
-   * client from authoritative table data before local reads begin.
-   */
-  replica?: Replica;
-
-  /** Optional at-rest encryption for platform persistence adapters. */
-  encryption?: Omit<EncryptionOptions, "getIdentityKey">;
+  prefetch?: Prefetch;
 }
 
-/**
- * Create an embedded Convex client using injected platform services.
- *
- * This is the core factory behind browser-specific wrappers. Future platforms
- * like Electron or Expo should supply an {@link EmbeddedPlatformAdapter}
- * instead of re-implementing client/runtime orchestration.
- *
- * @param input - Factory inputs including user-facing options and a platform adapter.
- * @param input.options - Embedded client configuration.
- * @param input.platform - Platform services for persistence, broadcasting, and connectivity.
- * @returns A standard `ConvexClient` instance backed by an embedded runtime.
- *
- * @example
- * ```ts
- * const client = createEmbeddedClient({
- *   options: { modules, name: "app-cache" },
- *   platform,
- * });
- * ```
- */
 export function createEmbeddedClient(input: {
   options: EmbeddedClientOptions;
   platform: EmbeddedPlatformAdapter;
 }): ConvexClient {
   const { options, platform } = input;
   const dbName = options.name ?? "convex-embedded";
-  const modules = normalizeModuleRegistry(
-    options.modules as Record<string, () => Promise<ConvexModule>>,
-  );
+  const tableDefinitions = extractEmbeddedTableDefinitions(options.schema);
+  const convex = {
+    ...options.convex,
+    modules: normalizeModuleRegistry(options.convex.modules),
+  } satisfies ConvexInput;
 
-  const sessionBroadcast = platform.createSessionBroadcast?.({ name: dbName });
-  const writeBroadcast = platform.createWriteBroadcast?.({ name: dbName });
-  const replayMetadata = new Map<string, PendingReplayMeta>();
-  const replayMetadataReady = Fx.run(
-    Fx.from({
-      ok: () => discoverPendingReplayMetadata(modules),
-      err: (error) => error as Error,
-    }).pipe(
-      Fx.tap((discovered) =>
-        Fx.sync(() => {
-          replayMetadata.clear();
-          for (const [key, value] of discovered) {
-            replayMetadata.set(key, value);
-          }
-        }),
-      ),
-      Fx.map(() => replayMetadata),
-    ),
-  );
-
-  const runtime = new EmbeddedRuntime({
-    modules,
-    schema: options.schema as EmbeddedRuntimeOptions["schema"],
-    replica: options.replica,
-    crypto: platform.crypto ?? createAmbientCryptoProvider(),
-    verifyToken: options.auth?.verifyToken,
-    writeBroadcast,
+  const sessionBroadcast =
+    platform.createSessionBroadcast?.({ name: dbName }) ?? null;
+  const writeBroadcast =
+    platform.createWriteBroadcast?.({ name: dbName }) ?? null;
+  const processorId = platform.processorIdentity?.getProcessorId({
+    name: dbName,
   });
 
-  const storageReady = attachPlatformPersistence({
+  const runtime = new EmbeddedRuntime({
+    convex,
+    schema: options.schema as EmbeddedRuntimeOptions["schema"],
+    prefetch: options.prefetch,
+    crypto: platform.crypto ?? createAmbientCryptoProvider(),
+    verifyToken: options.auth?.verifyToken,
+    writeBroadcast: writeBroadcast ?? undefined,
+  });
+
+  let clientClosed = false;
+  let installedStorageSurface: { close(): void } | null = null;
+  let client!: ConvexClient;
+  const rootScope = new DisposableScope();
+
+  const platformConfig: PlatformConfig = {
     runtime,
     platform,
     name: dbName,
-    encryption: options.encryption,
-  });
-  const tableDefinitions = extractEmbeddedTableDefinitions(options.schema);
-  let clientClosed = false;
-  let installedStorageSurface: {
-    close(): void;
-  } | null = null;
+    sessionBroadcast,
+    writeBroadcast,
+    connectivity: platform.connectivity,
+    processorId,
+    clientClosed: () => clientClosed,
+  };
 
   runtime.setStorageSurface(null);
-  Fx.detach(
-    () =>
-      Fx.run(
-        Fx.from({
-          ok: () => storageReady,
-          err: (error) => error as Error,
-        }).pipe(
-          Fx.tap(() =>
-            Fx.sync(() => {
-              if (clientClosed) {
-                log.info("skipping storage surface install after client close");
-                return;
-              }
 
-              const storageSurface =
-                platform.createStorageSurface?.({
-                  runtime,
-                  name: dbName,
-                  crypto: runtime.crypto,
-                }) ?? null;
+  const replayMetadata = new Map<string, PendingReplayMeta>();
+  let replayMetadataReady: Promise<Map<string, PendingReplayMeta>> | null =
+    null;
+  const loadReplayMetadata = () => {
+    replayMetadataReady ??= discoverPendingReplayMetadata(convex.modules).then(
+      (discovered) => {
+        replayMetadata.clear();
+        for (const [key, value] of discovered) {
+          replayMetadata.set(key, value);
+        }
+        return replayMetadata;
+      },
+    );
+    return replayMetadataReady;
+  };
 
-              if (clientClosed) {
-                storageSurface?.close();
-                return;
-              }
+  const authEntry: AuthEntry = {
+    ...(createAuthEntry(platformConfig) as Omit<
+      AuthEntry,
+      "getIdentityKey" | "getUserIdentitySource" | "currentAuthFetcher"
+    >),
+    getIdentityKey: options.auth?.getIdentityKey,
+  };
 
-              installedStorageSurface = storageSurface;
-              runtime.setStorageSurface(storageSurface);
-              log.info(
-                `storage surface installed after persistence bootstrap (${storageSurface ? "enabled" : "none"})`,
-              );
-            }),
-          ),
-          Fx.inspect((error) =>
-            Fx.sync(() => {
-              log.error(
-                "storage surface install skipped after persistence failure",
-                error,
-              );
-            }),
-          ),
-          Fx.recover(() => Fx.unit),
-        ),
-      ),
-    "[factory] storage surface install:",
-  );
+  const load = new LoadCoordinator({
+    runtime,
+    platform,
+    name: dbName,
+    prefetch: options.prefetch,
+    hasPrefetch: Boolean(options.prefetch),
+    fallbackIdentityKey: options.prefetch?.identityKey ?? null,
+    readActiveIdentityKey: () => initializeActiveIdentityKey(runtime),
+    setActiveIdentityKey: (identityKey) => {
+      authEntry.activeIdentityKey = identityKey;
+    },
+    tableDefinitions,
+    replayMetadata,
+    loadReplayMetadata,
+    storeManifests: [
+      AUTH_STATE_STORE_MIGRATIONS,
+      STORAGE_METADATA_STORE_MIGRATIONS,
+      SCHEDULED_FUNCTIONS_STORE_MIGRATIONS,
+      ID_MAP_STORE_MIGRATIONS,
+      PENDING_STORE_MIGRATIONS,
+    ],
+    onIdentityError: (error) => {
+      log.warn(
+        "[factory] initialize identity failed, falling back to null",
+        error,
+      );
+    },
+    onLoadError: (error) => {
+      log.error("[factory] load migrations:", error);
+    },
+    onRefreshError: (stage, error) => {
+      if (stage === "after-persistence") {
+        log.error("[factory] refresh local watches after persistence:", error);
+        return;
+      }
+      log.error("[factory] refresh local watches:", error);
+    },
+    onTiming: ({ replayMetadataMs, migrationsMs, totalMs }) => {
+      log.info(
+        `open: replayMetadata=${replayMetadataMs.toFixed(1)}ms migrations=${migrationsMs.toFixed(1)}ms total=${totalMs.toFixed(1)}ms`,
+      );
+    },
+  });
 
-  const transport = runtime.createTransport();
-  const client = new ConvexClient(transport.url, {
+  // Without prefetch, block executeLocal until durable storage loads so
+  // restarts see persisted rows. With prefetch, serve the prefetch payload
+  // immediately and let `refreshLocalQueryWatches` catch watchers up later.
+  if (!options.prefetch) {
+    runtime.extendStorageReady(load.storageReady);
+  }
+
+  void load.storageReady
+    .then(() => {
+      const storageSurface = installStorageSurface(platformConfig);
+      installedStorageSurface = storageSurface;
+    })
+    .catch((error) => {
+      log.error(
+        "storage surface install skipped after persistence failure",
+        error,
+      );
+    });
+
+  const transport = runtime.createTransport(load.ready);
+  client = new ConvexClient(transport.url, {
     ...options.clientOptions,
     webSocketConstructor:
       transport.webSocketConstructor as unknown as typeof WebSocket,
@@ -239,106 +317,51 @@ export function createEmbeddedClient(input: {
     tableDefinitions,
     fieldHandles: new Map(),
   });
-
-  const authEntry: AuthEntry = {
-    runtime,
-    getIdentityKey: options.auth?.getIdentityKey,
-    getPendingCount: () => 0,
-    refreshSync: () => Promise.resolve(),
-    activeIdentityKey: null,
-    sessionBroadcast,
-    state: { status: "idle" },
-    listeners: new Set(),
-  };
   registerAuthEntry(client, authEntry);
 
-  const storageHydrated = storageReady.then(() =>
-    runtime.waitForStorageHydration(),
-  );
+  rootScope.addFinalizer(() => {
+    deleteEmbeddedClientEntry(client);
+    deleteAuthEntry(client);
+  });
+  rootScope.addFinalizer(() => {
+    (authEntry.stateHub as PubSub<AuthState>).shutdown();
+  });
+  rootScope.addFinalizer(() => {
+    installedStorageSurface?.close();
+    installedStorageSurface = null;
+    runtime.setStorageSurface(null);
+  });
+  rootScope.addFinalizer(() => {
+    sessionBroadcast?.close();
+    platform.connectivity?.close?.();
+  });
+  rootScope.addFinalizer(() => {
+    runtime.shutdown();
+  });
 
-  const identityReady = Fx.run(
-    Fx.from({
-      ok: () => storageHydrated,
-      err: (error) => error as Error,
-    }).pipe(
-      Fx.chain(() =>
-        Fx.from({
-          ok: () => initializeActiveIdentityKey(runtime),
-          err: (error) => error as Error,
-        }),
-      ),
-      Fx.map(
-        (identityKey) => identityKey ?? options.replica?.identityKey ?? null,
-      ),
-      Fx.tap((resolvedIdentityKey) =>
-        Fx.sync(() => {
-          runtime.setActiveIdentityKey(resolvedIdentityKey);
-          authEntry.activeIdentityKey = resolvedIdentityKey;
-        }),
-      ),
-      Fx.recover(() =>
-        Fx.sync(() => {
-          authEntry.activeIdentityKey = null;
-          runtime.setActiveIdentityKey(null);
-          return null;
-        }),
-      ),
-    ),
-  );
-
-  const startupReady = identityReady.then((identityKey) =>
-    replayMetadataReady.then(() =>
-      runLocalMigrations(runtime, {
-        identityKey,
-        tableDefinitions,
-        replayMetadata,
-        storeManifests: [
-          AUTH_STATE_STORE_MIGRATIONS,
-          STORAGE_METADATA_STORE_MIGRATIONS,
-          SCHEDULED_FUNCTIONS_STORE_MIGRATIONS,
-          ID_MAP_STORE_MIGRATIONS,
-          PENDING_STORE_MIGRATIONS,
-        ],
-      }),
-    ),
-  );
-
-  runtime.setHydrationGate(startupReady);
-  Fx.detach(
-    () =>
-      Fx.run(
-        Fx.from({
-          ok: () => startupReady,
-          err: (error) => error as Error,
-        }).pipe(
-          Fx.tap(() =>
-            Fx.from({
-              ok: () => runtime.refreshLocalQueryWatches(),
-              err: (error) => error as Error,
-            }),
-          ),
-          Fx.recover(() => Fx.unit),
-        ),
-      ),
-    "[factory] refresh local watches:",
-  );
-
-  const resolveAttachment = options.remote
-    ? attachResolve({
+  const resolveAttachment: ResolveAttachment | null = options.remote
+    ? createResolveAttachment({
         client,
-        runtime,
         authEntry,
         resolveOpts: options.remote,
-        modules,
+        convex,
         getIdentityKeyForSync: () => authEntry.activeIdentityKey,
         getReplayPayloadVersion: (refName) =>
           replayMetadata.get(refName)?.version ?? 1,
-        connectivity: platform.connectivity,
-        processorId: platform.processorIdentity?.getProcessorId({
-          name: dbName,
-        }),
+        platformConfig,
       })
     : null;
+
+  if (resolveAttachment) {
+    rootScope.addFinalizer(async () => {
+      try {
+        await resolveAttachment.close();
+        deleteResolveEntry(client);
+      } catch {
+        // swallow close errors
+      }
+    });
+  }
 
   if (!options.remote) {
     patchRoutedConvexClient({
@@ -367,15 +390,22 @@ export function createEmbeddedClient(input: {
 
   installAuthController(client, runtime, authEntry, {
     authOptions: options.auth,
-    forwardSetAuth: resolveAttachment?.forwardSetAuth,
-    forwardClearAuth: resolveAttachment?.forwardClearAuth,
-    forwardSetAdminAuth: resolveAttachment?.forwardSetAdminAuth,
+    forwardSetAuth: resolveAttachment?.forwardSetAuth
+      ? (...args) => resolveAttachment.forwardSetAuth(...args)
+      : undefined,
+    forwardClearAuth: resolveAttachment?.forwardClearAuth
+      ? () => resolveAttachment.forwardClearAuth()
+      : undefined,
+    forwardSetAdminAuth: resolveAttachment?.forwardSetAdminAuth
+      ? (...args) => resolveAttachment.forwardSetAdminAuth(...args)
+      : undefined,
   });
 
-  const unsubscribeSessionFanout =
-    sessionBroadcast?.onNotification(() => {
-      void refreshAuthFromSource(authEntry);
-    }) ?? (() => {});
+  const unsubscribeSessionFanout = installSessionFanout(
+    authEntry,
+    platformConfig,
+  );
+  rootScope.addFinalizer(() => unsubscribeSessionFanout());
 
   const originalClose = client.close.bind(client);
   let closePromise: Promise<void> | null = null;
@@ -386,20 +416,7 @@ export function createEmbeddedClient(input: {
 
     closePromise = (async () => {
       clientClosed = true;
-      deleteEmbeddedClientEntry(client);
-      deleteAuthEntry(client);
-      if (resolveAttachment) {
-        await resolveAttachment.close();
-        deleteResolveEntry(client);
-      }
-      unsubscribeSessionFanout();
-      sessionBroadcast?.close();
-      writeBroadcast?.close();
-      platform.connectivity?.close?.();
-      installedStorageSurface?.close();
-      installedStorageSurface = null;
-      runtime.setStorageSurface(null);
-      runtime.shutdown();
+      await rootScope.close();
       await originalClose();
     })();
 

@@ -1,9 +1,10 @@
 import {
-  migratePendingEntries,
   PendingQueue,
   PendingQueuePersistenceError,
 } from "@resolve/client/pending";
-import { describe, it, expect, vi, beforeEach } from "vite-plus/test";
+import { migratePendingEntries } from "@resolve/runtime/migrations/pending";
+import { describe, it, expect, beforeEach } from "@tests/testkit";
+import { vi } from "vitest";
 
 // ---------------------------------------------------------------------------
 // Mock client
@@ -332,6 +333,24 @@ describe("remove()", () => {
     expect(entry!._id).toMatch(/^ephemeral_/);
     expect(mockClient.mutation).not.toHaveBeenCalled();
   });
+
+  it("keeps persisted entries queued when removal fails", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mockClient.mutation
+      .mockResolvedValueOnce("doc-1")
+      .mockRejectedValueOnce(new Error("delete failed"));
+
+    try {
+      await queue.push("tasks:create", { title: "test" }, "uuid-1", "tasks");
+
+      await expect(queue.remove()).resolves.toBeUndefined();
+
+      expect(queue.length).toBe(1);
+      expect(queue.peek()?._id).toBe("doc-1");
+    } finally {
+      warn.mockRestore();
+    }
+  });
 });
 
 describe("claimNext() / renewLease() / release()", () => {
@@ -365,11 +384,32 @@ describe("claimNext() / renewLease() / release()", () => {
         identityKey: null,
         owner: "processor-a",
         leaseMs: 500,
+        processorStaleMs: 500,
       },
     );
     expect(entry?.owner).toBe("processor-a");
     expect(entry?.state).toBe("processing");
     expect(entry?.leaseExpiresAt).toBe(123);
+  });
+
+  it("does not claim a stale in-memory entry when persistence returns null", async () => {
+    mockClient.query
+      .mockResolvedValueOnce([
+        {
+          _id: "doc-1",
+          ref: "tasks:create",
+          args: '{"title":"hello"}',
+          localResult: '"uuid-1"',
+          table: "tasks",
+        },
+      ])
+      .mockResolvedValueOnce([]);
+    mockClient.mutation.mockResolvedValue(null);
+
+    await queue.hydrate();
+
+    await expect(queue.claimNext("processor-a", 500)).resolves.toBeUndefined();
+    expect(queue.length).toBe(0);
   });
 
   it("renews an owned lease", async () => {

@@ -1,6 +1,4 @@
-import { Fx } from "@robelest/fx";
 import type { ConvexClient } from "convex/browser";
-import { convexToJson } from "convex/values";
 
 import {
   getEmbeddedClientEntry,
@@ -11,9 +9,10 @@ import {
   createEmptyProseContent,
   type ProseContent,
   proseContentToPlainText,
-} from "@/crdt/prose";
+} from "@/crdt/prose/content";
 import type { Definition } from "@/shared/schema";
 import { getCrdtType } from "@/shared/schema";
+import { structuralEqual } from "@/shared/structuralEqual";
 import { CrdtType, type FieldRef } from "@/shared/types";
 
 type RefValue<TRef extends FieldRef> =
@@ -51,19 +50,10 @@ type SharedFieldState<T> = {
   listeners: Set<() => void>;
   currentValue: T;
   currentText?: string;
-  currentSignature: string;
   ready: Promise<void>;
   refresh(): Promise<void>;
   release(): void;
 };
-
-function serializeValue(value: unknown): string {
-  try {
-    return JSON.stringify(convexToJson(value as never));
-  } catch {
-    return JSON.stringify(value);
-  }
-}
 
 function requireEntry(client: ConvexClient): EmbeddedClientEntry {
   const entry = getEmbeddedClientEntry(client);
@@ -129,7 +119,8 @@ function createSharedFieldState<T>(input: {
 
   const subscription = input.entry.runtime.subscribeTableWrites(
     input.ref.table,
-    () => {
+    (source) => {
+      if (source === "local") return;
       void refresh();
     },
   );
@@ -145,29 +136,19 @@ function createSharedFieldState<T>(input: {
 
     refreshing = true;
     try {
-      await Fx.run(
-        Fx.from({
-          ok: () =>
-            input.entry.runtime.getDocument(input.ref.table, input.ref.id),
-          err: (error) => error as Error,
-        }).pipe(
-          Fx.tap((document) =>
-            Fx.sync(() => {
-              const next = input.read(document);
-              const signature = `${serializeValue(next.value)}::${next.text ?? ""}`;
-              if (signature !== state.currentSignature) {
-                state.currentValue = next.value;
-                state.currentText = next.text;
-                state.currentSignature = signature;
-                for (const listener of Array.from(listeners)) {
-                  listener();
-                }
-              }
-            }),
-          ),
-          Fx.map(() => undefined as void),
-        ),
+      const document = await input.entry.runtime.getDocument(
+        input.ref.table,
+        input.ref.id,
       );
+      const next = input.read(document);
+      if (
+        !structuralEqual(next.value, state.currentValue) ||
+        next.text !== state.currentText
+      ) {
+        state.currentValue = next.value;
+        state.currentText = next.text;
+        listeners.forEach((listener) => listener());
+      }
     } finally {
       refreshing = false;
       if (refreshQueued) {
@@ -182,7 +163,6 @@ function createSharedFieldState<T>(input: {
     refCount: 1,
     listeners,
     currentValue: input.emptyValue,
-    currentSignature: serializeValue(input.emptyValue),
     ready: Promise.resolve(),
     refresh,
     release: () => {
@@ -223,9 +203,7 @@ export async function openProse(
       };
     },
   });
-  await Fx.run(
-    Fx.from({ ok: () => state.ready, err: (error) => error as Error }),
-  );
+  await state.ready;
 
   return {
     kind: "prose",
@@ -254,9 +232,7 @@ export async function openRegister<
     emptyValue: undefined as RefValue<TRef>,
     read: (document) => ({ value: document?.[ref.field] as RefValue<TRef> }),
   });
-  await Fx.run(
-    Fx.from({ ok: () => state.ready, err: (error) => error as Error }),
-  );
+  await state.ready;
 
   return {
     kind: "register",
@@ -290,9 +266,7 @@ export async function openSet<
       })(),
     }),
   });
-  await Fx.run(
-    Fx.from({ ok: () => state.ready, err: (error) => error as Error }),
-  );
+  await state.ready;
 
   return {
     kind: "set",
@@ -325,9 +299,7 @@ export async function openCounter(
           : 0,
     }),
   });
-  await Fx.run(
-    Fx.from({ ok: () => state.ready, err: (error) => error as Error }),
-  );
+  await state.ready;
 
   return {
     kind: "counter",

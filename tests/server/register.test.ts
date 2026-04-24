@@ -1,15 +1,14 @@
-import { register as registerField, prose } from "@resolve/server/schema";
+import { register as registerField, prose } from "@resolve/server/fields";
+import { bindTableRuntime } from "@resolve/server/runtime";
 import {
-  bindTableRuntime,
   embeddedTable,
   localOnly,
   remoteOnly,
   _resetRegistry,
-  RESOLVE_QUERY_META,
   REMOTE_META,
-} from "@resolve/server/setup";
+} from "@resolve/server/table";
+import { describe, it, expect, vi, beforeEach } from "@tests/testkit";
 import { v } from "convex/values";
-import { describe, it, expect, vi, beforeEach } from "vite-plus/test";
 import * as Y from "yjs";
 
 // ---------------------------------------------------------------------------
@@ -26,8 +25,11 @@ function makeMockComponent() {
   return {
     public: {
       recordUpdate: { _name: "recordUpdate" } as any,
+      recordDelete: { _name: "recordDelete" } as any,
       getLiveState: { _name: "getLiveState" } as any,
       getLiveStates: { _name: "getLiveStates" } as any,
+      getLiveStatesPage: { _name: "getLiveStatesPage" } as any,
+      getCollectionChanges: { _name: "getCollectionChanges" } as any,
       createCheckpoint: { _name: "createCheckpoint" } as any,
       listCheckpoints: { _name: "listCheckpoints" } as any,
       getCheckpoint: { _name: "getCheckpoint" } as any,
@@ -155,26 +157,6 @@ describe("embeddedTable()", () => {
     expect(() => remoteOnly("bad-input" as any)).toThrow(
       /expects a Convex function export/,
     );
-  });
-
-  it("query() tags scoped resolve queries with RESOLVE_QUERY_META", () => {
-    const tasks: any = embeddedTable(uniqueTable(), {
-      title: registerField(v.string()),
-    });
-    bindRuntime(tasks);
-
-    const listMine = tasks.query({
-      args: { owner: v.string() },
-      resolve: { args: () => ({ owner: "alice" }) },
-      handler: async () => [],
-    });
-
-    expect(listMine[RESOLVE_QUERY_META]).toEqual({
-      __brand: "convex-embedded:resolveQueryMeta",
-      table: tasks.table,
-      getArgs: expect.any(Function),
-    });
-    expect(listMine[RESOLVE_QUERY_META].getArgs()).toEqual({ owner: "alice" });
   });
 
   it("preserves the embedded table handle through chained indexes", () => {
@@ -557,16 +539,18 @@ describe("resolve handler", () => {
     const result = await tasks.resolve._handler(
       {},
       {
+        collectionSeq: null,
         documents: [
-          { docId: "a", vector: new ArrayBuffer(0) },
-          { docId: "b", vector: new ArrayBuffer(0) },
+          { docId: "a", vector: new ArrayBuffer(0), lastSeq: null },
+          { docId: "b", vector: new ArrayBuffer(0), lastSeq: null },
         ],
       },
     );
 
-    expect(result).toHaveLength(2);
-    expect(result[0].docId).toBe("a");
-    expect(result[0].diff).toBeUndefined();
+    expect(result.mode).toBe("incremental");
+    expect(result.documents).toHaveLength(2);
+    expect(result.documents[0].docId).toBe("a");
+    expect(result.documents[0].diff).toBeUndefined();
   });
 
   it("computes diffs from component deltas on remote", async () => {
@@ -584,28 +568,40 @@ describe("resolve handler", () => {
     fields.set("title", titleMap);
     const serverUpdate = Y.encodeStateAsUpdateV2(serverDoc);
 
-    const runQuery = vi
-      .fn()
-      .mockResolvedValue([{ update: serverUpdate.buffer, seq: 0 }]);
+    const runQuery = vi.fn().mockImplementation((ref: any) => {
+      if (ref._name === "getCollectionChanges") {
+        return Promise.resolve({
+          mode: "incremental",
+          collectionSeq: 1,
+          changes: [{ docId: "doc1", kind: "upsert" }],
+        });
+      }
+      if (ref._name === "getLiveState") {
+        return Promise.resolve({ update: serverUpdate.buffer, seq: 1 });
+      }
+      return Promise.resolve(null);
+    });
 
     const clientDoc = new Y.Doc();
     const clientVector = Y.encodeStateVector(clientDoc);
 
     const result = await tasks.resolve._handler(
-      { runQuery },
+      { runQuery, db: { get: vi.fn() } },
       {
-        documents: [{ docId: "doc1", vector: clientVector.buffer }],
+        collectionSeq: 0,
+        documents: [{ docId: "doc1", vector: clientVector.buffer, lastSeq: 0 }],
       },
     );
 
-    expect(result).toHaveLength(1);
-    expect(result[0].docId).toBe("doc1");
-    expect(result[0].diff).toBeDefined();
+    expect(result.documents).toHaveLength(1);
+    expect(result.documents[0].docId).toBe("doc1");
+    expect(result.documents[0].diff).toBeDefined();
   });
 
   it("does not return remote-only docs for scoped resolves", async () => {
     const component = makeMockComponent();
     const tasks: any = embeddedTable(uniqueTable(), {
+      owner: registerField(v.string()),
       title: registerField(v.string()),
       body: prose(),
     });
@@ -619,30 +615,362 @@ describe("resolve handler", () => {
     const serverUpdate = Y.encodeStateAsUpdateV2(serverDoc);
 
     const ctx = {
-      runQuery: vi.fn().mockResolvedValue([
-        { docId: "doc1", update: serverUpdate.buffer, seq: 0 },
-        { docId: "doc2", update: serverUpdate.buffer, seq: 1 },
-      ]),
+      runQuery: vi.fn().mockImplementation((ref: any, args: any) => {
+        if (ref._name === "getCollectionChanges") {
+          return Promise.resolve({
+            mode: "full",
+            collectionSeq: 5,
+            changes: [],
+          });
+        }
+        if (ref._name === "getLiveStates") {
+          if (Array.isArray(args.docIds) && args.docIds.length === 0) {
+            return Promise.resolve([]);
+          }
+          return Promise.resolve([
+            { docId: "doc1", update: serverUpdate.buffer, seq: 1 },
+            { docId: "doc2", update: serverUpdate.buffer, seq: 2 },
+          ]);
+        }
+        return Promise.resolve(null);
+      }),
       db: {
-        get: vi.fn().mockResolvedValue({
-          _id: "doc2",
-          _creationTime: 1,
-          title: "Extra",
-          body: "Remote-only",
+        get: vi.fn().mockImplementation((docId: string) => {
+          if (docId === "doc1") {
+            return Promise.resolve({
+              _id: "doc1",
+              _creationTime: 1,
+              owner: "alice",
+              title: "Server title",
+              body: "Scoped",
+            });
+          }
+          if (docId === "doc2") {
+            return Promise.resolve({
+              _id: "doc2",
+              _creationTime: 2,
+              owner: "bob",
+              title: "Other owner",
+              body: "Out of scope",
+            });
+          }
+          return Promise.resolve(null);
         }),
       },
     };
 
-    const clientDoc = new Y.Doc();
-    const clientVector = Y.encodeStateVector(clientDoc);
-
     const result = await tasks.resolve._handler(ctx, {
-      documents: [{ docId: "doc1", vector: clientVector.buffer }],
+      collectionSeq: 0,
+      documents: [{ docId: "doc1", vector: new ArrayBuffer(0), lastSeq: 0 }],
       scopeArgs: { owner: "alice" },
     });
 
-    expect(result).toEqual([
-      expect.objectContaining({ docId: "doc1", diff: expect.any(ArrayBuffer) }),
+    expect(result.mode).toBe("full");
+    const returnedIds = result.documents.map((d: any) => d.docId).sort();
+    expect(returnedIds).toEqual(["doc1"]);
+  });
+
+  it("filters indexed scoped snapshots by the full scope args", async () => {
+    const component = makeMockComponent();
+    const tasks: any = embeddedTable(uniqueTable(), {
+      projectId: registerField(v.string()),
+      status: registerField(v.string()),
+      title: registerField(v.string()),
+    }).index("by_projectId", ["projectId"]);
+    bindRuntime(tasks, component);
+
+    const serverDoc = new Y.Doc();
+    const fields = serverDoc.getMap("fields");
+    const titleMap = new Y.Map();
+    titleMap.set("_init", { value: "Scoped task", timestamp: Date.now() });
+    fields.set("title", titleMap);
+    const serverUpdate = Y.encodeStateAsUpdateV2(serverDoc);
+
+    const indexedCollect = vi
+      .fn()
+      .mockResolvedValue([{ _id: "doc-open" }, { _id: "doc-closed" }]);
+    const eqChain = { eq: vi.fn().mockReturnThis() };
+    const ctx: any = {
+      runQuery: vi.fn().mockImplementation((ref: any, args: any) => {
+        if (ref._name === "getCollectionChanges") {
+          return Promise.resolve({
+            mode: "full",
+            collectionSeq: 9,
+            changes: [],
+          });
+        }
+        if (ref._name === "getLiveStates") {
+          if (Array.isArray(args.docIds) && args.docIds.length === 0) {
+            return Promise.resolve([]);
+          }
+          expect(args.docIds.sort()).toEqual(["doc-closed", "doc-open"]);
+          return Promise.resolve(
+            args.docIds.map((docId: string) => ({
+              docId,
+              update: serverUpdate.buffer,
+              seq: docId === "doc-open" ? 1 : 2,
+            })),
+          );
+        }
+        return Promise.resolve(null);
+      }),
+      db: {
+        query: vi.fn(() => ({
+          withIndex: vi.fn((indexName: string, chain: any) => {
+            expect(indexName).toBe("by_projectId");
+            chain(eqChain);
+            expect(eqChain.eq).toHaveBeenCalledWith("projectId", "p1");
+            return { collect: indexedCollect };
+          }),
+        })),
+        get: vi.fn().mockImplementation((docId: string) => {
+          if (docId === "doc-open") {
+            return Promise.resolve({
+              _id: "doc-open",
+              _creationTime: 1,
+              projectId: "p1",
+              status: "open",
+              title: "Open task",
+            });
+          }
+          if (docId === "doc-closed") {
+            return Promise.resolve({
+              _id: "doc-closed",
+              _creationTime: 2,
+              projectId: "p1",
+              status: "closed",
+              title: "Closed task",
+            });
+          }
+          return Promise.resolve(null);
+        }),
+      },
+    };
+
+    const result = await tasks.resolve._handler(ctx, {
+      collectionSeq: 0,
+      documents: [],
+      scopeArgs: { projectId: "p1", status: "open" },
+    });
+
+    expect(result.mode).toBe("full");
+    expect(result.documents.map((d: any) => d.docId)).toEqual(["doc-open"]);
+    expect(indexedCollect).toHaveBeenCalledTimes(1);
+  });
+
+  it("resolves scoped first-time subscriptions via a declared index", async () => {
+    const component = makeMockComponent();
+    const tasks: any = embeddedTable(uniqueTable(), {
+      owner: registerField(v.string()),
+      title: registerField(v.string()),
+    }).index("by_owner", ["owner"]);
+    bindRuntime(tasks, component);
+
+    const serverDoc = new Y.Doc();
+    const fields = serverDoc.getMap("fields");
+    const titleMap = new Y.Map();
+    titleMap.set("_init", { value: "Alice's task", timestamp: Date.now() });
+    fields.set("title", titleMap);
+    const serverUpdate = Y.encodeStateAsUpdateV2(serverDoc);
+
+    const indexedCollect = vi
+      .fn()
+      .mockResolvedValue([{ _id: "doc-alice-1" }, { _id: "doc-alice-2" }]);
+    const eqChain = { eq: vi.fn().mockReturnThis() };
+    const ctx: any = {
+      runQuery: vi.fn().mockImplementation((ref: any, args: any) => {
+        if (ref._name === "getCollectionChanges") {
+          return Promise.resolve({
+            mode: "full",
+            collectionSeq: 7,
+            changes: [],
+          });
+        }
+        if (ref._name === "getLiveStates") {
+          if (args.docIds.length === 0) {
+            // detectRuntime probe
+            return Promise.resolve([]);
+          }
+          // Should ask for exactly the doc IDs returned by the indexed read.
+          expect(args.docIds.sort()).toEqual(["doc-alice-1", "doc-alice-2"]);
+          return Promise.resolve(
+            args.docIds.map((docId: string) => ({
+              docId,
+              update: serverUpdate.buffer,
+              seq: 1,
+            })),
+          );
+        }
+        return Promise.resolve(null);
+      }),
+      db: {
+        query: vi.fn((table: string) => ({
+          withIndex: vi.fn((indexName: string, chain: any) => {
+            expect(indexName).toBe("by_owner");
+            chain(eqChain);
+            expect(eqChain.eq).toHaveBeenCalledWith("owner", "alice");
+            return { collect: indexedCollect };
+          }),
+        })),
+        get: vi.fn().mockImplementation((docId: string) => {
+          if (docId === "doc-alice-1") {
+            return Promise.resolve({
+              _id: "doc-alice-1",
+              _creationTime: 1,
+              owner: "alice",
+              title: "Alice's first task",
+            });
+          }
+          if (docId === "doc-alice-2") {
+            return Promise.resolve({
+              _id: "doc-alice-2",
+              _creationTime: 2,
+              owner: "alice",
+              title: "Alice's second task",
+            });
+          }
+          return Promise.resolve(null);
+        }),
+      },
+    };
+
+    const result = await tasks.resolve._handler(ctx, {
+      collectionSeq: 0,
+      documents: [],
+      scopeArgs: { owner: "alice" },
+    });
+
+    expect(result.mode).toBe("full");
+    const returnedIds = result.documents.map((d: any) => d.docId).sort();
+    expect(returnedIds).toEqual(["doc-alice-1", "doc-alice-2"]);
+    expect(indexedCollect).toHaveBeenCalledTimes(1);
+  });
+
+  it("recomputes indexed scoped snapshots even when the client sends known doc ids", async () => {
+    const component = makeMockComponent();
+    const tasks: any = embeddedTable(uniqueTable(), {
+      owner: registerField(v.string()),
+      title: registerField(v.string()),
+    }).index("by_owner", ["owner"]);
+    bindRuntime(tasks, component);
+
+    const serverDoc = new Y.Doc();
+    const fields = serverDoc.getMap("fields");
+    const titleMap = new Y.Map();
+    titleMap.set("_init", { value: "Alice's task", timestamp: Date.now() });
+    fields.set("title", titleMap);
+    const serverUpdate = Y.encodeStateAsUpdateV2(serverDoc);
+
+    const indexedCollect = vi
+      .fn()
+      .mockResolvedValue([{ _id: "doc-alice-1" }, { _id: "doc-alice-2" }]);
+    const eqChain = { eq: vi.fn().mockReturnThis() };
+    const ctx: any = {
+      runQuery: vi.fn().mockImplementation((ref: any, args: any) => {
+        if (ref._name === "getCollectionChanges") {
+          return Promise.resolve({
+            mode: "full",
+            collectionSeq: 8,
+            changes: [],
+          });
+        }
+        if (ref._name === "getLiveStates") {
+          if (args.docIds.length === 0) {
+            return Promise.resolve([]);
+          }
+          expect(args.docIds.sort()).toEqual(["doc-alice-1", "doc-alice-2"]);
+          return Promise.resolve(
+            args.docIds.map((docId: string) => ({
+              docId,
+              update: serverUpdate.buffer,
+              seq: 1,
+            })),
+          );
+        }
+        return Promise.resolve(null);
+      }),
+      db: {
+        query: vi.fn(() => ({
+          withIndex: vi.fn((_indexName: string, chain: any) => {
+            chain(eqChain);
+            return { collect: indexedCollect };
+          }),
+        })),
+        get: vi.fn().mockImplementation((docId: string) => {
+          if (docId === "doc-alice-1") {
+            return Promise.resolve({
+              _id: "doc-alice-1",
+              _creationTime: 1,
+              owner: "alice",
+              title: "Alice's first task",
+            });
+          }
+          if (docId === "doc-alice-2") {
+            return Promise.resolve({
+              _id: "doc-alice-2",
+              _creationTime: 2,
+              owner: "alice",
+              title: "Alice's second task",
+            });
+          }
+          return Promise.resolve(null);
+        }),
+      },
+    };
+
+    const result = await tasks.resolve._handler(ctx, {
+      collectionSeq: 7,
+      documents: [
+        { docId: "doc-alice-1", vector: new ArrayBuffer(0), lastSeq: 1 },
+      ],
+      scopeArgs: { owner: "alice" },
+    });
+
+    expect(result.mode).toBe("full");
+    const returnedIds = result.documents.map((d: any) => d.docId).sort();
+    expect(returnedIds).toEqual(["doc-alice-1", "doc-alice-2"]);
+  });
+
+  it("returns deleted for scoped incremental docs that no longer match the scope", async () => {
+    const component = makeMockComponent();
+    const tasks: any = embeddedTable(uniqueTable(), {
+      owner: registerField(v.string()),
+      title: registerField(v.string()),
+    });
+    bindRuntime(tasks, component);
+
+    const ctx = {
+      runQuery: vi.fn().mockImplementation((ref: any) => {
+        if (ref._name === "getCollectionChanges") {
+          return Promise.resolve({
+            mode: "incremental",
+            collectionSeq: 2,
+            changes: [{ docId: "doc1", kind: "upsert" }],
+          });
+        }
+        if (ref._name === "getLiveState") {
+          return Promise.resolve({ update: new ArrayBuffer(0), seq: 2 });
+        }
+        return Promise.resolve(null);
+      }),
+      db: {
+        get: vi.fn().mockResolvedValue({
+          _id: "doc1",
+          _creationTime: 1,
+          owner: "bob",
+          title: "Moved",
+        }),
+      },
+    };
+
+    const result = await tasks.resolve._handler(ctx as any, {
+      collectionSeq: 1,
+      documents: [{ docId: "doc1", vector: new ArrayBuffer(0), lastSeq: 1 }],
+      scopeArgs: { owner: "alice" },
+    });
+
+    expect(result.documents).toEqual([
+      { docId: "doc1", deleted: true, seq: null },
     ]);
   });
 
@@ -685,19 +1013,30 @@ describe("resolve handler", () => {
     const fullUpdate = Y.encodeStateAsUpdateV2(doc);
     const stateVector = Y.encodeStateVector(doc);
 
-    const runQuery = vi
-      .fn()
-      .mockResolvedValue([{ update: fullUpdate.buffer, seq: 0 }]);
+    const runQuery = vi.fn().mockImplementation((ref: any) => {
+      if (ref._name === "getCollectionChanges") {
+        return Promise.resolve({
+          mode: "incremental",
+          collectionSeq: 1,
+          changes: [{ docId: "doc1", kind: "upsert" }],
+        });
+      }
+      if (ref._name === "getLiveState") {
+        return Promise.resolve({ update: fullUpdate.buffer, seq: 1 });
+      }
+      return Promise.resolve(null);
+    });
 
     const result = await tasks.resolve._handler(
-      { runQuery },
+      { runQuery, db: { get: vi.fn() } },
       {
-        documents: [{ docId: "doc1", vector: stateVector.buffer }],
+        collectionSeq: 0,
+        documents: [{ docId: "doc1", vector: stateVector.buffer, lastSeq: 0 }],
       },
     );
 
-    expect(result).toHaveLength(1);
-    expect(result[0].diff).toBeUndefined();
+    expect(result.documents).toHaveLength(1);
+    expect(result.documents[0].diff).toBeUndefined();
   });
 
   it("handles missing deltas gracefully", async () => {
@@ -708,16 +1047,31 @@ describe("resolve handler", () => {
     });
     bindRuntime(tasks, component);
 
-    const runQuery = vi.fn().mockResolvedValue([null]);
+    const runQuery = vi.fn().mockImplementation((ref: any) => {
+      if (ref._name === "getCollectionChanges") {
+        return Promise.resolve({
+          mode: "incremental",
+          collectionSeq: 1,
+          changes: [{ docId: "missing", kind: "upsert" }],
+        });
+      }
+      if (ref._name === "getLiveState") {
+        return Promise.resolve(null);
+      }
+      return Promise.resolve(null);
+    });
 
     const result = await tasks.resolve._handler(
-      { runQuery },
+      { runQuery, db: { get: vi.fn() } },
       {
-        documents: [{ docId: "missing", vector: new ArrayBuffer(0) }],
+        collectionSeq: 0,
+        documents: [
+          { docId: "missing", vector: new ArrayBuffer(0), lastSeq: 0 },
+        ],
       },
     );
 
-    expect(result).toHaveLength(1);
-    expect(result[0].diff).toBeUndefined();
+    expect(result.documents).toHaveLength(1);
+    expect(result.documents[0].deleted).toBe(true);
   });
 });

@@ -1,5 +1,3 @@
-import { Fx } from "@robelest/fx";
-import { Cv } from "@robelest/fx/convex";
 /**
  * UDF execution engine following the convex-test invocation pattern.
  *
@@ -18,12 +16,8 @@ import { Cv } from "@robelest/fx/convex";
  * installed globalThis.Convex.syscall / asyncSyscall handlers.
  */
 import type { Value } from "convex/values";
-import { convexToJson, jsonToConvex } from "convex/values";
+import { ConvexError, convexToJson, jsonToConvex } from "convex/values";
 
-import {
-  componentRouteTargetLabel,
-  isRemoteOnly,
-} from "@/client/routing/metadata";
 import type { FunctionPath, ModuleLoader } from "@/kernel/modules";
 import { OpsContext, createOpsContext } from "@/kernel/ops";
 import {
@@ -37,6 +31,7 @@ import type { Database } from "@/runtime/db/database";
 import type { DatabaseCommitResult } from "@/runtime/db/database";
 import type { QueryDependency } from "@/runtime/db/types";
 import type { StorageSurface } from "@/runtime/storage";
+import { componentRouteTargetLabel, isRemoteOnly } from "@/shared/route";
 
 // ---------------------------------------------------------------------------
 // Global type augmentation for the Convex runtime
@@ -354,63 +349,38 @@ export class UdfExecutor {
     executionContext: ExecutionContext = {},
   ): Promise<unknown> {
     const db = this._db;
-    const resolveFunc = this._resolveFunc.bind(this);
-    const noHandlerError = this._noHandlerError.bind(this);
-    return this._runWithGlobals(
-      () =>
-        Fx.run(
-          Fx.bracket(
-            // Acquire: start transaction
-            Fx.sync(() => {
-              db.startTransaction();
-            }),
-            // Use: run the query
-            () =>
-              Fx.gen(function* () {
-                const func: Record<string, unknown> = yield* Fx.promise(() =>
-                  resolveFunc(functionPath, "query"),
-                );
+    return this._runWithGlobals(async () => {
+      db.startTransaction();
+      try {
+        const func = await this._resolveFunc(functionPath, "query");
 
-                if (typeof func.invokeQuery === "function") {
-                  const argsStr = JSON.stringify(
-                    convexToJson([(args ?? {}) as Value]),
-                  );
-                  const rawResult: string = yield* Fx.promise(() =>
-                    (func.invokeQuery as (s: string) => Promise<string>)(
-                      argsStr,
-                    ),
-                  );
-                  return jsonToConvex(JSON.parse(rawResult));
-                }
+        if (typeof func.invokeQuery === "function") {
+          const argsStr = JSON.stringify(convexToJson([(args ?? {}) as Value]));
+          const rawResult = await (
+            func.invokeQuery as (s: string) => Promise<string>
+          )(argsStr);
+          return jsonToConvex(JSON.parse(rawResult));
+        }
 
-                const handler = getHandler(func);
-                if (handler === null) {
-                  return yield* Fx.fail(noHandlerError(functionPath));
-                }
-                const result = yield* Fx.promise(() =>
-                  Promise.resolve(handler({}, args ?? {})),
-                );
-                return result;
-              }),
-            // Release: always rollback (queries are read-only)
-            () =>
-              Fx.sync(() => {
-                db.rollbackWrites();
-              }),
-          ),
-        ),
-      executionContext,
-    );
+        const handler = getHandler(func);
+        if (handler === null) {
+          throw this._noHandlerError(functionPath);
+        }
+        return await Promise.resolve(handler({}, args ?? {}));
+      } finally {
+        db.rollbackWrites();
+      }
+    }, executionContext);
   }
 
   /**
    * Execute a mutation function. Wraps in a transaction and commits
    * on success, rolls back on error.
    *
-   * Uses Fx.bracket to manage the transaction lifecycle:
-   * - Acquire: startTransaction()
-   * - Use: run mutation body + commit()
-   * - Release (failure only): rollbackWrites()
+   * Uses try/finally to manage the transaction lifecycle:
+   * - Start: startTransaction()
+   * - Success: run mutation body + commitAsync()
+   * - Failure: rollbackWrites()
    */
   async executeMutation(
     functionPath: FunctionPath,
@@ -418,59 +388,37 @@ export class UdfExecutor {
     executionContext: ExecutionContext = {},
   ): Promise<MutationResult> {
     const db = this._db;
-    const resolveFunc = this._resolveFunc.bind(this);
-    const noHandlerError = this._noHandlerError.bind(this);
-    return this._runWithGlobals(
-      () =>
-        Fx.run(
-          Fx.bracket(
-            // Acquire: start transaction
-            Fx.sync(() => {
-              db.startTransaction();
-            }),
-            // Use: run the mutation
-            () =>
-              Fx.gen(function* () {
-                const func: Record<string, unknown> = yield* Fx.promise(() =>
-                  resolveFunc(functionPath, "mutation"),
-                );
+    return this._runWithGlobals(async () => {
+      db.startTransaction();
+      let succeeded = false;
+      try {
+        const func = await this._resolveFunc(functionPath, "mutation");
 
-                let result: unknown;
-                if (typeof func.invokeMutation === "function") {
-                  const invokeMutation = func.invokeMutation as (
-                    argsStr: string,
-                  ) => Promise<string>;
-                  const argsStr = JSON.stringify(
-                    convexToJson([(args ?? {}) as Value]),
-                  );
-                  const rawResult: string = yield* Fx.promise(() =>
-                    invokeMutation(argsStr),
-                  );
-                  result = jsonToConvex(JSON.parse(rawResult));
-                } else {
-                  const handler = getHandler(func);
-                  if (handler === null) {
-                    return yield* Fx.fail(noHandlerError(functionPath));
-                  }
-                  result = yield* Fx.promise(() =>
-                    Promise.resolve(handler({}, args ?? {})),
-                  );
-                }
+        let result: unknown;
+        if (typeof func.invokeMutation === "function") {
+          const invokeMutation = func.invokeMutation as (
+            argsStr: string,
+          ) => Promise<string>;
+          const argsStr = JSON.stringify(convexToJson([(args ?? {}) as Value]));
+          const rawResult = await invokeMutation(argsStr);
+          result = jsonToConvex(JSON.parse(rawResult));
+        } else {
+          const handler = getHandler(func);
+          if (handler === null) {
+            throw this._noHandlerError(functionPath);
+          }
+          result = await Promise.resolve(handler({}, args ?? {}));
+        }
 
-                const commit = db.commit();
-                return { result, commit } as MutationResult;
-              }),
-            // Release: rollback on failure (commit already happened on success path)
-            (_tx, exit) =>
-              Fx.sync(() => {
-                if (exit._tag === "Failure") {
-                  db.rollbackWrites();
-                }
-              }),
-          ),
-        ),
-      executionContext,
-    );
+        const commit = await db.commitAsync();
+        succeeded = true;
+        return { result, commit } as MutationResult;
+      } finally {
+        if (!succeeded) {
+          db.rollbackWrites();
+        }
+      }
+    }, executionContext);
   }
 
   /**
@@ -524,40 +472,30 @@ export class UdfExecutor {
       typeof (db as any).getActiveIdentityKey === "function"
         ? (db as any).getActiveIdentityKey()
         : null;
-    return Fx.run(
-      Fx.bracket(
-        // Acquire: patch globals and install syscalls
-        Fx.sync(() => {
-          const ops = createOpsContext();
-          const savedGlobals = patchGlobals(ops);
-          const previousConvexDescriptor = Object.getOwnPropertyDescriptor(
-            globalThis,
-            "Convex",
-          );
-          const previousConvex = globalThis.Convex;
-          this._contextStack.push(executionContext);
-          if (typeof (db as any).setActiveIdentityKey === "function") {
-            (db as any).setActiveIdentityKey(
-              executionContext.identityKey ?? null,
-            );
-          }
-          installGlobalConvex(this._installedConvex);
-          return { savedGlobals, previousConvex, previousConvexDescriptor };
-        }),
-        // Use: run the callback
-        () => Fx.promise(fn),
-        // Release: restore globals unconditionally
-        ({ savedGlobals, previousConvex, previousConvexDescriptor }) =>
-          Fx.sync(() => {
-            restoreGlobalConvex(previousConvex, previousConvexDescriptor);
-            this._contextStack.pop();
-            if (typeof (db as any).setActiveIdentityKey === "function") {
-              (db as any).setActiveIdentityKey(previousIdentityKey);
-            }
-            restoreGlobals(savedGlobals);
-          }),
-      ),
+
+    const ops = createOpsContext();
+    const savedGlobals = patchGlobals(ops);
+    const previousConvexDescriptor = Object.getOwnPropertyDescriptor(
+      globalThis,
+      "Convex",
     );
+    const previousConvex = globalThis.Convex;
+    this._contextStack.push(executionContext);
+    if (typeof (db as any).setActiveIdentityKey === "function") {
+      (db as any).setActiveIdentityKey(executionContext.identityKey ?? null);
+    }
+    installGlobalConvex(this._installedConvex);
+
+    try {
+      return await fn();
+    } finally {
+      restoreGlobalConvex(previousConvex, previousConvexDescriptor);
+      this._contextStack.pop();
+      if (typeof (db as any).setActiveIdentityKey === "function") {
+        (db as any).setActiveIdentityKey(previousIdentityKey);
+      }
+      restoreGlobals(savedGlobals);
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -579,7 +517,7 @@ export class UdfExecutor {
   ): Promise<Record<string, unknown>> {
     if (functionPath.componentPath.length > 0) {
       const target = componentRouteTargetLabel(functionPath);
-      throw Cv.error({
+      throw new ConvexError({
         code: "NESTED_COMPONENT_LOCAL_UNSUPPORTED",
         message:
           `[convex-embedded] Local execution reached component function "${target}". ` +
@@ -618,7 +556,7 @@ export class UdfExecutor {
     }
 
     if (isRemoteOnly(rawExport)) {
-      throw Cv.error({
+      throw new ConvexError({
         code: "ROUTE_REMOTE_LOCAL_UNSUPPORTED",
         message:
           `[convex-embedded] Function "${modulePath}:${exportName}" is marked remoteOnly() and cannot run in the embedded runtime. ` +
@@ -633,31 +571,27 @@ export class UdfExecutor {
     const func = rawExport as Record<string, unknown>;
 
     // Validate that the export's declared type matches what we expect.
-    switch (expectedType) {
-      case "query":
-        if (func.isQuery === false || func.isMutation || func.isAction) {
-          throw new Error(
-            `Expected a query function from module "${modulePath}" ` +
-              `export \`${exportName}\`, but it is not a query.`,
-          );
-        }
-        break;
-      case "mutation":
-        if (func.isMutation === false || func.isQuery || func.isAction) {
-          throw new Error(
-            `Expected a mutation function from module "${modulePath}" ` +
-              `export \`${exportName}\`, but it is not a mutation.`,
-          );
-        }
-        break;
-      case "action":
-        if (func.isAction === false || func.isQuery || func.isMutation) {
-          throw new Error(
-            `Expected an action function from module "${modulePath}" ` +
-              `export \`${exportName}\`, but it is not an action.`,
-          );
-        }
-        break;
+    if (expectedType === "query") {
+      if (func.isQuery === false || func.isMutation || func.isAction) {
+        throw new Error(
+          `Expected a query function from module "${modulePath}" ` +
+            `export \`${exportName}\`, but it is not a query.`,
+        );
+      }
+    } else if (expectedType === "mutation") {
+      if (func.isMutation === false || func.isQuery || func.isAction) {
+        throw new Error(
+          `Expected a mutation function from module "${modulePath}" ` +
+            `export \`${exportName}\`, but it is not a mutation.`,
+        );
+      }
+    } else if (expectedType === "action") {
+      if (func.isAction === false || func.isQuery || func.isMutation) {
+        throw new Error(
+          `Expected an action function from module "${modulePath}" ` +
+            `export \`${exportName}\`, but it is not an action.`,
+        );
+      }
     }
 
     this._resolvedFunctions.set(cacheKey, func);

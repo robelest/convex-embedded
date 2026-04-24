@@ -1,6 +1,4 @@
-import { Fx } from "@robelest/fx";
-
-import { getIdentityKey, type UserIdentity } from "@/auth/resolver";
+import { getIdentityKey, type UserIdentity } from "@/auth";
 import {
   getAuthSnapshot,
   notifyAuthListeners,
@@ -23,7 +21,7 @@ export const AUTH_STATE_STORE_MIGRATIONS: StoreMigrationManifest = {
 export async function initializeActiveIdentityKey(
   runtime: EmbeddedRuntime,
 ): Promise<string | null> {
-  const value = await runtime.executeBootstrapLocal({
+  const value = await runtime.executeLocal({
     kind: "query",
     path: SystemPaths.authStateGetActive,
     args: {},
@@ -94,7 +92,7 @@ export async function refreshAuthFromSource(entry: AuthEntry): Promise<void> {
   await applyAuthIdentity(entry, identity, false);
 }
 
-export function applyAuthIdentity(
+export async function applyAuthIdentity(
   entry: AuthEntry,
   identity: UserIdentity | null,
   broadcast: boolean,
@@ -102,63 +100,53 @@ export function applyAuthIdentity(
   const previous = getAuthSnapshot(entry.state);
   const identityKey =
     entry.getIdentityKey?.(identity) ?? getIdentityKey(identity);
-  return Fx.run(
-    Fx.from({
-      ok: async () => {
-        entry.runtime.setIdentity(identity);
-        entry.runtime.setActiveIdentityKey(identityKey);
-        await entry.runtime.refreshLocalQueryWatches();
-        await migrateAnonymousDataIfNeeded(
-          entry,
-          previous.identityKey,
-          identityKey,
-        );
-        entry.activeIdentityKey = identityKey;
-        await writeActiveIdentityKey(entry.runtime, identityKey);
+  try {
+    entry.runtime.setIdentity(identity);
+    entry.runtime.setActiveIdentityKey(identityKey);
+    await entry.runtime.refreshLocalQueryWatches();
+    await migrateAnonymousDataIfNeeded(
+      entry,
+      previous.identityKey,
+      identityKey,
+    );
+    entry.activeIdentityKey = identityKey;
+    await writeActiveIdentityKey(entry.runtime, identityKey);
 
-        if (identity === null) {
-          notifyAuthListeners(entry, { status: "unauthenticated" });
-          await entry.refreshSync?.();
-          if (broadcast) {
-            entry.sessionBroadcast?.notify({ type: "authChanged" });
-          }
-          return;
-        }
+    if (identity === null) {
+      notifyAuthListeners(entry, { status: "unauthenticated" });
+      await entry.refreshSync?.();
+      if (broadcast) {
+        entry.sessionBroadcast?.notify({ type: "authChanged" });
+      }
+      return;
+    }
 
-        if (
-          previous.identityKey &&
-          identityKey &&
-          previous.identityKey !== identityKey &&
-          (await hasPendingWorkForOtherIdentity(entry))
-        ) {
-          notifyAuthListeners(entry, {
-            status: "identityMismatch",
-            identity,
-            identityKey,
-          });
-          await entry.refreshSync?.();
-          if (broadcast) {
-            entry.sessionBroadcast?.notify({ type: "authChanged" });
-          }
-          return;
-        }
+    if (
+      previous.identityKey &&
+      identityKey &&
+      previous.identityKey !== identityKey &&
+      (await hasPendingWorkForOtherIdentity(entry))
+    ) {
+      notifyAuthListeners(entry, {
+        status: "identityMismatch",
+        identity,
+        identityKey,
+      });
+      await entry.refreshSync?.();
+      if (broadcast) {
+        entry.sessionBroadcast?.notify({ type: "authChanged" });
+      }
+      return;
+    }
 
-        notifyAuthListeners(entry, toAuthenticatedState(identity, identityKey));
-        await entry.refreshSync?.();
-        if (broadcast) {
-          entry.sessionBroadcast?.notify({ type: "authChanged" });
-        }
-      },
-      err: (err) => asError(err),
-    }).pipe(
-      Fx.inspect((err) =>
-        Fx.sync(() => {
-          notifyAuthListeners(entry, { status: "error", error: err });
-        }),
-      ),
-      Fx.recover(() => Fx.unit),
-    ),
-  );
+    notifyAuthListeners(entry, toAuthenticatedState(identity, identityKey));
+    await entry.refreshSync?.();
+    if (broadcast) {
+      entry.sessionBroadcast?.notify({ type: "authChanged" });
+    }
+  } catch (err) {
+    notifyAuthListeners(entry, { status: "error", error: asError(err) });
+  }
 }
 
 export function wrapFetchToken(

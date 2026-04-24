@@ -5,7 +5,6 @@
  * in-memory document set: full table scans, index range scans,
  * full-text search, filters, ordering, pagination, and vector search.
  */
-import { Fx } from "@robelest/fx";
 import type { JSONValue, Value } from "convex/values";
 import { jsonToConvex } from "convex/values";
 
@@ -63,6 +62,12 @@ type SourceEvaluation = {
 
 type ActiveQuery = {
   results: Array<GenericDocument>;
+  index: number;
+};
+
+type AsyncActiveQuery = {
+  resultsPromise: Promise<Array<GenericDocument>>;
+  results: Array<GenericDocument> | null;
   index: number;
 };
 
@@ -324,17 +329,19 @@ function unsupportedFilter(filter: FilterJson): never {
 }
 
 function isUndefinedMarker(value: JSONValue): boolean {
-  return Fx.pipe(
-    asRecord(value),
-    (record) => record !== null && "$undefined" in record,
-  );
+  const record = asRecord(value);
+  return record !== null && "$undefined" in record;
 }
 
 const FIELD_PATH_PARTS_CACHE = new Map<string, string[]>();
+const FIELD_PATH_PARTS_CACHE_MAX_SIZE = 1_000;
 
 function getFieldPathParts(fieldPath: string): string[] {
   let cached = FIELD_PATH_PARTS_CACHE.get(fieldPath);
   if (!cached) {
+    if (FIELD_PATH_PARTS_CACHE.size >= FIELD_PATH_PARTS_CACHE_MAX_SIZE) {
+      FIELD_PATH_PARTS_CACHE.clear();
+    }
     cached = fieldPath.split(".");
     FIELD_PATH_PARTS_CACHE.set(fieldPath, cached);
   }
@@ -346,14 +353,13 @@ export function evaluateFieldPath(
   fieldPath: string,
   document: GenericDocument,
 ): Value | undefined {
-  return Fx.pipe(getFieldPathParts(fieldPath), (pathParts) =>
-    pathParts.reduce<Value | undefined>(
-      (result, part) =>
-        result !== undefined && result !== null && isSimpleObject(result)
-          ? (result as Record<string, Value | undefined>)[part]
-          : undefined,
-      document as Value,
-    ),
+  const pathParts = getFieldPathParts(fieldPath);
+  return pathParts.reduce<Value | undefined>(
+    (result, part) =>
+      result !== undefined && result !== null && isSimpleObject(result)
+        ? (result as Record<string, Value | undefined>)[part]
+        : undefined,
+    document as Value,
   );
 }
 
@@ -363,18 +369,16 @@ export function evaluateValue(value: JSONValue): Value | undefined {
 }
 
 export function normalizeFilter(filter: FilterJson): FilterNode {
-  return Fx.pipe(
-    asRecord(filter),
-    (record) =>
-      record === null
-        ? unsupportedFilter(filter)
-        : (filterNormalizers.find(({ key }) => key in record) ??
-          unsupportedFilter(filter)),
-    (normalizer) =>
-      normalizer.build(
-        (asRecord(filter) as Record<string, unknown>)[normalizer.key],
-        normalizeFilter,
-      ),
+  const record = asRecord(filter);
+  if (record === null) {
+    unsupportedFilter(filter);
+  }
+  const normalizer =
+    filterNormalizers.find(({ key }) => key in record) ??
+    unsupportedFilter(filter);
+  return normalizer.build(
+    (record as Record<string, unknown>)[normalizer.key],
+    normalizeFilter,
   );
 }
 
@@ -496,9 +500,8 @@ export function evaluateFilter(
   document: GenericDocument,
   filter: FilterJson,
 ): Value | undefined {
-  return Fx.pipe(filter, normalizeFilter, (node) =>
-    evaluateNormalizedFilter(document, node),
-  );
+  const node = normalizeFilter(filter);
+  return evaluateNormalizedFilter(document, node);
 }
 
 // ---------------------------------------------------------------------------
@@ -522,24 +525,19 @@ function validateIndexRangeExpression(
   source: Source & { type: "IndexRange" },
   fields: string[],
 ): void {
-  Fx.pipe(
-    source.range,
-    (range) =>
-      range.reduce<RangeValidationState>(
-        (validation, filter, filterIndex) => {
-          const kind = rangeKindsByType[filter.type];
-          const ctx: RangeValidationContext = {
-            filter,
-            filterIndex,
-            fields,
-            source,
-            validation,
-          };
-          return rangeValidationHandlers[validation.state][kind](ctx);
-        },
-        { state: "eq", fieldIndex: 0 },
-      ),
-    () => undefined,
+  source.range.reduce<RangeValidationState>(
+    (validation, filter, filterIndex) => {
+      const kind = rangeKindsByType[filter.type];
+      const ctx: RangeValidationContext = {
+        filter,
+        filterIndex,
+        fields,
+        source,
+        validation,
+      };
+      return rangeValidationHandlers[validation.state][kind](ctx);
+    },
+    { state: "eq", fieldIndex: 0 },
   );
 }
 
@@ -557,13 +555,21 @@ export type DocumentIterator = (
 ) => void;
 
 export type TableCountReader = (tableName: string) => number;
+export type AsyncTableCountReader = (tableName: string) => Promise<number>;
 export type QueryReader = (
   query: SerializedQuery,
 ) => Array<GenericDocument> | null;
+export type AsyncQueryReader = (
+  query: SerializedQuery,
+) => Promise<Array<GenericDocument> | null>;
 export type SourceReader = (
   source: Source,
   limit?: number | null,
 ) => SourceEvaluation | null;
+export type AsyncSourceReader = (
+  source: Source,
+  limit?: number | null,
+) => Promise<SourceEvaluation | null>;
 
 /**
  * Stateful query engine. Manages active streaming queries and
@@ -572,6 +578,7 @@ export type SourceReader = (
 export class QueryEngine {
   private _nextQueryId: QueryId = 1;
   private _queryResults: Record<QueryId, ActiveQuery> = {};
+  private _asyncQueryResults: Record<QueryId, AsyncActiveQuery> = {};
 
   constructor(
     private _schema: ParsedSchema | null,
@@ -579,6 +586,12 @@ export class QueryEngine {
     private _countTable: TableCountReader = () => 0,
     private _readQuery: QueryReader = () => null,
     private _readSource: SourceReader = () => null,
+    private _countTableAsync: AsyncTableCountReader = async (tableName) =>
+      this._countTable(tableName),
+    private _readQueryAsync: AsyncQueryReader = async (query) =>
+      this._readQuery(query),
+    private _readSourceAsync: AsyncSourceReader = async (source, limit) =>
+      this._readSource(source, limit),
   ) {}
 
   /** Update the document iterator (e.g. after a schema or docs change). */
@@ -598,6 +611,20 @@ export class QueryEngine {
     return id;
   }
 
+  startQueryAsync(query: SerializedQuery): QueryId {
+    const id = this._nextQueryId;
+    const resultsPromise = this._evaluateQueryAsync(query).then((results) => {
+      const active = this._asyncQueryResults[id];
+      if (active) {
+        active.results = results;
+      }
+      return results;
+    });
+    this._asyncQueryResults[id] = { resultsPromise, results: null, index: 0 };
+    this._nextQueryId += 1;
+    return id;
+  }
+
   queryNext(queryId: QueryId): {
     value: GenericDocument | null;
     done: boolean;
@@ -612,8 +639,24 @@ export class QueryEngine {
         : { value: query.results[query.index++]!, done: false };
   }
 
+  async queryNextAsync(queryId: QueryId): Promise<{
+    value: GenericDocument | null;
+    done: boolean;
+  }> {
+    const query = this._asyncQueryResults[queryId];
+    if (query === undefined) {
+      throw new Error("Bad queryId");
+    }
+
+    const results = query.results ?? (await query.resultsPromise);
+    return query.index >= results.length
+      ? { value: null, done: true }
+      : { value: results[query.index++]!, done: false };
+  }
+
   queryCleanup(queryId: QueryId): void {
     delete this._queryResults[queryId];
+    delete this._asyncQueryResults[queryId];
   }
 
   // -------------------------------------------------------------------------
@@ -628,7 +671,11 @@ export class QueryEngine {
     query: SerializedQuery;
     cursor: string | null;
     pageSize: number;
-  }): { page: GenericDocument[]; isDone: boolean; continueCursor: string } {
+  }): {
+    page: GenericDocument[];
+    isDone: boolean;
+    continueCursor: string;
+  } {
     const queryId = this.startQuery(query);
     const page: GenericDocument[] = [];
     let isInPage = cursor === null;
@@ -664,12 +711,63 @@ export class QueryEngine {
     return { page, isDone, continueCursor };
   }
 
+  async paginateAsync({
+    query,
+    cursor,
+    pageSize,
+  }: {
+    query: SerializedQuery;
+    cursor: string | null;
+    pageSize: number;
+  }): Promise<{
+    page: GenericDocument[];
+    isDone: boolean;
+    continueCursor: string;
+  }> {
+    const queryId = this.startQueryAsync(query);
+    const page: GenericDocument[] = [];
+    let isInPage = cursor === null;
+    let isDone = false;
+    let continueCursor = "_end_cursor";
+
+    for (;;) {
+      const { value, done } = await this.queryNextAsync(queryId);
+      if (done) {
+        isDone = true;
+        continueCursor = "_end_cursor";
+        break;
+      }
+
+      const current = value!;
+      const reachedLimit = isInPage && page.length + 1 >= pageSize;
+
+      if (reachedLimit) {
+        page.push(current);
+        continueCursor = current._id as string;
+        break;
+      }
+
+      if (isInPage) {
+        page.push(current);
+      }
+
+      isInPage = isInPage || current._id === cursor;
+    }
+
+    this.queryCleanup(queryId);
+    return { page, isDone, continueCursor };
+  }
+
   // -------------------------------------------------------------------------
   // Count
   // -------------------------------------------------------------------------
 
   count(tableName: string): number {
     return this._countTable(tableName);
+  }
+
+  async countAsync(tableName: string): Promise<number> {
+    return this._countTableAsync(tableName);
   }
 
   // -------------------------------------------------------------------------
@@ -730,6 +828,28 @@ export class QueryEngine {
     return this._applyLimit(sortedResults, limit);
   }
 
+  private async _evaluateQueryAsync(
+    query: SerializedQuery,
+  ): Promise<Array<GenericDocument>> {
+    const optimizedQuery = await this._readQueryAsync(query);
+    if (optimizedQuery !== null) {
+      return optimizedQuery;
+    }
+
+    const { filters, limit } = this._extractQueryOperators(query.operators);
+    const source = await this._evaluateSourceAsync(
+      query.source,
+      filters.length === 0 ? limit : null,
+    );
+    const filteredResults = this._applyFilters(source.results, filters);
+    const sortedResults = this._sortResults(
+      filteredResults,
+      source.fieldPathsToSortBy,
+      source.order,
+    );
+    return this._applyLimit(sortedResults, limit);
+  }
+
   private _evaluateSource(
     source: Source,
     limit: number | null = null,
@@ -744,6 +864,18 @@ export class QueryEngine {
       IndexRange: (current) => this._evaluateIndexRangeSource(current),
       Search: (current) => this._evaluateSearchSource(current, limit),
     });
+  }
+
+  private async _evaluateSourceAsync(
+    source: Source,
+    limit: number | null = null,
+  ): Promise<SourceEvaluation> {
+    const optimized = await this._readSourceAsync(source, limit);
+    if (optimized !== null) {
+      return optimized;
+    }
+
+    return this._evaluateSource(source, limit);
   }
 
   private _evaluateFullTableScanSource(
@@ -873,23 +1005,19 @@ export class QueryEngine {
     }
 
     const orderMultiplier = order === "asc" ? 1 : -1;
-    return [...results].sort((left, right) =>
-      Fx.pipe(
-        fieldPathsToSortBy,
-        (fieldPaths) =>
-          fieldPaths.reduce(
-            (comparison, fieldPath) =>
-              comparison !== 0
-                ? comparison
-                : compareValues(
-                    evaluateFieldPath(fieldPath, left),
-                    evaluateFieldPath(fieldPath, right),
-                  ),
-            0,
-          ),
-        (comparison) => comparison * orderMultiplier,
-      ),
-    );
+    return results.sort((left, right) => {
+      const comparison = fieldPathsToSortBy.reduce(
+        (acc, fieldPath) =>
+          acc !== 0
+            ? acc
+            : compareValues(
+                evaluateFieldPath(fieldPath, left),
+                evaluateFieldPath(fieldPath, right),
+              ),
+        0,
+      );
+      return comparison * orderMultiplier;
+    });
   }
 
   private _applyLimit(

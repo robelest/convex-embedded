@@ -1,28 +1,29 @@
 import {
-  cleanupDoc,
-  createCheckpoint,
-  getCheckpoint,
+  getCollectionChanges,
   getLiveState,
   getLiveStates,
-  listCheckpoints,
+  getLiveStatesPage,
+  recordDelete,
   recordUpdate,
 } from "@resolve/component/public";
-import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { beforeEach, describe, expect, it } from "@tests/testkit";
+import { vi } from "vitest";
 import * as Y from "yjs";
 
 const recordUpdateHandler = (recordUpdate as any)._handler as Function;
+const recordDeleteHandler = (recordDelete as any)._handler as Function;
+const getCollectionChangesHandler = (getCollectionChanges as any)
+  ._handler as Function;
 const getLiveStateHandler = (getLiveState as any)._handler as Function;
 const getLiveStatesHandler = (getLiveStates as any)._handler as Function;
-const createCheckpointHandler = (createCheckpoint as any)._handler as Function;
-const listCheckpointsHandler = (listCheckpoints as any)._handler as Function;
-const getCheckpointHandler = (getCheckpoint as any)._handler as Function;
-const cleanupDocHandler = (cleanupDoc as any)._handler as Function;
+const getLiveStatesPageHandler = (getLiveStatesPage as any)
+  ._handler as Function;
 
 type TableName =
+  | "collectionHeads"
+  | "collectionTail"
   | "liveStates"
-  | "deltaTail"
-  | "checkpoints"
-  | "pinnedCheckpoints";
+  | "deltaTail";
 
 function clone<T>(value: T): T {
   return structuredClone(value);
@@ -30,10 +31,10 @@ function clone<T>(value: T): T {
 
 function createMockCtx() {
   const tables: Record<TableName, Array<any>> = {
+    collectionHeads: [],
+    collectionTail: [],
     liveStates: [],
     deltaTail: [],
-    checkpoints: [],
-    pinnedCheckpoints: [],
   };
   let idCounter = 0;
 
@@ -46,6 +47,15 @@ function createMockCtx() {
           return {
             eq: (nextField: string, nextValue: unknown) => {
               filters[nextField] = nextValue;
+              return {
+                gt: (gtField: string, gtValue: unknown) => {
+                  filters[gtField] = { $gt: gtValue };
+                  return undefined;
+                },
+              };
+            },
+            gt: (nextField: string, nextValue: unknown) => {
+              filters[nextField] = { $gt: nextValue };
               return undefined;
             },
           };
@@ -53,10 +63,20 @@ function createMockCtx() {
       });
 
       const rows = tables[tableName].filter((row) =>
-        Object.entries(filters).every(([key, value]) => row[key] === value),
+        Object.entries(filters).every(([key, value]) => {
+          const currentRow = row as Record<string, any>;
+          if (
+            value &&
+            typeof value === "object" &&
+            "$gt" in (value as Record<string, unknown>)
+          ) {
+            return currentRow[key] > (value as { $gt: any }).$gt;
+          }
+          return currentRow[key] === value;
+        }),
       );
 
-      const query = {
+      return {
         unique: async () => {
           if (rows.length > 1) {
             throw new Error(`Expected unique result for ${tableName}`);
@@ -64,13 +84,12 @@ function createMockCtx() {
           return clone(rows[0] ?? null);
         },
         collect: async () => clone(rows),
+        take: async (count: number) => clone(rows.slice(0, count)),
         order: (direction: "asc" | "desc") => {
           const ordered = [...rows].sort((a, b) => {
-            const orderField = indexName.endsWith("createdAt")
-              ? "createdAt"
-              : indexName.endsWith("updatedAt")
-                ? "updatedAt"
-                : "seq";
+            const orderField = indexName.endsWith("updatedAt")
+              ? "updatedAt"
+              : "seq";
             const aOrder = a[orderField] ?? 0;
             const bOrder = b[orderField] ?? 0;
             return direction === "desc" ? bOrder - aOrder : aOrder - bOrder;
@@ -82,8 +101,6 @@ function createMockCtx() {
           };
         },
       };
-
-      return query;
     },
   });
 
@@ -115,16 +132,6 @@ function createMockCtx() {
           }
         }
       }),
-      get: vi.fn(async (id: string) => {
-        for (const table of Object.values(tables)) {
-          const row = table.find((entry) => entry._id === id);
-          if (row) return clone(row);
-        }
-        return null;
-      }),
-      normalizeId: vi.fn((tableName: string, id: string) =>
-        id.startsWith(`${tableName}:`) ? id : null,
-      ),
     },
     tables,
   };
@@ -159,6 +166,7 @@ describe("component public API", () => {
       update: update1,
       keepTailCount: 2,
       tailByteLimit: 1024,
+      docCreationTime: 1,
     });
     await recordUpdateHandler(ctx as any, {
       collection: "tasks",
@@ -166,6 +174,7 @@ describe("component public API", () => {
       update: update2,
       keepTailCount: 2,
       tailByteLimit: 1024,
+      docCreationTime: 1,
     });
     await recordUpdateHandler(ctx as any, {
       collection: "tasks",
@@ -173,6 +182,7 @@ describe("component public API", () => {
       update: update3,
       keepTailCount: 2,
       tailByteLimit: 1024,
+      docCreationTime: 1,
     });
 
     const liveState = await getLiveStateHandler(ctx as any, {
@@ -194,7 +204,7 @@ describe("component public API", () => {
       null,
     ]);
     expect(allLiveStates).toEqual([
-      expect.objectContaining({ docId: "doc1", seq: 2 }),
+      expect.objectContaining({ docId: "doc1", seq: 2, docCreationTime: 1 }),
     ]);
     expect(ctx.tables.deltaTail).toHaveLength(2);
     expect(ctx.tables.deltaTail.map((entry) => entry.seq)).toEqual([1, 2]);
@@ -212,6 +222,7 @@ describe("component public API", () => {
       update: update1,
       keepTailCount: 10,
       tailByteLimit: update2.byteLength,
+      docCreationTime: 2,
     });
     await recordUpdateHandler(ctx as any, {
       collection: "tasks",
@@ -219,220 +230,227 @@ describe("component public API", () => {
       update: update2,
       keepTailCount: 10,
       tailByteLimit: update2.byteLength,
+      docCreationTime: 2,
     });
 
     expect(ctx.tables.deltaTail).toHaveLength(1);
     expect(ctx.tables.deltaTail[0].seq).toBe(1);
   });
 
-  it("keeps pinned checkpoints and the latest unpinned N", async () => {
+  it("tracks per-document sequence numbers independently across interleaved updates", async () => {
     const ctx = createMockCtx();
 
-    const update1 = yUpdate("v1");
-    const update2 = yUpdate("v2");
-    const update3 = yUpdate("v3");
-    const update4 = yUpdate("v4");
-
     await recordUpdateHandler(ctx as any, {
       collection: "tasks",
-      docId: "doc3",
-      update: update1,
-      keepTailCount: 10,
-      tailByteLimit: 1024,
+      docId: "docA",
+      update: yUpdate("a1"),
+      keepTailCount: 8,
+      tailByteLimit: 8192,
+      docCreationTime: 1,
     });
-
-    const first = await createCheckpointHandler(ctx as any, {
-      collection: "tasks",
-      docId: "doc3",
-      label: "first",
-      pinned: true,
-      keepCheckpointCount: 2,
-    });
-    vi.advanceTimersByTime(1);
-
     await recordUpdateHandler(ctx as any, {
       collection: "tasks",
-      docId: "doc3",
-      update: update2,
-      keepTailCount: 10,
-      tailByteLimit: 1024,
+      docId: "docB",
+      update: yUpdate("b1"),
+      keepTailCount: 8,
+      tailByteLimit: 8192,
+      docCreationTime: 2,
     });
-    await createCheckpointHandler(ctx as any, {
-      collection: "tasks",
-      docId: "doc3",
-      label: "second",
-      keepCheckpointCount: 2,
-    });
-    vi.advanceTimersByTime(1);
-
     await recordUpdateHandler(ctx as any, {
       collection: "tasks",
-      docId: "doc3",
-      update: update3,
-      keepTailCount: 10,
-      tailByteLimit: 1024,
+      docId: "docA",
+      update: yUpdate("a2"),
+      keepTailCount: 8,
+      tailByteLimit: 8192,
+      docCreationTime: 1,
     });
-    await createCheckpointHandler(ctx as any, {
-      collection: "tasks",
-      docId: "doc3",
-      label: "third",
-      keepCheckpointCount: 2,
-    });
-    vi.advanceTimersByTime(1);
-
     await recordUpdateHandler(ctx as any, {
       collection: "tasks",
-      docId: "doc3",
-      update: update4,
-      keepTailCount: 10,
-      tailByteLimit: 1024,
+      docId: "docB",
+      update: yUpdate("b2"),
+      keepTailCount: 8,
+      tailByteLimit: 8192,
+      docCreationTime: 2,
     });
-    await createCheckpointHandler(ctx as any, {
+    await recordUpdateHandler(ctx as any, {
       collection: "tasks",
-      docId: "doc3",
-      label: "fourth",
-      keepCheckpointCount: 2,
+      docId: "docA",
+      update: yUpdate("a3"),
+      keepTailCount: 8,
+      tailByteLimit: 8192,
+      docCreationTime: 1,
     });
 
-    const checkpoints = await listCheckpointsHandler(ctx as any, {
+    const allLiveStates = await getLiveStatesHandler(ctx as any, {
       collection: "tasks",
-      docId: "doc3",
     });
-    const checkpoint = await getCheckpointHandler(ctx as any, {
-      collection: "tasks",
-      docId: "doc3",
-      checkpointId: first.checkpointId,
-    });
+    const docATail = ctx.tables.deltaTail
+      .filter((entry) => entry.docId === "docA")
+      .map((entry) => entry.seq);
+    const docBTail = ctx.tables.deltaTail
+      .filter((entry) => entry.docId === "docB")
+      .map((entry) => entry.seq);
 
-    expect(checkpoints.map((entry: any) => entry.label)).toEqual([
-      "fourth",
-      "third",
-      "first",
+    expect(allLiveStates).toEqual([
+      expect.objectContaining({ docId: "docA", seq: 2 }),
+      expect.objectContaining({ docId: "docB", seq: 1 }),
     ]);
-    expect(checkpoint).toMatchObject({ label: "first", pinned: true, seq: 0 });
-    expect(ctx.tables.checkpoints.map((entry) => entry.label)).toEqual([
-      "third",
-      "fourth",
-    ]);
-    expect(ctx.tables.pinnedCheckpoints.map((entry) => entry.label)).toEqual([
-      "first",
-    ]);
+    expect(docATail).toEqual([0, 1, 2]);
+    expect(docBTail).toEqual([0, 1]);
   });
 
-  it("does not trim checkpoints during recordUpdate", async () => {
+  it("keeps a monotonic tail for many updates to the same document", async () => {
     const ctx = createMockCtx();
 
-    const update1 = yUpdate("draft");
-    const update2 = yUpdate("draft v2");
+    for (let index = 0; index < 12; index += 1) {
+      await recordUpdateHandler(ctx as any, {
+        collection: "issues",
+        docId: "same-doc",
+        update: yUpdate(`value-${index}`),
+        keepTailCount: 12,
+        tailByteLimit: 256 * 1024,
+        docCreationTime: 5,
+      });
+    }
 
-    await recordUpdateHandler(ctx as any, {
-      collection: "tasks",
-      docId: "doc-inline",
-      update: update1,
-      keepTailCount: 10,
-      tailByteLimit: 1024,
-    });
-    await createCheckpointHandler(ctx as any, {
-      collection: "tasks",
-      docId: "doc-inline",
-      label: "first",
-      keepCheckpointCount: 1,
-    });
-    vi.advanceTimersByTime(1);
-    await createCheckpointHandler(ctx as any, {
-      collection: "tasks",
-      docId: "doc-inline",
-      label: "second",
-      keepCheckpointCount: 10,
+    const liveState = await getLiveStateHandler(ctx as any, {
+      collection: "issues",
+      docId: "same-doc",
     });
 
-    await recordUpdateHandler(ctx as any, {
-      collection: "tasks",
-      docId: "doc-inline",
-      update: update2,
-      keepTailCount: 10,
-      tailByteLimit: 1024,
-    });
-
-    expect(ctx.tables.checkpoints.map((entry) => entry.label)).toEqual([
-      "first",
-      "second",
-    ]);
+    expect(liveState).toMatchObject({ seq: 11 });
+    expect(ctx.tables.deltaTail.map((entry) => entry.seq)).toEqual(
+      Array.from({ length: 12 }, (_, index) => index),
+    );
   });
 
-  it("cleanupDoc prunes tail and unpinned checkpoints", async () => {
+  it("falls back to full mode when collection tail no longer covers the requested sequence", async () => {
     const ctx = createMockCtx();
 
-    const update1 = yUpdate("x");
-    const update2 = yUpdate("xy");
-    const update3 = yUpdate("xyz");
+    for (let index = 0; index < 4; index += 1) {
+      await recordUpdateHandler(ctx as any, {
+        collection: "tasks",
+        docId: `doc${index}`,
+        update: yUpdate(`value-${index}`),
+        keepTailCount: 8,
+        keepCollectionTailCount: 2,
+        tailByteLimit: 8192,
+        docCreationTime: index,
+      });
+    }
 
-    await recordUpdateHandler(ctx as any, {
+    const result = await getCollectionChangesHandler(ctx as any, {
       collection: "tasks",
-      docId: "doc4",
-      update: update1,
-      keepTailCount: 5,
-      tailByteLimit: 1024,
-    });
-    await recordUpdateHandler(ctx as any, {
-      collection: "tasks",
-      docId: "doc4",
-      update: update2,
-      keepTailCount: 5,
-      tailByteLimit: 1024,
-    });
-    await recordUpdateHandler(ctx as any, {
-      collection: "tasks",
-      docId: "doc4",
-      update: update3,
-      keepTailCount: 5,
-      tailByteLimit: 1024,
+      sinceSeq: 0,
     });
 
-    await createCheckpointHandler(ctx as any, {
-      collection: "tasks",
-      docId: "doc4",
-      label: "keep-me",
-      pinned: true,
-      keepCheckpointCount: 10,
+    expect(ctx.tables.collectionTail.map((entry) => entry.seq)).toEqual([2, 3]);
+    expect(result).toMatchObject({
+      mode: "full",
+      collectionSeq: 3,
+      isGapDetected: true,
     });
-    vi.advanceTimersByTime(1);
-    await createCheckpointHandler(ctx as any, {
-      collection: "tasks",
-      docId: "doc4",
-      label: "drop-me",
-      keepCheckpointCount: 10,
-    });
-    vi.advanceTimersByTime(1);
-    await createCheckpointHandler(ctx as any, {
-      collection: "tasks",
-      docId: "doc4",
-      label: "keep-latest",
-      keepCheckpointCount: 10,
-    });
+    expect(result.changes).toEqual([]);
+  });
 
-    const result = await cleanupDocHandler(ctx as any, {
+  it("returns incremental changes when the retained collection tail is contiguous", async () => {
+    const ctx = createMockCtx();
+
+    for (let index = 0; index < 4; index += 1) {
+      await recordUpdateHandler(ctx as any, {
+        collection: "tasks",
+        docId: `doc${index}`,
+        update: yUpdate(`value-${index}`),
+        keepTailCount: 8,
+        keepCollectionTailCount: 2,
+        tailByteLimit: 8192,
+        docCreationTime: index,
+      });
+    }
+
+    const result = await getCollectionChangesHandler(ctx as any, {
       collection: "tasks",
-      docId: "doc4",
-      keepTailCount: 1,
-      tailByteLimit: update3.byteLength,
-      keepCheckpointCount: 1,
+      sinceSeq: 1,
     });
 
     expect(result).toEqual({
-      tailDeleted: 2,
-      tailKept: 1,
-      checkpointDeleted: 1,
-      checkpointKept: 2,
+      mode: "incremental",
+      collectionSeq: 3,
+      isGapDetected: false,
+      changes: [
+        { docId: "doc2", kind: "upsert" },
+        { docId: "doc3", kind: "upsert" },
+      ],
     });
-    expect(ctx.tables.deltaTail).toHaveLength(1);
-    expect(
-      ctx.tables.checkpoints
-        .map((entry: any) => entry.label)
-        .sort((left: string, right: string) => left.localeCompare(right)),
-    ).toEqual(["keep-latest"]);
-    expect(
-      ctx.tables.pinnedCheckpoints.map((entry: any) => entry.label),
-    ).toEqual(["keep-me"]);
+  });
+
+  it("includes delete markers in incremental collection changes", async () => {
+    const ctx = createMockCtx();
+
+    await recordUpdateHandler(ctx as any, {
+      collection: "tasks",
+      docId: "doc1",
+      update: yUpdate("value"),
+      keepTailCount: 8,
+      keepCollectionTailCount: 8,
+      tailByteLimit: 8192,
+      docCreationTime: 1,
+    });
+    await recordDeleteHandler(ctx as any, {
+      collection: "tasks",
+      docId: "doc1",
+      keepCollectionTailCount: 8,
+    });
+
+    const result = await getCollectionChangesHandler(ctx as any, {
+      collection: "tasks",
+      sinceSeq: 0,
+    });
+
+    expect(result).toEqual({
+      mode: "incremental",
+      collectionSeq: 1,
+      isGapDetected: false,
+      changes: [{ docId: "doc1", kind: "delete" }],
+    });
+  });
+
+  it("pages live states by doc id cursor", async () => {
+    const ctx = createMockCtx();
+
+    for (const [index, docId] of ["doc1", "doc2", "doc3"].entries()) {
+      await recordUpdateHandler(ctx as any, {
+        collection: "tasks",
+        docId,
+        update: yUpdate(`value-${index}`),
+        keepTailCount: 8,
+        tailByteLimit: 8192,
+        docCreationTime: index + 1,
+      });
+    }
+
+    const firstPage = await getLiveStatesPageHandler(ctx as any, {
+      collection: "tasks",
+      limit: 2,
+    });
+    const secondPage = await getLiveStatesPageHandler(ctx as any, {
+      collection: "tasks",
+      limit: 2,
+      cursor: firstPage.continueCursor,
+    });
+
+    expect(firstPage).toMatchObject({
+      continueCursor: "doc2",
+      isDone: false,
+      page: [
+        expect.objectContaining({ docId: "doc1", docCreationTime: 1 }),
+        expect.objectContaining({ docId: "doc2", docCreationTime: 2 }),
+      ],
+    });
+    expect(secondPage).toMatchObject({
+      continueCursor: null,
+      isDone: true,
+      page: [expect.objectContaining({ docId: "doc3", docCreationTime: 3 })],
+    });
   });
 });

@@ -24,90 +24,149 @@ import type { FunctionReference } from "convex/server";
 export type ComponentApi<Name extends string | undefined = string | undefined> =
   {
     public: {
-      cleanupDoc: FunctionReference<
-        "mutation",
-        "internal",
-        {
-          collection: string;
-          docId: string;
-          keepCheckpointCount?: number;
-          keepTailCount?: number;
-          tailByteLimit?: number;
-        },
-        {
-          checkpointDeleted: number;
-          checkpointKept: number;
-          tailDeleted: number;
-          tailKept: number;
-        },
-        Name
-      >;
-      createCheckpoint: FunctionReference<
-        "mutation",
-        "internal",
-        {
-          actorId?: string;
-          collection: string;
-          docId: string;
-          keepCheckpointCount?: number;
-          label?: string;
-          metadata?: any;
-          pinned?: boolean;
-          reason?: string;
-          source?: string;
-        },
-        { checkpointId: string | string; seq: number },
-        Name
-      >;
-      getCheckpoint: FunctionReference<
+      getCollectionChanges: FunctionReference<
         "query",
         "internal",
-        { checkpointId: string | string; collection: string; docId: string },
+        { collection: string; sinceSeq: number | null },
         {
-          actorId?: string;
-          byteLength: number;
-          checkpointId: string | string;
-          createdAt: number;
-          label?: string;
-          metadata?: any;
-          pinned: boolean;
-          reason?: string;
-          seq: number;
-          source?: string;
-          update: ArrayBuffer;
-        } | null,
+          changes: Array<{ docId: string; kind: "upsert" | "delete" }>;
+          collectionSeq: number;
+          isGapDetected: boolean;
+          mode: "full" | "incremental";
+        },
         Name
       >;
       getLiveState: FunctionReference<
         "query",
         "internal",
         { collection: string; docId: string },
-        { seq: number; update: ArrayBuffer } | null,
+        { docCreationTime?: number; seq: number; update: ArrayBuffer } | null,
         Name
       >;
       getLiveStates: FunctionReference<
         "query",
         "internal",
-        { collection: string; docIds: Array<string> },
-        Array<{ docId: string; seq: number; update: ArrayBuffer } | null>,
+        { collection: string; docIds?: Array<string> },
+        Array<{
+          docCreationTime?: number;
+          docId: string;
+          seq: number;
+          update: ArrayBuffer;
+        } | null>,
         Name
       >;
-      listCheckpoints: FunctionReference<
+      getLiveStatesPage: FunctionReference<
         "query",
         "internal",
-        { collection: string; docId: string },
-        Array<{
-          actorId?: string;
-          byteLength: number;
-          checkpointId: string | string;
-          createdAt: number;
-          label?: string;
-          metadata?: any;
-          pinned: boolean;
-          reason?: string;
-          seq: number;
-          source?: string;
-        }>,
+        { collection: string; cursor?: string | null; limit?: number },
+        {
+          continueCursor: string | null;
+          isDone: boolean;
+          page: Array<{
+            docCreationTime?: number;
+            docId: string;
+            seq: number;
+            update: ArrayBuffer;
+          }>;
+        },
+        Name
+      >;
+      live: {
+        getCollectionChanges: FunctionReference<
+          "query",
+          "internal",
+          { collection: string; sinceSeq: number | null },
+          {
+            changes: Array<{ docId: string; kind: "upsert" | "delete" }>;
+            collectionSeq: number;
+            isGapDetected: boolean;
+            mode: "full" | "incremental";
+          },
+          Name
+        >;
+        getLiveState: FunctionReference<
+          "query",
+          "internal",
+          { collection: string; docId: string },
+          { docCreationTime?: number; seq: number; update: ArrayBuffer } | null,
+          Name
+        >;
+        getLiveStates: FunctionReference<
+          "query",
+          "internal",
+          { collection: string; docIds?: Array<string> },
+          Array<{
+            docCreationTime?: number;
+            docId: string;
+            seq: number;
+            update: ArrayBuffer;
+          } | null>,
+          Name
+        >;
+        getLiveStatesPage: FunctionReference<
+          "query",
+          "internal",
+          { collection: string; cursor?: string | null; limit?: number },
+          {
+            continueCursor: string | null;
+            isDone: boolean;
+            page: Array<{
+              docCreationTime?: number;
+              docId: string;
+              seq: number;
+              update: ArrayBuffer;
+            }>;
+          },
+          Name
+        >;
+        recordDelete: FunctionReference<
+          "mutation",
+          "internal",
+          {
+            collection: string;
+            docId: string;
+            keepCollectionTailCount?: number;
+          },
+          {
+            collectionSeq: number;
+            collectionTailDeleted: number;
+            deletedDeltaCount: number;
+            deletedLiveState: boolean;
+          },
+          Name
+        >;
+        recordUpdate: FunctionReference<
+          "mutation",
+          "internal",
+          {
+            collection: string;
+            docCreationTime: number;
+            docId: string;
+            keepCollectionTailCount?: number;
+            keepTailCount?: number;
+            tailByteLimit?: number;
+            update: ArrayBuffer;
+          },
+          {
+            collectionSeq: number;
+            collectionTailDeleted: number;
+            seq: number;
+            tailDeleted: number;
+            tailKept: number;
+          },
+          Name
+        >;
+      };
+      recordDelete: FunctionReference<
+        "mutation",
+        "internal",
+        { collection: string; docId: string; keepCollectionTailCount?: number },
+        {
+          collectionSeq: number;
+          collectionTailDeleted: number;
+          deletedDeltaCount: number;
+          deletedLiveState: boolean;
+        },
         Name
       >;
       recordUpdate: FunctionReference<
@@ -115,12 +174,20 @@ export type ComponentApi<Name extends string | undefined = string | undefined> =
         "internal",
         {
           collection: string;
+          docCreationTime: number;
           docId: string;
+          keepCollectionTailCount?: number;
           keepTailCount?: number;
           tailByteLimit?: number;
           update: ArrayBuffer;
         },
-        { seq: number; tailDeleted: number; tailKept: number },
+        {
+          collectionSeq: number;
+          collectionTailDeleted: number;
+          seq: number;
+          tailDeleted: number;
+          tailKept: number;
+        },
         Name
       >;
     };

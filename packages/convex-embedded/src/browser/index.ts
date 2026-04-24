@@ -13,12 +13,12 @@
  *   modules (from the lazy ESM registry) contain non-cloneable `Function`
  *   and `Proxy` objects that cannot cross a `postMessage` boundary.
  *
- * - **wa-sqlite** runs in a **Dedicated Worker** for persistence.
+ * - **SQLite via OPFS** runs in a **Dedicated Worker** for persistence.
  *   Only plain JSON data (documents, metadata) and `ArrayBuffer`s
  *   (blobs) cross the worker boundary.
  *
  * - **Cross-context propagation** uses the browser platform broadcast layer
- *   (`BroadcastChannel` / `storage` events) plus a shared IndexedDB name.
+ *   (`BroadcastChannel` / `storage` events) plus a shared persistent database name.
  *
  * - **Remote connection** (optional) uses the built-in Yjs CRDT-based resolve
  *   engine that reconciles offline changes on reconnect, plus reactive
@@ -43,10 +43,10 @@
  * @example
  * ```ts
  * import { createConvexClient } from "@robelest/convex-embedded/browser";
- * import { modules } from "./convex-modules";
+ * import { convex } from "./convex";
  *
  * const client = createConvexClient({
- *   modules,
+ *   convex,
  *   remote: { url: "https://happy-otter-123.convex.cloud" },
  * });
  * ```
@@ -57,101 +57,61 @@
 import { ConvexClient } from "convex/browser";
 import type { BaseConvexClientOptions } from "convex/browser";
 
-import { createBrowserPlatformAdapter } from "@/browser/platform";
+import {
+  registerBrowserDebugClient,
+  unregisterBrowserDebugClient,
+} from "@/browser/debug";
+import {
+  clearBrowserLocalData,
+  createBrowserPlatformAdapter,
+} from "@/browser/platform";
 import { type AuthOptions, type AuthState } from "@/client/auth";
 import { createEmbeddedClient } from "@/client/factory";
+import type { Prefetch } from "@/client/prefetch";
 import { type RemoteOptions, type RemoteState } from "@/client/remote";
-import type { Replica } from "@/client/replica";
-import { type ConvexModuleRegistry } from "@/kernel/modules";
+import { type ConvexInput } from "@/kernel/modules";
 import type { EncryptionOptions } from "@/storage/encrypted";
 
-// Re-export preloading utilities (public).
-export {
-  CDN_BASE,
-  WASM_URL,
-  preloadLinks,
-  injectPreloadLinks,
-  compileWasmModule,
-} from "@/browser/preload";
-export type { ConvexModuleRegistry } from "@/kernel/modules";
+export type { ConvexInput } from "@/kernel/modules";
+export type { EncryptionOptions } from "@/storage/encrypted";
 
 // ---------------------------------------------------------------------------
 // Public interfaces & types
 // ---------------------------------------------------------------------------
 
 /**
- * Configuration for the remote Convex connection.
+ * Auth and remote sync types re-exported for convenience from the browser
+ * entrypoint.
  *
- * When provided as the `remote` option to {@link createConvexClient}, the
- * client automatically connects to the remote Convex deployment — mutations
- * are local-first with durable queue and remote replay, and reactive
- * subscriptions keep the local database up-to-date with changes from
- * other clients.
- *
- * @remarks
- * **Naming**: "Resolve" refers to the CRDT-based reconciliation that
- * happens when a client reconnects after being offline. While online,
- * data flows through standard reactive query subscriptions — resolve is
- * only invoked for offline catch-up.
- *
- * **Retry behaviour**: Both `maxRetries` and `retryDelayMs` control
- * the retry policy for the Yjs CRDT resolve pass on reconnect (not for
- * normal reactive subscription delivery, which the Convex SDK handles
- * automatically).
- *
- * @example
- * ```ts
- * // Minimal — just a deployment URL
- * const client = createConvexClient({
- *   modules,
- *   remote: { url: "https://happy-otter-123.convex.cloud" },
- * });
- * ```
- *
- * @example
- * ```ts
- * // Custom retry policy for unreliable networks
- * const client = createConvexClient({
- *   modules,
- *   remote: {
- *     url: import.meta.env.CONVEX_URL,
- *     maxRetries: 5,
- *     retryDelayMs: 2000,
- *   },
- * });
- * ```
- *
- * @see {@link createConvexClient} — The factory that consumes this config.
- * @see {@link RemoteState} — Observable state of the remote engine.
- *
- * @category Configuration
+ * Use `RemoteOptions` as the `remote` field inside {@link ClientOptions}, and
+ * use `RemoteState` / `AuthState` with the corresponding browser subscription
+ * helpers.
  */
-export type { EncryptionOptions };
 export type { AuthOptions, AuthState, RemoteOptions, RemoteState };
 
 /**
  * Options for {@link createConvexClient}.
  *
  * @remarks
- * The only required option is `modules` — everything else has sensible
+ * The only required option is `convex` — everything else has sensible
  * defaults. Add `remote` to enable local-first mode with a remote Convex
  * deployment; omit it for a purely local embedded database.
  *
- * **Module discovery**: The `modules` map must be an enumerable lazy ESM
+ * **Module discovery**: The `convex.modules` map must be an enumerable lazy ESM
  * registry keyed by canonical Convex module ids such as `tasks` or
  * `lib/utils`. The embedded runtime inspects each module's exports to find Convex
  * function definitions and — when remote is enabled — `remote metadata`
  * constants exported by `register()`.
  *
- * **Persistence**: By default, documents are persisted to IndexedDB
- * via a wa-sqlite worker. Tabs sharing the same `name` share the same
+ * **Persistence**: By default, documents are persisted to OPFS
+ * via a dedicated sqlite worker. Tabs sharing the same `name` share the same
  * data and receive cross-tab updates via `BroadcastChannel`.
  *
  * @example
  * ```ts
  * // Minimal — local-only, no remote
  * const client = createConvexClient({
- *   modules,
+ *   convex,
  * });
  * ```
  *
@@ -159,7 +119,7 @@ export type { AuthOptions, AuthState, RemoteOptions, RemoteState };
  * ```ts
  * // Local-first with remote
  * const client = createConvexClient({
- *   modules,
+ *   convex,
  *   remote: { url: import.meta.env.CONVEX_URL },
  * });
  * ```
@@ -180,10 +140,10 @@ export interface ClientOptions {
    *
    * @example
    * ```ts
-   * import { modules } from "./convex-modules";
+   * import { convex } from "./convex";
    * ```
    */
-  modules: ConvexModuleRegistry;
+  convex: ConvexInput;
 
   /**
    * Optional Convex schema definition (the default export from your
@@ -205,18 +165,7 @@ export interface ClientOptions {
   >;
 
   /**
-   * URL of the wa-sqlite worker script.
-   *
-   * @remarks
-   * In most setups this resolves automatically. Override only when
-   * using a custom build pipeline that moves worker scripts.
-   *
-   * @internal
-   */
-  workerUrl?: URL | string;
-
-  /**
-   * IndexedDB database name. Tabs sharing the same name share the
+   * Persistent browser database name. Tabs sharing the same name share the
    * same persisted data and receive cross-tab updates via
    * `BroadcastChannel`.
    *
@@ -250,16 +199,13 @@ export interface ClientOptions {
   auth?: AuthOptions;
 
   /**
-   * Optional remote-backed replica used to seed the embedded database.
+   * Optional remote-backed prefetch data used to seed the embedded database.
    *
-   * This is the browser-side half of the SSR/bootstrap flow: build the replica
-   * on the server with `createReplica(...)`, serialize it into the page, then
-   * pass it here so the browser client starts warm.
+   * This is the browser-side half of the SSR/prefetch flow: build the prefetch
+   * on the server with `createEmbeddedPrefetch(...)`, serialize it into the
+   * page, then pass it here so the browser client starts warm.
    */
-  replica?: Replica;
-
-  /** Optional at-rest encryption for persisted local state. */
-  encryption?: Omit<EncryptionOptions, "getIdentityKey">;
+  prefetch?: Prefetch;
 }
 
 /**
@@ -328,12 +274,12 @@ export interface ClientOptions {
  * @remarks
  * **How it works**: The factory creates an embedded runtime on the
  * main thread, connects it to a `ConvexClient` via a loopback WebSocket
- * transport, and initialises wa-sqlite persistence in a Dedicated Worker.
+ * transport, and initialises browser sqlite persistence in a Dedicated Worker.
  * From the outside, the returned client behaves identically to a normal
  * `ConvexClient` connected to a remote deployment.
  *
  * **Without `remote`**: Purely local. Queries and mutations run against
- * an in-browser database persisted to IndexedDB via wa-sqlite. No
+ * an in-browser database persisted via OPFS-backed sqlite. No
  * network traffic.
  *
  * **With `remote`**: Local-first with a remote Convex deployment:
@@ -361,7 +307,7 @@ export interface ClientOptions {
  * import { onDestroy } from "svelte";
  *
  * const client = createConvexClient({
- *   modules,
+ *   convex,
  *   remote: { url: import.meta.env.CONVEX_URL },
  * });
  *
@@ -376,7 +322,7 @@ export interface ClientOptions {
  * import { ConvexProvider } from "convex/react";
  *
  * const client = createConvexClient({
- *   modules,
+ *   convex,
  *   remote: { url: import.meta.env.CONVEX_URL },
  * });
  *
@@ -393,7 +339,7 @@ export interface ClientOptions {
  * ```ts
  * // Local-only (no remote) — useful for prototyping or offline-only apps
  * const client = createConvexClient({
- *   modules,
+ *   convex,
  * });
  * ```
  *
@@ -411,14 +357,39 @@ export interface ClientOptions {
  */
 export function createConvexClient(options: ClientOptions): ConvexClient {
   ensureConvexAllowFunctionsInBrowser();
-  const platform = createBrowserPlatformAdapter({
-    workerUrl: options.workerUrl,
+  const platform = createBrowserPlatformAdapter();
+  const client = createEmbeddedClient({ options, platform }) as ConvexClient & {
+    close(): Promise<void>;
+  };
+  const name = options.name ?? "convex-embedded";
+
+  registerBrowserDebugClient({
+    name,
+    clear: async () => {
+      await client.close();
+      await clearBrowserLocalData(name);
+    },
   });
-  return createEmbeddedClient({ options, platform });
+
+  const originalClose = client.close.bind(client);
+  client.close = async () => {
+    unregisterBrowserDebugClient(name);
+    await originalClose();
+  };
+
+  return client;
 }
 
+/**
+ * Create the browser platform adapter used by embedded browser clients.
+ *
+ * @see createConvexClient
+ */
 export { createBrowserPlatformAdapter } from "@/browser/platform";
 
+/**
+ * Embedded auth helpers for browser clients.
+ */
 export {
   getAuthState,
   subscribeAuthState,
@@ -429,6 +400,9 @@ export {
   switchIdentity,
 } from "@/client/auth";
 
+/**
+ * Remote sync state helpers for browser clients.
+ */
 export { getRemoteState, subscribeRemoteState } from "@/client/remote";
 
 function ensureConvexAllowFunctionsInBrowser(): void {

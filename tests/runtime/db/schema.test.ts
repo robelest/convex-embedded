@@ -7,7 +7,7 @@ import {
   validateSchemaDefinition,
 } from "@embedded/runtime/db/schema";
 import type { ValidatorJSON } from "@embedded/runtime/db/schema";
-import { describe, it, expect } from "vite-plus/test";
+import { describe, it, expect } from "@tests/testkit";
 
 // ---------------------------------------------------------------------------
 // Helpers

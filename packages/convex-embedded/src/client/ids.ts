@@ -9,7 +9,6 @@
  * @packageDocumentation
  */
 
-import { Fx } from "@robelest/fx";
 import type { ConvexClient } from "convex/browser";
 
 import type { StoreMigrationManifest } from "@/runtime/migrations/types";
@@ -96,24 +95,12 @@ export class IdMap {
    * Must be called (and awaited) before using `getRemoteId` or
    * `translateArgs`.
    */
-  hydrate(): Promise<void> {
+  async hydrate(): Promise<void> {
     const identityKey = this._getIdentityKey?.() ?? null;
-    return Fx.run(
-      Fx.from({
-        ok: () => {
-          if (this._queryFn) {
-            return this._queryFn(SYS_ID_MAP_GET_ALL, {
-              identityKey,
-            }) as Promise<
-              Array<{
-                localId: string;
-                remoteId: string;
-                table: string;
-                identityKey?: string;
-              }>
-            >;
-          }
-          return (this._localClient as any).query(SYS_ID_MAP_GET_ALL, {
+    try {
+      const entries = await (async () => {
+        if (this._queryFn) {
+          return this._queryFn(SYS_ID_MAP_GET_ALL, {
             identityKey,
           }) as Promise<
             Array<{
@@ -123,29 +110,29 @@ export class IdMap {
               identityKey?: string;
             }>
           >;
-        },
-        err: (e) => e as Error,
-      }).pipe(
-        Fx.tap((entries) =>
-          Fx.sync(() => {
-            this._cache.clear();
-            this._reverse.clear();
-            for (const entry of entries) {
-              this._cache.set(entry.localId, entry.remoteId);
-              this._reverse.set(entry.remoteId, entry.localId);
-            }
-            log.info(`id-map: hydrated ${entries.length} mapping(s)`);
-          }),
-        ),
-        Fx.inspect((err) =>
-          Fx.sync(() =>
-            log.warn("id-map: hydration failed (starting with empty map)", err),
-          ),
-        ),
-        Fx.recover(() => Fx.unit),
-        Fx.map(() => undefined as void),
-      ),
-    );
+        }
+        return (this._localClient as any).query(SYS_ID_MAP_GET_ALL, {
+          identityKey,
+        }) as Promise<
+          Array<{
+            localId: string;
+            remoteId: string;
+            table: string;
+            identityKey?: string;
+          }>
+        >;
+      })();
+
+      this._cache.clear();
+      this._reverse.clear();
+      for (const entry of entries) {
+        this._cache.set(entry.localId, entry.remoteId);
+        this._reverse.set(entry.remoteId, entry.localId);
+      }
+      log.info(`id-map: hydrated ${entries.length} mapping(s)`);
+    } catch (err) {
+      log.warn("id-map: hydration failed (starting with empty map)", err);
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -214,7 +201,7 @@ export class IdMap {
    * Updates the in-memory cache immediately and persists to the
    * embedded DB's `_resolve_id_map` system table.
    */
-  set(localId: string, remoteId: string, table: string): Promise<void> {
+  async set(localId: string, remoteId: string, table: string): Promise<void> {
     const previousRemoteId = this._cache.get(localId);
     if (previousRemoteId !== undefined && previousRemoteId !== remoteId) {
       this._reverse.delete(previousRemoteId);
@@ -223,70 +210,50 @@ export class IdMap {
     this._cache.set(localId, remoteId);
     this._reverse.set(remoteId, localId);
 
-    return Fx.run(
-      Fx.from({
-        ok: () =>
-          this._mutationFn
-            ? this._mutationFn(SYS_ID_MAP_SET, {
-                localId,
-                remoteId,
-                table,
-                identityKey: this._getIdentityKey?.() ?? null,
-              })
-            : ((this._localClient as any).mutation(SYS_ID_MAP_SET, {
-                localId,
-                remoteId,
-                table,
-                identityKey: this._getIdentityKey?.() ?? null,
-              }) as Promise<unknown>),
-        err: (e) => e as Error,
-      }).pipe(
-        Fx.tap(() =>
-          Fx.sync(() =>
-            log.debug(`id-map: set ${localId} → ${remoteId} (table: ${table})`),
-          ),
-        ),
-        Fx.inspect((err) =>
-          Fx.sync(() => log.warn("id-map: failed to persist mapping", err)),
-        ),
-        // Cache is already updated — persistence failure is non-fatal.
-        Fx.recover(() => Fx.unit),
-        Fx.map(() => undefined as void),
-      ),
-    );
+    try {
+      await (this._mutationFn
+        ? this._mutationFn(SYS_ID_MAP_SET, {
+            localId,
+            remoteId,
+            table,
+            identityKey: this._getIdentityKey?.() ?? null,
+          })
+        : ((this._localClient as any).mutation(SYS_ID_MAP_SET, {
+            localId,
+            remoteId,
+            table,
+            identityKey: this._getIdentityKey?.() ?? null,
+          }) as Promise<unknown>));
+
+      log.debug(`id-map: set ${localId} → ${remoteId} (table: ${table})`);
+    } catch (err) {
+      log.warn("id-map: failed to persist mapping", err);
+    }
   }
 
   /**
    * Remove a mapping by local ID.
    */
-  delete(localId: string): Promise<void> {
+  async delete(localId: string): Promise<void> {
     const remoteId = this._cache.get(localId);
     this._cache.delete(localId);
     if (remoteId) {
       this._reverse.delete(remoteId);
     }
 
-    return Fx.run(
-      Fx.from({
-        ok: () =>
-          this._mutationFn
-            ? this._mutationFn(SYS_ID_MAP_DELETE, {
-                localId,
-                identityKey: this._getIdentityKey?.() ?? null,
-              })
-            : ((this._localClient as any).mutation(SYS_ID_MAP_DELETE, {
-                localId,
-                identityKey: this._getIdentityKey?.() ?? null,
-              }) as Promise<unknown>),
-        err: (e) => e as Error,
-      }).pipe(
-        Fx.inspect((err) =>
-          Fx.sync(() => log.warn("id-map: failed to delete mapping", err)),
-        ),
-        Fx.recover(() => Fx.unit),
-        Fx.map(() => undefined as void),
-      ),
-    );
+    try {
+      await (this._mutationFn
+        ? this._mutationFn(SYS_ID_MAP_DELETE, {
+            localId,
+            identityKey: this._getIdentityKey?.() ?? null,
+          })
+        : ((this._localClient as any).mutation(SYS_ID_MAP_DELETE, {
+            localId,
+            identityKey: this._getIdentityKey?.() ?? null,
+          }) as Promise<unknown>));
+    } catch (err) {
+      log.warn("id-map: failed to delete mapping", err);
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -310,16 +277,29 @@ export class IdMap {
     ) as T;
   }
 
+  private _getActiveLocalId(remoteId: string): string | undefined {
+    if (this._hasLocalDocumentId?.(remoteId)) {
+      return undefined;
+    }
+    const localId = this.getLocalId(remoteId) ?? undefined;
+    if (!localId) {
+      return undefined;
+    }
+    if (!this._hasLocalDocumentId || this._hasLocalDocumentId(localId)) {
+      return localId;
+    }
+    return undefined;
+  }
+
   translateRemoteIdsToLocal<T>(value: T): T {
-    return this._translateValue(
-      value,
-      (candidate) => this.getLocalId(candidate) ?? undefined,
+    return this._translateValue(value, (candidate) =>
+      this._getActiveLocalId(candidate),
     ) as T;
   }
 
   translateClientIdsToRuntime<T>(value: T): T {
     return this._translateValue(value, (candidate) => {
-      const activeLocalId = this.getLocalId(candidate);
+      const activeLocalId = this._getActiveLocalId(candidate);
       if (activeLocalId) {
         return activeLocalId;
       }

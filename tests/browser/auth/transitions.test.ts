@@ -1,18 +1,12 @@
-import { createTestIdentity } from "@embedded/auth/resolver";
 import { EmbeddedRuntime } from "@embedded/runtime/embedded";
+import { createTestIdentity } from "@embedded/test";
 import {
   createConvexClient,
   getAuthState,
   switchIdentity,
 } from "@resolve/browser/index";
-import {
-  afterEach,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it } from "@tests/testkit";
+import { vi } from "vitest";
 
 vi.mock("convex/browser", () => {
   class MockConvexClient {
@@ -106,8 +100,8 @@ function createSyncModules() {
   );
 
   return {
-    "./convex/_generated/api.ts": async () => ({}),
-    "./convex/tasks.ts": async () => ({
+    "_generated/api": async () => ({}),
+    tasks: async () => ({
       resolve: resolveExport,
       list: () => [],
     }),
@@ -172,7 +166,7 @@ describe("auth state transitions", () => {
   it("transitions authenticated -> offlineStale -> authenticated with remote events", async () => {
     const identity = createTestIdentity({ subject: "alice" });
     const client = createConvexClient({
-      modules: createSyncModules(),
+      convex: { modules: createSyncModules() },
       remote: { url: REMOTE_URL },
       auth: { getUserIdentity: async () => identity },
     });
@@ -212,7 +206,7 @@ describe("auth state transitions", () => {
       .mockResolvedValueOnce(null);
 
     const client = createConvexClient({
-      modules: createSyncModules(),
+      convex: { modules: createSyncModules() },
       remote: { url: REMOTE_URL },
       auth: {
         fetchToken,
@@ -246,7 +240,7 @@ describe("auth state transitions", () => {
     const fetchToken = vi.fn(async () => "token");
 
     const client = createConvexClient({
-      modules: createSyncModules(),
+      convex: { modules: createSyncModules() },
       remote: { url: REMOTE_URL },
       auth: {
         fetchToken,
@@ -292,7 +286,7 @@ describe("auth state transitions", () => {
     const bob = createTestIdentity({ subject: "bob" });
 
     const client = createConvexClient({
-      modules: createSyncModules(),
+      convex: { modules: createSyncModules() },
       remote: { url: REMOTE_URL },
       auth: { getUserIdentity: async () => alice },
     });
@@ -324,7 +318,7 @@ describe("auth state transitions", () => {
     const bob = createTestIdentity({ subject: "bob" });
 
     const client = createConvexClient({
-      modules: createSyncModules(),
+      convex: { modules: createSyncModules() },
       remote: { url: REMOTE_URL },
       auth: { getUserIdentity: async () => alice },
     });

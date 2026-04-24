@@ -1,13 +1,14 @@
 import { engine } from "@resolve/client/engine";
-import type { Definition } from "@resolve/server/schema";
 import {
-  describe,
-  it,
-  expect,
-  vi,
-  beforeEach,
-  afterEach,
-} from "vite-plus/test";
+  define,
+  prose,
+  register as registerField,
+} from "@resolve/server/schema";
+import type { Definition } from "@resolve/server/schema";
+import { canonicalizeMappedCreateTable } from "@resolve/shared/id_canonicalization";
+import { describe, it, expect, beforeEach, afterEach } from "@tests/testkit";
+import { v } from "convex/values";
+import { vi } from "vitest";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -28,6 +29,16 @@ function createMockSchema(overrides?: Partial<Definition>): Definition {
     getOmittedFields: () => [],
     ...overrides,
   } as Definition;
+}
+
+function deferredPromise<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 function createMockLocalClient(): any {
@@ -152,6 +163,7 @@ function createMockEmbedded(): any {
     embedded: {
       client: localClient as any,
       ingestDocuments: vi.fn().mockResolvedValue(undefined),
+      canonicalizeMappedCreate: vi.fn().mockResolvedValue(undefined),
       getDocumentsForTable: vi.fn().mockResolvedValue([]),
       getStorageMetadata: vi
         .fn()
@@ -215,6 +227,30 @@ function createStatefulEmbedded(
       .mockImplementation(
         async (_table: string, nextDocs: Array<Record<string, unknown>>) => {
           docs = [...nextDocs];
+        },
+      ),
+    canonicalizeMappedCreate: vi
+      .fn()
+      .mockImplementation(
+        async (input: {
+          localId: string;
+          remoteId: string;
+          tableName: string;
+          schemas: Record<string, Definition>;
+        }) => {
+          const schema = input.schemas[input.tableName];
+          if (!schema) {
+            return;
+          }
+          const canonical = canonicalizeMappedCreateTable({
+            docs,
+            schema,
+            localId: input.localId,
+            remoteId: input.remoteId,
+            rewriteOwnId: true,
+            tableName: input.tableName,
+          });
+          docs = canonical.documents;
         },
       ),
     getDocumentsForTable: vi.fn().mockImplementation(async () => [...docs]),
@@ -390,17 +426,42 @@ function getRegisteredHandlers(eventName: string): Array<() => void> {
     .map((call: unknown[]) => call[1] as () => void);
 }
 
-/** Shorthand for a table config with both resolve and query refs. */
+/** Shorthand for a table config with a resolve ref. */
 function tableConfig(
   resolve: string,
-  query: string = `${resolve.split(".")[0]}_list`,
+  _unusedLegacyListRef?: string,
   schema: Definition = createMockSchema(),
 ) {
-  return { resolve, query, schema };
+  return { resolve, schema };
 }
 
 function createEngine(config: any) {
   return engine.create(config as any);
+}
+
+/**
+ * Layers a custom mutation handler on top of the base `createMockLocalClient`
+ * implementation. The `customHandler` is called first; if it returns
+ * `undefined` (not `Promise.resolve(undefined)`!), the call falls through to
+ * the original mock implementation which handles all `_system:*` paths.
+ *
+ * Usage:
+ *   const { localClient } = createMockEmbedded();
+ *   layerMutationMock(localClient, (path, args) => {
+ *     if (path === "tasks:create") return Promise.resolve("local-1");
+ *     return undefined; // fall through
+ *   });
+ */
+function layerMutationMock(
+  localClient: any,
+  customHandler: (path: string, args: any) => Promise<unknown> | undefined,
+) {
+  const baseMutation = localClient.mutation.getMockImplementation();
+  localClient.mutation.mockImplementation((path: string, args: any) => {
+    const custom = customHandler(path, args);
+    if (custom !== undefined) return custom;
+    return baseMutation ? baseMutation(path, args) : Promise.resolve(null);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -567,34 +628,6 @@ describe("engine.create()", () => {
     m.stop();
   });
 
-  it("uses resolveArgs for remote subscriptions when provided", async () => {
-    const { embedded } = createMockEmbedded();
-    const remoteClient = createMockRemoteClient();
-
-    const m = createEngine({
-      embedded,
-      remoteClient,
-      tables: {
-        tasks: {
-          ...tableConfig("resolve_ref"),
-          resolveArgs: () => ({ owner: "alice" }),
-        },
-      },
-    });
-
-    m.start();
-    await settle();
-
-    expect(remoteClient.onUpdate).toHaveBeenCalledWith(
-      "resolve_ref_list",
-      { owner: "alice" },
-      expect.any(Function),
-      expect.any(Function),
-    );
-
-    m.stop();
-  });
-
   it("stop() cleans up and sets status to idle", async () => {
     const { embedded } = createMockEmbedded();
     const remoteClient = createMockRemoteClient();
@@ -659,9 +692,11 @@ describe("engine.create()", () => {
 
     expect(remoteClient.query).toHaveBeenCalledTimes(2);
     expect(remoteClient.query).toHaveBeenCalledWith("tasks.resolve", {
+      collectionSeq: null,
       documents: [],
     });
     expect(remoteClient.query).toHaveBeenCalledWith("comments.resolve", {
+      collectionSeq: null,
       documents: [],
     });
 
@@ -712,11 +747,12 @@ describe("engine.create()", () => {
     m.start();
     await settle();
 
-    // onUpdate should have been called for each table
+    // onUpdate should have been called for each table, subscribing to the
+    // resolve endpoint with stable args.
     expect(remoteClient.onUpdate).toHaveBeenCalledTimes(1);
     expect(remoteClient.onUpdate).toHaveBeenCalledWith(
-      "tasks_list",
-      {},
+      "resolve_ref",
+      { collectionSeq: null, documents: [] },
       expect.any(Function),
       expect.any(Function),
     );
@@ -966,13 +1002,34 @@ describe("engine.create()", () => {
     ).toBe(false);
 
     if (onUpdateHandler) {
-      const handler = onUpdateHandler as (
-        docs: Array<Record<string, unknown>>,
-      ) => void;
-      handler([
-        { _id: "task-1", _creationTime: 1, title: "Keep", body: "" },
-        { _id: "task-2", _creationTime: 2, title: "Delete me", body: "" },
-      ]);
+      const handler = onUpdateHandler as (response: unknown) => void;
+      handler({
+        mode: "full",
+        collectionSeq: 1,
+        protocolVersion: 1,
+        documents: [
+          {
+            docId: "task-1",
+            seq: 1,
+            document: {
+              _id: "task-1",
+              _creationTime: 1,
+              title: "Keep",
+              body: "",
+            },
+          },
+          {
+            docId: "task-2",
+            seq: 2,
+            document: {
+              _id: "task-2",
+              _creationTime: 2,
+              title: "Delete me",
+              body: "",
+            },
+          },
+        ],
+      });
     }
     await settle(20);
 
@@ -981,10 +1038,24 @@ describe("engine.create()", () => {
     ).toBe(false);
 
     if (onUpdateHandler) {
-      const handler = onUpdateHandler as (
-        docs: Array<Record<string, unknown>>,
-      ) => void;
-      handler([{ _id: "task-1", _creationTime: 1, title: "Keep", body: "" }]);
+      const handler = onUpdateHandler as (response: unknown) => void;
+      handler({
+        mode: "full",
+        collectionSeq: 2,
+        protocolVersion: 1,
+        documents: [
+          {
+            docId: "task-1",
+            seq: 1,
+            document: {
+              _id: "task-1",
+              _creationTime: 1,
+              title: "Keep",
+              body: "",
+            },
+          },
+        ],
+      });
     }
     await settle(80);
 
@@ -1090,14 +1161,18 @@ describe("engine.create()", () => {
 
     await m.resolveNow();
 
-    expect(embedded.ingestDocuments).toHaveBeenCalledWith("tasks", [
-      {
-        _id: "remote-task-1",
-        _creationTime: 1,
-        title: "Remote task",
-        body: "from remote",
-      },
-    ]);
+    expect(embedded.ingestDocuments).toHaveBeenCalledWith(
+      "tasks",
+      [
+        {
+          _id: "remote-task-1",
+          _creationTime: 1,
+          title: "Remote task",
+          body: "from remote",
+        },
+      ],
+      undefined,
+    );
   });
 
   it("resolveNow() strips omitted fields from remote-only documents", async () => {
@@ -1129,41 +1204,222 @@ describe("engine.create()", () => {
 
     await m.resolveNow();
 
-    expect(embedded.ingestDocuments).toHaveBeenCalledWith("tasks", [
-      {
-        _id: "remote-task-1",
-        _creationTime: 1,
-        title: "Remote task",
-        body: "from remote",
-      },
-    ]);
+    expect(embedded.ingestDocuments).toHaveBeenCalledWith(
+      "tasks",
+      [
+        {
+          _id: "remote-task-1",
+          _creationTime: 1,
+          title: "Remote task",
+          body: "from remote",
+        },
+      ],
+      undefined,
+    );
   });
 
-  it("passes scoped resolve args to the resolve query", async () => {
+  it("resolveNow() preserves local doc shape when resolve returns no diff", async () => {
     const { embedded } = createMockEmbedded();
     const remoteClient = createMockRemoteClient();
+    const proseSchema = define({
+      version: 1,
+      shape: {
+        title: registerField(v.string()),
+        body: prose(),
+      },
+    });
+    const localDoc = {
+      _id: "task-1",
+      _creationTime: 1,
+      title: "Local task",
+      body: {
+        type: "doc",
+        content: [
+          {
+            type: "paragraph",
+            content: [{ type: "text", text: "Hello world" }],
+          },
+        ],
+      },
+    };
+    embedded.getDocumentsForTable.mockResolvedValue([localDoc]);
+    remoteClient.query.mockResolvedValue({
+      mode: "incremental",
+      collectionSeq: 1,
+      protocolVersion: 1,
+      documents: [{ docId: "task-1", seq: 1 }],
+    });
 
     const m = createEngine({
       embedded,
       remoteClient,
       tables: {
-        tasks: {
-          ...tableConfig("resolve_ref", "tasks_list"),
-          resolveArgs: () => ({ owner: "alice" }),
-        },
+        tasks: tableConfig("resolve_ref", "tasks_list", proseSchema),
       },
     });
 
     await m.resolveNow();
 
-    expect(remoteClient.query).toHaveBeenCalledWith("resolve_ref", {
-      documents: [],
-      scopeArgs: { owner: "alice" },
+    expect(embedded.ingestDocuments).toHaveBeenCalledWith(
+      "tasks",
+      [localDoc],
+      undefined,
+    );
+  });
+
+  it("resolveNow() replaces local table state when the server falls back to full mode", async () => {
+    const { embedded, getDocs } = createStatefulEmbedded([
+      {
+        _id: "stale-local",
+        _creationTime: 1,
+        title: "stale",
+        body: "remove me",
+      },
+      {
+        _id: "keep-remote",
+        _creationTime: 2,
+        title: "old title",
+        body: "outdated",
+      },
+    ]);
+    const remoteClient = createMockRemoteClient();
+    remoteClient.query.mockResolvedValue({
+      mode: "full",
+      collectionSeq: 8,
+      protocolVersion: 1,
+      documents: [
+        {
+          docId: "keep-remote",
+          seq: 8,
+          document: {
+            _id: "keep-remote",
+            _creationTime: 2,
+            title: "fresh title",
+            body: "updated",
+          },
+        },
+      ],
     });
+
+    const m = createEngine({
+      embedded,
+      remoteClient,
+      tables: { tasks: tableConfig("resolve_ref") },
+    });
+
+    await m.resolveNow();
+
+    expect(getDocs()).toEqual([
+      {
+        _id: "keep-remote",
+        _creationTime: 2,
+        title: "fresh title",
+        body: "updated",
+      },
+    ]);
+  });
+
+  it("resolveNow() buffers paged full-mode results until the snapshot completes", async () => {
+    const { embedded, getDocs } = createStatefulEmbedded([
+      {
+        _id: "stale-local",
+        _creationTime: 1,
+        title: "stale",
+        body: "remove me",
+      },
+    ]);
+    const remoteClient = createMockRemoteClient();
+    remoteClient.query
+      .mockResolvedValueOnce({
+        mode: "full",
+        collectionSeq: 8,
+        protocolVersion: 1,
+        documents: [
+          {
+            docId: "page-1",
+            seq: 1,
+            document: {
+              _id: "page-1",
+              _creationTime: 11,
+              title: "Page one",
+              body: "first",
+            },
+          },
+        ],
+        continueCursor: "cursor-1",
+        isDone: false,
+      })
+      .mockResolvedValueOnce({
+        mode: "full",
+        collectionSeq: 8,
+        protocolVersion: 1,
+        documents: [
+          {
+            docId: "page-2",
+            seq: 2,
+            document: {
+              _id: "page-2",
+              _creationTime: 12,
+              title: "Page two",
+              body: "second",
+            },
+          },
+        ],
+        continueCursor: null,
+        isDone: true,
+      });
+
+    const m = createEngine({
+      embedded,
+      remoteClient,
+      tables: { tasks: tableConfig("resolve_ref") },
+    });
+
+    await m.resolveNow();
+
+    expect(remoteClient.query).toHaveBeenNthCalledWith(
+      1,
+      "resolve_ref",
+      expect.objectContaining({
+        collectionSeq: null,
+        documents: [
+          expect.objectContaining({
+            docId: "stale-local",
+            lastSeq: null,
+            vector: expect.any(ArrayBuffer),
+          }),
+        ],
+      }),
+    );
+    expect(remoteClient.query).toHaveBeenNthCalledWith(
+      2,
+      "resolve_ref",
+      expect.objectContaining({
+        collectionSeq: null,
+        fullCursor: "cursor-1",
+        documents: [expect.objectContaining({ docId: "stale-local" })],
+      }),
+    );
+    expect(embedded.ingestDocuments).toHaveBeenCalledTimes(1);
+    expect(getDocs()).toEqual([
+      {
+        _id: "page-1",
+        _creationTime: 11,
+        title: "Page one",
+        body: "first",
+      },
+      {
+        _id: "page-2",
+        _creationTime: 12,
+        title: "Page two",
+        body: "second",
+      },
+    ]);
   });
 
   it("reloadIdentity() rehydrates scoped state before resolving", async () => {
     let activeIdentityKey: string | null = "user:a";
+    let pendingEntries: Array<Record<string, unknown>> = [];
     const localClient = {
       query: vi
         .fn()
@@ -1190,7 +1446,7 @@ describe("engine.create()", () => {
             }
 
             if (path === "_system:pendingGetAll") {
-              return Promise.resolve(
+              const entries =
                 args?.identityKey === "user:b"
                   ? [
                       {
@@ -1199,16 +1455,79 @@ describe("engine.create()", () => {
                         args: JSON.stringify({ id: "local-b" }),
                         localResult: JSON.stringify({ _id: "local-b" }),
                         table: "tasks",
+                        identityKey: "user:b",
                       },
                     ]
-                  : [],
-              );
+                  : [];
+              pendingEntries = entries;
+              return Promise.resolve(entries);
             }
 
             return Promise.resolve(null);
           },
         ),
-      mutation: vi.fn().mockResolvedValue("pending-doc-1"),
+      mutation: vi.fn().mockImplementation((path: string, args: any) => {
+        if (path === "_system:pendingClaimNext") {
+          const entry = pendingEntries.find(
+            (current) =>
+              (current.identityKey ?? null) === (args.identityKey ?? null) &&
+              (((current.state as string | undefined) ?? "pending") ===
+                "pending" ||
+                (((current.state as string | undefined) ?? "pending") ===
+                  "processing" &&
+                  typeof current.leaseExpiresAt === "number" &&
+                  (current.leaseExpiresAt as number) <= Date.now())),
+          );
+          if (!entry) {
+            return Promise.resolve(null);
+          }
+          entry.state = "processing";
+          entry.owner = args.owner;
+          entry.processingStartedAt = Date.now();
+          entry.leaseExpiresAt = Date.now() + (args.leaseMs ?? 30_000);
+          return Promise.resolve({ ...entry });
+        }
+        if (path === "_system:pendingRenewLease") {
+          const entry = pendingEntries.find(
+            (current) => current._id === args.id,
+          );
+          if (entry && entry.owner === args.owner) {
+            entry.leaseExpiresAt = Date.now() + (args.leaseMs ?? 30_000);
+            return Promise.resolve(true);
+          }
+          return Promise.resolve(false);
+        }
+        if (path === "_system:pendingRemove") {
+          pendingEntries = pendingEntries.filter(
+            (entry) => entry._id !== args.id,
+          );
+          return Promise.resolve(null);
+        }
+        if (path === "_system:pendingRelease") {
+          const entry = pendingEntries.find(
+            (current) => current._id === args.id,
+          );
+          if (entry) {
+            entry.state = "pending";
+            delete entry.owner;
+            delete entry.processingStartedAt;
+            delete entry.leaseExpiresAt;
+          }
+          return Promise.resolve(null);
+        }
+        if (path === "_system:pendingUnblockAll") {
+          pendingEntries = pendingEntries.map((entry) => ({
+            ...entry,
+            state: "pending",
+            blockedReason: undefined,
+            owner: undefined,
+            processingStartedAt: undefined,
+            leaseExpiresAt: undefined,
+          }));
+          return Promise.resolve(null);
+        }
+        return Promise.resolve(null);
+      }),
     };
 
     const embedded: any = {
@@ -1364,6 +1683,7 @@ describe("engine.create()", () => {
       expect.arrayContaining([
         expect.objectContaining({ _id: "doc-1", _creationTime: 100 }),
       ]),
+      undefined,
     );
 
     m.stop();
@@ -1396,29 +1716,44 @@ describe("engine.create()", () => {
     expect(remoteClient.onUpdate).toHaveBeenCalledTimes(1);
     const onUpdateCallback = remoteClient.onUpdate.mock.calls[0]![2];
 
-    // Simulate a remote update with omitted fields.
-    onUpdateCallback([
-      {
-        _id: "doc-1",
-        _creationTime: 100,
-        title: "Task",
-        body: "Body",
-        secretField: "should-be-stripped",
-        internalData: { nested: true },
-      },
-    ]);
+    // Simulate a remote resolve-endpoint update. The subscription target is
+    // the resolve query; the handler receives ResolveResponse-shaped data
+    // and unwraps the `document` fields before ingesting.
+    onUpdateCallback({
+      mode: "full",
+      collectionSeq: 1,
+      protocolVersion: 1,
+      documents: [
+        {
+          docId: "doc-1",
+          seq: 1,
+          document: {
+            _id: "doc-1",
+            _creationTime: 100,
+            title: "Task",
+            body: "Body",
+            secretField: "should-be-stripped",
+            internalData: { nested: true },
+          },
+        },
+      ],
+    });
 
     await settle();
 
     // ingestDocuments should have been called with the omitted fields removed.
-    expect(embedded.ingestDocuments).toHaveBeenCalledWith("tasks", [
-      expect.objectContaining({
-        _id: "doc-1",
-        _creationTime: 100,
-        title: "Task",
-        body: "Body",
-      }),
-    ]);
+    expect(embedded.ingestDocuments).toHaveBeenCalledWith(
+      "tasks",
+      [
+        expect.objectContaining({
+          _id: "doc-1",
+          _creationTime: 100,
+          title: "Task",
+          body: "Body",
+        }),
+      ],
+      undefined,
+    );
 
     // Verify the omitted fields are NOT present.
     const ingestCall = embedded.ingestDocuments.mock.calls.find(
@@ -1430,6 +1765,135 @@ describe("engine.create()", () => {
     expect(ingestedDoc).not.toHaveProperty("internalData");
 
     m.stop();
+  });
+
+  it("buffers child-table snapshots until parent-table docs are available locally", async () => {
+    vi.useFakeTimers();
+    try {
+      const docsByTable = new Map<string, Array<Record<string, unknown>>>([
+        ["projects", []],
+        ["issues", []],
+      ]);
+      const localClient = createMockLocalClient();
+      const ingestOrder: Array<string> = [];
+      const embedded = {
+        client: localClient as any,
+        ingestDocuments: vi
+          .fn()
+          .mockImplementation(
+            async (table: string, docs: Array<Record<string, unknown>>) => {
+              ingestOrder.push(table);
+              docsByTable.set(table, [...docs]);
+            },
+          ),
+        canonicalizeMappedCreate: vi.fn().mockResolvedValue(undefined),
+        getDocumentsForTable: vi
+          .fn()
+          .mockImplementation(async (table: string) => {
+            return [...(docsByTable.get(table) ?? [])];
+          }),
+        hasLocalDocumentId: vi.fn((id: string) =>
+          [...docsByTable.values()].some((docs) =>
+            docs.some((doc) => doc._id === id),
+          ),
+        ),
+      } as any;
+
+      const projectSchema = createMockSchema({
+        shape: { name: "string" },
+        getShape: () => ({ name: "string" }),
+      });
+      const issueSchema = createMockSchema({
+        shape: {
+          projectId: { kind: "id", tableName: "projects" },
+          title: "string",
+        },
+        getShape: () => ({
+          projectId: { kind: "id", tableName: "projects" },
+          title: "string",
+        }),
+      });
+
+      const updateHandlers = new Map<
+        string,
+        (docs: Array<Record<string, unknown>>) => void
+      >();
+      const remoteClient = {
+        ...createMockRemoteClient(),
+        onUpdate: vi
+          .fn()
+          .mockImplementation(
+            (query: string, _args: unknown, onUpdate: any) => {
+              updateHandlers.set(query, onUpdate);
+              return vi.fn();
+            },
+          ),
+      };
+
+      const m = createEngine({
+        embedded,
+        remoteClient,
+        tables: {
+          projects: tableConfig(
+            "projects:bind",
+            "projects:list",
+            projectSchema,
+          ),
+          issues: tableConfig("issues:bind", "issues:list", issueSchema),
+        },
+      });
+
+      m.start();
+      await vi.advanceTimersByTimeAsync(1);
+
+      updateHandlers.get("issues:bind")?.({
+        mode: "full",
+        collectionSeq: 1,
+        protocolVersion: 1,
+        documents: [
+          {
+            docId: "issue-1",
+            seq: 1,
+            document: {
+              _id: "issue-1",
+              _creationTime: 2,
+              projectId: "project-1",
+              title: "Issue",
+            },
+          },
+        ],
+      } as any);
+      await vi.advanceTimersByTimeAsync(1);
+
+      expect(embedded.ingestDocuments).not.toHaveBeenCalledWith(
+        "issues",
+        expect.anything(),
+      );
+
+      updateHandlers.get("projects:bind")?.({
+        mode: "full",
+        collectionSeq: 1,
+        protocolVersion: 1,
+        documents: [
+          {
+            docId: "project-1",
+            seq: 1,
+            document: {
+              _id: "project-1",
+              _creationTime: 1,
+              name: "Project",
+            },
+          },
+        ],
+      } as any);
+      await vi.advanceTimersByTimeAsync(50);
+
+      expect(ingestOrder).toEqual(["projects"]);
+      expect(docsByTable.get("issues") ?? []).toEqual([]);
+      m.stop();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("stops retrying buffered snapshot ingests after the retry budget is exhausted", async () => {
@@ -1449,20 +1913,31 @@ describe("engine.create()", () => {
       });
 
       m.start();
-      await vi.runAllTimersAsync();
+      await vi.advanceTimersByTimeAsync(1);
 
       expect(remoteClient.onUpdate).toHaveBeenCalledTimes(1);
       const onUpdateCallback = remoteClient.onUpdate.mock.calls[0]![2];
-      onUpdateCallback([
-        {
-          _id: "doc-1",
-          _creationTime: 1,
-          title: "Task",
-          body: "Body",
-        },
-      ]);
+      onUpdateCallback({
+        mode: "full",
+        collectionSeq: 1,
+        protocolVersion: 1,
+        documents: [
+          {
+            docId: "doc-1",
+            seq: 1,
+            document: {
+              _id: "doc-1",
+              _creationTime: 1,
+              title: "Task",
+              body: "Body",
+            },
+          },
+        ],
+      });
 
-      await vi.runAllTimersAsync();
+      for (let index = 0; index < 12; index += 1) {
+        await vi.advanceTimersByTimeAsync(1_000);
+      }
       const callCountAfterRetries = embedded.ingestDocuments.mock.calls.length;
 
       await vi.advanceTimersByTimeAsync(30_000);
@@ -1484,12 +1959,9 @@ describe("engine.create()", () => {
   describe("processQueue()", () => {
     it("forwards a queued mutation to remoteClient.mutation", async () => {
       const { embedded, localClient } = createMockEmbedded();
-      localClient.mutation.mockImplementation((path: string) => {
-        const routes: Record<string, unknown> = {
-          "_system:pendingPush": "pending-doc-1",
-          "_system:pendingRemove": null,
-        };
-        return Promise.resolve(routes[path] ?? { _id: "local-1" });
+      layerMutationMock(localClient, (path) => {
+        if (path === "tasks:create") return Promise.resolve({ _id: "local-1" });
+        return undefined;
       });
 
       const remoteClient = createMockRemoteClient();
@@ -1514,16 +1986,13 @@ describe("engine.create()", () => {
       m.stop();
     });
 
-    it("records local→remote ID mapping when results differ", async () => {
+    it("returns the local id immediately and records local→remote mapping in the background", async () => {
       const { embedded, localClient } = createMockEmbedded();
-      localClient.mutation.mockImplementation((path: string) => {
-        const routes: Record<string, unknown> = {
-          "_system:pendingPush": "pending-doc-1",
-          "_system:pendingRemove": null,
-          "_system:idMapSet": null,
-        };
-        return Promise.resolve(routes[path] ?? "local-uuid-1");
+      layerMutationMock(localClient, (path) => {
+        if (path === "tasks:create") return Promise.resolve("local-uuid-1");
+        return undefined;
       });
+      embedded.hasLocalDocumentId = vi.fn(() => false);
 
       const remoteClient = createMockRemoteClient();
       remoteClient.mutation.mockResolvedValue("remote-id-99");
@@ -1538,10 +2007,258 @@ describe("engine.create()", () => {
       await settle();
 
       const result = await m.mutation("tasks:create", { title: "Test" });
+      await settle();
 
-      expect(result).toBe("remote-id-99");
+      expect(result).toBe("local-uuid-1");
+      expect(localClient.mutation).toHaveBeenCalledWith(
+        "_system:idMapSet",
+        expect.objectContaining({ localId: "local-uuid-1" }),
+      );
       expect(m.idMap.getRemoteId("local-uuid-1")).toBe("remote-id-99");
       m.stop();
+    });
+
+    it("deletes stale mappings only when a hydrated mapped create already exists under the remote id", async () => {
+      let pendingEntries: Array<Record<string, unknown>> = [
+        {
+          _id: "pending-doc-1",
+          ref: "tasks:create",
+          args: JSON.stringify({ title: "Test" }),
+          localResult: JSON.stringify("local-uuid-1"),
+          table: "tasks",
+          payloadVersion: 1,
+          hydrated: true,
+          identityKey: null,
+        },
+      ];
+      let idMappings: Array<{
+        localId: string;
+        remoteId: string;
+        table: string;
+      }> = [
+        {
+          localId: "local-uuid-1",
+          remoteId: "remote-id-99",
+          table: "tasks",
+        },
+      ];
+
+      const localClient = {
+        query: vi.fn().mockImplementation((path: string) => {
+          if (path === "_system:idMapGetAll") {
+            return Promise.resolve([...idMappings]);
+          }
+          if (path === "_system:pendingGetAll") {
+            return Promise.resolve([...pendingEntries]);
+          }
+          return Promise.resolve(null);
+        }),
+        mutation: vi.fn().mockImplementation((path: string, args: any) => {
+          if (path === "_system:pendingClaimNext") {
+            const entry = pendingEntries[0];
+            if (!entry) {
+              return Promise.resolve(null);
+            }
+            entry.state = "processing";
+            entry.owner = args.owner;
+            entry.leaseExpiresAt = Date.now() + (args.leaseMs ?? 30_000);
+            return Promise.resolve({ ...entry });
+          }
+          if (path === "_system:pendingRemove") {
+            pendingEntries = pendingEntries.filter(
+              (entry) => entry._id !== args.id,
+            );
+            return Promise.resolve(null);
+          }
+          if (path === "_system:idMapDelete") {
+            idMappings = idMappings.filter(
+              (entry) => entry.localId !== args.localId,
+            );
+            return Promise.resolve(null);
+          }
+          return Promise.resolve(null);
+        }),
+      };
+
+      const embedded = {
+        client: localClient as any,
+        ingestDocuments: vi.fn().mockResolvedValue(undefined),
+        canonicalizeMappedCreate: vi.fn().mockResolvedValue(undefined),
+        getDocumentsForTable: vi.fn().mockResolvedValue([]),
+        hasLocalDocumentId: vi.fn((id: string) => id === "remote-id-99"),
+      } as any;
+
+      const remoteClient = createMockRemoteClient();
+
+      const m = createEngine({
+        embedded,
+        remoteClient,
+        tables: { tasks: tableConfig("resolve_ref") },
+      });
+
+      m.start();
+      await settle();
+      await settle();
+
+      expect(localClient.mutation).toHaveBeenCalledWith(
+        "_system:idMapDelete",
+        expect.objectContaining({ localId: "local-uuid-1" }),
+      );
+      expect(remoteClient.mutation).not.toHaveBeenCalled();
+      expect(m.idMap.getRemoteId("local-uuid-1")).toBeNull();
+      expect(pendingEntries).toHaveLength(0);
+      m.stop();
+    });
+
+    it("replays a hydrated mapped create when the local alias document still exists", async () => {
+      let pendingEntries: Array<Record<string, unknown>> = [];
+      let idMappings: Array<{
+        localId: string;
+        remoteId: string;
+        table: string;
+      }> = [];
+      let nextPendingId = 1;
+
+      const localClient = {
+        query: vi.fn().mockImplementation((path: string) => {
+          if (path === "_system:idMapGetAll") {
+            return Promise.resolve([...idMappings]);
+          }
+          if (path === "_system:pendingGetAll") {
+            return Promise.resolve([...pendingEntries]);
+          }
+          return Promise.resolve(null);
+        }),
+        mutation: vi.fn().mockImplementation((path: string, args: any) => {
+          if (path === "comments:create") {
+            return Promise.resolve("local-comment-1");
+          }
+          if (path === "_system:pendingPush") {
+            const entry = {
+              _id: `pending-doc-${nextPendingId++}`,
+              ...args,
+            };
+            pendingEntries.push(entry);
+            return Promise.resolve(entry._id);
+          }
+          if (path === "_system:pendingGetAll") {
+            return Promise.resolve([...pendingEntries]);
+          }
+          if (path === "_system:pendingClaimNext") {
+            const entry = pendingEntries.find(
+              (current) =>
+                (current.identityKey ?? null) === (args.identityKey ?? null) &&
+                (((current.state as string | undefined) ?? "pending") ===
+                  "pending" ||
+                  (((current.state as string | undefined) ?? "pending") ===
+                    "processing" &&
+                    typeof current.leaseExpiresAt === "number" &&
+                    current.leaseExpiresAt <= Date.now())),
+            );
+            if (!entry) {
+              return Promise.resolve(null);
+            }
+            entry.state = "processing";
+            entry.owner = args.owner;
+            entry.processingStartedAt = Date.now();
+            entry.leaseExpiresAt = Date.now() + (args.leaseMs ?? 30_000);
+            return Promise.resolve({ ...entry });
+          }
+          if (path === "_system:pendingRemove") {
+            pendingEntries = pendingEntries.filter(
+              (entry) => entry._id !== args.id,
+            );
+            return Promise.resolve(null);
+          }
+          if (path === "_system:pendingRenewLease") {
+            const entry = pendingEntries.find(
+              (current) => current._id === args.id,
+            );
+            if (entry && entry.owner === args.owner) {
+              entry.leaseExpiresAt = Date.now() + (args.leaseMs ?? 30_000);
+              return Promise.resolve(true);
+            }
+            return Promise.resolve(false);
+          }
+          if (path === "_system:idMapSet") {
+            idMappings = idMappings
+              .filter((entry) => entry.localId !== args.localId)
+              .concat({
+                localId: args.localId,
+                remoteId: args.remoteId,
+                table: args.table,
+              });
+            return Promise.resolve(null);
+          }
+          if (path === "_system:idMapDelete") {
+            idMappings = idMappings.filter(
+              (entry) => entry.localId !== args.localId,
+            );
+            return Promise.resolve(null);
+          }
+          return Promise.resolve(null);
+        }),
+      };
+
+      const offlineConnectivity = { isOnline: () => false };
+      const onlineConnectivity = { isOnline: () => true };
+      const embedded = {
+        client: localClient as any,
+        ingestDocuments: vi.fn().mockResolvedValue(undefined),
+        canonicalizeMappedCreate: vi.fn().mockResolvedValue(undefined),
+        getDocumentsForTable: vi.fn().mockResolvedValue([]),
+        hasLocalDocumentId: vi.fn((id: string) => id === "local-comment-1"),
+      } as any;
+
+      const remoteClient = createMockRemoteClient();
+      remoteClient.mutation.mockResolvedValue("remote-comment-1");
+
+      const firstEngine = createEngine({
+        embedded,
+        remoteClient,
+        connectivity: offlineConnectivity,
+        tables: { comments: tableConfig("resolve_ref") },
+      });
+
+      firstEngine.start();
+      await settle();
+      await firstEngine.mutation("comments:create", {
+        body: "Hello",
+        issueId: "issue-1",
+      });
+      await firstEngine.idMap.set(
+        "local-comment-1",
+        "remote-comment-1",
+        "comments",
+      );
+      firstEngine.stop();
+
+      expect(pendingEntries).toHaveLength(1);
+      expect(idMappings).toEqual([
+        {
+          localId: "local-comment-1",
+          remoteId: "remote-comment-1",
+          table: "comments",
+        },
+      ]);
+
+      const secondEngine = createEngine({
+        embedded,
+        remoteClient,
+        connectivity: onlineConnectivity,
+        tables: { comments: tableConfig("resolve_ref") },
+      });
+
+      secondEngine.start();
+      await settle();
+      await settle();
+
+      expect(remoteClient.mutation).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ body: "Hello", issueId: "issue-1" }),
+      );
+
+      secondEngine.stop();
     });
 
     it("canonicalizes nested id fields in later union members after create replay", async () => {
@@ -1558,9 +2275,22 @@ describe("engine.create()", () => {
         },
       ];
       embedded.getDocumentsForTable.mockImplementation(async () => [...docs]);
-      embedded.ingestDocuments.mockImplementation(
-        async (_table: string, nextDocs: Array<Record<string, unknown>>) => {
-          docs = [...nextDocs];
+      embedded.canonicalizeMappedCreate.mockImplementation(
+        async (input: {
+          localId: string;
+          remoteId: string;
+          tableName: string;
+          schemas: Record<string, Definition>;
+        }) => {
+          const canonical = canonicalizeMappedCreateTable({
+            docs,
+            schema: input.schemas[input.tableName]!,
+            localId: input.localId,
+            remoteId: input.remoteId,
+            rewriteOwnId: true,
+            tableName: input.tableName,
+          });
+          docs = canonical.documents;
         },
       );
 
@@ -1631,14 +2361,109 @@ describe("engine.create()", () => {
       m.stop();
     });
 
+    it("keeps the mapped create pending until runtime canonicalization finishes", async () => {
+      const { embedded, localClient } = createMockEmbedded();
+      layerMutationMock(localClient, (path) => {
+        if (path === "tasks:create") return Promise.resolve("local-uuid-1");
+        return undefined;
+      });
+
+      const remapReady = deferredPromise<void>();
+      const releaseRemap = deferredPromise<void>();
+      embedded.canonicalizeMappedCreate.mockImplementation(async () => {
+        remapReady.resolve();
+        await releaseRemap.promise;
+      });
+
+      const remoteClient = createMockRemoteClient();
+      remoteClient.mutation.mockResolvedValue("remote-id-99");
+
+      const m = createEngine({
+        embedded,
+        remoteClient,
+        tables: { tasks: tableConfig("resolve_ref") },
+      });
+
+      m.start();
+      await settle();
+
+      const mutationPromise = m.mutation("tasks:create", { title: "Test" });
+      await remapReady.promise;
+
+      expect(localClient.mutation).not.toHaveBeenCalledWith(
+        "_system:pendingRemove",
+        expect.anything(),
+      );
+
+      await expect(mutationPromise).resolves.toBe("local-uuid-1");
+
+      releaseRemap.resolve();
+      await settle();
+
+      expect(localClient.mutation).toHaveBeenCalledWith(
+        "_system:pendingRemove",
+        expect.objectContaining({
+          id: "pending-doc-1",
+        }),
+      );
+      m.stop();
+    });
+
+    it("does not publish the local→remote id mapping until canonicalization finishes", async () => {
+      const { embedded, localClient } = createMockEmbedded();
+      layerMutationMock(localClient, (path) => {
+        if (path === "tasks:create") return Promise.resolve("local-uuid-1");
+        return undefined;
+      });
+
+      const remapReady = deferredPromise<void>();
+      const releaseRemap = deferredPromise<void>();
+      embedded.canonicalizeMappedCreate.mockImplementation(async () => {
+        remapReady.resolve();
+        await releaseRemap.promise;
+      });
+
+      const remoteClient = createMockRemoteClient();
+      remoteClient.mutation.mockResolvedValue("remote-id-99");
+
+      const m = createEngine({
+        embedded,
+        remoteClient,
+        tables: { tasks: tableConfig("resolve_ref") },
+      });
+
+      m.start();
+      await settle();
+
+      const mutationPromise = m.mutation("tasks:create", { title: "Test" });
+      await remapReady.promise;
+
+      expect(m.idMap.getRemoteId("local-uuid-1")).toBeNull();
+      expect(localClient.mutation).not.toHaveBeenCalledWith(
+        "_system:idMapSet",
+        expect.anything(),
+      );
+
+      await expect(mutationPromise).resolves.toBe("local-uuid-1");
+
+      releaseRemap.resolve();
+      await settle();
+
+      expect(localClient.mutation).toHaveBeenCalledWith(
+        "_system:idMapSet",
+        expect.objectContaining({
+          localId: "local-uuid-1",
+          remoteId: "remote-id-99",
+        }),
+      );
+      m.stop();
+    });
+
     it("dequeues entries after successful remote push", async () => {
       const { embedded, localClient } = createMockEmbedded();
-      localClient.mutation.mockImplementation((path: string) => {
-        const routes: Record<string, unknown> = {
-          "_system:pendingPush": "pending-doc-1",
-          "_system:pendingRemove": null,
-        };
-        return Promise.resolve(routes[path] ?? { _id: "local-1" });
+      layerMutationMock(localClient, (path) => {
+        if (path === "tasks:create") return Promise.resolve({ _id: "local-1" });
+        return undefined;
       });
 
       const remoteClient = createMockRemoteClient();
@@ -1663,19 +2488,14 @@ describe("engine.create()", () => {
     it("continues draining when creates enqueue during an active queue pass", async () => {
       const { embedded, localClient } = createMockEmbedded();
       let pendingId = 0;
-      localClient.mutation.mockImplementation((path: string) => {
-        if (path === "_system:pendingPush") {
+      layerMutationMock(localClient, (path) => {
+        if (path === "tasks:create") {
           pendingId += 1;
-          return Promise.resolve(`pending-doc-${pendingId}`);
+          return Promise.resolve(`local-uuid-${pendingId}`);
         }
-        if (path === "_system:pendingRemove") {
-          return Promise.resolve(null);
-        }
-        if (path === "_system:idMapSet") {
-          return Promise.resolve(null);
-        }
-        return Promise.resolve(`local-uuid-${pendingId + 1}`);
+        return undefined;
       });
+      embedded.hasLocalDocumentId = vi.fn(() => false);
 
       let releaseFirst!: () => void;
       const firstRemoteMutation = new Promise<void>((resolve) => {
@@ -1788,23 +2608,14 @@ describe("engine.create()", () => {
       vi.useFakeTimers();
       try {
         const { embedded, localClient } = createMockEmbedded();
-        localClient.mutation.mockImplementation((path: string, _args: any) => {
-          if (path === "_system:pendingPush") {
-            return Promise.resolve("pending-doc-1");
-          }
+        layerMutationMock(localClient, (path) => {
           if (path === "_system:pendingRenewLease") {
             return Promise.resolve(true);
-          }
-          if (path === "_system:pendingRemove") {
-            return Promise.resolve(null);
-          }
-          if (path === "_system:idMapSet") {
-            return Promise.resolve(null);
           }
           if (path === "tasks:create") {
             return Promise.resolve("local-uuid-1");
           }
-          return Promise.resolve(null);
+          return undefined;
         });
 
         const remoteClient = createMockRemoteClient();
@@ -1841,7 +2652,7 @@ describe("engine.create()", () => {
       }
     });
 
-    it("drops a hydrated create entry when its local id is already mapped", async () => {
+    it("drops a hydrated create entry only when the canonical remote doc is already present", async () => {
       const { embedded, localClient } = createMockEmbedded();
       localClient.query.mockImplementation((path: string) => {
         const routes: Record<string, unknown> = {
@@ -1864,12 +2675,33 @@ describe("engine.create()", () => {
         };
         return Promise.resolve(routes[path] ?? null);
       });
-      localClient.mutation.mockImplementation((path: string) => {
-        const routes: Record<string, unknown> = {
-          "_system:pendingRemove": null,
-        };
-        return Promise.resolve(routes[path] ?? null);
-      });
+      embedded.hasLocalDocumentId = vi.fn(
+        (id: string) => id === "remote-id-99",
+      );
+      {
+        let pendingClaimed = false;
+        localClient.mutation.mockImplementation((path: string, args: any) => {
+          if (path === "_system:pendingClaimNext" && !pendingClaimed) {
+            pendingClaimed = true;
+            return Promise.resolve({
+              _id: "pending-doc-1",
+              ref: "tasks:create",
+              args: JSON.stringify({ title: "Buy milk" }),
+              localResult: JSON.stringify("local-uuid-1"),
+              table: "tasks",
+              hydrated: true,
+              state: "processing",
+              owner: args.owner,
+              leaseExpiresAt: Date.now() + (args.leaseMs ?? 30_000),
+              identityKey: null,
+            });
+          }
+          if (path === "_system:pendingClaimNext") {
+            return Promise.resolve(null);
+          }
+          return Promise.resolve(null);
+        });
+      }
 
       const remoteClient = createMockRemoteClient();
 
@@ -1890,17 +2722,19 @@ describe("engine.create()", () => {
           id: "pending-doc-1",
         }),
       );
+      expect(localClient.mutation).toHaveBeenCalledWith(
+        "_system:idMapDelete",
+        expect.objectContaining({ localId: "local-uuid-1" }),
+      );
 
       m.stop();
     });
 
     it("retains entry in queue on remote push failure", async () => {
       const { embedded, localClient } = createMockEmbedded();
-      localClient.mutation.mockImplementation((path: string) => {
-        const routes: Record<string, unknown> = {
-          "_system:pendingPush": "pending-doc-1",
-        };
-        return Promise.resolve(routes[path] ?? { _id: "local-1" });
+      layerMutationMock(localClient, (path) => {
+        if (path === "tasks:create") return Promise.resolve({ _id: "local-1" });
+        return undefined;
       });
 
       const remoteClient = createMockRemoteClient();
@@ -1924,12 +2758,9 @@ describe("engine.create()", () => {
 
     it("blocks a queued entry on authorization failure", async () => {
       const { embedded, localClient } = createMockEmbedded();
-      localClient.mutation.mockImplementation((path: string) => {
-        const routes: Record<string, unknown> = {
-          "_system:pendingPush": "pending-doc-1",
-          "_system:pendingBlock": null,
-        };
-        return Promise.resolve(routes[path] ?? { _id: "local-1" });
+      layerMutationMock(localClient, (path) => {
+        if (path === "tasks:create") return Promise.resolve({ _id: "local-1" });
+        return undefined;
       });
 
       const remoteClient = createMockRemoteClient();
@@ -1972,12 +2803,9 @@ describe("engine.create()", () => {
       });
 
       const { embedded, localClient } = createMockEmbedded();
-      localClient.mutation.mockImplementation((path: string) => {
-        const routes: Record<string, unknown> = {
-          "_system:pendingPush": "pending-doc-1",
-          "_system:pendingRemove": null,
-        };
-        return Promise.resolve(routes[path] ?? { _id: "local-1" });
+      layerMutationMock(localClient, (path) => {
+        if (path === "tasks:create") return Promise.resolve({ _id: "local-1" });
+        return undefined;
       });
 
       const remoteClient = createMockRemoteClient();
@@ -2015,6 +2843,46 @@ describe("engine.create()", () => {
       m.stop();
     });
 
+    it("drops offline create/delete pairs before replay reaches remote", async () => {
+      Object.defineProperty(globalThis, "navigator", {
+        value: { onLine: false },
+        writable: true,
+        configurable: true,
+      });
+
+      const { embedded } = createStatefulEmbedded([]);
+      const remoteClient = createMockRemoteClient();
+
+      const m = createEngine({
+        embedded,
+        remoteClient,
+        tables: { tasks: tableConfig("resolve_ref") },
+      });
+
+      m.start();
+      await settle();
+
+      const createdId = (await m.mutation("tasks:create", {
+        title: "Ephemeral",
+      })) as string;
+      await m.mutation("tasks:remove", { id: createdId });
+      await settle();
+
+      expect(m.pendingCount()).toBe(0);
+      expect(remoteClient.mutation).not.toHaveBeenCalled();
+
+      Object.defineProperty(globalThis, "navigator", {
+        value: { onLine: true },
+        writable: true,
+        configurable: true,
+      });
+      getRegisteredHandler("online")();
+      await settle(200);
+
+      expect(remoteClient.mutation).not.toHaveBeenCalled();
+      m.stop();
+    });
+
     it("uploads local storage blobs before replaying queued mutations", async () => {
       Object.defineProperty(globalThis, "navigator", {
         value: { onLine: false },
@@ -2043,11 +2911,13 @@ describe("engine.create()", () => {
         return Promise.resolve({ ...args, _id: "remote-doc-1" });
       });
 
-      globalThis.fetch = vi.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        json: async () => ({ storageId: "remote-storage-1" }),
-      } as Response);
+      globalThis.fetch = vi.fn().mockImplementation(
+        async () =>
+          new Response(JSON.stringify({ storageId: "remote-storage-1" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+      );
 
       const m = createEngine({
         embedded,
@@ -2073,13 +2943,21 @@ describe("engine.create()", () => {
       getRegisteredHandler("online")();
       await settle(200);
 
-      expect(globalThis.fetch).toHaveBeenCalledWith(
-        "https://uploads.example/upload",
-        expect.objectContaining({
-          method: "POST",
-          headers: { "Content-Type": "text/plain" },
+      const [uploadUrl, uploadRequest] = vi.mocked(globalThis.fetch).mock
+        .calls[0]!;
+      if (typeof uploadUrl === "string") {
+        expect(uploadUrl).toBe("https://uploads.example/upload");
+      } else if (uploadUrl instanceof URL) {
+        expect(uploadUrl.href).toBe("https://uploads.example/upload");
+      } else {
+        expect(uploadUrl.url).toBe("https://uploads.example/upload");
+      }
+      expect(uploadRequest).toMatchObject({
+        method: "POST",
+        headers: expect.objectContaining({
+          "content-type": "text/plain",
         }),
-      );
+      });
       expect(remoteClient.mutation).toHaveBeenNthCalledWith(
         1,
         expect.objectContaining({
@@ -2145,11 +3023,13 @@ describe("engine.create()", () => {
         return Promise.resolve({ ...args, _id: "remote-doc-2" });
       });
 
-      globalThis.fetch = vi.fn().mockResolvedValue({
-        ok: true,
-        status: 200,
-        json: async () => ({ storageId: "remote-storage-2" }),
-      } as Response);
+      globalThis.fetch = vi.fn().mockImplementation(
+        async () =>
+          new Response(JSON.stringify({ storageId: "remote-storage-1" }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          }),
+      );
 
       const m = createEngine({
         embedded,
@@ -2196,7 +3076,7 @@ describe("engine.create()", () => {
         expect.objectContaining({
           [Symbol.for("functionName")]: "tasks:create",
         }),
-        expect.objectContaining({ attachmentId: "remote-storage-2" }),
+        expect.objectContaining({ attachmentId: "remote-storage-1" }),
       );
       m.stop();
     });
@@ -2410,11 +3290,9 @@ describe("engine.create()", () => {
       });
 
       const { embedded, localClient } = createMockEmbedded();
-      localClient.mutation.mockImplementation((path: string) => {
-        const routes: Record<string, unknown> = {
-          "_system:pendingPush": "pending-doc-1",
-        };
-        return Promise.resolve(routes[path] ?? { _id: "local-1" });
+      layerMutationMock(localClient, (path) => {
+        if (path === "tasks:create") return Promise.resolve({ _id: "local-1" });
+        return undefined;
       });
 
       const remoteClient: any = {
@@ -2503,12 +3381,10 @@ describe("engine.create()", () => {
 
       let releaseFirstPush!: (value: unknown) => void;
       const { embedded, localClient } = createMockEmbedded();
-      localClient.mutation.mockImplementation((path: string) => {
-        const routes: Record<string, unknown> = {
-          "_system:pendingPush": `pending-doc-${localClient.mutation.mock.calls.length}`,
-          "_system:pendingRemove": null,
-        };
-        return Promise.resolve(routes[path] ?? { _id: `local-${Date.now()}` });
+      layerMutationMock(localClient, (path) => {
+        if (path === "tasks:create")
+          return Promise.resolve({ _id: `local-${Date.now()}` });
+        return undefined;
       });
 
       const remoteClient: any = {

@@ -10,10 +10,15 @@ export default defineConfig([
   {
     entry: {
       index: "src/index.ts",
+      auth: "src/auth/index.ts",
+      // The browser sqlite client resolves ./worker.js relative to its emitted
+      // chunk, so the worker entry must stay co-located with that chunk in dist/.
+      worker: "src/browser/sqlite/worker.js",
       "browser/index": "src/browser/index.ts",
+      "tracing/browser": "src/tracing/browser.ts",
+      "tracing/node": "src/tracing/node.ts",
       react: "src/react.ts",
       "expo/index": "src/expo/index.ts",
-      "browser/worker": "src/browser/sqlite/worker.ts",
     },
     format: "esm",
     platform: "browser",
@@ -21,8 +26,30 @@ export default defineConfig([
     clean: true,
     deps: {
       neverBundle: [/^convex/, "yjs", "convex-helpers"],
-      alwaysBundle: ["@robelest/fx"],
+      alwaysBundle: ["effect", /^effect\//, /^@effect\/platform-browser/],
     },
+    alias: srcAlias,
+  },
+  {
+    entry: {
+      "node/index": "src/node/index.ts",
+      cli: "src/cli.ts",
+    },
+    format: "esm",
+    outDir: "dist",
+    dts: true,
+    clean: false,
+    platform: "node",
+    deps: {
+      neverBundle: [/^convex/, "yjs", "convex-helpers"],
+      alwaysBundle: [
+        "effect",
+        /^effect\//,
+        /^@effect\/platform-node/,
+        /^@effect\/sql-sqlite-node/,
+      ],
+    },
+    outExtensions: jsExtensions,
     alias: srcAlias,
   },
   // Schema-safe build — MUST produce a single file with no _deps/ chunks.
@@ -52,7 +79,7 @@ export default defineConfig([
     platform: "node",
     deps: {
       neverBundle: [/^convex/, "yjs", "convex-helpers"],
-      alwaysBundle: ["@robelest/fx"],
+      alwaysBundle: ["effect", /^effect\//, /^@effect\/platform-browser/],
     },
     outExtensions: jsExtensions,
     alias: srcAlias,
@@ -67,7 +94,7 @@ export default defineConfig([
     platform: "browser",
     deps: {
       neverBundle: [/^convex/, "yjs", "convex-helpers"],
-      alwaysBundle: ["@robelest/fx"],
+      alwaysBundle: ["effect", /^effect\//, /^@effect\/platform-browser/],
     },
     outExtensions: jsExtensions,
     alias: srcAlias,
@@ -82,7 +109,7 @@ export default defineConfig([
     platform: "browser",
     deps: {
       neverBundle: [/^convex/, "yjs", "convex-helpers"],
-      alwaysBundle: ["@robelest/fx"],
+      alwaysBundle: ["effect"],
     },
     outExtensions: jsExtensions,
     alias: srcAlias,
@@ -97,7 +124,7 @@ export default defineConfig([
     platform: "node",
     deps: {
       neverBundle: [/^convex/, "convex-test", "yjs", "convex-helpers"],
-      alwaysBundle: ["@robelest/fx"],
+      alwaysBundle: ["effect"],
     },
     outExtensions: jsExtensions,
     alias: srcAlias,

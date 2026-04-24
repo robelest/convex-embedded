@@ -12,7 +12,8 @@ import { SubscriptionManager } from "@embedded/sync/subscriptions";
  * Exercises the Database, QueryEngine, UdfExecutor, Syscalls, and
  * SubscriptionManager layers working together end-to-end.
  */
-import { describe, it, expect, vi } from "vite-plus/test";
+import { describe, it, expect } from "@tests/testkit";
+import { vi } from "vitest";
 
 // ---------------------------------------------------------------------------
 // Helpers

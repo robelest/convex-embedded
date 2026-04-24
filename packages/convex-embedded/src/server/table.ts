@@ -7,23 +7,41 @@
  * @packageDocumentation
  */
 
+/**
+ * Embedded table builders and registry helpers.
+ */
 export {
   embeddedTable,
-  bindTable,
-  localOnly,
-  remoteOnly,
   getTableRegistry,
   _resetRegistry,
-  REMOTE_META,
+} from "@/server/schema";
+/**
+ * Attach the packaged resolve runtime to an embedded table handle.
+ */
+export { bindTable } from "@/server/runtime";
+/**
+ * Route markers used to force local-only, remote-only, or upload-url behavior.
+ */
+export { localOnly, remoteOnly, storageUploadUrl } from "@/server/markers";
+/**
+ * Metadata symbols exported for advanced marker-driven integrations.
+ */
+export {
   PENDING_REPLAY_META,
-} from "@/server/setup";
+  REMOTE_META,
+  STORAGE_UPLOAD_URL_META,
+} from "@/shared/symbols";
 
 export type {
   EmbeddedTableHandle,
-  RemoteMeta,
-  RouteMode,
+  LocalTableMigrationStep,
+} from "@/server/schema";
+export type {
   PendingReplayMeta,
   PendingReplayMigrationContext,
   PendingReplayMigrationResult,
   PendingReplayMigrationStep,
-} from "@/server/setup";
+  RemoteMeta,
+  RouteMode,
+  StorageUploadUrlMeta,
+} from "@/shared/symbols";

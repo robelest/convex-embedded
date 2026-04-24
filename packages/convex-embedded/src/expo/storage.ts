@@ -1,4 +1,3 @@
-import { Fx } from "@robelest/fx";
 import {
   EncodingType,
   cacheDirectory,
@@ -85,6 +84,45 @@ function uploadUrlForToken(token: string): string {
   ).toString();
 }
 
+async function handleUploadRequest(
+  runtime: EmbeddedRuntime,
+  token: string,
+  request: Request,
+): Promise<Response> {
+  if (request.method !== "POST") {
+    return new Response(
+      JSON.stringify({ error: "Upload URL only accepts POST requests." }),
+      {
+        status: 405,
+        headers: { "Content-Type": "application/json" },
+      },
+    );
+  }
+
+  try {
+    const contentType = request.headers.get("content-type") ?? "";
+    const body = await request.arrayBuffer();
+    const blob = new Blob([body], { type: contentType || undefined });
+    const storageId = await runtime.storeUploadedBlobWithMetadata(blob, {
+      uploadSourceRef: runtime.consumeUploadUrlSource(token),
+    });
+    uploadSurfaces.delete(token);
+    return new Response(JSON.stringify({ storageId }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  } catch (thrown) {
+    const error = thrown instanceof Error ? thrown : new Error(String(thrown));
+    return new Response(
+      JSON.stringify({ error: error.message || "Upload failed." }),
+      {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      },
+    );
+  }
+}
+
 export function createExpoStorageSurface(
   runtime: EmbeddedRuntime,
   crypto: EmbeddedCryptoProvider,
@@ -103,50 +141,7 @@ export function createExpoStorageSurface(
         return uploadUrlForToken(token);
       },
       async handleUpload(token: string, request: Request): Promise<Response> {
-        if (request.method !== "POST") {
-          return new Response(
-            JSON.stringify({ error: "Upload URL only accepts POST requests." }),
-            {
-              status: 405,
-              headers: { "Content-Type": "application/json" },
-            },
-          );
-        }
-
-        return await Fx.run(
-          Fx.from({
-            ok: async () => {
-              const contentType = request.headers.get("content-type") ?? "";
-              const body = await request.arrayBuffer();
-              const blob = new Blob([body], { type: contentType || undefined });
-              const storageId = await runtime.storeUploadedBlobWithMetadata(
-                blob,
-                {
-                  uploadSourceRef: runtime.consumeUploadUrlSource(token),
-                },
-              );
-              uploadSurfaces.delete(token);
-              return new Response(JSON.stringify({ storageId }), {
-                status: 200,
-                headers: { "Content-Type": "application/json" },
-              });
-            },
-            err: (error) =>
-              error instanceof Error ? error : new Error(String(error)),
-          }).pipe(
-            Fx.recover((error) =>
-              Fx.succeed(
-                new Response(
-                  JSON.stringify({ error: error.message || "Upload failed." }),
-                  {
-                    status: 500,
-                    headers: { "Content-Type": "application/json" },
-                  },
-                ),
-              ),
-            ),
-          ),
-        );
+        return handleUploadRequest(runtime, token, request);
       },
       close(): void {
         for (const [token, surface] of Array.from(uploadSurfaces.entries())) {
@@ -221,50 +216,7 @@ export function createExpoStorageSurface(
     },
 
     async handleUpload(token: string, request: Request): Promise<Response> {
-      if (request.method !== "POST") {
-        return new Response(
-          JSON.stringify({ error: "Upload URL only accepts POST requests." }),
-          {
-            status: 405,
-            headers: { "Content-Type": "application/json" },
-          },
-        );
-      }
-
-      return await Fx.run(
-        Fx.from({
-          ok: async () => {
-            const contentType = request.headers.get("content-type") ?? "";
-            const body = await request.arrayBuffer();
-            const blob = new Blob([body], { type: contentType || undefined });
-            const storageId = await runtime.storeUploadedBlobWithMetadata(
-              blob,
-              {
-                uploadSourceRef: runtime.consumeUploadUrlSource(token),
-              },
-            );
-            uploadSurfaces.delete(token);
-            return new Response(JSON.stringify({ storageId }), {
-              status: 200,
-              headers: { "Content-Type": "application/json" },
-            });
-          },
-          err: (error) =>
-            error instanceof Error ? error : new Error(String(error)),
-        }).pipe(
-          Fx.recover((error) =>
-            Fx.succeed(
-              new Response(
-                JSON.stringify({ error: error.message || "Upload failed." }),
-                {
-                  status: 500,
-                  headers: { "Content-Type": "application/json" },
-                },
-              ),
-            ),
-          ),
-        ),
-      );
+      return handleUploadRequest(runtime, token, request);
     },
 
     close(): void {

@@ -2,40 +2,52 @@ import type { FunctionReference } from "convex/server";
 
 import type { Definition } from "./core.js";
 
+/**
+ * Metadata symbol attached to embedded resolve/list queries for remote sync.
+ */
 export const REMOTE_META = Symbol.for("convex-embedded:remoteMeta");
-export const RESOLVE_QUERY_META = Symbol.for(
-  "convex-embedded:resolveQueryMeta",
-);
+/**
+ * Metadata symbol attached to mutations that define replay migration behavior.
+ */
 export const PENDING_REPLAY_META = Symbol.for(
   "convex-embedded:pendingReplayMeta",
 );
 
+/**
+ * Metadata describing the remote-sync exports attached to a bound table.
+ */
 export interface RemoteMeta {
   readonly __brand: "convex-embedded:remoteMeta";
   readonly table: string;
   readonly schema: Definition;
   readonly resolveExport: string;
-  readonly listExport: string | null;
 }
 
-export interface ResolveQueryMeta {
-  readonly __brand: "convex-embedded:resolveQueryMeta";
-  readonly table: string;
-  readonly getArgs?: () => Record<string, unknown>;
-}
-
+/**
+ * Context passed to a pending-replay migration step.
+ */
 export interface PendingReplayMigrationContext {
   readonly ref: string;
   readonly localId: string | null;
 }
 
+/**
+ * Result returned by a pending-replay migration step.
+ */
 export type PendingReplayMigrationResult = Record<string, unknown>;
 
+/**
+ * Migration step used to transform queued mutation arguments between replay
+ * payload versions.
+ */
 export type PendingReplayMigrationStep = (
   args: Record<string, unknown>,
   ctx: PendingReplayMigrationContext,
 ) => PendingReplayMigrationResult | Promise<PendingReplayMigrationResult>;
 
+/**
+ * Metadata describing replay migration behavior for a mutation.
+ */
 export interface PendingReplayMeta {
   readonly __brand: "convex-embedded:pendingReplayMeta";
   readonly version: number;
@@ -44,14 +56,17 @@ export interface PendingReplayMeta {
 
 interface ResolveComponentApi {
   public: {
+    recordDelete: FunctionReference<"mutation", any>;
     recordUpdate: FunctionReference<"mutation", any>;
+    getCollectionChanges: FunctionReference<"query", any>;
     getLiveState: FunctionReference<"query", any>;
     getLiveStates: FunctionReference<"query", any>;
-    createCheckpoint: FunctionReference<"mutation", any>;
-    listCheckpoints: FunctionReference<"query", any>;
-    getCheckpoint: FunctionReference<"query", any>;
-    cleanupDoc: FunctionReference<"mutation", any>;
+    getLiveStatesPage: FunctionReference<"query", any>;
   };
 }
 
+/**
+ * Bound component API required by the packaged remote runtime.
+ * @internal
+ */
 export type ComponentBinding = ResolveComponentApi;

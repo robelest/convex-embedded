@@ -13,16 +13,12 @@ import type { Definition } from "@/shared/schema";
 /**
  * Global symbol used to tag the `resolve` export with remote metadata.
  *
- * @deprecated — The registry-based discovery in `embeddedTable()` +
- * `setup()` replaces symbol scanning. Kept for backward compatibility
- * with existing deployed modules.
+ * Tagged metadata used by the sync engine to discover per-table resolve/bind
+ * exports.
  *
  * @internal
  */
 export const REMOTE_META = Symbol.for("convex-embedded:remoteMeta");
-export const RESOLVE_QUERY_META = Symbol.for(
-  "convex-embedded:resolveQueryMeta",
-);
 export const PENDING_REPLAY_META = Symbol.for(
   "convex-embedded:pendingReplayMeta",
 );
@@ -34,7 +30,7 @@ export const STORAGE_UPLOAD_URL_META = Symbol.for(
 // RouteMode
 // ---------------------------------------------------------------------------
 
-export type { RouteMode } from "@/client/routing/metadata";
+export type { RouteMode } from "@/shared/route";
 
 // ---------------------------------------------------------------------------
 // Metadata interfaces
@@ -54,22 +50,6 @@ export interface RemoteMeta {
   readonly schema: Definition;
   /** Export name of the generated resolve query. */
   readonly resolveExport: string;
-  /** Optional export name for a list query used during discovery. */
-  readonly listExport: string | null;
-}
-
-/**
- * Metadata attached to queries that participate in resolve-driven refetch.
- *
- * The client-side sync engine reads this marker to know which query should be
- * invalidated after CRDT reconciliation finishes for a table.
- */
-export interface ResolveQueryMeta {
-  readonly __brand: "convex-embedded:resolveQueryMeta";
-  /** Embedded table name associated with the query. */
-  readonly table: string;
-  /** Optional callback returning query args to refetch after resolve. */
-  readonly getArgs?: () => Record<string, unknown>;
 }
 
 export interface PendingReplayMigrationContext {

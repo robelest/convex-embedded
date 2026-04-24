@@ -53,21 +53,15 @@ function authenticated(): ViewFilter {
       },
       query: unknown,
     ) {
-      return Fx.run(
-        Fx.from({
-          ok: () => ctx.auth?.getUserIdentity(),
-          err: (error) => error as Error,
-        }).pipe(
-          Fx.map((identity) => {
-            if (!identity) {
-              throw new Error(
-                "convex-embedded: view.authenticated() requires a logged-in user",
-              );
-            }
-            return query;
-          }),
-        ),
+      const identity = await Promise.resolve(
+        ctx.auth?.getUserIdentity() ?? null,
       );
+      if (!identity) {
+        throw new Error(
+          "convex-embedded: view.authenticated() requires a logged-in user",
+        );
+      }
+      return query;
     },
   };
 }
@@ -94,24 +88,15 @@ function ownership(options: { index: string; field: string }): ViewFilter {
         withIndex(indexName: string, builder: (q: unknown) => unknown): unknown;
       },
     ) {
-      return Fx.run(
-        Fx.from({
-          ok: () => ctx.auth.getUserIdentity(),
-          err: (error) => error as Error,
-        }).pipe(
-          Fx.map((identity) => {
-            const userId =
-              identity?.subject ?? identity?.tokenIdentifier ?? null;
+      const identity = await ctx.auth.getUserIdentity();
+      const userId = identity?.subject ?? identity?.tokenIdentifier ?? null;
 
-            return query.withIndex(index, (q: unknown) => {
-              const qb = q as {
-                eq(fieldName: string, value: unknown): unknown;
-              };
-              return qb.eq(field, userId);
-            });
-          }),
-        ),
-      );
+      return query.withIndex(index, (q: unknown) => {
+        const qb = q as {
+          eq(fieldName: string, value: unknown): unknown;
+        };
+        return qb.eq(field, userId);
+      });
     },
   };
 }
@@ -120,9 +105,29 @@ function ownership(options: { index: string; field: string }): ViewFilter {
 // Export as namespace
 // ---------------------------------------------------------------------------
 
+/**
+ * Built-in view/filter helpers for composing scoped Convex queries.
+ *
+ * @remarks
+ * Views are intentionally small and composable. You call them from your own
+ * public query handlers rather than attaching them to `embeddedTable(...)`
+ * directly.
+ *
+ * @example
+ * ```ts
+ * export const listMine = query({
+ *   args: {},
+ *   handler: async (ctx) => {
+ *     return await view
+ *       .ownership({ index: "by_userId", field: "userId" })
+ *       .apply(ctx, ctx.db.query("tasks"))
+ *       .collect();
+ *   },
+ * });
+ * ```
+ */
 export const view = {
   public: publicView,
   authenticated,
   ownership,
 };
-import { Fx } from "@robelest/fx";

@@ -6,16 +6,16 @@
  *
  * @internal
  */
-import { Fx } from "@robelest/fx";
 
+import {
+  PersistenceAdapter,
+  type CommitBatch,
+  type DatabaseMeta,
+  type StoredDocumentWithTable,
+} from "@/persistence/adapter";
 import type { EmbeddedCryptoProvider } from "@/runtime/crypto";
 import type { StoredDocument } from "@/runtime/db/types";
 import { decodeBase64, encodeBase64 } from "@/shared/base64";
-import type {
-  CommitBatch,
-  StorageAdapter,
-  StoredDocumentWithTable,
-} from "@/storage/adapter";
 
 type KeyMaterial = {
   keyId: string;
@@ -36,6 +36,7 @@ type EncryptedEnvelope = {
   version: 1;
   keyId: string;
   identityKey: string | null;
+  encoding: "json" | "bytes";
   nonce: string;
   ciphertext: string;
 };
@@ -45,6 +46,13 @@ type EncryptedStoredDocument = {
   _creationTime: number;
   __encrypted: EncryptedEnvelope;
 };
+
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  return bytes.buffer.slice(
+    bytes.byteOffset,
+    bytes.byteOffset + bytes.byteLength,
+  ) as ArrayBuffer;
+}
 
 async function encryptJson(
   value: unknown,
@@ -65,6 +73,7 @@ async function encryptJson(
     version: 1,
     keyId: keyMaterial.keyId,
     identityKey,
+    encoding: "json",
     nonce: encodeBase64(nonce),
     ciphertext: encodeBase64(ciphertext),
   };
@@ -92,6 +101,52 @@ async function decryptJson<T>(
   });
 
   return JSON.parse(new TextDecoder().decode(plaintext)) as T;
+}
+
+async function encryptBytes(
+  value: Uint8Array,
+  keyMaterial: KeyMaterial,
+  identityKey: string | null,
+  crypto: EmbeddedCryptoProvider,
+): Promise<EncryptedEnvelope> {
+  const nonce = crypto.getRandomValues(new Uint8Array(12));
+  const ciphertext = await crypto.encryptAesGcm({
+    key: keyMaterial.key,
+    plaintext: value,
+    nonce,
+    additionalData: new TextEncoder().encode(identityKey ?? "anonymous"),
+  });
+
+  return {
+    version: 1,
+    keyId: keyMaterial.keyId,
+    identityKey,
+    encoding: "bytes",
+    nonce: encodeBase64(nonce),
+    ciphertext: encodeBase64(ciphertext),
+  };
+}
+
+async function decryptBytes(
+  envelope: EncryptedEnvelope,
+  options: EncryptionOptions,
+): Promise<Uint8Array> {
+  const key = await options.getKey({
+    keyId: envelope.keyId,
+    identityKey: envelope.identityKey,
+  });
+  if (!key) {
+    throw new Error(`Missing encryption key for ${envelope.keyId}`);
+  }
+
+  return options.crypto.decryptAesGcm({
+    key,
+    nonce: decodeBase64(envelope.nonce),
+    ciphertext: decodeBase64(envelope.ciphertext),
+    additionalData: new TextEncoder().encode(
+      envelope.identityKey ?? "anonymous",
+    ),
+  });
 }
 
 async function encryptDocument(
@@ -132,144 +187,100 @@ async function decryptDocument(
  *
  * @see EncryptionOptions
  */
+class EncryptedAdapter extends PersistenceAdapter {
+  constructor(
+    private readonly inner: PersistenceAdapter,
+    private readonly options: EncryptionOptions,
+  ) {
+    super();
+  }
+
+  async listAll(): Promise<StoredDocumentWithTable[]> {
+    const rows = await this.inner.listAll();
+    const results: StoredDocumentWithTable[] = [];
+    for (const { doc, tableName } of rows) {
+      results.push({
+        doc: await decryptDocument(doc, this.options),
+        tableName,
+      });
+    }
+    return results;
+  }
+
+  async list(tableName: string): Promise<StoredDocument[]> {
+    const docs = await this.inner.list(tableName);
+    const results: StoredDocument[] = [];
+    for (const doc of docs) {
+      results.push(await decryptDocument(doc, this.options));
+    }
+    return results;
+  }
+
+  meta(): Promise<DatabaseMeta | null> {
+    return this.inner.meta();
+  }
+
+  async commit(batch: CommitBatch): Promise<void> {
+    const puts: StoredDocumentWithTable[] = [];
+    for (const { doc, tableName } of batch.puts) {
+      const encrypted = await encryptDocument(doc, this.options);
+      puts.push({ tableName, doc: encrypted as unknown as StoredDocument });
+    }
+    await this.inner.commit({ ...batch, puts });
+  }
+
+  async clear(): Promise<void> {
+    await this.inner.clear();
+  }
+
+  async listBlobs(): Promise<Array<{ id: string; blob: Blob }>> {
+    const entries = await this.inner.listBlobs();
+    const results: Array<{ id: string; blob: Blob }> = [];
+    for (const { id, blob } of entries) {
+      const text = await blob.text();
+      const envelope = JSON.parse(text) as EncryptedEnvelope;
+      const bytes = await decryptBytes(envelope, this.options);
+      results.push({ id, blob: new Blob([toArrayBuffer(bytes)]) });
+    }
+    return results;
+  }
+
+  async getBlob(id: string): Promise<Blob | null> {
+    const encrypted = await this.inner.getBlob(id);
+    if (encrypted === null) return null;
+    const text = await encrypted.text();
+    const envelope = JSON.parse(text) as EncryptedEnvelope;
+    const bytes = await decryptBytes(envelope, this.options);
+    return new Blob([toArrayBuffer(bytes)]);
+  }
+
+  async putBlob(id: string, blob: Blob): Promise<void> {
+    const identityKey = this.options.getIdentityKey();
+    const [keyMaterial, buffer] = await Promise.all([
+      this.options.getActiveKey({ identityKey }),
+      blob.arrayBuffer(),
+    ]);
+    const envelope = await encryptBytes(
+      new Uint8Array(buffer),
+      keyMaterial,
+      identityKey,
+      this.options.crypto,
+    );
+    await this.inner.putBlob(id, new Blob([JSON.stringify(envelope)]));
+  }
+
+  async deleteBlob(id: string): Promise<void> {
+    await this.inner.deleteBlob(id);
+  }
+
+  async close(): Promise<void> {
+    await this.inner.close();
+  }
+}
+
 export function createEncryptedStorage(
-  storage: StorageAdapter,
+  storage: PersistenceAdapter,
   options: EncryptionOptions,
-): StorageAdapter {
-  return {
-    async getDocuments(): Promise<StoredDocumentWithTable[]> {
-      return Fx.run(
-        Fx.from({
-          ok: () => storage.getDocuments(),
-          err: (error) => error as Error,
-        }).pipe(
-          Fx.chain((rows) =>
-            Fx.each(rows, ({ doc, tableName }) =>
-              Fx.from({
-                ok: () => decryptDocument(doc, options),
-                err: (error) => error as Error,
-              }).pipe(Fx.map((decrypted) => ({ doc: decrypted, tableName }))),
-            ),
-          ),
-        ),
-      );
-    },
-
-    async getDocumentsByTable(tableName: string): Promise<StoredDocument[]> {
-      return Fx.run(
-        Fx.from({
-          ok: () => storage.getDocumentsByTable(tableName),
-          err: (error) => error as Error,
-        }).pipe(
-          Fx.chain((docs) =>
-            Fx.each(docs, (doc) =>
-              Fx.from({
-                ok: () => decryptDocument(doc, options),
-                err: (error) => error as Error,
-              }),
-            ),
-          ),
-        ),
-      );
-    },
-
-    getMeta: () => storage.getMeta(),
-
-    getBlobs: async () => {
-      return Fx.run(
-        Fx.from({
-          ok: () => storage.getBlobs(),
-          err: (error) => error as Error,
-        }).pipe(
-          Fx.chain((entries) =>
-            Fx.each(entries, ({ id, blob }) =>
-              Fx.from({
-                ok: () => blob.text(),
-                err: (error) => error as Error,
-              }).pipe(
-                Fx.map((text) => JSON.parse(text) as EncryptedEnvelope),
-                Fx.chain((envelope) =>
-                  Fx.from({
-                    ok: () => decryptJson<number[]>(envelope, options),
-                    err: (error) => error as Error,
-                  }),
-                ),
-                Fx.map((bytes) => ({
-                  id,
-                  blob: new Blob([Uint8Array.from(bytes)]),
-                })),
-              ),
-            ),
-          ),
-        ),
-      );
-    },
-
-    commit: async (batch: CommitBatch) => {
-      const puts = await Fx.run(
-        Fx.each(batch.puts, ({ doc, tableName }) =>
-          Fx.from({
-            ok: () => encryptDocument(doc, options),
-            err: (error) => error as Error,
-          }).pipe(
-            Fx.map((encrypted) => ({
-              tableName,
-              doc: encrypted as unknown as StoredDocument,
-            })),
-          ),
-        ),
-      );
-      await Fx.run(
-        Fx.from({
-          ok: () => storage.commit({ ...batch, puts }),
-          err: (error) => error as Error,
-        }),
-      );
-    },
-
-    storeBlob: async (id: string, blob: Blob) => {
-      const identityKey = options.getIdentityKey();
-      const [keyMaterial, buffer] = await Fx.run(
-        Fx.zip(
-          Fx.from({
-            ok: () => options.getActiveKey({ identityKey }),
-            err: (error) => error as Error,
-          }),
-          Fx.from({
-            ok: () => blob.arrayBuffer(),
-            err: (error) => error as Error,
-          }),
-        ),
-      );
-      const envelope = await Fx.run(
-        Fx.from({
-          ok: () =>
-            encryptJson(
-              Array.from(new Uint8Array(buffer)),
-              keyMaterial,
-              identityKey,
-              options.crypto,
-            ),
-          err: (error) => error as Error,
-        }),
-      );
-      await Fx.run(
-        Fx.from({
-          ok: () => storage.storeBlob(id, new Blob([JSON.stringify(envelope)])),
-          err: (error) => error as Error,
-        }),
-      );
-    },
-
-    deleteBlob: (id: string) => storage.deleteBlob(id),
-    clear: () => storage.clear(),
-    close: async () => {
-      await Fx.run(
-        Fx.from({
-          ok: () => storage.close?.() ?? Promise.resolve(),
-          err: (error) => error as Error,
-        }),
-      );
-    },
-  };
+): PersistenceAdapter {
+  return new EncryptedAdapter(storage, options);
 }

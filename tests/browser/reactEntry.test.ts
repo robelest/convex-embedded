@@ -1,5 +1,6 @@
+import { describe, expect, it } from "@tests/testkit";
 import type { ConvexClient } from "convex/browser";
-import { describe, expect, it, vi } from "vite-plus/test";
+import { vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
   getAuthStateMock: vi.fn(() => ({ status: "authenticated" as const })),

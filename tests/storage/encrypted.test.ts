@@ -1,7 +1,7 @@
+import { OpaqueAdapter } from "@embedded/persistence/opaque/adapter";
 import { createAmbientCryptoProvider } from "@embedded/runtime/crypto";
 import { createEncryptedStorage } from "@embedded/storage/encrypted";
-import { ephemeralStorage } from "@embedded/storage/memory";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it } from "@tests/testkit";
 
 const cryptoProvider = createAmbientCryptoProvider();
 
@@ -15,7 +15,7 @@ async function createKey() {
 describe("createEncryptedStorage", () => {
   it("round-trips encrypted documents and blobs", async () => {
     const key = await createKey();
-    const storage = createEncryptedStorage(ephemeralStorage(), {
+    const storage = createEncryptedStorage(new OpaqueAdapter(), {
       crypto: cryptoProvider,
       getActiveKey: async () => ({ keyId: "k1", key }),
       getKey: async ({ keyId }) => (keyId === "k1" ? key : null),
@@ -36,10 +36,10 @@ describe("createEncryptedStorage", () => {
       deletes: [],
       meta: { timestamp: 1, lastCreationTime: 1 },
     });
-    await storage.storeBlob("blob-1", new Blob([new Uint8Array([1, 2, 3])]));
+    await storage.putBlob("blob-1", new Blob([new Uint8Array([1, 2, 3])]));
 
-    const docs = await storage.getDocumentsByTable("tasks");
-    const blobs = await storage.getBlobs();
+    const docs = await storage.list("tasks");
+    const blobs = await storage.listBlobs();
 
     expect(docs).toEqual([
       {
@@ -55,7 +55,7 @@ describe("createEncryptedStorage", () => {
 
   it("fails cleanly when a key is unavailable", async () => {
     const key = await createKey();
-    const base = ephemeralStorage();
+    const base = new OpaqueAdapter();
     const encrypted = createEncryptedStorage(base, {
       crypto: cryptoProvider,
       getActiveKey: async () => ({ keyId: "k1", key }),
@@ -81,14 +81,12 @@ describe("createEncryptedStorage", () => {
       getIdentityKey: () => null,
     });
 
-    await expect(broken.getDocuments()).rejects.toThrow(
-      /Missing encryption key/,
-    );
+    await expect(broken.listAll()).rejects.toThrow(/Missing encryption key/);
   });
 
   it("supports large encrypted blobs without stack overflow", async () => {
     const key = await createKey();
-    const storage = createEncryptedStorage(ephemeralStorage(), {
+    const storage = createEncryptedStorage(new OpaqueAdapter(), {
       crypto: cryptoProvider,
       getActiveKey: async () => ({ keyId: "k1", key }),
       getKey: async ({ keyId }) => (keyId === "k1" ? key : null),
@@ -100,10 +98,10 @@ describe("createEncryptedStorage", () => {
       payload[index] = index % 251;
     }
     await expect(
-      storage.storeBlob("blob-large", new Blob([payload])),
+      storage.putBlob("blob-large", new Blob([payload])),
     ).resolves.toBeUndefined();
 
-    const blobs = await storage.getBlobs();
+    const blobs = await storage.listBlobs();
     expect(new Uint8Array(await blobs[0]!.blob.arrayBuffer())).toEqual(payload);
   });
 });

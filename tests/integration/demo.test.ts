@@ -3,9 +3,10 @@
 import { api } from "@convex/_generated/api";
 import type { Id } from "@convex/_generated/dataModel";
 import schema from "@convex/schema";
+import { projects } from "@convex/schema";
 import type { ConvexModuleRegistry } from "@embedded/kernel/modules";
+import { initYjsDoc } from "@resolve/shared/yjs";
 import { register as registerResolveComponent } from "@robelest/convex-embedded/test";
-import { convexTest } from "convex-test";
 /**
  * Integration test for convex-embedded using convex-test.
  *
@@ -16,7 +17,9 @@ import { convexTest } from "convex-test";
  *   -> client applies diff
  *   -> resolve returns empty (up to date)
  */
-import { describe, it, expect, vi, beforeEach } from "vite-plus/test";
+import { describe, it, expect, beforeEach } from "@tests/testkit";
+import { convexTest } from "convex-test";
+import { vi } from "vitest";
 import * as Y from "yjs";
 
 /** Safely convert a Uint8Array to a proper ArrayBuffer for Convex v.bytes() */
@@ -83,25 +86,28 @@ describe("convex-embedded integration", () => {
     const emptyVector = Y.encodeStateVector(emptyDoc);
 
     const resolveResults = await t.query(api.projects.bind, {
+      collectionSeq: null,
       documents: [
         {
           docId: projectId,
           vector: toArrayBuffer(emptyVector),
+          lastSeq: null,
         },
       ],
     });
 
-    expect(resolveResults).toHaveLength(1);
-    const result = resolveResults[0];
+    expect(resolveResults.mode).toBe("full");
+    expect(resolveResults.documents).toHaveLength(1);
+    const result = resolveResults.documents[0]!;
     expect(result.docId).toBe(projectId);
-    // The diff should be non-empty since the client has no state
-    expect(result.diff).toBeDefined();
-    expect(result.diff).toBeInstanceOf(ArrayBuffer);
-    expect((result.diff as ArrayBuffer).byteLength).toBeGreaterThan(0);
+    expect(result.seq).toBeTypeOf("number");
+    expect(result.document).toBeDefined();
 
-    // 3. Apply the diff to a client Y.Doc
-    const clientDoc = new Y.Doc();
-    Y.applyUpdateV2(clientDoc, new Uint8Array(result.diff as ArrayBuffer));
+    // 3. Seed a client Y.Doc from the returned full document
+    const clientDoc = initYjsDoc(
+      projects.schema,
+      result.document as Record<string, unknown>,
+    );
 
     // Verify the client doc has the expected data
     // Register fields are stored as Y.Map<{value, timestamp}>
@@ -112,16 +118,18 @@ describe("convex-embedded integration", () => {
     // 4. Resolve again with the client's current state vector — should be up to date
     const clientVector = Y.encodeStateVector(clientDoc);
     const resolveResults2 = await t.query(api.projects.bind, {
+      collectionSeq: null,
       documents: [
         {
           docId: projectId,
           vector: toArrayBuffer(clientVector),
+          lastSeq: null,
         },
       ],
     });
 
-    expect(resolveResults2).toHaveLength(1);
-    const result2 = resolveResults2[0];
+    expect(resolveResults2.documents).toHaveLength(1);
+    const result2 = resolveResults2.documents[0]!;
     expect(result2.docId).toBe(projectId);
     // Should be undefined (no diff) since client is up to date
     expect(result2.diff).toBeUndefined();
@@ -151,22 +159,26 @@ describe("convex-embedded integration", () => {
     const freshDoc = new Y.Doc();
     const freshVector = Y.encodeStateVector(freshDoc);
     const results = await t.query(api.projects.bind, {
+      collectionSeq: null,
       documents: [
         {
           docId: projectId as string,
           vector: toArrayBuffer(freshVector),
+          lastSeq: null,
         },
       ],
     });
 
-    expect(results).toHaveLength(1);
-    const result = results[0];
+    expect(results.documents).toHaveLength(1);
+    const result = results.documents[0]!;
     expect(result.docId).toBe(projectId);
-    expect(result.diff).toBeDefined();
+    expect(result.document).toBeDefined();
 
-    // Apply the diff to a fresh client doc
-    const clientDoc = new Y.Doc();
-    Y.applyUpdateV2(clientDoc, new Uint8Array(result.diff as ArrayBuffer));
+    // Apply the returned full document to a fresh client doc
+    const clientDoc = initYjsDoc(
+      projects.schema,
+      result.document as Record<string, unknown>,
+    );
 
     // Verify updated values
     const fields = clientDoc.getMap("fields");
@@ -176,16 +188,18 @@ describe("convex-embedded integration", () => {
     // Resolve again — client should now be up to date
     const clientVector = Y.encodeStateVector(clientDoc);
     const results2 = await t.query(api.projects.bind, {
+      collectionSeq: null,
       documents: [
         {
           docId: projectId as string,
           vector: toArrayBuffer(clientVector),
+          lastSeq: null,
         },
       ],
     });
 
-    expect(results2).toHaveLength(1);
-    expect(results2[0].diff).toBeUndefined();
+    expect(results2.documents).toHaveLength(1);
+    expect(results2.documents[0]?.diff).toBeUndefined();
   });
 
   it("resolves with no delta if document has never been recorded", async () => {
@@ -196,16 +210,16 @@ describe("convex-embedded integration", () => {
     const emptyVector = Y.encodeStateVector(emptyDoc);
 
     const results = await t.query(api.projects.bind, {
+      collectionSeq: null,
       documents: [
         {
           docId: "nonexistent-id",
           vector: toArrayBuffer(emptyVector),
+          lastSeq: null,
         },
       ],
     });
 
-    expect(results).toHaveLength(1);
-    expect(results[0].docId).toBe("nonexistent-id");
-    expect(results[0].diff).toBeUndefined();
+    expect(results.documents).toHaveLength(0);
   });
 });

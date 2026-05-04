@@ -85,6 +85,11 @@ export default function IssueDetail() {
         return;
       }
       const patch = Object.fromEntries(changed);
+      // The SDK's auto-derive optimistic path runs synchronously inside
+      // client.mutation(): it writes to the cache and fires React
+      // subscribers from this call stack, so React 18 treats the setState
+      // as discrete-event priority. No optimistic-callback boilerplate
+      // needed here.
       void client.mutation(api.issues.update, {
         issueId: issue._id,
         ...patch,

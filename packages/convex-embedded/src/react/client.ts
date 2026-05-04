@@ -13,6 +13,7 @@ import type {
   FunctionReturnType,
   OptionalRestArgs,
 } from "convex/server";
+import { startTransition } from "react";
 
 type WatchQueryOptions = {
   journal?: QueryJournal;
@@ -81,6 +82,12 @@ export class EmbeddedConvexReactClient extends ConvexReactClient {
       enumerable: false,
       writable: false,
     });
+    const setScheduler = (embeddedClient as unknown as {
+      setOptimisticDeferredScheduler?: (fn: (work: () => void) => void) => void;
+    }).setOptimisticDeferredScheduler;
+    if (typeof setScheduler === "function") {
+      setScheduler((work) => startTransition(work));
+    }
   }
 
   setAuth(...args: Parameters<ConvexReactClient["setAuth"]>): void {
@@ -110,6 +117,11 @@ export class EmbeddedConvexReactClient extends ConvexReactClient {
         query,
         args,
         () => {
+          const ts = globalThis.performance?.now?.() ?? Date.now();
+          // eslint-disable-next-line no-console
+          console.log(
+            `[react-notify] listeners=${listeners.size} ts=${ts.toFixed(1)}`,
+          );
           for (const listener of listeners) {
             listener();
           }

@@ -31,8 +31,26 @@ export function markUiClick(label: string, details?: Record<string, unknown>): v
   if (existing && !existing.reported) {
     emit("aborted", label, now() - existing.startedAt, existing.details);
   }
-  marks.set(label, { startedAt: now(), details });
+  const startedAt = now();
+  marks.set(label, { startedAt, details });
   emit("click", label, 0, details);
+  // Probe how long JS stays busy after click. If macrotask fires fast (<10ms)
+  // JS is idle and React's render delay is its own scheduler.
+  setTimeout(() => {
+    const mark = marks.get(label);
+    if (!mark || mark.reported) return;
+    const elapsed = now() - mark.startedAt;
+    console.log(`[ui-timing] macrotask "${label}" ${elapsed.toFixed(1)}ms`);
+  }, 0);
+  // Probe rAF — fires next frame. Tells us when display refreshes.
+  if (typeof requestAnimationFrame === "function") {
+    requestAnimationFrame(() => {
+      const mark = marks.get(label);
+      if (!mark || mark.reported) return;
+      const elapsed = now() - mark.startedAt;
+      console.log(`[ui-timing] raf "${label}" ${elapsed.toFixed(1)}ms`);
+    });
+  }
 }
 
 export function endUiMark(
@@ -62,6 +80,14 @@ export function clearUiMark(label: string): void {
  */
 export function useTimeUiUpdate<T>(label: string, value: T): void {
   const previous = useRef<{ value: T; reportedCommit: boolean } | null>(null);
+  // Log render-phase observation: when React reads the new value during render.
+  if (previous.current && previous.current.value !== value) {
+    const mark = marks.get(label);
+    if (mark) {
+      const renderMs = now() - mark.startedAt;
+      emit("render", label, renderMs);
+    }
+  }
   useEffect(() => {
     if (previous.current && previous.current.value === value) return;
     const isFirst = previous.current === null;

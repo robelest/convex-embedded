@@ -468,6 +468,7 @@ export function attachResolve(input: {
   processorId?: string;
   cache?: EmbeddedQueryCache;
   getCacheStorage?: () => QueryCacheStorage | null;
+  knownTables?: ReadonlySet<string>;
 }): ResolveAttachment {
   const {
     client,
@@ -552,6 +553,7 @@ export function attachResolve(input: {
     connectivity: input.connectivity,
     cache: input.cache,
     getCacheStorage: input.getCacheStorage,
+    knownTables: input.knownTables,
   });
 
   getResolveEntriesStore().set(client, entry);

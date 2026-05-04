@@ -135,6 +135,7 @@ function createResolveAttachment(input: {
   platformConfig: PlatformConfig;
   cache: EmbeddedQueryCache;
   getCacheStorage: () => QueryCacheStorage | null;
+  knownTables: ReadonlySet<string>;
 }): ResolveAttachment {
   const { runtime, connectivity, processorId } = input.platformConfig;
 
@@ -150,6 +151,7 @@ function createResolveAttachment(input: {
     processorId,
     cache: input.cache,
     getCacheStorage: input.getCacheStorage,
+    knownTables: input.knownTables,
   });
 }
 
@@ -407,6 +409,7 @@ export function createEmbeddedClient(input: {
         platformConfig,
         cache: queryCache,
         getCacheStorage: () => queryCacheStorage,
+        knownTables: new Set(tableDefinitions.keys()),
       })
     : null;
 
@@ -438,6 +441,7 @@ export function createEmbeddedClient(input: {
       connectivity: platform.connectivity,
       cache: queryCache,
       getCacheStorage: () => queryCacheStorage,
+      knownTables: new Set(tableDefinitions.keys()),
     });
   }
 

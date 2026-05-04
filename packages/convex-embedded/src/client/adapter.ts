@@ -18,6 +18,9 @@ import { nowMs } from "@/shared/perf";
 import { stableValueKey } from "@/shared/valuekey";
 import { withSpanSync } from "@/tracing/spans";
 
+import { effectToTransitions } from "@/client/optimistic/apply";
+import { deriveOptimisticEffect } from "@/client/optimistic/derive";
+
 function createNoopUnsubscribe(): any {
   const noop = (() => {}) as any;
   noop.unsubscribe = noop;
@@ -240,6 +243,73 @@ class CachePipeline {
     }
     const cached = this.config.cache.get(refName, args);
     return cached?.value;
+  }
+
+  private deferredScheduler: (fn: () => void) => void = (fn) => fn();
+
+  setDeferredScheduler(scheduler: (fn: () => void) => void): void {
+    this.deferredScheduler =
+      typeof scheduler === "function" ? scheduler : (fn) => fn();
+  }
+
+  applyOptimisticTransition(
+    updates: Array<{
+      refName: string;
+      args: unknown;
+      value: unknown;
+      priority?: "discrete" | "transition";
+    }>,
+  ): void {
+    if (updates.length === 0) return;
+    const transition: typeof updates = [];
+    for (const update of updates) {
+      if (update.priority === "transition") {
+        transition.push(update);
+        continue;
+      }
+      this.applyOptimisticOne(update);
+    }
+    if (transition.length > 0) {
+      this.deferredScheduler(() => {
+        for (const update of transition) {
+          this.applyOptimisticOne(update);
+        }
+      });
+    }
+  }
+
+  private applyOptimisticOne(update: {
+    refName: string;
+    args: unknown;
+    value: unknown;
+  }): void {
+    const argsKey = `${update.refName} ${stableValueKey(update.args)}`;
+    const previous = this.config.cache.get(update.refName, update.args);
+    const nextEntry: CachedEntry = {
+      value: update.value,
+      receivedAtMs: Date.now(),
+      ts: previous?.ts,
+      paginationCursor: previous?.paginationCursor,
+      paginationIsDone: previous?.paginationIsDone,
+    };
+    const changed = this.config.cache.set(
+      update.refName,
+      update.args,
+      nextEntry,
+    );
+    if (!changed) return;
+
+    const entry = this.active.get(argsKey);
+    if (entry) {
+      const valueChanged =
+        !entry.hasValue || !structuralEqual(entry.currentValue, update.value);
+      entry.currentValue = update.value;
+      entry.hasValue = true;
+      if (valueChanged) {
+        this.notifyListeners(entry);
+      }
+      void this.persistEntry(entry, nextEntry);
+    }
   }
 
   subscribe(input: {
@@ -564,6 +634,10 @@ class CachePipeline {
 
   private notifyListeners(entry: ActiveSubscription): void {
     if (entry.listeners.size === 0) return;
+    // eslint-disable-next-line no-console
+    console.log(
+      `[notify] ${entry.refName} listeners=${entry.listeners.size} ts=${nowMs().toFixed(1)}`,
+    );
     withSpanSync(
       "convex-embedded.cache.notifyListeners",
       (span) => {
@@ -1021,6 +1095,7 @@ export function patchRoutedConvexClient(input: {
   connectivity?: ConnectivityAdapter;
   cache?: EmbeddedQueryCache | null;
   getCacheStorage?: () => QueryCacheStorage | null;
+  knownTables?: ReadonlySet<string>;
 }) {
   patchBaseClientLocalQueryAccess({
     client: input.client,
@@ -1035,6 +1110,26 @@ export function patchRoutedConvexClient(input: {
   const cache = input.cache ?? null;
   const getCacheStorage = input.getCacheStorage ?? (() => null);
   const remoteClient = input.remoteClient ?? null;
+
+  const explicitOptimistic = new WeakMap<
+    object,
+    (
+      store: { getQuery: (refName: string, args: unknown) => unknown },
+      args: Record<string, unknown>,
+    ) => Array<{ refName: string; args: unknown; value: unknown }>
+  >();
+
+  const lookupExplicitOptimistic = (
+    ref: unknown,
+  ):
+    | ((
+        store: { getQuery: (refName: string, args: unknown) => unknown },
+        args: Record<string, unknown>,
+      ) => Array<{ refName: string; args: unknown; value: unknown }>)
+    | undefined => {
+    if (typeof ref !== "object" || ref === null) return undefined;
+    return explicitOptimistic.get(ref);
+  };
 
   const pipeline = cache
     ? new CachePipeline({
@@ -1181,6 +1276,32 @@ export function patchRoutedConvexClient(input: {
   (input.client as any).mutation = function patchedMutation(
     ...args: Parameters<typeof input.client.mutation>
   ): Promise<any> {
+    if (pipeline) {
+      try {
+        const ref = args[0];
+        const argsObj = (args[1] ?? {}) as Record<string, unknown>;
+        const refName = input.getRefName(ref);
+        const explicit = lookupExplicitOptimistic(ref);
+        const updates = explicit
+          ? explicit({ getQuery: pipeline.getCurrentValue.bind(pipeline) }, argsObj)
+          : (() => {
+              const effect = deriveOptimisticEffect({
+                refName,
+                args: argsObj,
+                knownTables: input.knownTables,
+              });
+              if (!effect) return [];
+              return effectToTransitions(effect, cache!);
+            })();
+        if (updates.length > 0) {
+          pipeline.applyOptimisticTransition(updates);
+        }
+      } catch (error) {
+        // eslint-disable-next-line no-console
+        console.warn("[convex-embedded] optimistic apply failed:", error);
+      }
+    }
+
     return waitUntilReady(async () => {
       const route = input.resolveMutationPlan(args[0]);
       if (route.kind === "error") {
@@ -1341,6 +1462,30 @@ export function patchRoutedConvexClient(input: {
     const raw = pipeline.getCurrentValue(refName, baseArgs);
     if (raw === undefined) return undefined;
     return toClientResult(raw, input.translateLocalResultToClient);
+  };
+
+  (input.client as any).applyOptimisticTransition = (
+    updates: Array<{ refName: string; args: unknown; value: unknown }>,
+  ): void => {
+    if (!pipeline) return;
+    pipeline.applyOptimisticTransition(updates);
+  };
+
+  (input.client as any).registerOptimisticUpdate = (
+    ref: unknown,
+    callback: (
+      store: { getQuery: (refName: string, args: unknown) => unknown },
+      args: Record<string, unknown>,
+    ) => Array<{ refName: string; args: unknown; value: unknown }>,
+  ): void => {
+    if (typeof ref !== "object" || ref === null) return;
+    explicitOptimistic.set(ref, callback);
+  };
+
+  (input.client as any).setOptimisticDeferredScheduler = (
+    scheduler: (fn: () => void) => void,
+  ): void => {
+    pipeline?.setDeferredScheduler(scheduler);
   };
 
   if (

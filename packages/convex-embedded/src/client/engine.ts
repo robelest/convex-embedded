@@ -3342,6 +3342,8 @@ function createEngine(config: EngineConfig): EngineInstance {
       const refName = getFunctionName(ref as any);
       const localArgs = idMap.translateRemoteIdsToLocal(args);
 
+      const __mutStart =
+        globalThis.performance?.now?.() ?? Date.now();
       let localResult: unknown = undefined;
       let localFailed = false;
       try {
@@ -3357,6 +3359,13 @@ function createEngine(config: EngineConfig): EngineInstance {
         );
       }
 
+      const __localDone =
+        globalThis.performance?.now?.() ?? Date.now();
+      // eslint-disable-next-line no-console
+      console.log(
+        `[engine.mutation] local-done t+${(__localDone - __mutStart).toFixed(1)}ms ref=${refName}`,
+      );
+
       if (localFailed) {
         const remoteResult = await (remoteClient as any).mutation(
           ref,
@@ -3371,21 +3380,33 @@ function createEngine(config: EngineConfig): EngineInstance {
       }
 
       if (enqueueForReplay) {
-        try {
-          const table = inferTableFromRef(ref, tables);
-          if (!table) {
-            throw new Error(
-              `[convex-embedded] could not infer table for mutation ref "${refName}".`,
-            );
-          }
+        const table = inferTableFromRef(ref, tables);
+        if (!table) {
+          throw new Error(
+            `[convex-embedded] could not infer table for mutation ref "${refName}".`,
+          );
+        }
+        // Detach pending-queue persistence so the user mutation returns
+        // immediately after local memory commit. Subsequent mutations may
+        // race their pending-pushes through the runtime's transaction lock
+        // (which already serialises commits), preserving ordering.
+        const replayPayloadVersion = getReplayPayloadVersion?.(refName) ?? 1;
+        runDetached(async () => {
+          const __pushStart =
+            globalThis.performance?.now?.() ?? Date.now();
           await pendingQueue.push(
             ref,
             args,
             localResult,
             table,
-            getReplayPayloadVersion?.(refName) ?? 1,
+            replayPayloadVersion,
           );
-
+          const __pushDone =
+            globalThis.performance?.now?.() ?? Date.now();
+          // eslint-disable-next-line no-console
+          console.log(
+            `[engine.mutation] queue.push push=${(__pushDone - __pushStart).toFixed(1)}ms ref=${refName}`,
+          );
           if (!isOnline && crdtFieldsByTable.has(table)) {
             const docId =
               typeof localResult === "string"
@@ -3396,18 +3417,20 @@ function createEngine(config: EngineConfig): EngineInstance {
               markCrdtRowDirty(table, docId);
             }
           }
-
           if (isOnline) {
             ensureReplayProcessing();
           } else {
             log.debug("sync: offline — mutation queued for later push");
           }
-        } catch (err) {
-          log.warn("sync: failed to queue mutation", err);
-          throw err;
-        }
+        }, "[sync] pendingQueue.push:");
       }
 
+      const __chainDone =
+        globalThis.performance?.now?.() ?? Date.now();
+      // eslint-disable-next-line no-console
+      console.log(
+        `[engine.mutation] chain-done t+${(__chainDone - __mutStart).toFixed(1)}ms ref=${refName}`,
+      );
       return localResult;
     },
 

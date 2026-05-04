@@ -174,7 +174,6 @@ export class SubscriptionManager {
     const { candidateTokens, changes, tablesWritten } =
       this._collectRelevantSubscriptions(changesOrTables);
 
-    let fired = 0;
     for (const token of candidateTokens) {
       const sub = this._subscriptions.get(token);
       if (!sub) {
@@ -189,14 +188,7 @@ export class SubscriptionManager {
 
       if (overlaps) {
         sub.callback();
-        fired += 1;
       }
-    }
-    if (fired > 0) {
-      // eslint-disable-next-line no-console
-      console.log(
-        `[invalidate] tables=${[...tablesWritten].join(",")} candidates=${candidateTokens.size} fired=${fired}`,
-      );
     }
   }
 

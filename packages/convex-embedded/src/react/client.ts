@@ -169,28 +169,36 @@ export class EmbeddedConvexReactClient extends ConvexReactClient {
     args: FunctionArgs<Query>,
     options: WatchPaginatedQueryOptions,
   ) {
+    const embedded = this.embeddedClient;
     const listeners = new Set<() => void>();
-    const subscription = this.embeddedClient.onPaginatedUpdate_experimental(
-      query,
-      args,
-      { initialNumItems: options.initialNumItems },
-      () => {
-        for (const listener of listeners) {
-          listener();
-        }
-      },
-      () => {
-        for (const listener of listeners) {
-          listener();
-        }
-      },
-    ) as unknown as PaginatedQuerySubscription<Query>;
+    let subscription: PaginatedQuerySubscription<Query> | null = null;
+
+    const ensureSubscription = (): PaginatedQuerySubscription<Query> => {
+      if (subscription !== null) return subscription;
+      subscription = embedded.onPaginatedUpdate_experimental(
+        query,
+        args,
+        { initialNumItems: options.initialNumItems },
+        () => {
+          for (const listener of listeners) {
+            listener();
+          }
+        },
+        () => {
+          for (const listener of listeners) {
+            listener();
+          }
+        },
+      ) as unknown as PaginatedQuerySubscription<Query>;
+      return subscription;
+    };
 
     return {
       onUpdate(callback: () => void) {
+        const sub = ensureSubscription();
         listeners.add(callback);
         const cancelImmediate =
-          subscription.getCurrentValue() !== undefined
+          sub.getCurrentValue() !== undefined
             ? scheduleImmediateCallback(() => {
                 if (listeners.has(callback)) callback();
               })
@@ -199,13 +207,26 @@ export class EmbeddedConvexReactClient extends ConvexReactClient {
         return () => {
           listeners.delete(callback);
           cancelImmediate?.();
-          if (listeners.size === 0) {
+          if (listeners.size === 0 && subscription !== null) {
             subscription.unsubscribe();
+            subscription = null;
           }
         };
       },
       localQueryResult() {
-        return subscription.getCurrentValue();
+        if (subscription !== null) {
+          return subscription.getCurrentValue();
+        }
+        const peek = (embedded as unknown as {
+          peekPaginatedCurrentValue?: (
+            ref: unknown,
+            args: unknown,
+            opts: { initialNumItems: number },
+          ) => unknown;
+        }).peekPaginatedCurrentValue;
+        return typeof peek === "function"
+          ? peek(query, args, { initialNumItems: options.initialNumItems })
+          : undefined;
       },
     };
   }

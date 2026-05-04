@@ -205,23 +205,11 @@ export class RuntimeQueryObserverRegistry<TMeta> {
       }
     }
 
-    const refreshStart =
-      globalThis.performance?.now?.() ?? Date.now();
     observer.evaluation = (async () => {
       do {
         observer.needsReevaluation = false;
         try {
-          const evalStart =
-            globalThis.performance?.now?.() ?? Date.now();
           const evaluation = await observer.evaluate();
-          const evalMs =
-            (globalThis.performance?.now?.() ?? Date.now()) - evalStart;
-          if (evalMs > 5) {
-            // eslint-disable-next-line no-console
-            console.log(
-              `[refresh] ${observer.token} eval=${evalMs.toFixed(1)}ms`,
-            );
-          }
           this.syncState(observer, evaluation, { notify: false });
           this._captureDepVersions(observer);
         } catch (error) {
@@ -247,20 +235,8 @@ export class RuntimeQueryObserverRegistry<TMeta> {
         }
 
         if (stateChanged(observer)) {
-          const notifyStart =
-            globalThis.performance?.now?.() ?? Date.now();
           for (const listener of Array.from(observer.listeners)) {
             listener();
-          }
-          const notifyMs =
-            (globalThis.performance?.now?.() ?? Date.now()) - notifyStart;
-          const totalMs =
-            (globalThis.performance?.now?.() ?? Date.now()) - refreshStart;
-          if (totalMs > 5) {
-            // eslint-disable-next-line no-console
-            console.log(
-              `[refresh] ${observer.token} total=${totalMs.toFixed(1)}ms notify=${notifyMs.toFixed(1)}ms listeners=${observer.listeners.size}`,
-            );
           }
         }
       } while (observer.needsReevaluation);

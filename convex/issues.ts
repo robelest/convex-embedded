@@ -149,19 +149,31 @@ export const update = issues.mutation({
     }
 
     const updates: Record<string, unknown> = {};
-    if (args.title !== undefined) updates.title = args.title.trim();
+    if (args.title !== undefined) {
+      const next = args.title.trim();
+      if (next !== issue.title) updates.title = next;
+    }
     if (args.description !== undefined) {
       updates.description = prose.normalize(args.description);
     }
-    if (args.status !== undefined) updates.status = args.status;
-    if (args.priority !== undefined) updates.priority = args.priority;
-    if (args.assigneeUserId !== undefined) {
+    if (args.status !== undefined && args.status !== issue.status) {
+      updates.status = args.status;
+    }
+    if (args.priority !== undefined && args.priority !== issue.priority) {
+      updates.priority = args.priority;
+    }
+    if (
+      args.assigneeUserId !== undefined &&
+      args.assigneeUserId !== issue.assigneeUserId
+    ) {
       updates.assigneeUserId = args.assigneeUserId;
     }
 
-    if (Object.keys(updates).length > 0) {
-      await ctx.db.patch(issue._id, updates);
+    if (Object.keys(updates).length === 0) {
+      return null;
     }
+
+    await ctx.db.patch(issue._id, updates);
 
     if (args.status !== undefined && args.status !== issue.status) {
       const wasOpen = isOpenIssue(issue.status);

@@ -77,9 +77,17 @@ export default function IssueDetail() {
       if (!issue) {
         return;
       }
+      const changed = Object.entries(fields).filter(([key, value]) => {
+        const current = (issue as Record<string, unknown>)[key];
+        return current !== value;
+      });
+      if (changed.length === 0) {
+        return;
+      }
+      const patch = Object.fromEntries(changed);
       void client.mutation(api.issues.update, {
         issueId: issue._id,
-        ...fields,
+        ...patch,
       });
     },
     [client, issue],

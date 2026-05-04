@@ -31,17 +31,8 @@ export function markUiClick(label: string, details?: Record<string, unknown>): v
   if (existing && !existing.reported) {
     emit("aborted", label, now() - existing.startedAt, existing.details);
   }
-  const startedAt = now();
-  marks.set(label, { startedAt, details });
+  marks.set(label, { startedAt: now(), details });
   emit("click", label, 0, details);
-  // Probe macrotask responsiveness by scheduling a 0ms setTimeout. Logs the
-  // actual delay to find out when JS is yielding to the event loop.
-  setTimeout(() => {
-    const mark = marks.get(label);
-    if (!mark || mark.reported) return;
-    const elapsed = now() - mark.startedAt;
-    console.log(`[ui-timing] macrotask "${label}" ${elapsed.toFixed(1)}ms`);
-  }, 0);
 }
 
 export function endUiMark(

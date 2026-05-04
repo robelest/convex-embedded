@@ -272,12 +272,6 @@ class CachePipeline {
     if (input.onError) {
       entry.errorListeners.add(input.onError);
     }
-    if (entry.listeners.size > 1) {
-      // eslint-disable-next-line no-console
-      console.log(
-        `[subscribe] ${entry.refName} listeners=${entry.listeners.size} stack:\n${new Error().stack?.split("\n").slice(2, 12).join("\n")}`,
-      );
-    }
 
     if (entry.hasValue) {
       try {
@@ -570,10 +564,6 @@ class CachePipeline {
 
   private notifyListeners(entry: ActiveSubscription): void {
     if (entry.listeners.size === 0) return;
-    // eslint-disable-next-line no-console
-    console.log(
-      `[notify] ${entry.refName} listeners=${entry.listeners.size}`,
-    );
     withSpanSync(
       "convex-embedded.cache.notifyListeners",
       (span) => {
@@ -1325,6 +1315,30 @@ export function patchRoutedConvexClient(input: {
     if (!pipeline) return undefined;
     const refName = input.getRefName(ref);
     const raw = pipeline.getCurrentValue(refName, args ?? {});
+    if (raw === undefined) return undefined;
+    return toClientResult(raw, input.translateLocalResultToClient);
+  };
+
+  (input.client as any).peekPaginatedCurrentValue = (
+    ref: unknown,
+    args: unknown,
+    options: { initialNumItems: number },
+  ): unknown => {
+    if (!pipeline) return undefined;
+    const refName = input.getRefName(ref);
+    const argRecord = (args ?? {}) as Record<string, unknown>;
+    const existingPaginationOpts = isPlainObject(argRecord.paginationOpts)
+      ? (argRecord.paginationOpts as Record<string, unknown>)
+      : {};
+    const baseArgs: Record<string, unknown> = {
+      ...argRecord,
+      paginationOpts: {
+        cursor: null,
+        numItems: options.initialNumItems,
+        ...existingPaginationOpts,
+      },
+    };
+    const raw = pipeline.getCurrentValue(refName, baseArgs);
     if (raw === undefined) return undefined;
     return toClientResult(raw, input.translateLocalResultToClient);
   };

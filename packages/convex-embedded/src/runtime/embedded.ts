@@ -1388,9 +1388,18 @@ export class EmbeddedRuntime {
     ) as Array<Record<string, unknown> & { _id: string; _creationTime: number }>;
     if (validDocs.length === 0) return;
 
+    const changed = validDocs.filter((doc) => {
+      const existing = this.db.get(
+        table,
+        doc._id as unknown as DocumentId,
+      ) as Record<string, unknown> | null;
+      return existing === null || !structuralEqual(existing, doc);
+    });
+    if (changed.length === 0) return;
+
     this.db.startTransaction();
     try {
-      for (const doc of validDocs) {
+      for (const doc of changed) {
         try {
           this.db.putDocument(table, doc, { validate: false });
         } catch {
@@ -1726,12 +1735,6 @@ export class EmbeddedRuntime {
 
         if (current.applyLocalEffects) {
           this.onMutationCommit(commit);
-          setTimeout(() => {
-            runDetached(
-              () => this.pushLocalQueryUpdates(commit),
-              "[convex-embedded] pushLocalQueryUpdates failed:",
-            );
-          }, 0);
         }
 
         return result;

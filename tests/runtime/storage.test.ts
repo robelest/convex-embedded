@@ -1,5 +1,5 @@
-import { attachPlatformPersistence } from "@resolve/runtime/persistence";
-import { mockAdapter } from "@tests/helpers/test-adapter";
+import { attachPlatformStorage } from "@resolve/runtime/load";
+import { mockAdapter } from "@tests/helpers/adapter";
 import { describe, expect, it, vi } from "@tests/testkit";
 
 function createStorage(
@@ -37,11 +37,11 @@ function createStorage(
   return mockAdapter(base);
 }
 
-describe("attachPlatformPersistence", () => {
+describe("attachPlatformStorage", () => {
   it("hydrates all tables then persists prefetch when storage has no user rows", async () => {
     const storage = createStorage({});
     const runtime = {
-      setPersistenceAdapter: vi.fn(),
+      setStorage: vi.fn(),
       setIdentityKey: vi.fn(),
       crypto: {} as never,
       getIdentityKey: vi.fn(() => null),
@@ -55,10 +55,10 @@ describe("attachPlatformPersistence", () => {
       },
     } as any;
 
-    await attachPlatformPersistence({
+    await attachPlatformStorage({
       runtime,
       platform: {
-        openPersistence: vi.fn(async () => storage),
+        openStorage: vi.fn(async () => storage),
       } as any,
       name: "test",
       prefetch: {
@@ -74,12 +74,12 @@ describe("attachPlatformPersistence", () => {
     expect(runtime.ingestPrefetchUngated).toHaveBeenCalledTimes(1);
   });
 
-  it("skips prefetch persistence and hydrates full data when storage already has user rows", async () => {
+  it("skips prefetch ingest and hydrates full data when storage already has user rows", async () => {
     const storage = createStorage({
       tasks: [{ _id: "task-local", _creationTime: 1, title: "Persisted" }],
     });
     const runtime = {
-      setPersistenceAdapter: vi.fn(),
+      setStorage: vi.fn(),
       crypto: {} as never,
       getIdentityKey: vi.fn(() => null),
       ingestPrefetchUngated: vi.fn(async () => undefined),
@@ -93,10 +93,10 @@ describe("attachPlatformPersistence", () => {
       },
     } as any;
 
-    await attachPlatformPersistence({
+    await attachPlatformStorage({
       runtime,
       platform: {
-        openPersistence: vi.fn(async () => storage),
+        openStorage: vi.fn(async () => storage),
       } as any,
       name: "test",
       prefetch: {
@@ -112,10 +112,10 @@ describe("attachPlatformPersistence", () => {
     expect(runtime.ingestPrefetchUngated).not.toHaveBeenCalled();
   });
 
-  it("hydrates all tables eagerly at startup, including for sql persistence adapters", async () => {
+  it("hydrates all tables eagerly at startup, including for sql storage adapters", async () => {
     const storage = createStorage({}, "sql");
     const runtime = {
-      setPersistenceAdapter: vi.fn(),
+      setStorage: vi.fn(),
       crypto: {} as never,
       getIdentityKey: vi.fn(() => null),
       ingestPrefetchUngated: vi.fn(async () => undefined),
@@ -128,10 +128,10 @@ describe("attachPlatformPersistence", () => {
       },
     } as any;
 
-    await attachPlatformPersistence({
+    await attachPlatformStorage({
       runtime,
       platform: {
-        openPersistence: vi.fn(async () => storage),
+        openStorage: vi.fn(async () => storage),
       } as any,
       name: "test",
     });

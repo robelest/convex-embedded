@@ -6,6 +6,7 @@ import {
   setOfflineStaleIfNeeded,
   type AuthEntry,
 } from "@/client/auth";
+import type { EmbeddedQueryCache } from "@/client/cache";
 import {
   discoverRemoteMetadata,
   type DiscoveredRemoteMetadata,
@@ -27,6 +28,7 @@ import type { ResolveInput } from "@/client/services/resolve";
 import type { ConvexInput } from "@/kernel/modules";
 import type { EmbeddedRuntime } from "@/runtime/embedded";
 import type { ConnectivityAdapter } from "@/runtime/platform";
+import type { QueryCacheStorage } from "@/runtime/sqlite/cache_table";
 import type { RouteMode } from "@/shared/route";
 import { PubSub } from "@/utils/pubsub";
 import { DisposableScope } from "@/utils/scope";
@@ -265,9 +267,6 @@ async function deferUntilDiscovery<T>(
   if (entry.discovery) {
     await entry.discovery;
   }
-  // If discovery ended in an error state, propagate the error so that
-  // deferred mutations and subscriptions surface the failure instead of
-  // silently falling back to local-only execution.
   if (entry.state.status === "error" && entry.state.error) {
     throw entry.state.error;
   }
@@ -467,6 +466,8 @@ export function attachResolve(input: {
   getReplayPayloadVersion?: (refName: string) => number;
   connectivity?: ConnectivityAdapter;
   processorId?: string;
+  cache?: EmbeddedQueryCache;
+  getCacheStorage?: () => QueryCacheStorage | null;
 }): ResolveAttachment {
   const {
     client,
@@ -505,9 +506,7 @@ export function attachResolve(input: {
   entry.scope.addFinalizer(async () => {
     try {
       await Promise.resolve(remoteClient.close());
-    } catch {
-      // Ignore close errors
-    }
+    } catch {}
   });
   entry.scope.addFinalizer(() => {
     entry.stateHub.shutdown();
@@ -530,10 +529,15 @@ export function attachResolve(input: {
     ensureReadReady: async (refName, readArgs) => {
       const tableName = refName.split(":")[0] ?? "";
       if (!tableName) return;
+      const filtered = readArgs
+        ? Object.fromEntries(
+            Object.entries(readArgs).filter(([key]) => key !== "paginationOpts"),
+          )
+        : undefined;
       const scopeArgs =
-        readArgs && Object.keys(readArgs).length > 0
-          ? (entry.engine?.idMap?.translateLocalIdsToRemote(readArgs) ??
-            readArgs)
+        filtered && Object.keys(filtered).length > 0
+          ? (entry.engine?.idMap?.translateLocalIdsToRemote(filtered) ??
+            filtered)
           : undefined;
       await entry.engine?.ensureScopeReady?.(tableName, scopeArgs);
     },
@@ -546,6 +550,8 @@ export function attachResolve(input: {
     waitUntilReady: (run) => deferUntilDiscovery(entry, run),
     isReady: () => entry.discoveryReady,
     connectivity: input.connectivity,
+    cache: input.cache,
+    getCacheStorage: input.getCacheStorage,
   });
 
   getResolveEntriesStore().set(client, entry);

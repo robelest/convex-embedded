@@ -5,20 +5,18 @@ import type {
   TableName,
 } from "@/runtime/db/types";
 import type {
-  PersistenceVectorRead,
-  PersistenceQueryRead,
-  PersistenceReadOptions,
+  VectorSearchArgs,
+  QueryArgs,
+  ReadOptions,
 } from "@/storage/adapter";
 
 export interface AsyncReadBackend {
-  listDocuments?(tableName: TableName): Promise<StoredDocument[]>;
-  readQuery?(args: PersistenceQueryRead): Promise<StoredDocument[] | null>;
-  readVectorCandidates?(
-    args: PersistenceVectorRead,
-  ): Promise<StoredDocument[] | null>;
-  readSource?(
+  getDocuments?(tableName: TableName): Promise<StoredDocument[]>;
+  query?(args: QueryArgs): Promise<StoredDocument[] | null>;
+  vectorSearch?(args: VectorSearchArgs): Promise<StoredDocument[] | null>;
+  source?(
     source: Source,
-    options?: PersistenceReadOptions,
+    options?: ReadOptions,
   ): Promise<StoredDocument[] | null>;
   getDocument?(
     tableName: TableName,

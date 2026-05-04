@@ -2,7 +2,7 @@
  * Node entry point for `@robelest/convex-embedded/node`.
  *
  * This surface mirrors the browser embedded client while wiring in
- * Node-native sqlite persistence for restart-safe local state and replay.
+ * Node-native sqlite storage for restart-safe local state and replay.
  *
  * @packageDocumentation
  */
@@ -18,7 +18,7 @@ import {
   createNodePlatformAdapter,
   type NodePlatformOptions,
 } from "@/node/platform";
-import { openNodePersistence } from "@/node/sqlite/adapter";
+import { openNodeStorage } from "@/node/sqlite/adapter";
 import type {
   ConnectivityAdapter,
   ProcessorIdentity,
@@ -26,7 +26,7 @@ import type {
 
 export type { AuthOptions, AuthState, RemoteOptions, RemoteState };
 export type { ConvexInput } from "@/kernel/modules";
-export { createNodePlatformAdapter, openNodePersistence };
+export { createNodePlatformAdapter, openNodeStorage };
 export type { NodePlatformOptions } from "@/node/platform";
 
 export interface ClientOptions {

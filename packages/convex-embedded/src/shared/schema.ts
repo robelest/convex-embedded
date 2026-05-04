@@ -1,15 +1,10 @@
-/**
- * Core schema utilities — field detection, definition builder, and Yjs bridge.
- *
- * Consolidates former schema-core.ts + schema-utils.ts into a single module.
- */
-
+import type {
+  MigrationsMap,
+  MigrationStep,
+} from "@/shared/migrations/types";
+import { targetVersionFromMigrations } from "@/shared/migrations/types";
 import type { CrdtFieldDescriptor } from "@/shared/types";
 import { CrdtType } from "@/shared/types";
-
-// ---------------------------------------------------------------------------
-// Field detection (was schema-core.ts)
-// ---------------------------------------------------------------------------
 
 const CRDT_FIELD = Symbol.for("convex-embedded:crdt-field");
 
@@ -29,59 +24,34 @@ export function getCrdtType(field: unknown): CrdtType | null {
   return null;
 }
 
-// ---------------------------------------------------------------------------
-// Definition builder (was schema-core.ts)
-// ---------------------------------------------------------------------------
-
-export type LocalTableMigrationStep = (ctx: {
-  table: string;
-  fromVersion: number;
-  toVersion: number;
-  targetVersion: number;
-  schema: Definition;
-  docs: {
-    all(): Promise<Array<Record<string, unknown>>>;
-    patchMissing(fields: Record<string, unknown>): Promise<number>;
-    patch(id: unknown, fields: Record<string, unknown>): Promise<void>;
-    replace(id: unknown, fields: Record<string, unknown>): Promise<void>;
-    delete(id: unknown): Promise<void>;
-    modify(
-      transform: (
-        doc: Record<string, unknown>,
-      ) =>
-        | Record<string, unknown>
-        | null
-        | void
-        | Promise<Record<string, unknown> | null | void>,
-    ): Promise<number>;
-  };
-}) => Promise<void> | void;
+/** @deprecated Re-exported for transitional uses; prefer `MigrationStep`. */
+export type LocalTableMigrationStep = MigrationStep;
 
 export interface DefineOptions {
-  version: number;
   shape: Record<string, unknown>;
   defaults?: Record<string, unknown>;
-  migrate?: Record<number, LocalTableMigrationStep>;
+  migrations?: MigrationsMap;
 }
 
 export interface Definition {
   version: number;
   shape: Record<string, unknown>;
   defaults: Record<string, unknown>;
-  migrate: Record<number, LocalTableMigrationStep>;
+  migrations: MigrationsMap;
   getShape(): Record<string, unknown>;
   getCrdtFields(): Map<string, CrdtFieldDescriptor>;
   getOmittedFields(): string[];
 }
 
 export function define(options: DefineOptions): Definition {
-  const { version, shape, defaults = {}, migrate = {} } = options;
+  const { shape, defaults = {}, migrations = {} } = options;
+  const version = targetVersionFromMigrations(migrations);
 
   return {
     version,
     shape,
     defaults,
-    migrate,
+    migrations,
     getShape() {
       return shape;
     },
@@ -106,14 +76,3 @@ export function define(options: DefineOptions): Definition {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Yjs bridge re-exports (was schema-utils.ts)
-// ---------------------------------------------------------------------------
-
-export {
-  computeDiff,
-  encodeDocumentState,
-  initYjsDoc,
-  isDiffEmpty,
-  mergeUpdate,
-} from "@/shared/yjs";

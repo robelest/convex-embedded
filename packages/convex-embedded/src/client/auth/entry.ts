@@ -90,9 +90,7 @@ export function notifyAuthListeners(entry: AuthEntry, state: AuthState): void {
   entry.state = state;
   try {
     entry.stateHub.publish(state);
-  } catch {
-    // Publish failures should not break auth propagation.
-  }
+  } catch {}
 }
 
 export function toAuthenticatedState(

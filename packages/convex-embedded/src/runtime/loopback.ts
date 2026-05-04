@@ -6,9 +6,9 @@
  * are delivered synchronously via `onmessage`.
  */
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
+import { createLogger } from "@/shared/logger";
+
+const log = createLogger("ws");
 
 const CONNECTING = 0;
 const OPEN = 1;
@@ -21,10 +21,6 @@ const CLOSED = 3;
  * triggering an inactivity-based reconnect (~60 s default).
  */
 const PING_INTERVAL_MS = 30_000;
-
-// ---------------------------------------------------------------------------
-// Event types
-// ---------------------------------------------------------------------------
 
 /** Base event shape for LoopbackWebSocket events. */
 /** @internal */
@@ -59,10 +55,6 @@ export interface LoopbackErrorEvent extends LoopbackEvent {
   type: "error";
   error: unknown;
 }
-
-// ---------------------------------------------------------------------------
-// LoopbackWebSocket
-// ---------------------------------------------------------------------------
 
 /**
  * Minimal WebSocket-compatible class that routes messages through an
@@ -101,17 +93,14 @@ export class LoopbackWebSocket {
     this.url = url;
     this._handler = handler;
 
-    // Schedule open on the next microtask, matching real WebSocket behaviour.
     void Promise.resolve().then(() => {
       if (this.readyState !== CONNECTING) return;
       this.readyState = OPEN;
-      console.debug("[convex-embedded:ws] open", url);
+      log.debug("open", url);
       const event = { type: "open" as const };
       this.onopen?.(event);
       this._emit("open", event);
 
-      // Start periodic Ping keepalive so the SDK doesn't trigger an
-      // inactivity-based reconnect.
       this._startPingInterval();
     });
   }
@@ -132,7 +121,7 @@ export class LoopbackWebSocket {
         return "?";
       }
     })();
-    console.debug("[convex-embedded:ws] send", msgType);
+    log.debug("send", msgType);
 
     this._sendQueue = this._sendQueue
       .then(
@@ -162,7 +151,7 @@ export class LoopbackWebSocket {
     if (this.readyState === CLOSED) return;
     this.readyState = CLOSED;
     this._stopPingInterval();
-    console.debug("[convex-embedded:ws] close", _code, _reason);
+    log.debug("close", _code, _reason);
     const event = {
       type: "close" as const,
       code: _code ?? 1000,
@@ -245,16 +234,12 @@ export class LoopbackWebSocket {
         return "?";
       }
     })();
-    console.debug("[convex-embedded:ws] recv", respType);
+    log.debug("recv", respType);
     const event = { type: "message" as const, data };
     this.onmessage?.(event);
     this._emit("message", event);
   }
 }
-
-// ---------------------------------------------------------------------------
-// Constructor factory
-// ---------------------------------------------------------------------------
 
 /**
  * Creates a WebSocket constructor compatible with ConvexClient's
@@ -275,7 +260,6 @@ export function LoopbackWebSocketConstructor(
     | ((message: string) => Promise<string[]>)
     | (() => (message: string) => Promise<string[]>),
 ): new (url: string) => LoopbackWebSocket {
-  // Detect factory vs handler: a factory takes 0 args; a handler takes 1.
   const isFactory = handlerOrFactory.length === 0;
 
   return class extends LoopbackWebSocket {

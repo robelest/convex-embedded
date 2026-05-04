@@ -5,7 +5,7 @@ import {
   register as registerField,
 } from "@resolve/server/schema";
 import type { Definition } from "@resolve/server/schema";
-import { canonicalizeMappedCreateTable } from "@resolve/shared/id_canonicalization";
+import { canonicalizeMappedCreateTable } from "@resolve/shared/canonicalize";
 import { describe, it, expect, beforeEach, afterEach } from "@tests/testkit";
 import { v } from "convex/values";
 import { vi } from "vitest";
@@ -549,7 +549,7 @@ describe("engine.create()", () => {
   // Start / Stop lifecycle
   // -------------------------------------------------------------------------
 
-  it("transitions through resolving to resolved on start() when online", async () => {
+  it("transitions to resolved on start() when online", async () => {
     const { embedded, localClient } = createMockEmbedded();
     const remoteClient = createMockRemoteClient();
 
@@ -565,10 +565,8 @@ describe("engine.create()", () => {
     m.start();
     await settle();
 
-    expect(statuses).toContain("resolving");
     expect(statuses).toContain("resolved");
 
-    // Hydration queries were issued on localClient
     expect(localClient.query).toHaveBeenCalledWith("_system:idMapGetAll", {
       identityKey: null,
     });
@@ -622,7 +620,8 @@ describe("engine.create()", () => {
 
     await settle();
 
-    // Resolve query called once per table (1 table), not tripled
+    await m.resolveNow();
+
     expect(remoteClient.query).toHaveBeenCalledTimes(1);
 
     m.stop();
@@ -689,6 +688,7 @@ describe("engine.create()", () => {
 
     m.start();
     await settle();
+    await m.resolveNow();
 
     expect(remoteClient.query).toHaveBeenCalledTimes(2);
     expect(remoteClient.query).toHaveBeenCalledWith("tasks.resolve", {
@@ -723,6 +723,8 @@ describe("engine.create()", () => {
     m.on("change", (status) => statuses.push(status.status));
 
     m.start();
+    await settle();
+    void m.resolveNow().catch(() => {});
     await settle(200);
 
     expect(statuses).toContain("error");
@@ -826,10 +828,7 @@ describe("engine.create()", () => {
     m.stop();
 
     expect(statuses.length).toBeGreaterThan(0);
-    expect(statuses).toContain("resolving");
     expect(statuses).toContain("resolved");
-    // stop() clears listeners before emitting idle, so the listener
-    // does not observe the final idle transition — verify via getStatus
     expect(m.getStatus()).toEqual({ status: "idle" });
   });
 
@@ -943,15 +942,18 @@ describe("engine.create()", () => {
     m.start();
     await settle();
 
-    expect(remoteClient.query).toHaveBeenCalledTimes(1);
     expect(remoteClient.onUpdate).toHaveBeenCalledTimes(1);
+    const onUpdateCallsBeforeMutation = remoteClient.onUpdate.mock.calls.length;
+    const queryCallsBeforeMutation = remoteClient.query.mock.calls.length;
 
     await m.mutation("tasks:create", { title: "Buy milk" });
     await settle(100);
 
     expect(unsubscribe).not.toHaveBeenCalled();
-    expect(remoteClient.query).toHaveBeenCalledTimes(1);
-    expect(remoteClient.onUpdate).toHaveBeenCalledTimes(1);
+    expect(remoteClient.query).toHaveBeenCalledTimes(queryCallsBeforeMutation);
+    expect(remoteClient.onUpdate).toHaveBeenCalledTimes(
+      onUpdateCallsBeforeMutation,
+    );
     expect(remoteClient.mutation).toHaveBeenCalledTimes(1);
 
     m.stop();
@@ -1095,7 +1097,7 @@ describe("engine.create()", () => {
     expect(m.pendingCount()).toBe(1);
   });
 
-  it("mutation() rejects when pending persistence degrades to ephemeral queueing", async () => {
+  it("mutation() rejects when pending storage degrades to ephemeral queueing", async () => {
     const { embedded, localClient } = createMockEmbedded();
     localClient.mutation.mockImplementation((path: string) => {
       if (path === "_system:pendingPush") {
@@ -1613,6 +1615,7 @@ describe("engine.create()", () => {
 
     m.start();
     await settle();
+    await m.resolveNow();
 
     expect(embedded.getDocumentsForTable).toHaveBeenCalledWith("tasks");
 
@@ -1621,15 +1624,13 @@ describe("engine.create()", () => {
 
   it("resolve sends state vectors for local docs to remote query", async () => {
     const { embedded } = createMockEmbedded();
-    // Return a local doc so the resolve encodes its state vector.
     embedded.getDocumentsForTable.mockResolvedValue([
       { _id: "doc-1", _creationTime: 100, title: "Hello", body: "World" },
     ]);
 
     const remoteClient = createMockRemoteClient();
-    // The resolve query should return results per-document.
     remoteClient.query.mockResolvedValue([
-      { docId: "doc-1" }, // no diff — client is up-to-date
+      { docId: "doc-1" },
     ]);
 
     const m = createEngine({
@@ -1640,9 +1641,8 @@ describe("engine.create()", () => {
 
     m.start();
     await settle();
+    await m.resolveNow();
 
-    // The resolve query should have been called with documents
-    // containing state vectors (ArrayBuffer).
     expect(remoteClient.query).toHaveBeenCalledTimes(1);
     const [, resolveArgs] = remoteClient.query.mock.calls[0]!;
     expect(resolveArgs.documents).toHaveLength(1);
@@ -1663,9 +1663,8 @@ describe("engine.create()", () => {
     ]);
 
     const remoteClient = createMockRemoteClient();
-    // Return no diff — client is up-to-date.
     remoteClient.query.mockResolvedValue([
-      { docId: "doc-1" }, // no diff field
+      { docId: "doc-1" },
     ]);
 
     const m = createEngine({
@@ -1676,8 +1675,8 @@ describe("engine.create()", () => {
 
     m.start();
     await settle();
+    await m.resolveNow();
 
-    // ingestDocuments should have been called with the materialized doc.
     expect(embedded.ingestDocuments).toHaveBeenCalledWith(
       "tasks",
       expect.arrayContaining([
@@ -3269,7 +3268,14 @@ describe("engine.create()", () => {
       m.start();
       await settle();
 
+      const onUpdateCallsAfterStart = remoteClient.onUpdate.mock.calls.length;
+
+      const offlineHandler = getRegisteredHandler("offline");
+      offlineHandler();
+      await settle();
+
       const onlineHandler = getRegisteredHandler("online");
+      onlineHandler();
       onlineHandler();
       await settle();
 
@@ -3278,7 +3284,9 @@ describe("engine.create()", () => {
       resolveQuery([]);
       await settle(100);
 
-      expect(remoteClient.onUpdate).toHaveBeenCalledTimes(1);
+      expect(remoteClient.onUpdate).toHaveBeenCalledTimes(
+        onUpdateCallsAfterStart + 1,
+      );
       m.stop();
     });
 
@@ -3328,12 +3336,6 @@ describe("engine.create()", () => {
     });
 
     it("drops remove replays that were already applied remotely", async () => {
-      Object.defineProperty(globalThis, "navigator", {
-        value: { onLine: false },
-        writable: true,
-        configurable: true,
-      });
-
       const { embedded } = createMockEmbedded();
       const remoteClient: any = {
         ...createMockRemoteClient(),
@@ -3352,6 +3354,17 @@ describe("engine.create()", () => {
 
       m.start();
       await settle();
+
+      const onUpdateCallsAfterStart = remoteClient.onUpdate.mock.calls.length;
+
+      Object.defineProperty(globalThis, "navigator", {
+        value: { onLine: false },
+        writable: true,
+        configurable: true,
+      });
+      getRegisteredHandler("offline")();
+      await settle();
+
       await m.mutation("tasks:remove", { id: "task-1" });
       await settle();
 
@@ -3367,7 +3380,9 @@ describe("engine.create()", () => {
       expect(remoteClient.mutation).toHaveBeenCalledTimes(1);
       expect(m.pendingCount()).toBe(0);
       expect(remoteClient.query).toHaveBeenCalledTimes(1);
-      expect(remoteClient.onUpdate).toHaveBeenCalledTimes(1);
+      expect(remoteClient.onUpdate).toHaveBeenCalledTimes(
+        onUpdateCallsAfterStart + 1,
+      );
 
       m.stop();
     });

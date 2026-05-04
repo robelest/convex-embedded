@@ -21,8 +21,8 @@ import {
   type Definition,
   type FieldKindForDescriptor,
   type FieldValueForDescriptor,
-  type LocalTableMigrationStep,
 } from "./core.js";
+import type { MigrationsMap } from "@/shared/migrations/types";
 import { extractValidator } from "./fields.js";
 import {
   PENDING_REPLAY_META,
@@ -273,16 +273,14 @@ export function embeddedTable<
   tableName: TableName,
   shape: Shape,
   options?: {
-    version?: number;
     defaults?: Record<string, unknown>;
-    migrate?: Record<number, LocalTableMigrationStep>;
+    migrations?: MigrationsMap;
   },
 ): EmbeddedTable<TableName, Shape> {
   const schemaDef = define({
-    version: options?.version ?? 1,
     shape,
     defaults: options?.defaults,
-    migrate: options?.migrate,
+    migrations: options?.migrations,
   });
 
   const validators: Record<string, any> = {};
@@ -324,8 +322,6 @@ export function embeddedTable<
     }),
     enumerable: false,
   });
-  // Track declared indexes so bindTableRuntime can auto-generate a scope
-  // resolver for scoped live subscriptions. Keyed by index descriptor.
   const declaredIndexes = new Map<string, readonly string[]>();
   Object.defineProperty(tableDef, "_declaredIndexes", {
     value: declaredIndexes,

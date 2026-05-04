@@ -8,10 +8,6 @@
 
 import type { StateVersion } from "@/sync/protocol";
 
-// ---------------------------------------------------------------------------
-// Session
-// ---------------------------------------------------------------------------
-
 export interface ActiveQuery {
   tableName: string;
   unsubscribe: () => void;
@@ -44,10 +40,6 @@ export class Session {
   }
 }
 
-// ---------------------------------------------------------------------------
-// SessionManager
-// ---------------------------------------------------------------------------
-
 /**
  * Creates, retrieves, and removes {@link Session} instances.
  */
@@ -58,7 +50,6 @@ export class SessionManager {
   /** Create a new session and return its ID. */
   createSession(): string {
     let id: string;
-    // Prefer crypto.randomUUID when available (Node 19+, most modern runtimes).
     if (
       typeof crypto !== "undefined" &&
       typeof crypto.randomUUID === "function"

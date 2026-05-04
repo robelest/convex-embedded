@@ -22,6 +22,11 @@ import { useEmbeddedClient } from "@/src/convex-client";
 import { useOverlayRegistration } from "@/src/overlay-guard";
 import { useProjectSelection } from "@/src/project-selection";
 import { colors } from "@/src/theme";
+import {
+  endUiMark,
+  markUiClick,
+  useTimeUiUpdate,
+} from "@/src/ui-timing";
 import { useWorkspaceData } from "@/src/use-workspace-data";
 
 export default function IssueDetail() {
@@ -53,6 +58,10 @@ export default function IssueDetail() {
     api.issues.detail,
     typeof id === "string" ? { issueId: id as Id<"issues"> } : "skip",
   );
+  useTimeUiUpdate("issue.status", issue?.status ?? null);
+  useTimeUiUpdate("issue.priority", issue?.priority ?? null);
+  useTimeUiUpdate("issue.title", issue?.title ?? null);
+  useTimeUiUpdate("issue.assignee", issue?.assigneeUserId ?? null);
 
   const commentsData = useQuery(
     api.comments.forIssue,
@@ -61,6 +70,7 @@ export default function IssueDetail() {
 
   type CommentItem = NonNullable<typeof commentsData>[number];
   const comments = commentsData ?? [];
+  useTimeUiUpdate("comment.create", comments.length);
 
   const updateIssue = useCallback(
     (fields: Record<string, unknown>) => {
@@ -81,18 +91,24 @@ export default function IssueDetail() {
       return;
     }
     if (titleDraft.trim() && titleDraft.trim() !== issue.title) {
+      markUiClick("issue.title");
       updateIssue({ title: titleDraft.trim() });
+      endUiMark("issue.title", "mutation-dispatched");
     }
   }, [issue, titleDraft, updateIssue]);
 
   const handlePostComment = useCallback(async () => {
     if (!issue || !commentText.trim()) return;
+    markUiClick("comment.create", { length: commentText.trim().length });
     setPosting(true);
     try {
-      await client.mutation(api.comments.create, {
+      const promise = client.mutation(api.comments.create, {
         issueId: issue._id,
         body: commentText.trim(),
       });
+      endUiMark("comment.create", "mutation-dispatched");
+      await promise;
+      endUiMark("comment.create", "mutation-resolved");
       setCommentText("");
     } finally {
       setPosting(false);
@@ -173,7 +189,11 @@ export default function IssueDetail() {
         <Text style={styles.sectionLabel}>Status</Text>
         <StatusPicker
           value={issue.status}
-          onSelect={(status) => updateIssue({ status })}
+          onSelect={(status) => {
+            markUiClick("issue.status", { from: issue.status, to: status });
+            updateIssue({ status });
+            endUiMark("issue.status", "mutation-dispatched");
+          }}
         />
       </View>
 
@@ -182,7 +202,14 @@ export default function IssueDetail() {
         <Text style={styles.sectionLabel}>Priority</Text>
         <PriorityPicker
           value={issue.priority}
-          onSelect={(priority) => updateIssue({ priority })}
+          onSelect={(priority) => {
+            markUiClick("issue.priority", {
+              from: issue.priority,
+              to: priority,
+            });
+            updateIssue({ priority });
+            endUiMark("issue.priority", "mutation-dispatched");
+          }}
         />
       </View>
 
@@ -204,7 +231,14 @@ export default function IssueDetail() {
           value={issue.assigneeUserId}
           assigneeName={issue.assigneeName}
           members={members.map((m) => ({ userId: m.userId, name: m.name }))}
-          onSelect={(userId) => updateIssue({ assigneeUserId: userId })}
+          onSelect={(userId) => {
+            markUiClick("issue.assignee", {
+              from: issue.assigneeUserId ?? null,
+              to: userId,
+            });
+            updateIssue({ assigneeUserId: userId });
+            endUiMark("issue.assignee", "mutation-dispatched");
+          }}
         />
       </View>
 

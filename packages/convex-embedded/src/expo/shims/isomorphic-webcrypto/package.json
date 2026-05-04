@@ -2,9 +2,9 @@
   "name": "isomorphic-webcrypto",
   "private": true,
   "type": "commonjs",
-  "main": "./src/react-native.js",
+  "main": "./src/index.js",
   "exports": {
-    ".": "./src/react-native.js",
-    "./src/react-native": "./src/react-native.js"
+    ".": "./src/index.js",
+    "./src/react-native": "./src/index.js"
   }
 }

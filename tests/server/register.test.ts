@@ -632,6 +632,16 @@ describe("resolve handler", () => {
             { docId: "doc2", update: serverUpdate.buffer, seq: 2 },
           ]);
         }
+        if (ref._name === "getLiveStatesPage") {
+          return Promise.resolve({
+            page: [
+              { docId: "doc1", update: serverUpdate.buffer, seq: 1 },
+              { docId: "doc2", update: serverUpdate.buffer, seq: 2 },
+            ],
+            continueCursor: null,
+            isDone: true,
+          });
+        }
         return Promise.resolve(null);
       }),
       db: {

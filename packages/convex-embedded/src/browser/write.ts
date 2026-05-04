@@ -49,9 +49,7 @@ export class BrowserWriteBroadcast implements WriteBroadcast {
             seq: this._seq,
           }),
         );
-      } catch {
-        // best-effort
-      }
+      } catch {}
     }
   }
 
@@ -91,9 +89,7 @@ export class BrowserWriteBroadcast implements WriteBroadcast {
           if (isValidStoredWritePayload(parsed)) {
             this._dispatch(new Set(parsed.tables));
           }
-        } catch {
-          // malformed payload
-        }
+        } catch {}
       };
       window.addEventListener("storage", this._storageHandler);
     }
@@ -103,9 +99,7 @@ export class BrowserWriteBroadcast implements WriteBroadcast {
     for (const cb of this._callbacks) {
       try {
         cb(tablesWritten);
-      } catch {
-        // keep loop alive
-      }
+      } catch {}
     }
   }
 }

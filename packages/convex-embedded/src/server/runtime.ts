@@ -15,6 +15,9 @@ import type {
   EmbeddedTableRuntimeHandle,
   RuntimeHooks,
 } from "@/server/schema";
+import { createLogger } from "@/shared/logger";
+import type { Definition } from "@/shared/schema";
+import { getCrdtType } from "@/shared/schema";
 import { REMOTE_META } from "@/shared/symbols";
 import type { RemoteMeta } from "@/shared/symbols";
 import {
@@ -24,30 +27,33 @@ import {
   materializeDocumentFromUpdate,
 } from "@/shared/yjs";
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function createLogger(category: string) {
-  const prefix = `[convex-embedded:${category}]`;
-  return {
-    debug: (msg: string, ...args: unknown[]) =>
-      console.debug(prefix, msg, ...args),
-    info: (msg: string, ...args: unknown[]) =>
-      console.info(prefix, msg, ...args),
-    warn: (msg: string, ...args: unknown[]) =>
-      console.warn(prefix, msg, ...args),
-    error: (msg: string, ...args: unknown[]) =>
-      console.error(prefix, msg, ...args),
-  };
-}
-
-const log = createLogger("runtime");
+const log = createLogger("server-runtime");
 
 function toArrayBuffer(data: Uint8Array): ArrayBuffer {
   const buf = new ArrayBuffer(data.byteLength);
   new Uint8Array(buf).set(data);
   return buf;
+}
+
+function pickCrdtFields(
+  schemaDef: Definition,
+  doc: Record<string, unknown>,
+): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+  for (const [key, fieldDef] of Object.entries(schemaDef.getShape())) {
+    if (getCrdtType(fieldDef) === null) continue;
+    if (key in doc) {
+      result[key] = doc[key];
+    }
+  }
+  return result;
+}
+
+function hasCrdtFields(schemaDef: Definition): boolean {
+  for (const fieldDef of Object.values(schemaDef.getShape())) {
+    if (getCrdtType(fieldDef) !== null) return true;
+  }
+  return false;
 }
 
 function getFieldValueByPath(
@@ -72,6 +78,18 @@ function matchesScopeArgs(
   return Object.entries(scopeArgs).every(
     ([fieldPath, expected]) => getFieldValueByPath(doc, fieldPath) === expected,
   );
+}
+
+const SCOPE_CURSOR_PREFIX = "scope:";
+
+function parseScopeCursor(cursor: string | null): number {
+  if (!cursor || !cursor.startsWith(SCOPE_CURSOR_PREFIX)) return 0;
+  const value = Number(cursor.slice(SCOPE_CURSOR_PREFIX.length));
+  return Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
+}
+
+function encodeScopeCursor(offset: number): string {
+  return `${SCOPE_CURSOR_PREFIX}${offset}`;
 }
 
 function extractDocId(result: any, args: any): string | null {
@@ -119,9 +137,7 @@ function parseRuntimeErrorDetails(error: unknown): {
             : fallback.toLowerCase(),
       };
     }
-  } catch {
-    // Fall through to plain-string matching.
-  }
+  } catch {}
   return { message: fallback.toLowerCase() };
 }
 
@@ -139,10 +155,6 @@ function isComponentUnavailableError(error: unknown): boolean {
   );
 }
 
-// ---------------------------------------------------------------------------
-// bindTableRuntime — sets hooks on a table handle for component behavior
-// ---------------------------------------------------------------------------
-
 export function bindTableRuntime(
   handle: EmbeddedTableRuntimeHandle,
   component?: ComponentBinding,
@@ -153,13 +165,10 @@ export function bindTableRuntime(
   const schemaDef = handle.schema;
 
   if (!component) {
-    log.info(`bindTableRuntime("${tableName}") — no component, local-only`);
+    log.debug(`bindTableRuntime("${tableName}") — no component, local-only`);
     return;
   }
 
-  // Indexes the user declared on their table. Used to resolve scoped
-  // live-subscription arg sets to doc IDs — we pick the best-matching
-  // index for the scope args and fetch IDs via withIndex.
   const declaredIndexes: Map<string, readonly string[]> =
     tableDef._declaredIndexes ?? new Map();
 
@@ -175,7 +184,6 @@ export function bindTableRuntime(
     const scopeKeys = new Set(Object.keys(scopeArgs));
     let best: { indexName: string; fields: readonly string[] } | null = null;
     for (const [indexName, fields] of declaredIndexes.entries()) {
-      // Require a prefix of the index's fields to be covered by scope args.
       let covered = 0;
       for (const f of fields) {
         if (scopeKeys.has(f)) covered += 1;
@@ -248,13 +256,13 @@ export function bindTableRuntime(
         collection: tableName,
         docIds: [],
       });
-      log.info(`detectRuntime(${tableName}): component resolved -> remote`);
+      log.debug(`detectRuntime(${tableName}): component resolved -> remote`);
       return cacheRuntimeValue(ctx, true);
     } catch (error) {
       if (!isComponentUnavailableError(error)) {
         throw error;
       }
-      log.info(`detectRuntime(${tableName}): component unavailable -> local`);
+      log.debug(`detectRuntime(${tableName}): component unavailable -> local`);
       return cacheRuntimeValue(ctx, false);
     }
   }
@@ -269,14 +277,19 @@ export function bindTableRuntime(
         });
         return;
       }
-      // Read current seq so we can tag the Yjs encoding with the next
-      // Lamport sequence number instead of a wall-clock timestamp.
+      if (!hasCrdtFields(schemaDef)) {
+        log.debug(
+          `recordRemoteChange(${tableName}/${docId}): no CRDT fields, skipping recordUpdate`,
+        );
+        return;
+      }
       const current = (await ctx.runQuery(component!.public.getLiveState, {
         collection: tableName,
         docId,
       })) as { seq: number } | null;
       const nextSeq = (current?.seq ?? -1) + 1;
-      const update = encodeDocumentState(schemaDef as any, doc, nextSeq);
+      const crdtFields = pickCrdtFields(schemaDef, doc);
+      const update = encodeDocumentState(schemaDef as any, crdtFields, nextSeq);
       await ctx.runMutation(component!.public.recordUpdate, {
         collection: tableName,
         docId,
@@ -288,10 +301,8 @@ export function bindTableRuntime(
     }
   }
 
-  // Hook: detectRuntime
   hooks.detectRuntime = detectRuntime;
 
-  // Hook: afterMutation — remote callback + delta recording
   hooks.afterMutation = async (ctx, def, args, result) => {
     const isRemote = await detectRuntime(ctx);
     if (!isRemote) {
@@ -304,7 +315,6 @@ export function bindTableRuntime(
     }
   };
 
-  // Hook: resolveHandler — diff computation using component state
   hooks.resolveHandler = async (ctx, args) => {
     const isRemote = await detectRuntime(ctx);
     if (!isRemote) {
@@ -345,81 +355,105 @@ export function bindTableRuntime(
         docCreationTime?: number;
         _creationTime?: number;
       };
-      let states: LiveStateRecord[] = [];
-
       const scoped = args.scopeArgs && Object.keys(args.scopeArgs).length > 0;
       const knownDocIds = args.documents.map((doc) => doc.docId);
       const scopeArgs = scoped
         ? (args.scopeArgs as Record<string, unknown>)
         : undefined;
 
-      // Choose the set of doc IDs to hydrate. Two paths:
-      //   (a) scoped with index coverage → resolve scope via an indexed read on
-      //       the user's own table.
-      //   (b) otherwise → fetch the full collection snapshot and filter after
-      //       materialization so the response stays authoritative.
       let docIdsToHydrate: string[] | null = null;
-      if (scoped) {
+      if (scoped && scopeArgs) {
         docIdsToHydrate = await resolveScopedDocIds(ctx, scopeArgs);
       }
 
+      const materializeStates = async (rawStates: LiveStateRecord[]) =>
+        (
+          await Promise.all(
+            rawStates.map(async (state) => {
+              const currentDocument =
+                typeof ctx.db?.get === "function"
+                  ? await ctx.db.get(state.docId)
+                  : null;
+              return {
+                docId: state.docId,
+                document:
+                  currentDocument ??
+                  materializeDocumentFromUpdate({
+                    schemaDef,
+                    docId: state.docId,
+                    docCreationTime:
+                      state.docCreationTime ?? state._creationTime ?? 0,
+                    update: state.update,
+                  }),
+                seq: state.seq,
+              };
+            }),
+          )
+        ).filter((entry) =>
+          scopeArgs
+            ? matchesScopeArgs(
+                entry.document as Record<string, unknown>,
+                scopeArgs,
+              )
+            : true,
+        );
+
       if (docIdsToHydrate !== null) {
-        // Path (a): targeted fetch for the scoped doc IDs.
+        const SCOPE_FETCH_PAGE = 32;
+        const fullCursor = args.fullCursor ?? null;
+        const cursorOffset = parseScopeCursor(fullCursor);
+        const sliceStart = cursorOffset;
+        const sliceEnd = Math.min(
+          docIdsToHydrate.length,
+          sliceStart + SCOPE_FETCH_PAGE,
+        );
+        const sliceIds = docIdsToHydrate.slice(sliceStart, sliceEnd);
+
         const rawLiveStates =
-          docIdsToHydrate.length === 0
+          sliceIds.length === 0
             ? []
             : ((await ctx.runQuery(component!.public.getLiveStates, {
                 collection: tableName,
-                docIds: docIdsToHydrate,
+                docIds: sliceIds,
               })) as Array<LiveStateRecord | null>);
-        states = rawLiveStates.filter((state): state is LiveStateRecord =>
-          Boolean(state && typeof state.docId === "string"),
+        const sliceStates = rawLiveStates.filter(
+          (state): state is LiveStateRecord =>
+            Boolean(state && typeof state.docId === "string"),
         );
-      } else {
-        // Path (b): fetch the authoritative full collection snapshot.
-        states = (
-          (await ctx.runQuery(component!.public.getLiveStates, {
-            collection: tableName,
-          })) as Array<LiveStateRecord | null>
-        ).filter((state): state is LiveStateRecord =>
-          Boolean(state && typeof state.docId === "string"),
-        );
+        const documents = await materializeStates(sliceStates);
+
+        const isDone = sliceEnd >= docIdsToHydrate.length;
+        const continueCursor = isDone ? null : encodeScopeCursor(sliceEnd);
+
+        return {
+          mode: "full" as const,
+          collectionSeq: collectionChanges.collectionSeq,
+          continueCursor,
+          isDone,
+          documents,
+        };
       }
 
-      const documents = (
-        await Promise.all(
-          states.map(async (state) => {
-            const currentDocument =
-              typeof ctx.db?.get === "function"
-                ? await ctx.db.get(state.docId)
-                : null;
-            return {
-              docId: state.docId,
-              document:
-                currentDocument ??
-                materializeDocumentFromUpdate({
-                  schemaDef,
-                  docId: state.docId,
-                  docCreationTime:
-                    state.docCreationTime ?? state._creationTime ?? 0,
-                  update: state.update,
-                }),
-              seq: state.seq,
-            };
-          }),
-        )
-      ).filter((entry) =>
-        matchesScopeArgs(entry.document as Record<string, unknown>, scopeArgs),
-      );
+      const page = (await ctx.runQuery(
+        component!.public.getLiveStatesPage,
+        {
+          collection: tableName,
+          cursor: args.fullCursor ?? null,
+          limit: 64,
+        },
+      )) as {
+        page: Array<LiveStateRecord>;
+        continueCursor: string | null;
+        isDone: boolean;
+      };
+      const scopedDocuments = await materializeStates(page.page);
 
-      // When scoped, any client-requested doc that didn't come back in the
-      // snapshot has either been deleted or moved out of scope — emit an
-      // explicit delete marker so the client evicts it locally.
       const missingRequestedDeletes =
-        scoped && knownDocIds.length > 0
+        scoped && knownDocIds.length > 0 && page.isDone
           ? args.documents
               .filter(
-                (doc) => !states.some((state) => state.docId === doc.docId),
+                (doc) =>
+                  !scopedDocuments.some((entry) => entry.docId === doc.docId),
               )
               .map((doc) => ({
                 docId: doc.docId,
@@ -431,9 +465,9 @@ export function bindTableRuntime(
       return {
         mode: collectionChanges.mode,
         collectionSeq: collectionChanges.collectionSeq,
-        continueCursor: null,
-        isDone: true,
-        documents: [...documents, ...missingRequestedDeletes],
+        continueCursor: page.continueCursor,
+        isDone: page.isDone,
+        documents: [...scopedDocuments, ...missingRequestedDeletes],
       };
     }
 
@@ -441,9 +475,6 @@ export function bindTableRuntime(
       args.documents.map(async (doc) => {
         const changeKind = changedById.get(doc.docId);
         if (changeKind === undefined) {
-          // Collection tail may have been trimmed or the live-subscription
-          // already advanced collectionSeq past this doc's change. Fall back
-          // to a direct doc-level seq check so we never silently skip updates.
           const latest = (await ctx.runQuery(component!.public.getLiveState, {
             collection: tableName,
             docId: doc.docId,
@@ -557,12 +588,8 @@ export function bindTableRuntime(
     };
   };
 
-  log.info(`bindTableRuntime("${tableName}") — version=${schemaDef.version}`);
+  log.debug(`bindTableRuntime("${tableName}") — version=${schemaDef.version}`);
 }
-
-// ---------------------------------------------------------------------------
-// bindTable — tags an existing resolve query with remote metadata
-// ---------------------------------------------------------------------------
 
 /**
  * Bind runtime behavior to an embedded table's resolve query.

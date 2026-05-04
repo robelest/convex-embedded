@@ -54,9 +54,7 @@ export class BrowserSessionBroadcast implements SessionBroadcast {
           this._channelName,
           JSON.stringify({ event, sender: this._senderId, seq: this._seq }),
         );
-      } catch {
-        // best-effort only
-      }
+      } catch {}
     }
   }
 
@@ -93,9 +91,7 @@ export class BrowserSessionBroadcast implements SessionBroadcast {
           if (isValidStoredSessionPayload(parsed)) {
             this._dispatch(parsed.event);
           }
-        } catch {
-          // ignore malformed payload
-        }
+        } catch {}
       };
       window.addEventListener("storage", this._storageHandler);
       this._scope.addFinalizer(() => {
@@ -111,9 +107,7 @@ export class BrowserSessionBroadcast implements SessionBroadcast {
     for (const callback of this._callbacks) {
       try {
         callback(event);
-      } catch {
-        // keep fanout alive
-      }
+      } catch {}
     }
   }
 }

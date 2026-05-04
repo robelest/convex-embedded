@@ -16,18 +16,10 @@
  *   });
  */
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
 export interface ViewFilter<Ctx = unknown, Q = unknown> {
   /** Apply this view's filter to a query. Returns the filtered query. */
   apply(ctx: Ctx, query: Q): Q | Promise<Q>;
 }
-
-// ---------------------------------------------------------------------------
-// Presets
-// ---------------------------------------------------------------------------
 
 /**
  * No filter. All rows visible to all callers.
@@ -100,10 +92,6 @@ function ownership(options: { index: string; field: string }): ViewFilter {
     },
   };
 }
-
-// ---------------------------------------------------------------------------
-// Export as namespace
-// ---------------------------------------------------------------------------
 
 /**
  * Built-in view/filter helpers for composing scoped Convex queries.

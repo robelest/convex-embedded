@@ -33,14 +33,18 @@ export async function discoverPendingReplayMetadata(
   const pending = (async () => {
     const metadata = new Map<string, PendingReplayMeta>();
 
-    for (const [moduleId, loadModule] of Object.entries(modules)) {
-      let loaded: Record<string, unknown> | null = null;
-      try {
-        loaded = await loadModule();
-      } catch {
-        loaded = null;
-      }
+    const moduleEntries = Object.entries(modules);
+    const loadedModules = await Promise.all(
+      moduleEntries.map(async ([moduleId, loadModule]) => {
+        try {
+          return [moduleId, await loadModule()] as const;
+        } catch {
+          return [moduleId, null] as const;
+        }
+      }),
+    );
 
+    for (const [moduleId, loaded] of loadedModules) {
       if (!loaded) {
         continue;
       }

@@ -15,14 +15,8 @@ export const SCHEDULED_FUNCTIONS_STORE_MIGRATIONS: StoreMigrationManifest = {
   version: 1,
 };
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
 interface SchedulerExecutorOptions {
-  /** Reference to the database (reserved for future job persistence). */
   db: Database;
-  /** Callback that executes a Convex function by path + args. */
   runFunction: (path: string, args: Record<string, unknown>) => Promise<void>;
 }
 
@@ -31,10 +25,6 @@ interface PendingJob {
   functionPath: string;
   args: Record<string, unknown>;
 }
-
-// ---------------------------------------------------------------------------
-// SchedulerExecutor
-// ---------------------------------------------------------------------------
 
 /**
  * Manages deferred function execution using `setTimeout`.
@@ -74,8 +64,6 @@ export class SchedulerExecutor {
 
     const timerId = setTimeout(() => {
       this._pending.delete(jobId);
-      // Fire-and-forget; errors are swallowed to match Convex's
-      // scheduled function semantics (failures are logged, not thrown).
       this._runFunction(functionPath, args).catch((error) => {
         console.error(
           `[SchedulerExecutor] Scheduled function "${functionPath}" failed:`,

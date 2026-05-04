@@ -31,14 +31,13 @@ import type { Database } from "@/runtime/db/database";
 import type { DatabaseCommitResult } from "@/runtime/db/database";
 import type { QueryDependency } from "@/runtime/db/types";
 import type { StorageSurface } from "@/runtime/storage";
+import { createLogger } from "@/shared/logger";
 import { componentRouteTargetLabel, isRemoteOnly } from "@/shared/route";
 
-// ---------------------------------------------------------------------------
-// Global type augmentation for the Convex runtime
-// ---------------------------------------------------------------------------
+const log = createLogger("udf");
+const loaderLog = createLogger("loader");
 
 declare global {
-  // eslint-disable-next-line no-var
   var Convex:
     | {
         syscall: (op: string, args: string) => string;
@@ -50,10 +49,6 @@ declare global {
       }
     | undefined;
 }
-
-// ---------------------------------------------------------------------------
-// Deterministic global patching
-// ---------------------------------------------------------------------------
 
 interface SavedGlobals {
   mathRandom: typeof Math.random;
@@ -154,9 +149,7 @@ function patchObjectProperty<T extends object, K extends keyof T>(
     try {
       object[key] = value;
       return true;
-    } catch {
-      // Accessor property without setter (e.g. Hermes engine on React Native)
-    }
+    } catch {}
   }
 
   if (descriptor?.configurable) {
@@ -166,13 +159,11 @@ function patchObjectProperty<T extends object, K extends keyof T>(
         value,
       });
       return true;
-    } catch {
-      // Non-configurable in practice
-    }
+    } catch {}
   }
 
-  console.debug(
-    `[convex-embedded:udf] skipping deterministic patch for ${String(key)}; property is not writable/configurable`,
+  log.debug(
+    `skipping deterministic patch for ${String(key)}; property is not writable/configurable`,
   );
   return false;
 }
@@ -192,23 +183,15 @@ function restoreObjectProperty<T extends object, K extends keyof T>(
     try {
       object[key] = value;
       return;
-    } catch {
-      // Accessor property without setter
-    }
+    } catch {}
   }
 
   if (descriptor?.configurable) {
     try {
       Object.defineProperty(object, key, descriptor);
-    } catch {
-      // Non-configurable in practice
-    }
+    } catch {}
   }
 }
-
-// ---------------------------------------------------------------------------
-// Module function resolution
-// ---------------------------------------------------------------------------
 
 /**
  * Extract the handler function from a registered Convex function export.
@@ -230,14 +213,6 @@ function getHandler(func: Record<string, unknown>): HandlerFn | null {
     return func.handler as HandlerFn;
   return null;
 }
-
-// ---------------------------------------------------------------------------
-// UdfExecutor
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Return types
-// ---------------------------------------------------------------------------
 
 export interface MutationResult {
   result: unknown;
@@ -290,6 +265,7 @@ export class UdfExecutor {
   private _activeTimers?: Set<ReturnType<typeof setTimeout>>;
   private _storageSurface: StorageSurface | null;
   private _contextStack: ExecutionContext[] = [];
+  private _actionRequestCounter = 0;
   private _installedConvex!: NonNullable<typeof globalThis.Convex>;
   private _resolvedFunctions = new Map<string, Record<string, unknown>>();
 
@@ -334,10 +310,6 @@ export class UdfExecutor {
   setStorageSurface(surface: StorageSurface | null): void {
     this._storageSurface = surface;
   }
-
-  // -----------------------------------------------------------------------
-  // Public API
-  // -----------------------------------------------------------------------
 
   /**
    * Execute a query function. Read-only — starts a transaction for
@@ -433,16 +405,13 @@ export class UdfExecutor {
     return this._runWithGlobals(async () => {
       const func = await this._resolveFunc(functionPath, "action");
 
-      // Prefer SDK's invokeAction if available.
-      // Note: invokeAction takes (requestId, argsStr) — 2 args.
       if (typeof func.invokeAction === "function") {
-        const requestId = "" + Math.random();
+        const requestId = "action_" + ++this._actionRequestCounter;
         const argsStr = JSON.stringify(convexToJson([(args ?? {}) as Value]));
         const rawResult = await func.invokeAction(requestId, argsStr);
         return jsonToConvex(JSON.parse(rawResult));
       }
 
-      // Fallback for test wrappers.
       const handler = getHandler(func);
       if (handler === null) {
         throw this._noHandlerError(functionPath);
@@ -450,10 +419,6 @@ export class UdfExecutor {
       return await handler({}, args ?? {});
     }, executionContext);
   }
-
-  // -----------------------------------------------------------------------
-  // Internal: global patching & syscall wiring
-  // -----------------------------------------------------------------------
 
   /**
    * Run a callback with:
@@ -498,10 +463,6 @@ export class UdfExecutor {
     }
   }
 
-  // -----------------------------------------------------------------------
-  // Internal: module & function resolution
-  // -----------------------------------------------------------------------
-
   /**
    * Load a module via the {@link ModuleLoader} and return the raw function
    * export object. Unlike `_resolveHandler` (removed), this returns the
@@ -539,8 +500,8 @@ export class UdfExecutor {
       maybeExportName === undefined ? "default" : maybeExportName;
 
     const mod = await this._moduleLoader.load(modulePath);
-    console.debug(
-      "[convex-embedded:loader] resolved module exports:",
+    loaderLog.debug(
+      "resolved module exports:",
       modulePath,
       Object.keys(mod),
       "looking for",
@@ -565,12 +526,8 @@ export class UdfExecutor {
       });
     }
 
-    // The Convex SDK sets flags like `isQuery`, `isMutation`, `isAction`
-    // on the registered function objects. We need to cast to access them
-    // since ConvexModule values are typed as `unknown`.
     const func = rawExport as Record<string, unknown>;
 
-    // Validate that the export's declared type matches what we expect.
     if (expectedType === "query") {
       if (func.isQuery === false || func.isMutation || func.isAction) {
         throw new Error(

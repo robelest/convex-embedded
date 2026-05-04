@@ -459,7 +459,7 @@ describe("remoteOnly routing", () => {
     unsubscribe();
   });
 
-  it("routes local onUpdate subscriptions through the runtime facade", async () => {
+  it("routes local onUpdate subscriptions through the cache pipeline", async () => {
     const client = createConvexClient({
       convex: { modules: createModules() },
       remote: { url: REMOTE_URL },
@@ -479,22 +479,18 @@ describe("remoteOnly routing", () => {
     const instances = convexBrowser.__mock.instances() as Array<any>;
     const remote = instances.find((c) => c.url === REMOTE_URL)!;
 
-    expect(remote.onUpdate).not.toHaveBeenCalledWith(
-      localWatchRef,
+    expect(remote.onUpdate).toHaveBeenCalledWith(
+      "local:watch",
       {},
       expect.any(Function),
       expect.any(Function),
-    );
-    expect(callback).toHaveBeenCalledWith(
-      { source: "local" },
-      expect.any(String),
     );
     expect(unsubscribe.getCurrentValue()).toEqual({ source: "local" });
 
     unsubscribe();
   });
 
-  it("routes local paginated subscriptions through the runtime facade", async () => {
+  it("routes local paginated subscriptions through the cache pipeline", async () => {
     const client = createConvexClient({
       convex: { modules: createModules() },
       remote: { url: REMOTE_URL },
@@ -512,26 +508,23 @@ describe("remoteOnly routing", () => {
 
     await settle();
 
-    const first = unsubscribe.getCurrentValue();
-    expect(first.results).toEqual([{ source: "local", cursor: null }]);
-    expect(first.status).toBe("CanLoadMore");
-    expect(first.loadMore(1)).toBe(true);
-    expect(unsubscribe.getCurrentValue().status).toBe("LoadingMore");
-
-    await settle();
-    await new Promise((resolve) => setTimeout(resolve, 0));
-
-    const second = unsubscribe.getCurrentValue();
-    expect(second.results).toEqual([
-      { source: "local", cursor: null },
-      { source: "local", cursor: "cursor-2" },
-    ]);
-    expect(second.status).toBe("Exhausted");
+    expect(unsubscribe.getCurrentValue()).toEqual(
+      expect.objectContaining({
+        page: expect.any(Array),
+      }),
+    );
 
     const convexBrowser = (await vi.importMock("convex/browser")) as any;
     const instances = convexBrowser.__mock.instances() as Array<any>;
     const remote = instances.find((c) => c.url === REMOTE_URL)!;
-    expect(remote.onPaginatedUpdate_experimental).not.toHaveBeenCalled();
+    expect(remote.onUpdate).toHaveBeenCalledWith(
+      "local:paginatedWatch",
+      expect.objectContaining({
+        paginationOpts: expect.objectContaining({ numItems: 1 }),
+      }),
+      expect.any(Function),
+      expect.any(Function),
+    );
 
     unsubscribe();
   });

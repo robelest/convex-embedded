@@ -66,6 +66,16 @@
       "import": "./dist/tracing/node.js",
       "default": "./dist/tracing/node.js"
     },
+    "./tracing/memory": {
+      "types": "./dist/tracing/memory.d.ts",
+      "import": "./dist/tracing/memory.js",
+      "default": "./dist/tracing/memory.js"
+    },
+    "./tracing/spans": {
+      "types": "./dist/tracing/spans.d.ts",
+      "import": "./dist/tracing/spans.js",
+      "default": "./dist/tracing/spans.js"
+    },
     "./react": {
       "types": "./dist/react.d.ts",
       "import": "./dist/react.js",
@@ -165,19 +175,19 @@
     "vite-plus": "catalog:"
   },
   "peerDependencies": {
+    "@op-engineering/op-sqlite": ">=15",
     "convex": "^1.34.1",
     "expo": ">=54",
-    "expo-crypto": ">=15",
     "expo-file-system": ">=19",
     "expo-network": ">=8",
-    "expo-sqlite": ">=16",
-    "react": ">=18"
+    "react": ">=18",
+    "react-native": ">=0.74"
   },
   "peerDependenciesMeta": {
-    "expo": {
+    "@op-engineering/op-sqlite": {
       "optional": true
     },
-    "expo-crypto": {
+    "expo": {
       "optional": true
     },
     "expo-file-system": {
@@ -186,10 +196,10 @@
     "expo-network": {
       "optional": true
     },
-    "expo-sqlite": {
+    "react": {
       "optional": true
     },
-    "react": {
+    "react-native": {
       "optional": true
     }
   },

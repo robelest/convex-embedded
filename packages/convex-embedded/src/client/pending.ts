@@ -16,10 +16,6 @@ import { getFunctionName } from "@/shared/refs";
 
 const log = createLogger("pending-queue");
 
-// ---------------------------------------------------------------------------
-// System function paths (must match convex-embedded's SYSTEM_FUNCTIONS keys)
-// ---------------------------------------------------------------------------
-
 const SYS_PENDING_PUSH = "_system:pendingPush";
 const SYS_PENDING_GET_ALL = "_system:pendingGetAll";
 const SYS_PENDING_CLAIM_NEXT = "_system:pendingClaimNext";
@@ -29,10 +25,6 @@ const SYS_PENDING_RELEASE = "_system:pendingRelease";
 const SYS_PENDING_CLEAR = "_system:pendingClear";
 const SYS_PENDING_BLOCK = "_system:pendingBlock";
 const SYS_PENDING_UNBLOCK_ALL = "_system:pendingUnblockAll";
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
 
 /** A mutation entry in the pending queue. */
 export interface PendingEntry {
@@ -60,11 +52,11 @@ export interface PendingEntry {
   leaseExpiresAt?: number;
   /** Optional blocked replay reason. */
   blockedReason?: "reauthRequired" | "authorizationDenied" | "scopeChanged";
-  /** True when this entry was loaded from persistence during hydrate. */
+  /** True when this entry was loaded from storage during hydrate. */
   hydrated?: boolean;
 }
 
-export class PendingQueuePersistenceError extends Error {
+export class PendingQueueStorageError extends Error {
   readonly entry: PendingEntry;
 
   constructor(entry: PendingEntry, cause: Error) {
@@ -72,14 +64,10 @@ export class PendingQueuePersistenceError extends Error {
       `Failed to persist pending mutation for ${entry.ref}; queued entry is ephemeral for this session only.`,
       { cause },
     );
-    this.name = "PendingQueuePersistenceError";
+    this.name = "PendingQueueStorageError";
     this.entry = entry;
   }
 }
-
-// ---------------------------------------------------------------------------
-// PendingQueue
-// ---------------------------------------------------------------------------
 
 /**
  * Optional local query executor used for runtime-first hydration reads.
@@ -95,19 +83,10 @@ export type LocalMutationExecutorFn = (
 ) => Promise<unknown>;
 
 export class PendingQueue {
-  /** In-memory queue — kept in remote with the DB. */
   private _entries: PendingEntry[] = [];
-
-  /** The local embedded client. */
   private _localClient: ConvexClient;
-
-  /** Local query executor used for runtime-first hydration reads. */
   private _queryFn: LocalQueryExecutorFn | null;
-
-  /** Local mutation executor used for runtime-first bookkeeping writes. */
   private _mutationFn: LocalMutationExecutorFn | null;
-
-  /** Active identity namespace for persistence. */
   private _getIdentityKey: (() => string | null) | null;
 
   constructor(
@@ -121,10 +100,6 @@ export class PendingQueue {
     this._mutationFn = mutationFn ?? null;
     this._getIdentityKey = getIdentityKey ?? null;
   }
-
-  // -----------------------------------------------------------------------
-  // Hydration
-  // -----------------------------------------------------------------------
 
   /**
    * Load all persisted pending mutations from the embedded DB.
@@ -174,10 +149,6 @@ export class PendingQueue {
     }
   }
 
-  // -----------------------------------------------------------------------
-  // Queue operations
-  // -----------------------------------------------------------------------
-
   /**
    * Append a mutation to the queue and persist it.
    *
@@ -191,8 +162,6 @@ export class PendingQueue {
     table: string,
     payloadVersion = 1,
   ): Promise<void> {
-    // Extract the function name from the FunctionReference.
-    // getFunctionName also accepts plain strings as a passthrough.
     const refName = typeof ref === "string" ? ref : getFunctionName(ref as any);
 
     const serialized = {
@@ -220,7 +189,7 @@ export class PendingQueue {
       return;
     }
 
-    let persistenceError: PendingQueuePersistenceError | null = null;
+    let storageError: PendingQueueStorageError | null = null;
 
     try {
       const id = await ((
@@ -240,14 +209,12 @@ export class PendingQueue {
         ...serialized,
         hydrated: false,
       };
-      // Keep an in-memory fallback for this session, but surface that
-      // durability has been lost so callers can react explicitly.
       this._entries.push(ephemeralEntry);
-      persistenceError = new PendingQueuePersistenceError(
+      storageError = new PendingQueueStorageError(
         ephemeralEntry,
         err as Error,
       );
-      throw persistenceError;
+      throw storageError;
     }
   }
 

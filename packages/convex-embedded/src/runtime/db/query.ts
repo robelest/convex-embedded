@@ -31,8 +31,7 @@ import {
   executeVectorSearch,
   resolveVectorIndexDefinition,
 } from "@/runtime/db/vector";
-
-type Tagged<Key extends string> = Record<Key, string>;
+import { matchTag } from "@/shared/match";
 
 export type FilterNode =
   | { _tag: "Eq"; left: FilterNode; right: FilterNode }
@@ -289,23 +288,6 @@ const rangeValidationHandlers = {
   >
 >;
 
-function matchTag<
-  T extends Tagged<K>,
-  K extends keyof T & string,
-  Handlers extends {
-    [V in T[K] & string]: (value: Extract<T, Record<K, V>>) => unknown;
-  },
->(value: T, key: K, handlers: Handlers): ReturnType<Handlers[T[K] & string]> {
-  const handler = handlers[value[key] as T[K] & string] as unknown as (
-    value: T,
-  ) => ReturnType<Handlers[T[K] & string]>;
-  return handler(value);
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 function isSimpleObject(value: unknown): boolean {
   const isObject = value !== null && typeof value === "object";
   if (!isObject) {
@@ -492,10 +474,6 @@ function advanceRangeValidation(
     : errorFactory(expectedField, ctx.filter.fieldPath);
 }
 
-// ---------------------------------------------------------------------------
-// Filter evaluation
-// ---------------------------------------------------------------------------
-
 export function evaluateFilter(
   document: GenericDocument,
   filter: FilterJson,
@@ -503,10 +481,6 @@ export function evaluateFilter(
   const node = normalizeFilter(filter);
   return evaluateNormalizedFilter(document, node);
 }
-
-// ---------------------------------------------------------------------------
-// Range filter evaluation (for index scans)
-// ---------------------------------------------------------------------------
 
 function evaluateRangeFilter(
   document: GenericDocument,
@@ -516,10 +490,6 @@ function evaluateRangeFilter(
   const value = evaluateValue(expr.value);
   return rangeEvaluators[expr.type](result, value);
 }
-
-// ---------------------------------------------------------------------------
-// Index range validation
-// ---------------------------------------------------------------------------
 
 function validateIndexRangeExpression(
   source: Source & { type: "IndexRange" },
@@ -544,10 +514,6 @@ function validateIndexRangeExpression(
 function printIndexOperator(filter: SerializedRangeExpression): string {
   return `.${filter.type.toLowerCase()}(${filter.fieldPath}, ${JSON.stringify(filter.value)})`;
 }
-
-// ---------------------------------------------------------------------------
-// QueryEngine
-// ---------------------------------------------------------------------------
 
 export type DocumentIterator = (
   tableName: string,
@@ -584,24 +550,20 @@ export class QueryEngine {
     private _schema: ParsedSchema | null,
     private _iterateDocs: DocumentIterator,
     private _countTable: TableCountReader = () => 0,
-    private _readQuery: QueryReader = () => null,
-    private _readSource: SourceReader = () => null,
+    private _query: QueryReader = () => null,
+    private _source: SourceReader = () => null,
     private _countTableAsync: AsyncTableCountReader = async (tableName) =>
       this._countTable(tableName),
     private _readQueryAsync: AsyncQueryReader = async (query) =>
-      this._readQuery(query),
+      this._query(query),
     private _readSourceAsync: AsyncSourceReader = async (source, limit) =>
-      this._readSource(source, limit),
+      this._source(source, limit),
   ) {}
 
   /** Update the document iterator (e.g. after a schema or docs change). */
   setDocumentIterator(iter: DocumentIterator): void {
     this._iterateDocs = iter;
   }
-
-  // -------------------------------------------------------------------------
-  // Streaming query
-  // -------------------------------------------------------------------------
 
   startQuery(query: SerializedQuery): QueryId {
     const id = this._nextQueryId;
@@ -658,10 +620,6 @@ export class QueryEngine {
     delete this._queryResults[queryId];
     delete this._asyncQueryResults[queryId];
   }
-
-  // -------------------------------------------------------------------------
-  // Pagination
-  // -------------------------------------------------------------------------
 
   paginate({
     query,
@@ -758,10 +716,6 @@ export class QueryEngine {
     return { page, isDone, continueCursor };
   }
 
-  // -------------------------------------------------------------------------
-  // Count
-  // -------------------------------------------------------------------------
-
   count(tableName: string): number {
     return this._countTable(tableName);
   }
@@ -769,10 +723,6 @@ export class QueryEngine {
   async countAsync(tableName: string): Promise<number> {
     return this._countTableAsync(tableName);
   }
-
-  // -------------------------------------------------------------------------
-  // Vector search
-  // -------------------------------------------------------------------------
 
   vectorSearch(
     tableAndIndexName: string,
@@ -804,12 +754,8 @@ export class QueryEngine {
     );
   }
 
-  // -------------------------------------------------------------------------
-  // Core evaluation
-  // -------------------------------------------------------------------------
-
   private _evaluateQuery(query: SerializedQuery): Array<GenericDocument> {
-    const optimizedQuery = this._readQuery(query);
+    const optimizedQuery = this._query(query);
     if (optimizedQuery !== null) {
       return optimizedQuery;
     }
@@ -854,7 +800,7 @@ export class QueryEngine {
     source: Source,
     limit: number | null = null,
   ): SourceEvaluation {
-    const optimized = this._readSource(source, limit);
+    const optimized = this._source(source, limit);
     if (optimized !== null) {
       return optimized;
     }

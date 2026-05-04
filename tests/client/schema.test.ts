@@ -19,7 +19,7 @@ import {
   omit,
   prose,
 } from "@resolve/server/schema";
-import { initYjsDoc } from "@resolve/shared/schema";
+import { initYjsDoc } from "@resolve/shared/yjs";
 import { describe, it, expect } from "@tests/testkit";
 import { v } from "convex/values";
 import * as Y from "yjs";
@@ -268,7 +268,7 @@ describe("encodeState()", () => {
 // ---------------------------------------------------------------------------
 
 describe("materializeYjsDoc()", () => {
-  it("materializes plain fields from a Y.Doc", () => {
+  it("skips plain fields entirely", () => {
     const def = define({
       version: 1,
       shape: { name: v.string(), age: v.number() },
@@ -277,8 +277,8 @@ describe("materializeYjsDoc()", () => {
     const doc = initYjsDoc(def, { name: "Alice", age: 30 });
     const result = materializeYjsDoc(def, doc);
 
-    expect(result.name).toBe("Alice");
-    expect(result.age).toBe(30);
+    expect(result).not.toHaveProperty("name");
+    expect(result).not.toHaveProperty("age");
   });
 
   it("materializes register fields (single value)", () => {
@@ -345,44 +345,52 @@ describe("materializeYjsDoc()", () => {
     expect(result.tags).toHaveLength(2);
   });
 
-  it("skips omitted fields", () => {
+  it("skips omitted and plain fields", () => {
     const def = define({
       version: 1,
       shape: {
+        title: register(v.string()),
         name: v.string(),
         secret: omit(v.string()),
       },
     });
 
-    const doc = initYjsDoc(def, { name: "Alice", secret: "hidden" });
+    const doc = initYjsDoc(def, {
+      title: "Hello",
+      name: "Alice",
+      secret: "hidden",
+    });
     const result = materializeYjsDoc(def, doc);
 
-    expect(result.name).toBe("Alice");
+    expect(result.title).toBe("Hello");
+    expect(result).not.toHaveProperty("name");
     expect(result).not.toHaveProperty("secret");
   });
 
-  it("does not include _id or _creationTime", () => {
+  it("does not include _id, _creationTime, or plain fields", () => {
     const def = define({
       version: 1,
-      shape: { name: v.string() },
+      shape: {
+        title: register(v.string()),
+        name: v.string(),
+      },
     });
 
-    // initYjsDoc already skips _id/_creationTime, but even if the Y.Doc
-    // somehow has them in the fields map, materializeYjsDoc iterates only
-    // over schemaDef.shape — so they never appear.
     const doc = initYjsDoc(def, {
       _id: "abc123",
       _creationTime: 1234567890,
+      title: "Hello",
       name: "Alice",
     });
     const result = materializeYjsDoc(def, doc);
 
     expect(result).not.toHaveProperty("_id");
     expect(result).not.toHaveProperty("_creationTime");
-    expect(result.name).toBe("Alice");
+    expect(result).not.toHaveProperty("name");
+    expect(result.title).toBe("Hello");
   });
 
-  it("round-trips initYjsDoc -> materializeYjsDoc", () => {
+  it("round-trips initYjsDoc -> materializeYjsDoc for CRDT fields only", () => {
     const def = define({
       version: 1,
       shape: {
@@ -418,7 +426,7 @@ describe("materializeYjsDoc()", () => {
     expect(result.votes).toBe(7);
     expect(result.tags).toEqual(expect.arrayContaining(["a", "b"]));
     expect((result.tags as string[]).length).toBe(2);
-    expect(result.plain).toBe(42);
+    expect(result).not.toHaveProperty("plain");
   });
 
   it("handles empty Y.Doc (all fields return defaults/empty)", () => {

@@ -119,9 +119,7 @@ export function subscribeAuthState(
   return entry.stateHub.subscribe((state) => {
     try {
       callback(state);
-    } catch {
-      // Listener failures should not break auth propagation.
-    }
+    } catch {}
   });
 }
 

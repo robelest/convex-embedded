@@ -1,24 +1,22 @@
 /**
- * Migration runner for local schema versioning.
- *
- * Re-exports from `@/shared/migrate` and adds the `convex/server`
- * -aware overload of `MigrationConfig` that accepts `FunctionReference`.
- *
- * @module
+ * Migration runner + ctx types for server-side imports.
  */
 
-/**
- * Run a set of embedded local table migrations against a runtime adapter.
- */
-export { runMigrations, migration } from "@/shared/migrate";
-/**
- * Migration configuration and adapter types re-exported for server-side local
- * schema upgrades.
- */
-export type {
-  MigrationConfig,
-  LocalTableMigrationStep,
-  LocalTableMigrationContext,
-  LocalTableDocsApi,
-  LocalMigrationAdapter,
-} from "@/shared/migrate";
+export {
+  runMigrations,
+  migration,
+  type RunMigrationsOptions,
+  type MigrationRuntimeAdapter,
+} from "@/shared/migrations/migrate";
+
+export {
+  type MigrationContext,
+  type MigrationDb,
+  type MigrationLogger,
+  type MigrationSchema,
+  type MigrationStep,
+  type MigrationStepFn,
+  type MigrationSystem,
+  type MigrationSystemTable,
+  type MigrationsMap,
+} from "@/shared/migrations/types";

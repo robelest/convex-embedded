@@ -100,29 +100,35 @@ export class EmbeddedConvexReactClient extends ConvexReactClient {
     ...argsAndOptions: [args?: FunctionArgs<Query>, options?: WatchQueryOptions]
   ) {
     const [args = {} as FunctionArgs<Query>, options] = argsAndOptions;
+    const embedded = this.embeddedClient;
     const listeners = new Set<() => void>();
-    const subscription = this.embeddedClient.onUpdate(
-      query,
-      args,
-      () => {
-        for (const listener of listeners) {
-          listener();
-        }
-      },
-      () => {
-        for (const listener of listeners) {
-          listener();
-        }
-      },
-    ) as unknown as QuerySubscription<Query>;
+    let subscription: QuerySubscription<Query> | null = null;
+
+    const ensureSubscription = (): QuerySubscription<Query> => {
+      if (subscription !== null) return subscription;
+      subscription = embedded.onUpdate(
+        query,
+        args,
+        () => {
+          for (const listener of listeners) {
+            listener();
+          }
+        },
+        () => {
+          for (const listener of listeners) {
+            listener();
+          }
+        },
+      ) as unknown as QuerySubscription<Query>;
+      return subscription;
+    };
 
     return {
       onUpdate(callback: () => void) {
+        const sub = ensureSubscription();
         listeners.add(callback);
-        // Schedule after adding the listener so the callback can't fire
-        // before the listener set contains it.
         const cancelImmediate =
-          subscription.getCurrentValue() !== undefined
+          sub.getCurrentValue() !== undefined
             ? scheduleImmediateCallback(() => {
                 if (listeners.has(callback)) callback();
               })
@@ -131,16 +137,26 @@ export class EmbeddedConvexReactClient extends ConvexReactClient {
         return () => {
           listeners.delete(callback);
           cancelImmediate?.();
-          if (listeners.size === 0) {
+          if (listeners.size === 0 && subscription !== null) {
             subscription.unsubscribe();
+            subscription = null;
           }
         };
       },
       localQueryResult() {
-        return subscription.getCurrentValue();
+        if (subscription !== null) {
+          return subscription.getCurrentValue();
+        }
+        const peek = (embedded as unknown as {
+          peekCurrentValue?: (
+            ref: unknown,
+            args: unknown,
+          ) => unknown;
+        }).peekCurrentValue;
+        return typeof peek === "function" ? peek(query, args) : undefined;
       },
       localQueryLogs() {
-        return subscription.getQueryLogs?.();
+        return subscription?.getQueryLogs?.();
       },
       journal() {
         return options?.journal;

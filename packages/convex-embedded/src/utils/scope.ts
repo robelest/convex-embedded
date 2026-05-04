@@ -23,7 +23,6 @@ export class DisposableScope {
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
-    // Execute in LIFO order (reverse of registration)
     const reversed = [...this.finalizers].reverse();
     this.finalizers.length = 0;
     for (const fn of reversed) {

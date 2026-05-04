@@ -1,20 +1,25 @@
 import type {
+  ParsedSchema,
   SearchIndexDefinition,
+  TableSchema,
+  ValidatorJSON,
   VectorIndexDefinition,
 } from "@/runtime/db/schema";
+import { validatorToSqlType } from "@/runtime/db/schema";
 import { buildSearchIndexState, executeSearch } from "@/runtime/db/search";
-import { sourceTableName } from "@/runtime/db/sql_pushdown";
+import { sourceTableName } from "@/runtime/db/sql";
 import type { StoredDocument } from "@/runtime/db/types";
 import { buildVectorFilterSqlClauseGroups } from "@/runtime/db/vector";
 import type {
   CommitBatch,
   DatabaseMeta,
-  PersistenceQueryRead,
-  PersistenceReadOptions,
-  PersistenceVectorRead,
-  SqlCommitApplyOptions,
-  SqlCommitApplyResult,
-  SqlPersistenceAdapter,
+  QueryArgs,
+  ReadOptions,
+  SchemaOp,
+  VectorSearchArgs,
+  SqlWriteOptions,
+  SqlWriteResult,
+  SqlStorageAdapter,
   StoredDocumentWithTable,
 } from "@/storage/adapter";
 
@@ -25,17 +30,7 @@ const SQLITE_ADAPTER_SCHEMA_VERSION = 3;
 const SQLITE_ADAPTER_META_TABLE = "_convex_sqlite_adapter_meta";
 const SQLITE_TABLE_ROUTING_TABLE = "_convex_sqlite_table_routing";
 
-const LEGACY_SCHEMA_STATEMENTS = [
-  `CREATE TABLE IF NOT EXISTS documents (
-    id TEXT PRIMARY KEY,
-    table_name TEXT NOT NULL DEFAULT '',
-    creation_time REAL NOT NULL DEFAULT 0,
-    identity_key TEXT,
-    data TEXT NOT NULL
-  )`,
-  "CREATE INDEX IF NOT EXISTS documents_by_table_name ON documents(table_name)",
-  "CREATE INDEX IF NOT EXISTS documents_by_table_name_and_creation_time ON documents(table_name, creation_time, id)",
-  "CREATE INDEX IF NOT EXISTS documents_by_table_name_and_identity_key ON documents(table_name, identity_key, id)",
+const BASE_SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS meta (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     timestamp REAL NOT NULL,
@@ -188,27 +183,149 @@ function quoteIdentifier(name: string): string {
   return `"${name.replaceAll('"', '""')}"`;
 }
 
-function physicalTableNameFor(tableName: string): string {
-  const internal = INTERNAL_TABLE_SPECS[tableName];
+function physicalTableNameFor(
+  tableName: string,
+  userTableSpecs?: Map<string, InternalTableSpec>,
+): string {
+  const internal =
+    INTERNAL_TABLE_SPECS[tableName] ?? userTableSpecs?.get(tableName);
   if (internal) {
     return internal.physicalTableName;
   }
   return `documents__${tableName}`;
 }
 
-type InternalFieldSpec = {
+export type InternalFieldSpec = {
   column: string;
   sqlType: string;
   notNull?: boolean;
   defaultSql?: string;
   preserveNull?: boolean;
+  serializer?: "json";
 };
 
-type InternalTableSpec = {
+export type InternalTableSpec = {
   physicalTableName: string;
   fields: Record<string, InternalFieldSpec>;
   indexes: Array<{ name: string; columns: string[]; unique?: boolean }>;
 };
+
+const RESERVED_FIELDS = new Set(["_id", "_creationTime"]);
+
+function validatorAcceptsNull(validator: ValidatorJSON): boolean {
+  if (validator.type === "null" || validator.type === "any") return true;
+  if (validator.type === "union") {
+    return validator.value.some(validatorAcceptsNull);
+  }
+  return false;
+}
+
+function fieldSpecForValidator(
+  fieldName: string,
+  fieldType: ValidatorJSON,
+  optional: boolean,
+): InternalFieldSpec {
+  const acceptsNull = validatorAcceptsNull(fieldType);
+  const sqlType = validatorToSqlType(fieldType);
+  if (sqlType !== null) {
+    return {
+      column: fieldName,
+      sqlType,
+      notNull: !optional && !acceptsNull,
+      preserveNull: acceptsNull,
+    };
+  }
+  return {
+    column: fieldName,
+    sqlType: "TEXT",
+    notNull: !optional && !acceptsNull,
+    preserveNull: acceptsNull,
+    serializer: "json",
+  };
+}
+
+export function buildUserTableSpec(
+  tableName: string,
+  tableSchema: TableSchema,
+  options: { omittedFields?: ReadonlySet<string> } = {},
+): InternalTableSpec {
+  const omittedFields = options.omittedFields;
+  const documentType = tableSchema.documentType;
+  const fields: Record<string, InternalFieldSpec> = {};
+
+  if (documentType.type === "object") {
+    for (const [fieldName, { fieldType, optional }] of Object.entries(
+      documentType.value,
+    )) {
+      if (RESERVED_FIELDS.has(fieldName)) continue;
+      if (omittedFields?.has(fieldName)) continue;
+      fields[fieldName] = fieldSpecForValidator(fieldName, fieldType, optional);
+    }
+  }
+
+  fields["__identityKey"] = {
+    column: "identity_key",
+    sqlType: "TEXT",
+    preserveNull: true,
+  };
+
+  const physicalTableName = `documents__${tableName}`;
+  const indexes: InternalTableSpec["indexes"] = [];
+
+  for (const indexDef of tableSchema.indexes) {
+    const mappedColumns: string[] = [];
+    for (const fieldName of indexDef.fields) {
+      if (fieldName === "_creationTime") {
+        mappedColumns.push("creation_time");
+        continue;
+      }
+      if (fieldName === "_id") {
+        mappedColumns.push("id");
+        continue;
+      }
+      const spec = fields[fieldName];
+      mappedColumns.push(spec ? spec.column : fieldName);
+    }
+    if (!indexDef.fields.includes("_creationTime")) {
+      mappedColumns.push("creation_time");
+    }
+    if (!indexDef.fields.includes("_id")) {
+      mappedColumns.push("id");
+    }
+    indexes.push({ name: indexDef.indexDescriptor, columns: mappedColumns });
+  }
+
+  indexes.push({
+    name: "by_creation_time",
+    columns: ["creation_time", "id"],
+  });
+  indexes.push({
+    name: "by_identity_key",
+    columns: ["identity_key", "id"],
+  });
+
+  return {
+    physicalTableName,
+    fields,
+    indexes,
+  };
+}
+
+export function buildUserTableSpecs(
+  schema: ParsedSchema,
+  omittedFieldsByTable?: ReadonlyMap<string, ReadonlySet<string>>,
+): Map<string, InternalTableSpec> {
+  const specs = new Map<string, InternalTableSpec>();
+  for (const [tableName, tableSchema] of schema.tables) {
+    specs.set(
+      tableName,
+      buildUserTableSpec(tableName, tableSchema, {
+        omittedFields: omittedFieldsByTable?.get(tableName),
+      }),
+    );
+  }
+  return specs;
+}
 
 const INTERNAL_TABLE_SPECS: Record<string, InternalTableSpec> = {
   _resolve_id_map: {
@@ -374,6 +491,21 @@ const INTERNAL_TABLE_SPECS: Record<string, InternalTableSpec> = {
       { name: "by_table", columns: ["table_name", "creation_time", "id"] },
     ],
   },
+  _resolve_schema_steps: {
+    physicalTableName: "internal__resolve_schema_steps",
+    fields: {
+      table: { column: "table_name", sqlType: "TEXT", notNull: true },
+      version: { column: "version", sqlType: "INTEGER", notNull: true },
+      stepName: { column: "step_name", sqlType: "TEXT", notNull: true },
+    },
+    indexes: [
+      {
+        name: "by_table_version_step",
+        columns: ["table_name", "version", "step_name", "creation_time", "id"],
+        unique: true,
+      },
+    ],
+  },
   _resolve_store_versions: {
     physicalTableName: "internal__resolve_store_versions",
     fields: {
@@ -417,8 +549,12 @@ const INTERNAL_TABLE_SPECS: Record<string, InternalTableSpec> = {
   },
 };
 
-function buildPhysicalTableSchema(tableName: string): SqliteStatement[] {
-  const internal = INTERNAL_TABLE_SPECS[tableName];
+function buildPhysicalTableSchema(
+  tableName: string,
+  userTableSpecs?: Map<string, InternalTableSpec>,
+): SqliteStatement[] {
+  const internal =
+    INTERNAL_TABLE_SPECS[tableName] ?? userTableSpecs?.get(tableName);
   if (internal) {
     const quotedTable = quoteIdentifier(internal.physicalTableName);
     const fieldColumns = Object.values(internal.fields).map((field) => {
@@ -444,7 +580,7 @@ function buildPhysicalTableSchema(tableName: string): SqliteStatement[] {
       })),
     ];
   }
-  const physicalTableName = physicalTableNameFor(tableName);
+  const physicalTableName = physicalTableNameFor(tableName, userTableSpecs);
   const quotedTable = quoteIdentifier(physicalTableName);
   return [
     {
@@ -462,6 +598,38 @@ function buildPhysicalTableSchema(tableName: string): SqliteStatement[] {
       sql: `CREATE INDEX IF NOT EXISTS ${quoteIdentifier(`${physicalTableName}_by_identity_key`)} ON ${quotedTable}(identity_key, id)`,
     },
   ];
+}
+
+function buildSchemaOpStatements(
+  physicalTableName: string,
+  ops: readonly SchemaOp[],
+): SqliteStatement[] {
+  const quotedTable = quoteIdentifier(physicalTableName);
+  const statements: SqliteStatement[] = [];
+  for (const op of ops) {
+    if (op.type === "addColumn") {
+      const parts = [quoteIdentifier(op.column), op.sqlType];
+      if (op.notNull) parts.push("NOT NULL");
+      if (op.defaultSql !== undefined) parts.push(`DEFAULT ${op.defaultSql}`);
+      statements.push({
+        sql: `ALTER TABLE ${quotedTable} ADD COLUMN ${parts.join(" ")}`,
+      });
+    } else if (op.type === "dropColumn") {
+      statements.push({
+        sql: `ALTER TABLE ${quotedTable} DROP COLUMN ${quoteIdentifier(op.column)}`,
+      });
+    } else if (op.type === "addIndex") {
+      const indexName = quoteIdentifier(`${physicalTableName}_${op.name}`);
+      statements.push({
+        sql: `CREATE ${op.unique ? "UNIQUE " : ""}INDEX IF NOT EXISTS ${indexName} ON ${quotedTable}(${op.fields.map(quoteIdentifier).join(", ")})`,
+      });
+    } else if (op.type === "dropIndex") {
+      statements.push({
+        sql: `DROP INDEX IF EXISTS ${quoteIdentifier(`${physicalTableName}_${op.name}`)}`,
+      });
+    }
+  }
+  return statements;
 }
 
 function internalFieldExpression(
@@ -497,9 +665,34 @@ function internalOrderByClause(
   return parts.join(", ");
 }
 
+function isIdentityScopedTarget(target: TableStorageTarget): boolean {
+  return !target.tableName.startsWith("_");
+}
+
+function appendIdentityScopeClause(
+  target: TableStorageTarget,
+  activeIdentityKey: string | null | undefined,
+  clauses: string[],
+  params: unknown[],
+): void {
+  if (!isIdentityScopedTarget(target) || activeIdentityKey === undefined) {
+    return;
+  }
+  if (activeIdentityKey === null) {
+    clauses.push("identity_key IS NULL");
+    return;
+  }
+  clauses.push("identity_key = ?");
+  params.push(activeIdentityKey);
+}
+
+function whereClause(clauses: string[]): string {
+  return clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : "";
+}
+
 function internalRangeWhereClause(input: {
   target: TableStorageTarget;
-  range: Extract<PersistenceQueryRead["source"], { type: "IndexRange" }>;
+  range: Extract<QueryArgs["source"], { type: "IndexRange" }>;
   params: unknown[];
 }): string[] {
   const clauses: string[] = [];
@@ -508,8 +701,6 @@ function internalRangeWhereClause(input: {
       input.target,
       expression.fieldPath,
     );
-    // Rewrite `= NULL` to `IS NULL` since SQL equality against NULL is
-    // UNKNOWN. Our range type excludes Neq, so no IS NOT NULL case here.
     if (expression.value === null && expression.type === "Eq") {
       clauses.push(`${fieldExpr} IS NULL`);
       continue;
@@ -595,27 +786,64 @@ function internalFilterWhereClause(
   return null;
 }
 
+type RowDecoder = (row: Record<string, unknown>) => StoredDocument;
+
+const ROW_DECODER_CACHE = new WeakMap<InternalTableSpec, RowDecoder>();
+
+function getRowDecoder(spec: InternalTableSpec): RowDecoder {
+  let decoder = ROW_DECODER_CACHE.get(spec);
+  if (decoder) {
+    return decoder;
+  }
+  type FieldStep = {
+    field: string;
+    column: string;
+    preserveNull: boolean;
+    isJson: boolean;
+  };
+  const fieldSteps: FieldStep[] = [];
+  for (const [field, fieldSpec] of Object.entries(spec.fields)) {
+    fieldSteps.push({
+      field,
+      column: fieldSpec.column,
+      preserveNull: !!fieldSpec.preserveNull,
+      isJson: fieldSpec.serializer === "json",
+    });
+  }
+
+  decoder = (row: Record<string, unknown>): StoredDocument => {
+    const doc: Record<string, unknown> = {
+      _id: String(row.id),
+      _creationTime: Number(row.creation_time ?? 0),
+    };
+    for (let i = 0; i < fieldSteps.length; i++) {
+      const step = fieldSteps[i]!;
+      const value = row[step.column];
+      if (value === undefined) continue;
+      if (value === null && !step.preserveNull) continue;
+      if (step.isJson && typeof value === "string") {
+        doc[step.field] = JSON.parse(value);
+      } else {
+        doc[step.field] = value;
+      }
+    }
+    return doc as StoredDocument;
+  };
+  ROW_DECODER_CACHE.set(spec, decoder);
+  return decoder;
+}
+
 function decodeInternalRow(
   target: TableStorageTarget,
   row: Record<string, unknown>,
 ): StoredDocument {
-  const doc: Record<string, unknown> = {
-    _id: String(row.id),
-    _creationTime: Number(row.creation_time ?? 0),
-  };
   if (!target.internalSpec) {
-    return doc as StoredDocument;
+    return {
+      _id: String(row.id),
+      _creationTime: Number(row.creation_time ?? 0),
+    } as StoredDocument;
   }
-  for (const [field, spec] of Object.entries(target.internalSpec.fields)) {
-    const value = row[spec.column];
-    if (value === null && !spec.preserveNull) {
-      continue;
-    }
-    if (value !== undefined) {
-      doc[field] = value;
-    }
-  }
-  return doc as StoredDocument;
+  return getRowDecoder(target.internalSpec)(row);
 }
 
 function buildStoredDocumentSelectSql(
@@ -637,7 +865,12 @@ function decodeStoredRows(
   rows: Record<string, unknown>[],
 ): StoredDocument[] {
   if (target.internalSpec) {
-    return rows.map((row) => decodeInternalRow(target, row));
+    const decoder = getRowDecoder(target.internalSpec);
+    const out: StoredDocument[] = new Array(rows.length);
+    for (let i = 0; i < rows.length; i++) {
+      out[i] = decoder(rows[i]!);
+    }
+    return out;
   }
   return rows.map((row) => decodeStoredDocument(String(row.data)));
 }
@@ -681,9 +914,17 @@ function internalInsertStatement(
     ...Object.values(spec.fields).map((field) => field.column),
   ];
   const params: unknown[] = [String(doc._id), documentCreationTime(doc)];
-  for (const fieldName of Object.keys(spec.fields)) {
+  for (const [fieldName, fieldSpec] of Object.entries(spec.fields)) {
     const value = (doc as Record<string, unknown>)[fieldName];
-    params.push(isConvexUndefined(value) ? null : (value as unknown));
+    if (isConvexUndefined(value) || value === undefined) {
+      params.push(null);
+      continue;
+    }
+    if (fieldSpec.serializer === "json") {
+      params.push(value === null ? null : JSON.stringify(value));
+      continue;
+    }
+    params.push(value as unknown);
   }
   return {
     sql: `INSERT OR REPLACE INTO ${target.fromClause} (${columns.map(quoteIdentifier).join(", ")}) VALUES (${columns.map(() => "?").join(", ")})`,
@@ -691,63 +932,8 @@ function internalInsertStatement(
   };
 }
 
-async function tableExists(
-  driver: SqliteDriver,
-  tableName: string,
-): Promise<boolean> {
-  const rows = await driver.query<{ name: string }>(
-    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
-    [tableName],
-  );
-  return rows.length > 0;
-}
-
-async function inferAdapterSchemaVersion(
-  driver: SqliteDriver,
-): Promise<number | null> {
-  if (await tableExists(driver, SQLITE_ADAPTER_META_TABLE)) {
-    const rows = await driver.query<{ schema_version: number }>(
-      `SELECT schema_version FROM ${SQLITE_ADAPTER_META_TABLE} WHERE id = 1`,
-    );
-    const schemaVersion = Number(rows[0]?.schema_version);
-    if (Number.isFinite(schemaVersion)) {
-      return schemaVersion;
-    }
-  }
-
-  const hasLegacyDocuments = await tableExists(driver, "documents");
-  const hasLegacyMeta = await tableExists(driver, "meta");
-  const hasLegacyBlobs = await tableExists(driver, "blobs");
-  return hasLegacyDocuments || hasLegacyMeta || hasLegacyBlobs ? 1 : null;
-}
-
-async function ensureLegacyDocumentColumns(
-  driver: SqliteDriver,
-): Promise<void> {
-  const documentColumns = await driver.query<{ name: string }>(
-    "PRAGMA table_info(documents)",
-  );
-  const columnNames = new Set(documentColumns.map((column) => column.name));
-
-  if (!columnNames.has("creation_time")) {
-    await driver.execute(
-      "ALTER TABLE documents ADD COLUMN creation_time REAL NOT NULL DEFAULT 0",
-    );
-  }
-  if (!columnNames.has("identity_key")) {
-    await driver.execute("ALTER TABLE documents ADD COLUMN identity_key TEXT");
-  }
-
-  await driver.execute(
-    "UPDATE documents SET creation_time = COALESCE(CAST(json_extract(data, '$._creationTime') AS REAL), 0) WHERE creation_time IS NULL OR creation_time = 0",
-  );
-  await driver.execute(
-    "UPDATE documents SET identity_key = json_extract(data, '$.__identityKey') WHERE identity_key IS NULL",
-  );
-}
-
 function buildSearchCandidateStatement(input: {
-  source: Extract<PersistenceQueryRead["source"], { type: "Search" }>;
+  source: Extract<QueryArgs["source"], { type: "Search" }>;
   activeIdentityKey?: string | null;
   target: TableStorageTarget;
 }): SqliteStatement {
@@ -780,7 +966,7 @@ function buildSearchCandidateStatement(input: {
   }
 
   return {
-    sql: `SELECT data FROM ${input.target.fromClause}${clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : ""}`,
+    sql: `${buildStoredDocumentSelectSql(input.target)}${clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : ""}`,
     params,
   };
 }
@@ -953,7 +1139,7 @@ async function readSearchCandidatesFromSideTable(input: {
   driver: SqliteDriver;
   tableName: string;
   definition: SearchIndexDefinition;
-  source: Extract<PersistenceQueryRead["source"], { type: "Search" }>;
+  source: Extract<QueryArgs["source"], { type: "Search" }>;
   activeIdentityKey?: string | null;
 }): Promise<StoredDocument[]> {
   const { driver, tableName, definition, source, activeIdentityKey } = input;
@@ -986,10 +1172,10 @@ async function readSearchCandidatesFromSideTable(input: {
   return rows.map(({ data }) => decodeStoredDocument(data));
 }
 
-async function readVectorCandidatesFromSideTable(input: {
+async function vectorSearchFromSideTable(input: {
   driver: SqliteDriver;
   tableName: string;
-  args: PersistenceVectorRead;
+  args: VectorSearchArgs;
 }): Promise<StoredDocument[]> {
   const { driver, tableName, args } = input;
   const indexName = args.definition.indexDescriptor;
@@ -1025,8 +1211,8 @@ async function readVectorCandidatesFromSideTable(input: {
 
 async function readSearch(
   driver: SqliteDriver,
-  source: Extract<PersistenceQueryRead["source"], { type: "Search" }>,
-  options: PersistenceReadOptions,
+  source: Extract<QueryArgs["source"], { type: "Search" }>,
+  options: ReadOptions,
   target: TableStorageTarget,
 ): Promise<StoredDocument[] | null> {
   const definition = options.searchDefinition;
@@ -1038,18 +1224,14 @@ async function readSearch(
     activeIdentityKey: options.activeIdentityKey,
     target,
   });
-  const rows = await driver.query<{ data: string }>(
-    statement.sql,
-    statement.params,
-  );
+  const docs = await queryStoredDocuments(driver, target, statement);
   return executeSearch(
     buildSearchIndexState({
-      docs: rows.map(({ data }) => {
-        const doc = decodeStoredDocument(data) as StoredDocument &
-          Record<string, unknown>;
-        const raw = doc[IDENTITY_SCOPE_FIELD];
+      docs: docs.map((doc) => {
+        const record = doc as StoredDocument & Record<string, unknown>;
+        const raw = record[IDENTITY_SCOPE_FIELD];
         return {
-          doc,
+          doc: record,
           identityKey: typeof raw === "string" ? raw : null,
         };
       }),
@@ -1063,14 +1245,11 @@ async function readSearch(
   );
 }
 
-async function readVectorCandidates(
+async function vectorSearch(
   driver: SqliteDriver,
   target: TableStorageTarget,
-  args: PersistenceVectorRead,
+  args: VectorSearchArgs,
 ): Promise<StoredDocument[]> {
-  if (target.internalSpec) {
-    return [];
-  }
   const params: unknown[] = [];
   const clauses: string[] = [];
 
@@ -1094,20 +1273,24 @@ async function readVectorCandidates(
     }
   }
 
-  let sql = `SELECT data FROM ${target.fromClause}`;
+  let sql = buildStoredDocumentSelectSql(target);
   if (clauses.length > 0) {
     sql += ` WHERE ${clauses.join(" AND ")}`;
   }
-  const rows = await driver.query<{ data: string }>(sql, params);
-  return rows.map(({ data }) => decodeStoredDocument(data));
+  return queryStoredDocuments(driver, target, { sql, params });
 }
 
 async function readTableDocuments(
   driver: SqliteDriver,
   target: TableStorageTarget,
+  options: ReadOptions = {},
 ): Promise<StoredDocument[]> {
+  const params: unknown[] = [];
+  const clauses: string[] = [];
+  appendIdentityScopeClause(target, options.activeIdentityKey, clauses, params);
   return queryStoredDocuments(driver, target, {
-    sql: `${buildStoredDocumentSelectSql(target)} ORDER BY creation_time ASC, id ASC`,
+    sql: `${buildStoredDocumentSelectSql(target)}${whereClause(clauses)} ORDER BY creation_time ASC, id ASC`,
+    params,
   });
 }
 
@@ -1149,8 +1332,6 @@ async function applyCommitBatch(
     const vectorDefs = registry.vector.get(tableName);
     if (vectorDefs && vectorDefs.length > 0) {
       for (const definition of vectorDefs) {
-        // Persist candidate rows even when the vector field is absent; the
-        // runtime ranking path filters them out during materialization.
         statements.push(
           ...upsertSideTableEntryStatements({
             kind: "vector",
@@ -1179,20 +1360,24 @@ async function applyCommitBatch(
 }
 
 function sourceQuerySql(
-  source: Exclude<PersistenceQueryRead["source"], { type: "Search" }>,
-  options: PersistenceReadOptions,
+  source: Exclude<QueryArgs["source"], { type: "Search" }>,
+  options: ReadOptions,
   target: TableStorageTarget,
 ): SqliteStatement {
   const params: unknown[] = [];
+  const clauses: string[] = [];
   let sql = buildStoredDocumentSelectSql(target);
 
+  appendIdentityScopeClause(target, options.activeIdentityKey, clauses, params);
+
   if (source.type === "FullTableScan") {
+    sql += whereClause(clauses);
     sql += ` ORDER BY ${internalOrderByClause(target, ["_creationTime"], source.order ?? "asc")}`;
   } else {
-    const clauses = internalRangeWhereClause({ target, range: source, params });
-    if (clauses.length > 0) {
-      sql += ` WHERE ${clauses.join(" AND ")}`;
-    }
+    clauses.push(
+      ...internalRangeWhereClause({ target, range: source, params }),
+    );
+    sql += whereClause(clauses);
     sql += ` ORDER BY ${internalOrderByClause(target, options.indexFields ?? [], source.order ?? "asc")}`;
   }
 
@@ -1205,7 +1390,7 @@ function sourceQuerySql(
 }
 
 function pushedQuerySql(
-  args: PersistenceQueryRead,
+  args: QueryArgs,
   target: TableStorageTarget,
 ): SqliteStatement | null {
   if (args.source.type === "Search") {
@@ -1214,6 +1399,8 @@ function pushedQuerySql(
   const params: unknown[] = [];
   const clauses: string[] = [];
   let sql = buildStoredDocumentSelectSql(target);
+
+  appendIdentityScopeClause(target, args.activeIdentityKey, clauses, params);
 
   if (args.source.type !== "FullTableScan") {
     clauses.push(
@@ -1229,9 +1416,7 @@ function pushedQuerySql(
     clauses.push(clause);
   }
 
-  if (clauses.length > 0) {
-    sql += ` WHERE ${clauses.join(" AND ")}`;
-  }
+  sql += whereClause(clauses);
   const orderFields =
     args.source.type === "FullTableScan"
       ? ["_creationTime"]
@@ -1247,12 +1432,9 @@ function pushedQuerySql(
 async function ensureSqliteSchema(driver: SqliteDriver): Promise<void> {
   await driver.execute("PRAGMA journal_mode = WAL");
 
-  const schemaVersion = await inferAdapterSchemaVersion(driver);
-
-  for (const statement of LEGACY_SCHEMA_STATEMENTS) {
+  for (const statement of BASE_SCHEMA_STATEMENTS) {
     await driver.execute(statement);
   }
-  await ensureLegacyDocumentColumns(driver);
   for (const statement of ROUTING_SCHEMA_STATEMENTS) {
     await driver.execute(statement);
   }
@@ -1260,12 +1442,10 @@ async function ensureSqliteSchema(driver: SqliteDriver): Promise<void> {
     await driver.execute(statement);
   }
 
-  if (schemaVersion === null || schemaVersion < SQLITE_ADAPTER_SCHEMA_VERSION) {
-    await driver.execute(
-      `INSERT OR REPLACE INTO ${SQLITE_ADAPTER_META_TABLE} (id, schema_version) VALUES (1, ?)`,
-      [SQLITE_ADAPTER_SCHEMA_VERSION],
-    );
-  }
+  await driver.execute(
+    `INSERT OR REPLACE INTO ${SQLITE_ADAPTER_META_TABLE} (id, schema_version) VALUES (1, ?)`,
+    [SQLITE_ADAPTER_SCHEMA_VERSION],
+  );
 }
 
 async function listTableRoutes(driver: SqliteDriver): Promise<TableRouteRow[]> {
@@ -1274,17 +1454,11 @@ async function listTableRoutes(driver: SqliteDriver): Promise<TableRouteRow[]> {
   );
 }
 
-async function listLegacySharedTables(driver: SqliteDriver): Promise<string[]> {
-  const rows = await driver.query<{ table_name: string }>(
-    "SELECT DISTINCT table_name FROM documents WHERE table_name IS NOT NULL AND table_name != ''",
-  );
-  return rows.map((row) => row.table_name);
-}
-
-export async function createSqlitePersistenceAdapter(input: {
+export async function createSqliteStorage(input: {
   driver: SqliteDriver;
-}): Promise<SqlPersistenceAdapter> {
-  const { driver } = input;
+  userTableSpecs?: Map<string, InternalTableSpec>;
+}): Promise<SqlStorageAdapter> {
+  const { driver, userTableSpecs } = input;
   await ensureSqliteSchema(driver);
 
   const tableRouteCache = new Map<string, string | null>();
@@ -1293,7 +1467,13 @@ export async function createSqlitePersistenceAdapter(input: {
     vector: new Map(),
   };
 
-  function updateRegistry(options: SqlCommitApplyOptions | undefined): void {
+  function resolveInternalSpec(tableName: string): InternalTableSpec | null {
+    return (
+      INTERNAL_TABLE_SPECS[tableName] ?? userTableSpecs?.get(tableName) ?? null
+    );
+  }
+
+  function updateRegistry(options: SqlWriteOptions | undefined): void {
     if (options?.tableSearchIndexes) {
       for (const [tableName, definitions] of Object.entries(
         options.tableSearchIndexes,
@@ -1334,86 +1514,26 @@ export async function createSqlitePersistenceAdapter(input: {
       tableName,
       physicalTableName,
       fromClause: quoteIdentifier(physicalTableName),
-      internalSpec: INTERNAL_TABLE_SPECS[tableName] ?? null,
+      internalSpec: resolveInternalSpec(tableName),
     };
   }
 
   async function ensurePhysicalTableRoute(tableName: string): Promise<string> {
     const existing = await getPhysicalTableName(tableName);
     if (existing) {
-      const desired = physicalTableNameFor(tableName);
-      const internal = INTERNAL_TABLE_SPECS[tableName];
-      if (internal && existing !== desired) {
-        const target = {
-          kind: "physical" as const,
-          tableName,
-          physicalTableName: desired,
-          fromClause: quoteIdentifier(desired),
-          internalSpec: internal,
-        };
-        const legacyRows = await driver.query<{ data: string }>(
-          `SELECT data FROM ${quoteIdentifier(existing)}`,
-        );
-        await driver.executeBatch([
-          ...buildPhysicalTableSchema(tableName),
-          ...legacyRows.map(({ data }) =>
-            internalInsertStatement(target, decodeStoredDocument(data)),
-          ),
-          {
-            sql: `INSERT OR REPLACE INTO ${SQLITE_TABLE_ROUTING_TABLE} (table_name, physical_table_name) VALUES (?, ?)`,
-            params: [tableName, desired],
-          },
-        ]);
-        tableRouteCache.set(tableName, desired);
-        return desired;
-      }
       return existing;
     }
 
-    const physicalTableName = physicalTableNameFor(tableName);
-    const internal = INTERNAL_TABLE_SPECS[tableName];
-    const target = {
-      kind: "physical" as const,
-      tableName,
-      physicalTableName,
-      fromClause: quoteIdentifier(physicalTableName),
-      internalSpec: internal ?? null,
-    };
-    const legacyRows = await driver.query<{ data: string }>(
-      "SELECT data FROM documents WHERE table_name = ?",
-      [tableName],
-    );
+    const physicalTableName = physicalTableNameFor(tableName, userTableSpecs);
     await driver.executeBatch([
-      ...buildPhysicalTableSchema(tableName),
+      ...buildPhysicalTableSchema(tableName, userTableSpecs),
       {
         sql: `INSERT OR REPLACE INTO ${SQLITE_TABLE_ROUTING_TABLE} (table_name, physical_table_name) VALUES (?, ?)`,
         params: [tableName, physicalTableName],
       },
-      ...(internal
-        ? legacyRows.map(({ data }) =>
-            internalInsertStatement(target, decodeStoredDocument(data)),
-          )
-        : [
-            {
-              sql: `INSERT OR REPLACE INTO ${quoteIdentifier(physicalTableName)} (id, creation_time, identity_key, data)
-                    SELECT id, creation_time, identity_key, data FROM documents WHERE table_name = ?`,
-              params: [tableName],
-            },
-          ]),
-      {
-        sql: "DELETE FROM documents WHERE table_name = ?",
-        params: [tableName],
-      },
     ]);
     tableRouteCache.set(tableName, physicalTableName);
     return physicalTableName;
-  }
-
-  async function migrateLegacySharedTablesToPhysical(): Promise<void> {
-    const legacyTables = await listLegacySharedTables(driver);
-    for (const tableName of legacyTables) {
-      await ensurePhysicalTableRoute(tableName);
-    }
   }
 
   async function getAllDocuments(): Promise<StoredDocumentWithTable[]> {
@@ -1426,7 +1546,7 @@ export async function createSqlitePersistenceAdapter(input: {
         tableName: route.table_name,
         physicalTableName: route.physical_table_name,
         fromClause: quoteIdentifier(route.physical_table_name),
-        internalSpec: INTERNAL_TABLE_SPECS[route.table_name] ?? null,
+        internalSpec: resolveInternalSpec(route.table_name),
       };
       const tableRows = await readTableDocuments(driver, target);
       results.push(
@@ -1440,16 +1560,17 @@ export async function createSqlitePersistenceAdapter(input: {
     return results;
   }
 
-  await migrateLegacySharedTablesToPhysical();
-
   return {
     kind: "sql",
     async getDocuments(): Promise<StoredDocumentWithTable[]> {
       return getAllDocuments();
     },
-    async getDocumentsByTable(tableName: string): Promise<StoredDocument[]> {
+    async getDocumentsByTable(
+      tableName: string,
+      opts: ReadOptions = {},
+    ): Promise<StoredDocument[]> {
       const target = await getStorageTarget(tableName);
-      return readTableDocuments(driver, target);
+      return readTableDocuments(driver, target, opts);
     },
     async hasAnyDocuments(tableName: string): Promise<boolean> {
       const physicalTableName = await getPhysicalTableName(tableName);
@@ -1461,18 +1582,40 @@ export async function createSqlitePersistenceAdapter(input: {
       );
       return rows.length > 0;
     },
-    async listDocuments(tableName: string): Promise<StoredDocument[]> {
+    async applySchemaOps(
+      tableName: string,
+      ops: readonly SchemaOp[],
+    ): Promise<void> {
+      if (ops.length === 0) return;
+      const physicalTableName = await ensurePhysicalTableRoute(tableName);
+      const statements = buildSchemaOpStatements(physicalTableName, ops);
+      if (statements.length === 0) return;
+      await driver.executeBatch(statements);
+    },
+    async listDocuments(
+      tableName: string,
+      opts: ReadOptions = {},
+    ): Promise<StoredDocument[]> {
       const target = await getStorageTarget(tableName);
-      return readTableDocuments(driver, target);
+      return readTableDocuments(driver, target, opts);
     },
     async getDocument(
       tableName: string,
       id: string,
+      opts: ReadOptions = {},
     ): Promise<StoredDocument | null> {
       const target = await getStorageTarget(tableName);
+      const params: unknown[] = [id];
+      const clauses = ["id = ?"];
+      appendIdentityScopeClause(
+        target,
+        opts.activeIdentityKey,
+        clauses,
+        params,
+      );
       const docs = await queryStoredDocuments(driver, target, {
-        sql: `${buildStoredDocumentSelectSql(target)} WHERE id = ?`,
-        params: [id],
+        sql: `${buildStoredDocumentSelectSql(target)}${whereClause(clauses)}`,
+        params,
       });
       return docs[0] ?? null;
     },
@@ -1498,14 +1641,26 @@ export async function createSqlitePersistenceAdapter(input: {
         ? { timestamp: row.timestamp, lastCreationTime: row.last_creation_time }
         : null;
     },
-    async countDocuments(tableName: string): Promise<number> {
+    async countDocuments(
+      tableName: string,
+      opts: ReadOptions = {},
+    ): Promise<number> {
       const target = await getStorageTarget(tableName);
+      const params: unknown[] = [];
+      const clauses: string[] = [];
+      appendIdentityScopeClause(
+        target,
+        opts.activeIdentityKey,
+        clauses,
+        params,
+      );
       const rows = await driver.query<{ count: number }>(
-        `SELECT COUNT(*) AS count FROM ${target.fromClause}`,
+        `SELECT COUNT(*) AS count FROM ${target.fromClause}${whereClause(clauses)}`,
+        params,
       );
       return rows[0]?.count ?? 0;
     },
-    async readSource(source, options = {}): Promise<StoredDocument[] | null> {
+    async source(source, options = {}): Promise<StoredDocument[] | null> {
       const target = await getStorageTarget(sourceTableName(source));
       if (source.type === "Search") {
         const definition = options.searchDefinition;
@@ -1560,7 +1715,7 @@ export async function createSqlitePersistenceAdapter(input: {
       const statement = sourceQuerySql(source, options, target);
       return queryStoredDocuments(driver, target, statement);
     },
-    async readQuery(args): Promise<StoredDocument[] | null> {
+    async query(args): Promise<StoredDocument[] | null> {
       if (args.source.type === "Search") {
         return null;
       }
@@ -1571,11 +1726,11 @@ export async function createSqlitePersistenceAdapter(input: {
       }
       return queryStoredDocuments(driver, target, statement);
     },
-    async readVectorCandidates(
-      args: PersistenceVectorRead,
+    async vectorSearch(
+      args: VectorSearchArgs,
     ): Promise<StoredDocument[] | null> {
       const target = await getStorageTarget(args.tableName);
-      if (target.internalSpec) {
+      if (INTERNAL_TABLE_SPECS[args.tableName]) {
         return [];
       }
       await rebuildSideTableFromDocuments({
@@ -1594,9 +1749,9 @@ export async function createSqlitePersistenceAdapter(input: {
           indexName: args.definition.indexDescriptor,
         })) === 0
       ) {
-        return readVectorCandidates(driver, target, args);
+        return vectorSearch(driver, target, args);
       }
-      return readVectorCandidatesFromSideTable({
+      return vectorSearchFromSideTable({
         driver,
         tableName: args.tableName,
         args,
@@ -1627,8 +1782,8 @@ export async function createSqlitePersistenceAdapter(input: {
     },
     async applyCommit(
       batch: CommitBatch,
-      options: SqlCommitApplyOptions,
-    ): Promise<SqlCommitApplyResult> {
+      options: SqlWriteOptions,
+    ): Promise<SqlWriteResult> {
       updateRegistry(options);
       for (const { tableName } of batch.puts) {
         await ensurePhysicalTableRoute(tableName);
@@ -1670,7 +1825,6 @@ export async function createSqlitePersistenceAdapter(input: {
           sql: `DELETE FROM ${quoteIdentifier(route.physical_table_name)}`,
         })),
         { sql: `DELETE FROM ${SQLITE_TABLE_ROUTING_TABLE}` },
-        { sql: "DELETE FROM documents" },
         { sql: "DELETE FROM meta" },
         { sql: "DELETE FROM blobs" },
         { sql: `DELETE FROM ${quoteIdentifier(SEARCH_ENTRIES_PHYSICAL)}` },

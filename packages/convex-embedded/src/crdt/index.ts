@@ -22,16 +22,9 @@
  * @packageDocumentation
  */
 
-// ---------------------------------------------------------------------------
-// Schema constructors
-// ---------------------------------------------------------------------------
-
-export { schema, omit, createConflict } from "@/server/schema";
-export type { RegisterOptions } from "@/server/schema";
-
-// ---------------------------------------------------------------------------
-// Field runtime access
-// ---------------------------------------------------------------------------
+export { schema, omit } from "@/server/schema/fields";
+export type { RegisterOptions } from "@/server/schema/fields";
+export { createConflict } from "@/server/schema/conflict";
 
 export type { FieldRef } from "@/shared/types";
 export type {
@@ -93,10 +86,6 @@ export const counter = {
 } as const;
 
 export type { ProseContent } from "@/crdt/prose/content";
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
 
 export type {
   Conflict,

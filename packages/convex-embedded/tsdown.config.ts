@@ -17,6 +17,8 @@ export default defineConfig([
       "browser/index": "src/browser/index.ts",
       "tracing/browser": "src/tracing/browser.ts",
       "tracing/node": "src/tracing/node.ts",
+      "tracing/memory": "src/tracing/memory.ts",
+      "tracing/spans": "src/tracing/spans.ts",
       react: "src/react.ts",
       "expo/index": "src/expo/index.ts",
     },

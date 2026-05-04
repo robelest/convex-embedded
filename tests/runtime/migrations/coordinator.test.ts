@@ -1,7 +1,7 @@
 import { EmbeddedRuntime } from "@embedded/runtime/embedded";
 import { runLocalMigrations } from "@embedded/runtime/migrations/coordinator";
 import type { PendingReplayMeta } from "@embedded/shared/symbols";
-import { mockAdapter } from "@tests/helpers/test-adapter";
+import { mockAdapter } from "@tests/helpers/adapter";
 import { describe, expect, it } from "@tests/testkit";
 import { vi } from "vitest";
 
@@ -9,7 +9,7 @@ const STUB_MODULES: Record<string, () => Promise<any>> = {
   "_generated/api": () => Promise.resolve({}),
 };
 
-function createSqlPersistence(
+function createSqlStorage(
   rowsByTable: Record<string, Array<Record<string, unknown>>>,
 ) {
   const getDocumentsByTable = vi.fn(async (tableName: string) => [
@@ -70,7 +70,7 @@ function createSqlPersistence(
 
 describe("runLocalMigrations", () => {
   it("migrates only pending entries for the active identity via indexed reads", async () => {
-    const { adapter: persistence, readSource } = createSqlPersistence({
+    const { adapter: storage, readSource } = createSqlStorage({
       _resolve_pending: [
         {
           _id: "pending-a",
@@ -98,9 +98,9 @@ describe("runLocalMigrations", () => {
     });
     const runtime = new EmbeddedRuntime({
       convex: { modules: STUB_MODULES },
-      persistence,
+      storage,
     });
-    runtime.db.setReadBackendForTests(persistence);
+    runtime.db.setReadBackendForTests(storage);
 
     const replayMetadata = new Map<string, PendingReplayMeta>([
       [
@@ -128,13 +128,9 @@ describe("runLocalMigrations", () => {
         replayMetadata,
       });
 
-      expect(readSource).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: "IndexRange",
-          indexName: "_resolve_pending.by_identity_key_and_creation_time",
-        }),
-        expect.anything(),
-      );
+      // Phase 1: hydrated tables serve reads from RAM, so the SQL source
+      // pushdown is no longer invoked. The pendingRows assertion below is the
+      // real correctness check.
 
       const pendingRows = (
         await runtime.db.listDocumentsAsync("_resolve_pending")

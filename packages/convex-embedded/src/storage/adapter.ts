@@ -1,14 +1,10 @@
 /**
- * @internal Shared value types + the legacy `SqlPersistenceAdapter` object
- * shape used internally by the SQL factory and worker.
+ * Storage adapter interfaces.
  *
- * The public API for persistence is the class hierarchy in `@/persistence`
- * ({@link PersistenceAdapter} base class, {@link SqliteAdapter}, {@link
- * OpaqueAdapter}). This module exists only because the SQL factory +
- * browser-worker still exchange objects via the `SqlPersistenceAdapter`
- * shape. New code should not import `SqlPersistenceAdapter` from here.
+ * - {@link StorageAdapter} — blob storage (minimal base)
+ * - {@link QueryableAdapter} — documents, queries, and blob storage
  *
- * @packageDocumentation
+ * @public
  */
 
 import type { FilterNode } from "@/runtime/db/query";
@@ -22,51 +18,51 @@ import type {
   VectorSearchExpression,
 } from "@/runtime/db/types";
 
-export interface DatabaseMeta {
+export interface StorageMetadata {
   timestamp: number;
   lastCreationTime: number;
 }
 
-export interface StoredDocumentWithTable {
+export interface DocumentWithTable {
   doc: StoredDocument;
   tableName: string;
 }
 
-export interface StoredDocumentDelete {
+export interface DocumentDelete {
   id: string;
   tableName: string;
 }
 
-export interface CommitBatch {
-  puts: StoredDocumentWithTable[];
-  deletes: StoredDocumentDelete[];
-  meta: DatabaseMeta;
+export interface WriteBatch {
+  puts: DocumentWithTable[];
+  deletes: DocumentDelete[];
+  meta: StorageMetadata;
 }
 
-export interface SqlCommittedTableSnapshot {
+export interface TableSnapshot {
   tableName: string;
   docs: StoredDocument[];
 }
 
-export interface SqlCommitApplyOptions {
+export interface WriteOptions {
   materializedTables: string[];
   tableSearchIndexes?: Record<string, SearchIndexDefinition[]>;
   tableVectorIndexes?: Record<string, VectorIndexDefinition[]>;
 }
 
-export interface SqlCommitApplyResult {
-  meta: DatabaseMeta;
-  tables: SqlCommittedTableSnapshot[];
+export interface WriteResult {
+  meta: StorageMetadata;
+  tables: TableSnapshot[];
 }
 
-export interface PersistenceReadOptions {
+export interface ReadOptions {
   limit?: number | null;
   indexFields?: string[];
   searchDefinition?: SearchIndexDefinition;
   activeIdentityKey?: string | null;
 }
 
-export interface PersistenceQueryRead {
+export interface QueryArgs {
   source: Source;
   filters: FilterNode[];
   limit: number | null;
@@ -75,7 +71,7 @@ export interface PersistenceQueryRead {
   activeIdentityKey?: string | null;
 }
 
-export interface PersistenceVectorRead {
+export interface VectorSearchArgs {
   tableName: string;
   indexName: string;
   definition: VectorIndexDefinition;
@@ -83,40 +79,130 @@ export interface PersistenceVectorRead {
   activeIdentityKey?: string | null;
 }
 
+export type SchemaOp =
+  | {
+      type: "addColumn";
+      column: string;
+      sqlType: "TEXT" | "REAL" | "INTEGER" | "BLOB";
+      notNull?: boolean;
+      defaultSql?: string;
+    }
+  | { type: "dropColumn"; column: string }
+  | {
+      type: "addIndex";
+      name: string;
+      fields: string[];
+      unique?: boolean;
+    }
+  | { type: "dropIndex"; name: string };
+
 /**
- * Internal object shape returned by `createSqlitePersistenceAdapter`. The
- * `SqliteAdapter` class wraps this; the browser SQLite worker exchanges
- * instances of this shape via RPC. Not exported from the public surface.
+ * Blob storage — the minimal base adapter.
  *
- * @internal
+ * Handles binary blob storage for file uploads and downloads.
  */
-export interface SqlPersistenceAdapter {
+export interface StorageAdapter {
+  getBlob(id: string): Promise<Blob | null>;
+  putBlob(id: string, blob: Blob): Promise<void>;
+  deleteBlob(id: string): Promise<void>;
+  clearAll(): Promise<void>;
+  close?(): Promise<void>;
+}
+
+/**
+ * Full document + query + blob storage.
+ *
+ * Extends {@link StorageAdapter} with document storage, metadata,
+ * native query execution, and atomic writes. This is what SQL-backed
+ * adapters implement.
+ *
+ * Query methods return `null` to opt out for a given input — the
+ * runtime falls back to in-memory evaluation.
+ */
+export interface QueryableAdapter extends StorageAdapter {
+  getDocuments(
+    table?: string,
+    opts?: ReadOptions,
+  ): Promise<DocumentWithTable[] | StoredDocument[]>;
+  getDocument(
+    table: string,
+    id: string,
+    opts?: ReadOptions,
+  ): Promise<StoredDocument | null>;
+  countDocuments(table: string, opts?: ReadOptions): Promise<number>;
+  getMetadata(): Promise<StorageMetadata | null>;
+  write(batch: WriteBatch, opts?: WriteOptions): Promise<WriteResult | void>;
+  query(args: QueryArgs): Promise<StoredDocument[] | null>;
+  source(source: Source, opts?: ReadOptions): Promise<StoredDocument[] | null>;
+  vectorSearch(args: VectorSearchArgs): Promise<StoredDocument[] | null>;
+  hasDocuments(table: string): Promise<boolean | null>;
+  applySchemaOps?(table: string, ops: readonly SchemaOp[]): Promise<void>;
+}
+
+/**
+ * Type guard for queryable adapters.
+ */
+export function isQueryable(
+  adapter: StorageAdapter,
+): adapter is QueryableAdapter {
+  return typeof (adapter as QueryableAdapter).query === "function";
+}
+
+export type { StorageMetadata as DatabaseMeta };
+export type { DocumentWithTable as StoredDocumentWithTable };
+export type { DocumentDelete as StoredDocumentDelete };
+export type { WriteBatch as CommitBatch };
+
+export interface SqlCommittedTableSnapshot {
+  tableName: string;
+  docs: StoredDocument[];
+}
+
+export interface SqlWriteOptions {
+  materializedTables: string[];
+  tableSearchIndexes?: Record<string, SearchIndexDefinition[]>;
+  tableVectorIndexes?: Record<string, VectorIndexDefinition[]>;
+}
+
+export interface SqlWriteResult {
+  meta: StorageMetadata;
+  tables: SqlCommittedTableSnapshot[];
+}
+
+export interface SqlStorageAdapter {
   kind: "sql";
-  getDocuments(): Promise<StoredDocumentWithTable[]>;
-  getDocumentsByTable(tableName: string): Promise<StoredDocument[]>;
-  getDocumentsByTables(
-    tableNames: string[],
-  ): Promise<StoredDocumentWithTable[]>;
-  getMeta(): Promise<DatabaseMeta | null>;
-  listDocuments(tableName: string): Promise<StoredDocument[]>;
-  getDocument(tableName: string, id: string): Promise<StoredDocument | null>;
-  countDocuments(tableName: string): Promise<number>;
-  readSource(
+  getDocuments(): Promise<DocumentWithTable[]>;
+  getDocumentsByTable(
+    tableName: string,
+    opts?: ReadOptions,
+  ): Promise<StoredDocument[]>;
+  getDocumentsByTables(tableNames: string[]): Promise<DocumentWithTable[]>;
+  getMeta(): Promise<StorageMetadata | null>;
+  listDocuments(
+    tableName: string,
+    opts?: ReadOptions,
+  ): Promise<StoredDocument[]>;
+  getDocument(
+    tableName: string,
+    id: string,
+    opts?: ReadOptions,
+  ): Promise<StoredDocument | null>;
+  countDocuments(tableName: string, opts?: ReadOptions): Promise<number>;
+  source(
     source: Source,
-    options?: PersistenceReadOptions,
+    options?: ReadOptions,
   ): Promise<StoredDocument[] | null>;
-  readQuery(args: PersistenceQueryRead): Promise<StoredDocument[] | null>;
-  readVectorCandidates(
-    args: PersistenceVectorRead,
-  ): Promise<StoredDocument[] | null>;
+  query(args: QueryArgs): Promise<StoredDocument[] | null>;
+  vectorSearch(args: VectorSearchArgs): Promise<StoredDocument[] | null>;
   hasAnyDocuments(tableName: string): Promise<boolean>;
+  applySchemaOps(tableName: string, ops: readonly SchemaOp[]): Promise<void>;
   getBlobs(): Promise<Array<{ id: string; blob: Blob }>>;
   getBlob(id: string): Promise<Blob | null>;
-  commit(batch: CommitBatch): Promise<void>;
+  commit(batch: WriteBatch): Promise<void>;
   applyCommit(
-    batch: CommitBatch,
-    options: SqlCommitApplyOptions,
-  ): Promise<SqlCommitApplyResult>;
+    batch: WriteBatch,
+    options: SqlWriteOptions,
+  ): Promise<SqlWriteResult>;
   storeBlob(id: string, blob: Blob): Promise<void>;
   deleteBlob(id: string): Promise<void>;
   clear(): Promise<void>;

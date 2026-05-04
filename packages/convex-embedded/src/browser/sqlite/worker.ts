@@ -4,9 +4,10 @@ import * as WaSqlite from "wa-sqlite";
 import SQLiteESMFactory from "wa-sqlite/dist/wa-sqlite.mjs";
 import { OPFSCoopSyncVFS } from "wa-sqlite/src/examples/OPFSCoopSyncVFS.js";
 
-import { createSqlitePersistenceAdapter } from "@/persistence/sqlite/factory";
+import { createSqliteStorage } from "@/storage/sqlite/factory";
 import type { StoredDocument } from "@/runtime/db/types";
-import type { SqlPersistenceAdapter } from "@/storage/adapter";
+import { createLogger } from "@/shared/logger";
+import type { SqlStorageAdapter } from "@/storage/adapter";
 import type { StoredDocumentWithTable } from "@/storage/adapter";
 
 import type {
@@ -15,24 +16,24 @@ import type {
   StorageWorkerResponse,
 } from "./protocol";
 
+const log = createLogger("browser-sqlite-worker");
+
 let sqlite3: ReturnType<typeof WaSqlite.Factory> | null = null;
 let db: number | null = null;
 let closeVfs: (() => void) | null = null;
 let queue: Promise<unknown> = Promise.resolve();
 let sqliteModule: { retryOps?: Array<Promise<unknown>> } | null = null;
-let persistenceAdapter: SqlPersistenceAdapter | null = null;
+let storageAdapter: SqlStorageAdapter | null = null;
 
 const MAX_RETRY_OP_ATTEMPTS = 20;
 
 async function resetWorkerState() {
-  persistenceAdapter = null;
+  storageAdapter = null;
   try {
     if (sqlite3 !== null && db !== null) {
       await Promise.resolve(sqlite3.close(db));
     }
-  } catch {
-    // Best-effort cleanup.
-  }
+  } catch {}
   sqlite3 = null;
   db = null;
   sqliteModule = null;
@@ -52,13 +53,13 @@ function invariantReady(): {
   return { sqlite3, db };
 }
 
-function invariantAdapterReady(): SqlPersistenceAdapter {
-  if (persistenceAdapter === null) {
+function invariantAdapterReady(): SqlStorageAdapter {
+  if (storageAdapter === null) {
     throw new Error(
-      "[convex-embedded] browser sqlite worker persistence is not initialized.",
+      "[convex-embedded] browser sqlite worker storage is not initialized.",
     );
   }
-  return persistenceAdapter;
+  return storageAdapter;
 }
 
 async function collectRows(sql: string, params?: Array<unknown>) {
@@ -154,9 +155,16 @@ async function handleInit(name: string) {
         vfs.close();
       }
     };
-    persistenceAdapter = await createSqlitePersistenceAdapter({
+    storageAdapter = await createSqliteStorage({
       driver: {
-        query: (sql, params) => collectRows(sql, params),
+        query<T extends Record<string, unknown> = Record<string, unknown>>(
+          sql: string,
+          params?: readonly unknown[],
+        ): Promise<T[]> {
+          return collectRows(sql, params ? [...params] : undefined) as Promise<
+            T[]
+          >;
+        },
         execute,
         executeBatch: async (statements) => {
           await execute("BEGIN");
@@ -171,9 +179,7 @@ async function handleInit(name: string) {
           } catch (error) {
             try {
               await execute("ROLLBACK");
-            } catch {
-              // Ignore rollback failures so the original write error surfaces.
-            }
+            } catch {}
             throw error;
           }
         },
@@ -182,8 +188,8 @@ async function handleInit(name: string) {
     await execute("PRAGMA temp_store = MEMORY");
     await execute("PRAGMA cache_size = -8000");
     const ended = globalThis.performance?.now?.() ?? Date.now();
-    console.info(
-      `[convex-embedded] sqlite worker init: wasm=${(moduleReady - started).toFixed(1)}ms vfs=${(vfsReady - moduleReady).toFixed(1)}ms open=${(openReady - vfsReady).toFixed(1)}ms schema=${(ended - openReady).toFixed(1)}ms total=${(ended - started).toFixed(1)}ms`,
+    log.debug(
+      `init: wasm=${(moduleReady - started).toFixed(1)}ms vfs=${(vfsReady - moduleReady).toFixed(1)}ms open=${(openReady - vfsReady).toFixed(1)}ms schema=${(ended - openReady).toFixed(1)}ms total=${(ended - started).toFixed(1)}ms`,
     );
   } catch (error) {
     await resetWorkerState();
@@ -220,9 +226,7 @@ async function handleExecuteBatch(input: {
   } catch (error) {
     try {
       await execute("ROLLBACK");
-    } catch {
-      // Ignore rollback failures so the original write error surfaces.
-    }
+    } catch {}
     throw error;
   }
 }
@@ -316,12 +320,12 @@ async function dispatch(message: StorageWorkerRequest) {
     case "listDocuments":
       return handleListDocuments(message.payload.tableName);
     case "readSource":
-      return invariantAdapterReady().readSource(
+      return invariantAdapterReady().source(
         message.payload.source,
         message.payload.options,
       );
     case "readQuery":
-      return invariantAdapterReady().readQuery(message.payload);
+      return invariantAdapterReady().query(message.payload);
     case "getDocument":
       return handleGetDocument(message.payload.tableName, message.payload.id);
     case "countDocuments":

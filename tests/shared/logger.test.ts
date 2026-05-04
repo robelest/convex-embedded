@@ -1,4 +1,4 @@
-import { createLogger } from "@resolve/shared/logger";
+import { createLogger, setLoggerDebug } from "@resolve/shared/logger";
 import { describe, it, expect, beforeEach, afterEach } from "@tests/testkit";
 import { vi } from "vitest";
 
@@ -12,6 +12,7 @@ describe("createLogger", () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    setLoggerDebug(false);
   });
 
   it("creates a logger with category prefix", () => {
@@ -32,13 +33,21 @@ describe("createLogger", () => {
     );
   });
 
-  it("delegates debug to console.debug", () => {
+  it("delegates debug to console.debug when enabled", () => {
+    setLoggerDebug(true);
     const log = createLogger("verbose");
     log.debug("trace msg");
 
     expect(console.debug).toHaveBeenCalledWith(
       "[convex-embedded:verbose] trace msg",
     );
+  });
+
+  it("silences debug by default", () => {
+    const log = createLogger("verbose");
+    log.debug("trace msg");
+
+    expect(console.debug).not.toHaveBeenCalled();
   });
 
   it("logs info/warn/error", () => {

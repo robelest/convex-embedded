@@ -10,9 +10,9 @@ import {
   type ProseContent,
   proseContentToPlainText,
 } from "@/crdt/prose/content";
+import { structuralEqual } from "@/shared/equals";
 import type { Definition } from "@/shared/schema";
 import { getCrdtType } from "@/shared/schema";
-import { structuralEqual } from "@/shared/structuralEqual";
 import { CrdtType, type FieldRef } from "@/shared/types";
 
 type RefValue<TRef extends FieldRef> =

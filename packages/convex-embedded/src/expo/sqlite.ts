@@ -1,50 +1,163 @@
+import { Platform } from "react-native";
 import {
-  defaultDatabaseDirectory,
-  openDatabaseAsync,
-  type SQLiteDatabase,
-} from "expo-sqlite";
+  ANDROID_DATABASE_PATH,
+  IOS_LIBRARY_PATH,
+  open,
+  type DB,
+  type PreparedStatement,
+  type Scalar,
+} from "@op-engineering/op-sqlite";
 
-import { SqliteAdapter } from "@/persistence/sqlite/adapter";
+import { logSlow, nowMs } from "@/shared/perf";
+import { SqliteAdapter } from "@/storage/sqlite/adapter";
+import type { InternalTableSpec } from "@/storage/sqlite/factory";
+import { withSpan } from "@/tracing/spans";
 
-export interface ExpoSqliteOptions {
+export interface OpSqliteStorageOptions {
   name: string;
   directory?: string;
+  userTableSpecs?: Map<string, InternalTableSpec>;
 }
 
-export async function openExpoSqlitePersistence(
-  options: ExpoSqliteOptions,
+function defaultLocation(): string | undefined {
+  if (Platform.OS === "ios") {
+    return (IOS_LIBRARY_PATH as string | undefined) ?? undefined;
+  }
+  if (Platform.OS === "android") {
+    return (ANDROID_DATABASE_PATH as string | undefined) ?? undefined;
+  }
+  return undefined;
+}
+
+function bindParams(params?: readonly unknown[]): Scalar[] {
+  if (!params || params.length === 0) {
+    return [];
+  }
+  return params.map((value) => value as Scalar);
+}
+
+export async function openOpSqliteStorage(
+  options: OpSqliteStorageOptions,
 ): Promise<SqliteAdapter> {
-  const database = await openDatabaseAsync(
-    `${options.name}.db`,
-    undefined,
-    options.directory ?? defaultDatabaseDirectory,
-  );
+  const location = options.directory ?? defaultLocation();
+  const database: DB = open({
+    name: `${options.name}.db`,
+    ...(location ? { location } : {}),
+  });
+
+  await database.execute("PRAGMA journal_mode = WAL");
+  await database.execute("PRAGMA synchronous = NORMAL");
+  await database.execute("PRAGMA temp_store = MEMORY");
+  await database.execute("PRAGMA busy_timeout = 5000");
+  await database.execute("PRAGMA cache_size = -32000");
+  await database.execute("PRAGMA mmap_size = 268435456");
+  await database.execute("PRAGMA wal_autocheckpoint = 1000");
 
   let queue: Promise<unknown> = Promise.resolve();
 
-  const enqueue = <T>(work: (db: SQLiteDatabase) => Promise<T>): Promise<T> => {
-    const op = queue.catch(() => undefined).then(() => work(database));
+  const enqueue = <T>(
+    label: string,
+    work: (db: DB) => Promise<T>,
+    details?: Record<string, unknown>,
+  ): Promise<T> => {
+    const queuedAt = nowMs();
+    const op = queue.catch(() => undefined).then(async () =>
+      withSpan(
+        `convex-embedded.sqlite.${label}`,
+        async (span) => {
+          const queueWaitMs = nowMs() - queuedAt;
+          span.setAttributes({
+            "convex.sqlite.queue_wait_ms": +queueWaitMs.toFixed(1),
+            "convex.sqlite.params": (details?.params as number) ?? 0,
+            ...(typeof details?.sql === "string"
+              ? { "convex.sqlite.sql": details.sql as string }
+              : {}),
+            ...(typeof details?.statements === "number"
+              ? { "convex.sqlite.statements": details.statements as number }
+              : {}),
+          });
+          logSlow(`sqlite.${label}.queue_wait`, queuedAt, details, 16);
+          const startedAt = nowMs();
+          try {
+            return await work(database);
+          } finally {
+            const durationMs = nowMs() - startedAt;
+            span.setAttributes({
+              "convex.sqlite.exec_ms": +durationMs.toFixed(1),
+            });
+            logSlow(`sqlite.${label}`, startedAt, details);
+          }
+        },
+      ),
+    );
     queue = op.catch(() => undefined);
     return op;
   };
 
-  return SqliteAdapter.open({
-    query: (sql, params) =>
-      enqueue((db) => db.getAllAsync(sql, [...(params ?? [])])) as Promise<
-        Record<string, unknown>[]
-      >,
-    execute: (sql, params) =>
-      enqueue((db) => db.runAsync(sql, [...(params ?? [])])),
-    executeBatch: (statements) =>
-      enqueue((db) =>
-        db.withExclusiveTransactionAsync(async (txn) => {
-          for (const statement of statements) {
-            await txn.runAsync(statement.sql, [...(statement.params ?? [])]);
-          }
-        }),
-      ),
-    close: async () => {
-      await enqueue((db) => db.closeAsync());
+  return new SqliteAdapter(
+    {
+      query: <T extends Record<string, unknown> = Record<string, unknown>>(
+        sql: string,
+        params?: readonly unknown[],
+      ) =>
+        enqueue(
+          "query",
+          async (db) => {
+            const result = await db.execute(sql, bindParams(params));
+            return (result.rows ?? []) as T[];
+          },
+          { params: params?.length ?? 0, sql: sql.slice(0, 160) },
+        ),
+      execute: (sql, params) =>
+        enqueue(
+          "execute",
+          async (db) => {
+            await db.execute(sql, bindParams(params));
+          },
+          { params: params?.length ?? 0, sql: sql.slice(0, 160) },
+        ),
+      executeBatch: (statements) =>
+        enqueue(
+          "executeBatch",
+          (db) =>
+            db.transaction(async (tx) => {
+              const prepared = new Map<string, PreparedStatement>();
+              const execBuffer: string[] = [];
+
+              const flushExecBuffer = async () => {
+                if (execBuffer.length === 0) {
+                  return;
+                }
+                await tx.execute(`${execBuffer.join(";\n")};`);
+                execBuffer.length = 0;
+              };
+
+              for (const statement of statements) {
+                const params = bindParams(statement.params);
+                if (params.length === 0) {
+                  execBuffer.push(statement.sql);
+                  continue;
+                }
+
+                await flushExecBuffer();
+                let compiled = prepared.get(statement.sql);
+                if (!compiled) {
+                  compiled = db.prepareStatement(statement.sql);
+                  prepared.set(statement.sql, compiled);
+                }
+                await compiled.bind(params);
+                await compiled.execute();
+              }
+              await flushExecBuffer();
+            }),
+          { statements: statements.length },
+        ),
+      close: async () => {
+        await enqueue("close", async (db) => {
+          await db.closeAsync();
+        });
+      },
     },
-  });
+    { userTableSpecs: options.userTableSpecs },
+  );
 }

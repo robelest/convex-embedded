@@ -18,10 +18,6 @@ export function compareValues(
   return compareAsTuples(makeComparable(k1), makeComparable(k2));
 }
 
-// ---------------------------------------------------------------------------
-// Internal helpers
-// ---------------------------------------------------------------------------
-
 function compareAsTuples<T>(a: [number, T], b: [number, T]): number {
   if (a[0] === b[0]) {
     return compareSameTypeValues(a[1], b[1]);
@@ -64,7 +60,6 @@ function makeComparable(v: Value | undefined): [number, unknown] {
   if (v === null) return [1, null];
   if (typeof v === "bigint") return [2, v];
   if (typeof v === "number") {
-    // All NaNs are considered equal.
     if (isNaN(v)) return [3.5, 0];
     return [3, v];
   }
@@ -76,7 +71,6 @@ function makeComparable(v: Value | undefined): [number, unknown] {
   if (Array.isArray(v)) {
     return [7, v.map(makeComparable)];
   }
-  // POJO — sort by sorted keys.
   const keys = Object.keys(v).sort();
   const pojo: Value[] = keys.map((k) => [k, v[k]!]);
   return [8, pojo.map(makeComparable)];

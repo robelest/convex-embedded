@@ -224,8 +224,6 @@ export function canonicalizeMappedCreateTable(input: {
     }
 
     if (!fromLocalAlias && existing.fromLocalAlias) {
-      // Prefer the local alias version while canonicalizing a create response so
-      // local optimistic state remains authoritative until IDs are rewritten.
       changed = true;
       continue;
     }

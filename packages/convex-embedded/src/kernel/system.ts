@@ -24,10 +24,6 @@
 import type { Database } from "@/runtime/db/database";
 import type { DocumentId, StoredDocument } from "@/runtime/db/types";
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
 /** A system function receives the database and args, returns a result. */
 export type SystemFn = (db: Database, args: Record<string, unknown>) => unknown;
 
@@ -182,10 +178,6 @@ async function allByIndex(
   return results;
 }
 
-// ---------------------------------------------------------------------------
-// ID Map functions (_resolve_id_map table)
-// ---------------------------------------------------------------------------
-
 /**
  * Insert or update an ID mapping.
  *
@@ -326,10 +318,6 @@ const idMapDelete: SystemFunctionDef = {
     return null;
   },
 };
-
-// ---------------------------------------------------------------------------
-// Pending Queue functions (_resolve_pending table)
-// ---------------------------------------------------------------------------
 
 /**
  * Append a mutation to the pending queue.
@@ -824,10 +812,6 @@ const documentMetadataClearCollection: SystemFunctionDef = {
   },
 };
 
-// ---------------------------------------------------------------------------
-// Auth state functions (_resolve_auth_state table)
-// ---------------------------------------------------------------------------
-
 const authStateSetActive: SystemFunctionDef = {
   type: "mutation",
   handler: async (db, args) => {
@@ -914,16 +898,6 @@ const identityMoveAnonymousToIdentity: SystemFunctionDef = {
   },
 };
 
-// ---------------------------------------------------------------------------
-// Registry
-// ---------------------------------------------------------------------------
-
-/**
- * All auto-registered system functions.
- *
- * Keys are the full UDF paths (e.g. `"_system:idMapSet"`).
- * The runtime registers these at construction time.
- */
 /**
  * All auto-registered system functions.
  *

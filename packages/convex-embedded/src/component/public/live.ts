@@ -281,7 +281,7 @@ export const getLiveStatesPage = query({
     isDone: v.boolean(),
   }),
   handler: async (ctx: QueryCtx, args) => {
-    const limit = Math.max(1, Math.min(args.limit ?? 128, 512));
+    const limit = Math.max(1, Math.min(args.limit ?? 64, 128));
     const query = ctx.db
       .query("liveStates")
       .withIndex("by_collection_doc", (q: any) => {

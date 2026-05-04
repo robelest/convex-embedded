@@ -19,10 +19,10 @@ import {
   type RuntimeQueryObserver,
 } from "@/runtime/registry";
 import { encodeBase64 } from "@/shared/base64";
+import { createLogger } from "@/shared/logger";
+import { matchTag } from "@/shared/match";
 
-// ---------------------------------------------------------------------------
-// Base64 helpers for LE-encoded u64 timestamps
-// ---------------------------------------------------------------------------
+const log = createLogger("protocol");
 
 /**
  * Encode a numeric timestamp as a base64-encoded little-endian 8-byte u64.
@@ -32,8 +32,6 @@ import { encodeBase64 } from "@/shared/base64";
  */
 function numberToEncodedU64(n: number): string {
   const bytes = new Uint8Array(8);
-  // Write as unsigned 64-bit LE. JS numbers only preserve 53 bits exactly, but
-  // that is sufficient for our timestamp/domain values on this protocol path.
   let val = n;
   for (let i = 0; i < 8; i++) {
     bytes[i] = val & 0xff;
@@ -41,10 +39,6 @@ function numberToEncodedU64(n: number): string {
   }
   return encodeBase64(bytes);
 }
-
-// ---------------------------------------------------------------------------
-// State version
-// ---------------------------------------------------------------------------
 
 /**
  * Server state version matching the real Convex wire format.
@@ -54,7 +48,7 @@ function numberToEncodedU64(n: number): string {
  */
 export type StateVersion = {
   querySet: number;
-  ts: number; // internal numeric — encoded to base64 on the wire
+  ts: number;
   identity: number;
 };
 
@@ -77,7 +71,7 @@ export interface ProtocolChange {
 
 type EncodedStateVersion = {
   querySet: number;
-  ts: string; // base64-encoded LE u64
+  ts: string;
   identity: number;
 };
 
@@ -145,23 +139,6 @@ function normalizeVerifiedIdentity(value: unknown): VerifiedIdentity {
   }
   return { identity: value, identityKey: null };
 }
-
-function matchTag<
-  T extends Record<K, string>,
-  K extends keyof T & string,
-  Handlers extends {
-    [V in T[K] & string]: (value: Extract<T, Record<K, V>>) => unknown;
-  },
->(value: T, key: K, handlers: Handlers): ReturnType<Handlers[T[K] & string]> {
-  const handler = handlers[value[key] as T[K] & string] as unknown as (
-    current: T,
-  ) => ReturnType<Handlers[T[K] & string]>;
-  return handler(value);
-}
-
-// ---------------------------------------------------------------------------
-// Client → Server messages
-// ---------------------------------------------------------------------------
 
 export type ClientMessage =
   | ClientConnect
@@ -231,10 +208,6 @@ interface ClientEvent {
   event: any;
 }
 
-// ---------------------------------------------------------------------------
-// Server → Client messages (encoded wire format)
-// ---------------------------------------------------------------------------
-
 type StateModification =
   | {
       type: "QueryUpdated";
@@ -276,7 +249,7 @@ interface ServerMutationResponse {
   requestId: number;
   success: boolean;
   result: JSONValue;
-  ts?: string; // base64-encoded LE u64 — present on success
+  ts?: string;
   logLines: string[];
   errorData?: JSONValue;
 }
@@ -306,10 +279,6 @@ interface ServerPing {
   type: "Ping";
 }
 
-// ---------------------------------------------------------------------------
-// Session state tracked per-connection inside the handler
-// ---------------------------------------------------------------------------
-
 interface SessionState {
   /** Current state version for this session. */
   version: StateVersion;
@@ -317,10 +286,6 @@ interface SessionState {
   identity: unknown;
   identityKey: string | null;
 }
-
-// ---------------------------------------------------------------------------
-// SyncProtocolHandler
-// ---------------------------------------------------------------------------
 
 /** Executor interface expected by the remote protocol handler. */
 export interface ProtocolExecutor {
@@ -385,16 +350,12 @@ export class SyncProtocolHandler {
     this._auth = opts.auth;
   }
 
-  // -----------------------------------------------------------------------
-  // Public API
-  // -----------------------------------------------------------------------
-
   async handleMessage(
     sessionId: string,
     message: ClientMessage,
   ): Promise<ServerMessage[]> {
     return this._withSessionLock(sessionId, async () => {
-      console.debug("[convex-embedded:protocol]", message.type, sessionId);
+      log.debug(message.type, sessionId);
       return matchTag(message, "type", {
         Connect: (current) =>
           Promise.resolve(this._handleConnect(sessionId, current)),
@@ -476,10 +437,6 @@ export class SyncProtocolHandler {
     this._sessions.delete(sessionId);
     this._sessionQueues.delete(sessionId);
   }
-
-  // -----------------------------------------------------------------------
-  // Internals
-  // -----------------------------------------------------------------------
 
   private _nextTs(): number {
     return ++this._ts;
@@ -683,9 +640,7 @@ export class SyncProtocolHandler {
     sessionId: string,
     _message: ClientConnect,
   ): ServerMessage[] {
-    // On reconnect, reset the session state so the client can rebuild.
     const session = this._getOrCreateSession(sessionId);
-    // Reset to zero so the client can send a fresh ModifyQuerySet
     session.version = { querySet: 0, ts: 0, identity: 0 };
     session.identity = null;
     this._queryStore.clearSession(sessionId);
@@ -905,7 +860,6 @@ export class SyncProtocolHandler {
     if (message.tokenType === "None") {
       authResult = authSuccessResult({ identity: null, identityKey: null });
     } else {
-      // "User" and "Admin" both verify the token
       try {
         const value = await this._auth.verifyToken(message.value ?? "");
         authResult = authSuccessResult(normalizeVerifiedIdentity(value));

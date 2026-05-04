@@ -12,10 +12,6 @@
  * user-space without patching globals.
  */
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
 export type LogLevel = "log" | "warn" | "error" | "info" | "debug";
 
 export interface LogEntry {
@@ -32,10 +28,6 @@ export interface CapturedConsole {
   debug(...args: unknown[]): void;
 }
 
-// ---------------------------------------------------------------------------
-// Mulberry32 PRNG
-// ---------------------------------------------------------------------------
-
 /**
  * Mulberry32 — a simple, fast 32-bit seeded PRNG with a full 2^32 period.
  * Returns a function that produces numbers in [0, 1).
@@ -50,10 +42,6 @@ function mulberry32(seed: number): () => number {
   };
 }
 
-// ---------------------------------------------------------------------------
-// UUID v4 generation from PRNG
-// ---------------------------------------------------------------------------
-
 const HEX = "0123456789abcdef";
 
 /**
@@ -64,7 +52,6 @@ const HEX = "0123456789abcdef";
  */
 function uuidV4(rng: () => number): string {
   const bytes = new Uint8Array(16);
-  // Fill with random bytes (4 bytes per rng call)
   for (let i = 0; i < 16; i += 4) {
     const r = (rng() * 0x100000000) >>> 0;
     bytes[i] = r & 0xff;
@@ -73,7 +60,6 @@ function uuidV4(rng: () => number): string {
     bytes[i + 3] = (r >>> 24) & 0xff;
   }
 
-  // Set version (4) and variant (10xx)
   bytes[6] = (bytes[6] & 0x0f) | 0x40;
   bytes[8] = (bytes[8] & 0x3f) | 0x80;
 
@@ -87,10 +73,6 @@ function uuidV4(rng: () => number): string {
   }
   return uuid;
 }
-
-// ---------------------------------------------------------------------------
-// OpsContext
-// ---------------------------------------------------------------------------
 
 /**
  * Deterministic execution context created fresh for each UDF invocation.
@@ -111,8 +93,6 @@ export class OpsContext {
     this.rng = mulberry32(seed);
     this.pinnedTimestamp = timestamp;
 
-    // Build the captured console once so the same object can be reused
-    // throughout the UDF invocation.
     const logs = this._logs;
     const ts = this.pinnedTimestamp;
     this.console = {
@@ -154,10 +134,6 @@ export class OpsContext {
     return this._logs;
   }
 }
-
-// ---------------------------------------------------------------------------
-// Factory
-// ---------------------------------------------------------------------------
 
 /**
  * Create a fresh {@link OpsContext} for a single UDF invocation.

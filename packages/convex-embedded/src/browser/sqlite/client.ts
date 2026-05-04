@@ -54,8 +54,6 @@ const RPC_TIMEOUT_MS = 15_000;
 export async function openBrowserSqlClient(options: {
   name: string;
 }): Promise<BrowserSqlClient> {
-  // Keep this worker URL relative to the emitted chunk. The build places the
-  // worker and the chunk that instantiates it side by side in dist/.
   const worker = new Worker(new URL("./worker.js", import.meta.url), {
     type: "module",
     name: options.name,
@@ -172,7 +170,6 @@ export async function openBrowserSqlClient(options: {
       await request("commit", { batch });
     },
     storeBlob: async (id, data) => {
-      // Transfer the ArrayBuffer to avoid copying large blobs into the worker.
       await request("storeBlob", { id, data }, [data]);
     },
     deleteBlob: async (id) => {

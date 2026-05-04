@@ -38,10 +38,6 @@ export const STORAGE_METADATA_STORE_MIGRATIONS: StoreMigrationManifest = {
   version: 1,
 };
 
-// ---------------------------------------------------------------------------
-// RunUdfFn — the callback used to invoke nested queries/mutations/actions
-// ---------------------------------------------------------------------------
-
 export type RunUdfFn = (
   type: "query" | "mutation" | "action",
   path: FunctionPath,
@@ -64,10 +60,6 @@ type TaggedJsSyscall = Readonly<{
 type SyncSyscallHandler = (args: JsonArgs) => string;
 type AsyncSyscallHandler = (args: JsonArgs) => Promise<string>;
 type JsSyscallHandler = (args: Record<string, unknown>) => Promise<unknown>;
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 function decodeJsonSyscall(op: string, jsonArgs: string): TaggedJsonSyscall {
   return {
@@ -175,10 +167,6 @@ async function dispatchJsSyscall(
   });
 }
 
-// ---------------------------------------------------------------------------
-// Sync syscall
-// ---------------------------------------------------------------------------
-
 /**
  * Create the synchronous syscall router.
  *
@@ -215,10 +203,6 @@ export function createSyncSyscall(
   return (op: string, jsonArgs: string): string =>
     dispatchSyncSyscall(decodeJsonSyscall(op, jsonArgs), handlers);
 }
-
-// ---------------------------------------------------------------------------
-// Async syscall
-// ---------------------------------------------------------------------------
 
 /**
  * Create the asynchronous syscall router.
@@ -305,19 +289,21 @@ export function createAsyncSyscall(
 
         void (async () => {
           try {
-            const job = db.get("_scheduled_functions", jobId);
-            const jobState = job?.state as { kind: string } | null;
-            if (job === null || jobState?.kind === "canceled") {
-              return;
-            }
-            if (jobState?.kind !== "pending") {
-              throw new Error(
-                `\`convex-embedded\` invariant error: Unexpected scheduled function state when starting it: ${jobState?.kind}`,
-              );
-            }
-
             db.startTransaction();
             try {
+              const job = db.get("_scheduled_functions", jobId);
+              const jobState = job?.state as { kind: string } | null;
+              if (job === null || jobState?.kind === "canceled") {
+                db.rollbackWrites();
+                return;
+              }
+              if (jobState?.kind !== "pending") {
+                db.rollbackWrites();
+                throw new Error(
+                  `\`convex-embedded\` invariant error: Unexpected scheduled function state when starting it: ${jobState?.kind}`,
+                );
+              }
+
               db.patch("_scheduled_functions", jobId, {
                 state: { kind: "inProgress" },
               });
@@ -339,17 +325,17 @@ export function createAsyncSyscall(
               finalState = "failed";
             }
 
-            const finishedJob = db.get("_scheduled_functions", jobId);
-            const finishedState = finishedJob?.state as {
-              kind: string;
-            } | null;
+            db.startTransaction();
+            try {
+              const finishedJob = db.get("_scheduled_functions", jobId);
+              const finishedState = finishedJob?.state as {
+                kind: string;
+              } | null;
 
-            if (
-              finalState === "failed" ||
-              (finishedJob !== null && finishedState?.kind === "inProgress")
-            ) {
-              db.startTransaction();
-              try {
+              if (
+                finalState === "failed" ||
+                (finishedJob !== null && finishedState?.kind === "inProgress")
+              ) {
                 db.patch("_scheduled_functions", jobId, {
                   state: { kind: finalState },
                   ...(finalState === "failed"
@@ -357,10 +343,12 @@ export function createAsyncSyscall(
                     : {}),
                 });
                 await db.commitAsync();
-              } catch (error) {
+              } else {
                 db.rollbackWrites();
-                throw error;
               }
+            } catch (error) {
+              db.rollbackWrites();
+              throw error;
             }
 
             const dbExt = db as unknown as Record<string, unknown>;
@@ -406,13 +394,15 @@ export function createAsyncSyscall(
     "1.0/get": async (args) => {
       const { table, id } = args as { table: string | undefined; id: string };
       const resolvedTable = table ?? db.getTableForId(id);
-      if (resolvedTable !== undefined) {
+      const doc = await db.getAsync(resolvedTable, id as DocumentId);
+      const dependencyTable = resolvedTable ?? db.getTableForId(id);
+      if (dependencyTable !== undefined) {
         options?.onDependency?.({
-          type: "FullTableScan",
-          tableName: resolvedTable,
+          type: "DocumentRead",
+          tableName: dependencyTable,
+          id,
         });
       }
-      const doc = await db.getAsync(resolvedTable, id as DocumentId);
       return JSON.stringify(convexToJson(doc));
     },
     "1.0/queryStreamNext": async (args) => {
@@ -617,10 +607,6 @@ export function createAsyncSyscall(
 
   return self;
 }
-
-// ---------------------------------------------------------------------------
-// JS syscall (blob storage)
-// ---------------------------------------------------------------------------
 
 /**
  * Create the JS syscall router for blob storage.

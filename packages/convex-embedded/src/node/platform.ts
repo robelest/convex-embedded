@@ -1,12 +1,15 @@
 import { resolve } from "node:path";
 
-import { openNodePersistence } from "@/node/sqlite/adapter";
+import { openNodeStorage } from "@/node/sqlite/adapter";
 import { createAmbientCryptoProvider } from "@/runtime/crypto";
 import {
   createAmbientConnectivityAdapter,
   createNoopWriteBroadcast,
   type EmbeddedPlatformAdapter,
 } from "@/runtime/platform";
+import { createLogger } from "@/shared/logger";
+
+const log = createLogger("node");
 
 export interface NodePlatformOptions {
   databasePath?: string;
@@ -23,13 +26,14 @@ export function createNodePlatformAdapter(
 
   return {
     crypto: platformCrypto,
-    async openPersistence({ name }) {
+    async openStorage({ name, runtime }) {
       const filename =
         options.databasePath ?? resolve(process.cwd(), `${name}.sqlite`);
-      console.info(
-        `[convex-embedded] starting node sqlite persistence for ${filename}`,
-      );
-      return await openNodePersistence({ filename });
+      log.debug(`starting sqlite storage for ${filename}`);
+      return await openNodeStorage({
+        filename,
+        userTableSpecs: runtime.getUserTableSpecs() ?? undefined,
+      });
     },
     createWriteBroadcast() {
       return createNoopWriteBroadcast();

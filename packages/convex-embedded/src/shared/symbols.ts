@@ -6,10 +6,6 @@
 
 import type { Definition } from "@/shared/schema";
 
-// ---------------------------------------------------------------------------
-// Symbols
-// ---------------------------------------------------------------------------
-
 /**
  * Global symbol used to tag the `resolve` export with remote metadata.
  *
@@ -26,15 +22,7 @@ export const STORAGE_UPLOAD_URL_META = Symbol.for(
   "convex-embedded:storageUploadUrlMeta",
 );
 
-// ---------------------------------------------------------------------------
-// RouteMode
-// ---------------------------------------------------------------------------
-
 export type { RouteMode } from "@/shared/route";
-
-// ---------------------------------------------------------------------------
-// Metadata interfaces
-// ---------------------------------------------------------------------------
 
 /**
  * Sync metadata attached to the `resolve` export.

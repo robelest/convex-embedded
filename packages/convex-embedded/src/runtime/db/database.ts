@@ -1,12 +1,11 @@
 import type { JSONValue, Value } from "convex/values";
 import { jsonToConvex } from "convex/values";
 
-import type { PersistenceAdapter } from "@/persistence/adapter";
 import {
   createAmbientCryptoProvider,
   type EmbeddedCryptoProvider,
 } from "@/runtime/crypto";
-import type { AsyncReadBackend } from "@/runtime/db/async_backend";
+import type { AsyncReadBackend } from "@/runtime/db/backend";
 import { compareValues } from "@/runtime/db/compare";
 import { QueryEngine } from "@/runtime/db/query";
 import {
@@ -37,7 +36,7 @@ import {
   type SearchOverlayState,
   type SearchIndexState,
 } from "@/runtime/db/search";
-import { sourceTableName } from "@/runtime/db/sql_pushdown";
+import { sourceTableName } from "@/runtime/db/sql";
 /**
  * Core in-memory database engine with MVCC timestamps.
  *
@@ -73,7 +72,9 @@ import {
 import { createStore } from "@/runtime/store";
 import type { Store } from "@/runtime/store";
 import { createLogger } from "@/shared/logger";
+import type { ReadOptions, StorageAdapter } from "@/storage/adapter";
 import type { CommitBatch } from "@/storage/adapter";
+import { withSpan, withSpanSync } from "@/tracing/spans";
 
 const IDENTITY_SCOPE_FIELD = "__identityKey";
 const log = createLogger("db");
@@ -179,6 +180,12 @@ const SYSTEM_INDEX_DEFINITIONS: Record<
       fields: ["table", "_creationTime", "_id"],
     },
   ],
+  _resolve_schema_steps: [
+    {
+      indexName: "by_table_version_step",
+      fields: ["table", "version", "stepName", "_creationTime", "_id"],
+    },
+  ],
   _resolve_store_versions: [
     {
       indexName: "by_store_scope_and_identity",
@@ -193,10 +200,6 @@ export interface DatabaseCommitResult {
   invalidation: CommitInvalidationBatch;
   persisted: Promise<void>;
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 /**
  * Convert a JSONValue to a Convex value, treating `{ $undefined: true }` as
@@ -231,20 +234,12 @@ function formatValueForError(value: unknown): string {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Database
-// ---------------------------------------------------------------------------
-
 export class Database {
-  // ---- Persistent state ---------------------------------------------------
-
   /** Committed documents keyed by `DocumentId`. */
   private _documents: Record<DocumentId, StoredDocument> = {};
 
   /** Blob storage keyed by `_storage` document ID. */
   private _blobStorage: Record<DocumentId, Blob> = {};
-  private _allBlobsHydrated = false;
-  private _blobHydration: Promise<void> | null = null;
 
   /** Committed document IDs grouped by table for faster per-table iteration. */
   private _tableDocuments: Map<string, Set<string>> = new Map();
@@ -274,14 +269,27 @@ export class Database {
   /** Active identity namespace for non-system tables. */
   private _activeIdentityKey: string | null = null;
 
-  // ---- MVCC state ---------------------------------------------------------
-
   /**
    * Monotonically increasing timestamp. Incremented on every committed
    * transaction that contains at least one write. Consumers (e.g. the
    * subscription manager) use this to detect staleness.
    */
   private _timestamp: Timestamp = 0;
+
+  private _tableVersion: Map<string, number> = new Map();
+
+  getTableVersion(tableName: string): number {
+    return this._tableVersion.get(tableName) ?? 0;
+  }
+
+  bumpTableVersions(tableNames: Iterable<string>): void {
+    for (const tableName of tableNames) {
+      this._tableVersion.set(
+        tableName,
+        (this._tableVersion.get(tableName) ?? 0) + 1,
+      );
+    }
+  }
 
   /**
    * Tables that have been written (insert / patch / replace / delete)
@@ -290,16 +298,14 @@ export class Database {
    */
   private _tablesWritten: Set<string> = new Set();
 
-  // ---- Storage adapter ----------------------------------------------------
-
   /** Optional durable storage backend. */
-  private _storage: PersistenceAdapter | null = null;
+  private _storage: StorageAdapter | null = null;
   private _fullyHydrated = false;
   private readonly _hydrationAttemptedTables = new Set<string>();
+  private readonly _tableHydrationPromises = new Map<string, Promise<void>>();
+  private readonly _tableHydrationResolvers = new Map<string, () => void>();
 
   private readonly _crypto: EmbeddedCryptoProvider;
-
-  // ---- Transaction state --------------------------------------------------
 
   /**
    * Pending writes for each level of transaction nesting.
@@ -322,44 +328,58 @@ export class Database {
   /** Pending write ids grouped by table for each transaction level. */
   private _writeTables: Array<Map<string, Set<string>>> = [];
 
+  /** Serializes async-persisted commits so SQLite writes apply in order. */
+  private _pendingPersistChain: Promise<void> = Promise.resolve();
+
   /** Lazily built visible pending state grouped by table. */
   private _pendingTableState: Map<string, PendingTableState> = new Map();
-
-  // ---- Query engine -------------------------------------------------------
 
   readonly queryEngine: QueryEngine;
   private readonly _store: Store = createStore();
 
-  // -------------------------------------------------------------------------
-  // Constructor
-  // -------------------------------------------------------------------------
-
   constructor(
     schema: ParsedSchema | null,
-    storage?: PersistenceAdapter,
+    storage?: StorageAdapter,
     crypto?: EmbeddedCryptoProvider,
   ) {
     this._schema = schema;
     this._storage = storage ?? null;
     this._crypto = crypto ?? createAmbientCryptoProvider();
-    this._store.setPersistence(this._storage);
+    this._store.setStorage(this._storage);
 
     if (schema !== null) {
       validateSchemaDefinition(schema);
     }
 
-    // Build document iterator bound to this database instance.
     const iterateDocs: DocumentIterator = (tableName, callback) => {
       this._iterateDocs(tableName, callback);
     };
     const countTable: TableCountReader = (tableName) =>
-      this.getDocumentsForTable(tableName).length;
-    const countTableAsync: AsyncTableCountReader = async (tableName) =>
-      this.getDocumentsForTable(tableName).length;
-    const readQuery: QueryReader = (query) => this._readOptimizedQuery(query);
+      this._hasPendingWritesForTable(tableName) ||
+      this._isIdentityScopedTable(tableName)
+        ? this.getDocumentsForTable(tableName).length
+        : (this._tableDocuments.get(tableName)?.size ?? 0);
+    const countTableAsync: AsyncTableCountReader = async (tableName) => {
+      if (
+        this._hasPendingWritesForTable(tableName) ||
+        this._isIdentityScopedTable(tableName)
+      ) {
+        return this.getDocumentsForTable(tableName).length;
+      }
+      if (this.isTableHydrationAttempted(tableName)) {
+        return this._tableDocuments.get(tableName)?.size ?? 0;
+      }
+      const storeCount = await this._store.countDocuments(
+        tableName,
+        this._storageReadOptions(tableName),
+      );
+      if (storeCount !== null) return storeCount;
+      return this._tableDocuments.get(tableName)?.size ?? 0;
+    };
+    const query: QueryReader = (query) => this._readOptimizedQuery(query);
     const readQueryAsync: AsyncQueryReader = (query) =>
       this._readOptimizedQueryAsync(query);
-    const readSource: SourceReader = (source, limit) =>
+    const source: SourceReader = (source, limit) =>
       this._readOptimizedSource(source, limit);
     const readSourceAsync: AsyncSourceReader = (source, limit) =>
       this._readOptimizedSourceAsync(source, limit);
@@ -368,17 +388,13 @@ export class Database {
       schema,
       iterateDocs,
       countTable,
-      readQuery,
-      readSource,
+      query,
+      source,
       countTableAsync,
       readQueryAsync,
       readSourceAsync,
     );
   }
-
-  // -------------------------------------------------------------------------
-  // Storage management
-  // -------------------------------------------------------------------------
 
   /**
    * Attach (or replace) the durable storage adapter.
@@ -387,9 +403,9 @@ export class Database {
    * (e.g. a wa-sqlite worker) after the `Database` is constructed.
    * After calling this, invoke {@link hydrate} to load persisted data.
    */
-  setStorage(storage: PersistenceAdapter): void {
+  setStorage(storage: StorageAdapter | null): void {
     this._storage = storage;
-    this._store.setPersistence(storage);
+    this._store.setStorage(storage);
     this._resetBlobState();
   }
 
@@ -405,83 +421,159 @@ export class Database {
     return this._activeIdentityKey;
   }
 
-  // -------------------------------------------------------------------------
-  // Storage hydration
-  // -------------------------------------------------------------------------
-
   /**
    * Hydrate the database from durable storage.
    *
    * Must be called (and awaited) before the first transaction when a
-   * {@link PersistenceAdapter} is configured. No-op when running without
+   * {@link StorageAdapter} is attached. No-op when running without
    * storage.
    */
   async hydrate(options?: { tables?: string[] }): Promise<void> {
     if (this._storage === null) return;
+    return withSpan(
+      "convex-embedded.db.hydrate",
+      async (span) => {
+        const started = globalThis.performance?.now?.() ?? Date.now();
 
-    const started = globalThis.performance?.now?.() ?? Date.now();
-
-    const tableNames = options?.tables;
-    const scopedHydration = tableNames !== undefined;
-    if (!scopedHydration || tableNames.includes("_storage")) {
-      this._resetBlobState();
-    }
-    const { documents, meta } = await this._store.load(
-      scopedHydration ? { tables: tableNames } : undefined,
-    );
-    const fetched = globalThis.performance?.now?.() ?? Date.now();
-
-    if (scopedHydration) {
-      for (const tableName of tableNames) {
-        this._clearCommittedTable(tableName);
-        this._hydrationAttemptedTables.add(tableName);
-      }
-    } else {
-      this._documents = {};
-      this._idTableMap.clear();
-      this._tableDocuments.clear();
-      this._fullyHydrated = true;
-    }
-
-    for (const { doc, tableName } of documents) {
-      if (tableName) {
-        this._idTableMap.set(doc._id as string, tableName);
-      }
-      if (!tableName || !this._store.isAuthoritative(tableName)) {
-        this._documents[doc._id] = doc;
-        if (tableName) {
-          this._addCommittedIdToTable(tableName, doc._id as string);
+        const tableNames = options?.tables;
+        const scopedHydration = tableNames !== undefined;
+        span.setAttributes({
+          "convex.db.hydrate.scoped": scopedHydration,
+          "convex.db.hydrate.scope": scopedHydration
+            ? tableNames.join(",")
+            : "all",
+        });
+        if (!scopedHydration || tableNames.includes("_storage")) {
+          this._resetBlobState();
         }
-      }
-    }
-    if (scopedHydration) {
-      for (const tableName of tableNames) {
-        if (!this._store.isAuthoritative(tableName)) {
-          this._rebuildTableIndexes(tableName);
-          this._rebuildTableSearchIndexes(tableName);
-          this._rebuildTableVectorIndexes(tableName);
+        const { documents, meta } = await withSpan(
+          "convex-embedded.db.hydrate.fetch",
+          () =>
+            this._store.load(
+              scopedHydration ? { tables: tableNames } : undefined,
+            ),
+        );
+        const fetched = globalThis.performance?.now?.() ?? Date.now();
+        span.setAttributes({
+          "convex.db.hydrate.docs": documents.length,
+          "convex.db.hydrate.fetch_ms": +(fetched - started).toFixed(1),
+        });
+
+        withSpanSync("convex-embedded.db.hydrate.populate", () => {
+          if (scopedHydration) {
+            for (const tableName of tableNames) {
+              this._clearCommittedTable(tableName);
+              this._hydrationAttemptedTables.add(tableName);
+            }
+          } else {
+            this._documents = {};
+            this._idTableMap.clear();
+            this._tableDocuments.clear();
+            this._fullyHydrated = true;
+          }
+
+          for (const { doc, tableName } of documents) {
+            if (tableName) {
+              this._idTableMap.set(doc._id as string, tableName);
+            }
+            this._documents[doc._id] = doc;
+            if (tableName) {
+              this._addCommittedIdToTable(tableName, doc._id as string);
+            }
+          }
+        });
+
+        await withSpan("convex-embedded.db.hydrate.rebuildIndexes", async () => {
+          if (scopedHydration) {
+            for (const tableName of tableNames) {
+              withSpanSync(
+                "convex-embedded.db.rebuildTableIndexes",
+                () => this._rebuildTableIndexes(tableName),
+                { attributes: { "convex.table": tableName } },
+              );
+              withSpanSync(
+                "convex-embedded.db.rebuildTableSearchIndexes",
+                () => this._rebuildTableSearchIndexes(tableName),
+                { attributes: { "convex.table": tableName } },
+              );
+              withSpanSync(
+                "convex-embedded.db.rebuildTableVectorIndexes",
+                () => this._rebuildTableVectorIndexes(tableName),
+                { attributes: { "convex.table": tableName } },
+              );
+              this._resolveTableHydration(tableName);
+            }
+          } else {
+            withSpanSync("convex-embedded.db.rebuildAllIndexes", () =>
+              this._rebuildAllIndexes(),
+            );
+            withSpanSync("convex-embedded.db.rebuildAllSearchIndexes", () =>
+              this._rebuildAllSearchIndexes(),
+            );
+            withSpanSync("convex-embedded.db.rebuildAllVectorIndexes", () =>
+              this._rebuildAllVectorIndexes(),
+            );
+            this._resolveAllTableHydrations();
+          }
+        });
+
+        if (meta !== null) {
+          this._timestamp = meta.timestamp;
+          this._lastCreationTime = meta.lastCreationTime;
         }
-      }
-    } else {
-      this._rebuildAllIndexes();
-      this._rebuildAllSearchIndexes();
-      this._rebuildAllVectorIndexes();
-    }
 
-    // Restore metadata counters.
-    if (meta !== null) {
-      this._timestamp = meta.timestamp;
-      this._lastCreationTime = meta.lastCreationTime;
-    }
-
-    const ended = globalThis.performance?.now?.() ?? Date.now();
-    log.info(
-      `hydrate: docs=${documents.length}, scope=${tableNames?.length ? tableNames.join(",") : "all"}, blobs=lazy, fetch=${(fetched - started).toFixed(1)}ms total=${(ended - started).toFixed(1)}ms`,
+        const ended = globalThis.performance?.now?.() ?? Date.now();
+        span.setAttributes({
+          "convex.db.hydrate.total_ms": +(ended - started).toFixed(1),
+          "convex.db.hydrate.rebuild_ms": +(ended - fetched).toFixed(1),
+        });
+        log.info(
+          `hydrate: docs=${documents.length}, scope=${tableNames?.length ? tableNames.join(",") : "all"}, blobs=lazy, fetch=${(fetched - started).toFixed(1)}ms total=${(ended - started).toFixed(1)}ms`,
+        );
+      },
     );
   }
 
   isTableHydrationAttempted(tableName: string): boolean {
     return this._fullyHydrated || this._hydrationAttemptedTables.has(tableName);
+  }
+
+  tableHydrated(tableName: string): Promise<void> {
+    if (this._storage === null || this._fullyHydrated) {
+      return Promise.resolve();
+    }
+    return this._ensureTableHydrationEntry(tableName);
+  }
+
+  private _ensureTableHydrationEntry(tableName: string): Promise<void> {
+    const existing = this._tableHydrationPromises.get(tableName);
+    if (existing !== undefined) {
+      return existing;
+    }
+    let resolver: () => void = () => {};
+    const promise = new Promise<void>((resolve) => {
+      resolver = resolve;
+    });
+    this._tableHydrationPromises.set(tableName, promise);
+    this._tableHydrationResolvers.set(tableName, resolver);
+    return promise;
+  }
+
+  private _resolveTableHydration(tableName: string): void {
+    const resolver = this._tableHydrationResolvers.get(tableName);
+    if (resolver !== undefined) {
+      resolver();
+      this._tableHydrationResolvers.delete(tableName);
+      return;
+    }
+    this._tableHydrationPromises.set(tableName, Promise.resolve());
+  }
+
+  private _resolveAllTableHydrations(): void {
+    for (const resolver of this._tableHydrationResolvers.values()) {
+      resolver();
+    }
+    this._tableHydrationResolvers.clear();
   }
 
   /**
@@ -499,15 +591,13 @@ export class Database {
 
     const { docs, meta } = await this._store.refreshTable({ tableName });
 
-    if (docs !== null && !this._store.isAuthoritative(tableName)) {
-      // Remove all current in-memory docs for this table.
+    if (docs !== null) {
       for (const id of this._tableDocuments.get(tableName) ?? []) {
         delete this._documents[id as DocumentId];
         this._idTableMap.delete(id);
       }
       this._tableDocuments.set(tableName, new Set());
 
-      // Replace with what's in storage and rebuild map entries.
       for (const doc of docs) {
         this._documents[doc._id] = doc;
         this._idTableMap.set(doc._id as string, tableName);
@@ -518,7 +608,6 @@ export class Database {
       this._rebuildTableVectorIndexes(tableName);
     }
 
-    // Sync metadata counters so timestamps remain monotonic across tabs.
     if (meta !== null) {
       if (meta.timestamp > this._timestamp) {
         this._timestamp = meta.timestamp;
@@ -529,18 +618,10 @@ export class Database {
     }
   }
 
-  // -------------------------------------------------------------------------
-  // MVCC timestamp
-  // -------------------------------------------------------------------------
-
   /** Current MVCC timestamp. */
   get timestamp(): Timestamp {
     return this._timestamp;
   }
-
-  // -------------------------------------------------------------------------
-  // Transaction lifecycle
-  // -------------------------------------------------------------------------
 
   /** Begin a new (possibly nested) transaction. */
   startTransaction(): void {
@@ -569,12 +650,10 @@ export class Database {
         );
       }
 
-      // Outermost commit — apply writes to in-memory storage.
       const { puts, deletes, rowChanges, stateChanges, invalidation } =
         this._buildCommittedWriteArtifacts(lastWrites);
       this._applyCommittedRowChanges(rowChanges);
 
-      // Bump timestamp only if there were actual writes.
       const tablesWritten = new Set(this._tablesWritten);
       if (tablesWritten.size > 0) {
         this._timestamp += 1;
@@ -638,7 +717,7 @@ export class Database {
       };
     }
 
-    const { puts, deletes, rowChanges } =
+    const { puts, deletes, rowChanges, invalidation } =
       this._buildCommittedWriteArtifacts(lastWrites);
     const nextTimestamp = this._timestamp + 1;
 
@@ -652,13 +731,50 @@ export class Database {
     } satisfies CommitBatch;
 
     const materializedTables = Array.from(tablesWritten).filter(
-      (tableName) => !this._store.isAuthoritative(tableName),
+      (tableName) => !this._isQueryableTable(tableName),
     );
-    const applied = await this._store.applyTopLevelCommit(batch, {
+
+    const writeOptions = {
       materializedTables,
       tableSearchIndexes: this._collectTableSearchIndexes(),
       tableVectorIndexes: this._collectTableVectorIndexes(),
-    });
+    };
+
+    const allWrittenTablesAlreadyHydrated = materializedTables.every(
+      (tableName) => this.isTableHydrationAttempted(tableName),
+    );
+
+    if (allWrittenTablesAlreadyHydrated) {
+      this._popCommittedWriteLevel();
+      this._applyCommittedIdHints(rowChanges);
+      this._timestamp = nextTimestamp;
+      this._lastCreationTime = batch.meta.lastCreationTime;
+      const dirtyTables = new Set<string>();
+      for (const change of rowChanges) {
+        if (change.tableName === "") continue;
+        dirtyTables.add(change.tableName);
+      }
+      if (rowChanges.length > 0) {
+        this._applyCommittedRowChanges(rowChanges);
+        for (const tableName of dirtyTables) {
+          this._rebuildTableIndexes(tableName);
+          this._rebuildTableSearchIndexes(tableName);
+          this._rebuildTableVectorIndexes(tableName);
+        }
+      }
+      this._tablesWritten.clear();
+
+      const persisted = this._enqueueAsyncCommit(batch, writeOptions);
+
+      return {
+        timestamp: this._timestamp,
+        tablesWritten,
+        invalidation,
+        persisted,
+      };
+    }
+
+    const applied = await this._store.write(batch, writeOptions);
     if (applied === null) {
       throw new Error(
         "[convex-embedded] expected committed store to apply external top-level commit",
@@ -672,14 +788,58 @@ export class Database {
     for (const snapshot of applied.tables) {
       this._replaceCommittedTableSnapshot(snapshot.tableName, snapshot.docs);
     }
+    const queryableRowChanges = rowChanges.filter(
+      (change) =>
+        change.tableName !== "" && this._isQueryableTable(change.tableName),
+    );
+    if (queryableRowChanges.length > 0) {
+      this._applyCommittedRowChanges(queryableRowChanges);
+      const dirtyTables = new Set<string>();
+      for (const change of queryableRowChanges) {
+        dirtyTables.add(change.tableName);
+      }
+      for (const tableName of dirtyTables) {
+        this._rebuildTableIndexes(tableName);
+        this._rebuildTableSearchIndexes(tableName);
+        this._rebuildTableVectorIndexes(tableName);
+      }
+    }
     this._tablesWritten.clear();
 
     return {
       timestamp: this._timestamp,
       tablesWritten,
-      invalidation: { tables: tablesWritten, changes: [] },
+      invalidation,
       persisted: Promise.resolve(),
     };
+  }
+
+  private _enqueueAsyncCommit(
+    batch: CommitBatch,
+    options: {
+      materializedTables: string[];
+      tableSearchIndexes: Record<
+        string,
+        import("@/runtime/db/schema").SearchIndexDefinition[]
+      >;
+      tableVectorIndexes: Record<
+        string,
+        import("@/runtime/db/schema").VectorIndexDefinition[]
+      >;
+    },
+  ): Promise<void> {
+    const previous = this._pendingPersistChain;
+    const next = previous
+      .catch(() => undefined)
+      .then(async () => {
+        await this._store.write(batch, options);
+      });
+    this._pendingPersistChain = next.catch(() => undefined);
+    return next;
+  }
+
+  async waitForPersistence(): Promise<void> {
+    await this._pendingPersistChain;
   }
 
   /** Discard the deepest pending write level. */
@@ -692,10 +852,6 @@ export class Database {
     this._writeTables.pop();
     this._pendingTableState.clear();
   }
-
-  // -------------------------------------------------------------------------
-  // CRUD operations
-  // -------------------------------------------------------------------------
 
   /**
    * Read a single document by ID.
@@ -796,11 +952,9 @@ export class Database {
       );
     }
 
-    // Strip system fields before merging.
     delete value["_id"];
     delete value["_creationTime"];
 
-    // Resolve any $undefined sentinels.
     const convexValue: Record<string, unknown> = {};
     for (const [key, v] of Object.entries(value)) {
       convexValue[key] = evaluateValue(v as JSONValue);
@@ -897,10 +1051,6 @@ export class Database {
     this._addWrite(id, null);
   }
 
-  // -------------------------------------------------------------------------
-  // Authoritative ingestion (for remote → local sync)
-  // -------------------------------------------------------------------------
-
   /**
    * Upsert a document with a caller-supplied `_id` and `_creationTime`.
    *
@@ -936,14 +1086,12 @@ export class Database {
     const existingTable = this._idTableMap.get(_id);
 
     if (existingTable !== undefined) {
-      // ID exists — verify it belongs to the same table.
       if (existingTable !== table) {
         throw new Error(
           `putDocument: ID "${_id}" belongs to table "${existingTable}", ` +
             `not "${table}"`,
         );
       }
-      // Replace in-place — keep the incoming _id and _creationTime.
       this._addWrite(
         docId,
         this._withIdentityScope(table, {
@@ -953,10 +1101,8 @@ export class Database {
         }),
       );
     } else {
-      // New document — register in the ID table map.
       this._idTableMap.set(_id, table);
 
-      // Track creation time for monotonicity.
       if (_creationTime > this._lastCreationTime) {
         this._lastCreationTime = _creationTime;
       }
@@ -1040,10 +1186,6 @@ export class Database {
     return tablesWritten;
   }
 
-  // -------------------------------------------------------------------------
-  // normalizeId
-  // -------------------------------------------------------------------------
-
   /**
    * If `idString` is a valid ID that belongs to `table`, return it.
    * Otherwise return `null`.
@@ -1063,10 +1205,6 @@ export class Database {
     return this._idTableMap.get(id);
   }
 
-  // -------------------------------------------------------------------------
-  // File / blob storage
-  // -------------------------------------------------------------------------
-
   async storeFile(storageId: DocumentId, blob: Blob): Promise<void> {
     this._blobStorage[storageId] = blob;
 
@@ -1078,7 +1216,6 @@ export class Database {
   deleteBlob(storageId: string): void {
     delete this._blobStorage[storageId as DocumentId];
 
-    // Remove from durable storage (fire-and-forget).
     if (this._storage) {
       this._storage.deleteBlob(storageId).catch((error) => {
         console.error("[convex-embedded] blob delete failed:", error);
@@ -1107,33 +1244,12 @@ export class Database {
       return null;
     }
 
-    if (this._storage.getBlob) {
-      const blob = await this._storage.getBlob(storageId as string);
-      if (blob !== null) {
-        this._blobStorage[storageId] = blob;
-      }
-      return blob;
+    const blob = await this._storage.getBlob(storageId as string);
+    if (blob !== null) {
+      this._blobStorage[storageId] = blob;
     }
-
-    if (!this._allBlobsHydrated) {
-      this._blobHydration ??= (async () => {
-        const blobs = await this._storage!.listBlobs();
-        for (const { id, blob } of blobs) {
-          this._blobStorage[id as DocumentId] = blob;
-        }
-        this._allBlobsHydrated = true;
-      })().finally(() => {
-        this._blobHydration = null;
-      });
-      await this._blobHydration;
-    }
-
-    return this._blobStorage[storageId] ?? null;
+    return blob;
   }
-
-  // -------------------------------------------------------------------------
-  // Query delegation
-  // -------------------------------------------------------------------------
 
   startQuery(query: SerializedQuery): QueryId {
     return this.queryEngine.startQuery(query);
@@ -1192,7 +1308,10 @@ export class Database {
   countAsync(tableName: string): Promise<number> {
     if (!this._hasPendingWritesForTable(tableName)) {
       return this._store
-        .countDocuments(tableName as TableName)
+        .countDocuments(
+          tableName as TableName,
+          this._storageReadOptions(tableName),
+        )
         .then((count) => count ?? this.count(tableName));
     }
     return Promise.resolve(this.count(tableName));
@@ -1206,6 +1325,16 @@ export class Database {
     let resolvedTable =
       tableName ??
       (this._idTableMap.get(id as string) as TableName | undefined);
+    if (
+      resolvedTable !== undefined &&
+      this.isTableHydrationAttempted(resolvedTable) &&
+      !this._hasPendingWritesForTable(resolvedTable)
+    ) {
+      const inMemory = this._getRaw(id);
+      if (inMemory !== null) {
+        return this._visibleDocumentInScope(resolvedTable, inMemory);
+      }
+    }
     if (resolvedTable === undefined) {
       resolvedTable = (await this._findTableForIdViaBackend(id)) as
         | TableName
@@ -1215,12 +1344,16 @@ export class Database {
       resolvedTable !== undefined &&
       !this._hasPendingWritesForTable(resolvedTable)
     ) {
-      const document = await this._store.getDocument(resolvedTable, id);
+      const document = await this._store.getDocument(
+        resolvedTable,
+        id,
+        this._storageReadOptions(resolvedTable),
+      );
       if (document !== null) {
         this._rememberCommittedLookup(resolvedTable, [document]);
       }
       if (document !== null) {
-        return document;
+        return this._stripIdentityScope(document as IdentityScopedDocument);
       }
     }
     return this.get(resolvedTable, id, options);
@@ -1236,7 +1369,11 @@ export class Database {
       if (this._isSystemTable(tableName)) {
         continue;
       }
-      const found = await this._store.getDocument(tableName, id);
+      const found = await this._store.getDocument(
+        tableName,
+        id,
+        this._storageReadOptions(tableName),
+      );
       if (found !== null) {
         this._idTableMap.set(id as string, tableName);
         return tableName;
@@ -1253,7 +1390,15 @@ export class Database {
       return true;
     }
 
-    const document = await this._store.getDocument(tableName, id);
+    if (this.isTableHydrationAttempted(tableName)) {
+      return false;
+    }
+
+    const document = await this._store.getDocument(
+      tableName,
+      id,
+      this._storageReadOptions(tableName),
+    );
     if (document === null) {
       return false;
     }
@@ -1264,11 +1409,17 @@ export class Database {
   }
 
   async listDocumentsAsync(tableName: TableName): Promise<StoredDocument[]> {
+    if (this.isTableHydrationAttempted(tableName)) {
+      return this.getDocumentsForTable(tableName);
+    }
     if (!this._hasPendingWritesForTable(tableName)) {
-      const docs = await this._store.listDocuments(tableName);
+      const docs = await this._store.getDocuments(
+        tableName,
+        this._storageReadOptions(tableName),
+      );
       if (docs !== null) {
         this._rememberCommittedLookup(tableName, docs);
-        return docs;
+        return this._stripIdentityScopes(docs);
       }
     }
     return this.getDocumentsForTable(tableName);
@@ -1334,7 +1485,6 @@ export class Database {
     limit?: number,
   ): Array<{ _id: string; _score: number }> {
     const [tableName, indexName] = tableAndIndexName.split(".");
-    this._assertSyncAllowedForTable(tableName, "vectorSearch");
     const state = this._vectorIndexes.get(`${tableName}.${indexName}`);
     if (state) {
       resolveVectorIndexDefinition(
@@ -1385,9 +1535,9 @@ export class Database {
       indexName,
     );
 
-    if (this._store.isAuthoritative(tableName)) {
+    if (this._isQueryableTable(tableName)) {
       const candidates =
-        (await this._store.readVectorCandidates({
+        (await this._store.vectorSearch({
           tableName,
           indexName,
           definition,
@@ -1428,10 +1578,6 @@ export class Database {
     return this.vectorSearch(tableAndIndexName, vector, filter, limit);
   }
 
-  // -------------------------------------------------------------------------
-  // Private: ID validation
-  // -------------------------------------------------------------------------
-
   /**
    * Validate that `id` is a string whose table (looked up in `_idTableMap`)
    * matches `expectedTableName` (when non-undefined).
@@ -1463,8 +1609,6 @@ export class Database {
 
     const actualTableName = this._idTableMap.get(id);
     if (actualTableName === undefined) {
-      // ID is not known — could be deleted or never existed.
-      // Return false so callers (get/delete/patch/replace) can handle it.
       return false;
     }
 
@@ -1484,7 +1628,7 @@ export class Database {
   ): Error {
     if (
       typeof tableName === "string" &&
-      this._store.isAuthoritative(tableName) &&
+      this._isQueryableTable(tableName) &&
       !this._tableDocuments.has(tableName)
     ) {
       return new Error(
@@ -1494,10 +1638,6 @@ export class Database {
     }
     return new Error(`${op} on non-existent document with ID "${idText}"`);
   }
-
-  // -------------------------------------------------------------------------
-  // Private: schema validation
-  // -------------------------------------------------------------------------
 
   /**
    * Validate a document against the schema for `tableName`.
@@ -1513,10 +1653,6 @@ export class Database {
     }
     validateValidator(validator, doc, (id) => this._idTableMap.get(id));
   }
-
-  // -------------------------------------------------------------------------
-  // Private: write helpers
-  // -------------------------------------------------------------------------
 
   /**
    * Stage a write into the deepest pending transaction level.
@@ -1604,9 +1740,7 @@ export class Database {
       (acc, [id, write]) => {
         const docId = id as DocumentId;
         const tableName = this._idTableMap.get(id) ?? "";
-        const shouldMaterialize = tableName
-          ? !this._store.isAuthoritative(tableName)
-          : true;
+        const shouldMaterialize = true;
         const before =
           (this._documents[docId] as IdentityScopedDocument | undefined) ??
           null;
@@ -1713,6 +1847,9 @@ export class Database {
       const { tableName, id, after } = change;
       if (after === null) {
         this._idTableMap.delete(id);
+        if (tableName) {
+          this._removeCommittedIdFromTable(tableName, id);
+        }
         continue;
       }
       if (tableName) {
@@ -1726,12 +1863,12 @@ export class Database {
     if (batch.puts.length === 0 && batch.deletes.length === 0) {
       return Promise.resolve();
     }
-    return this._storage.commit(batch);
+    const write = (
+      this._storage as { write?: (b: CommitBatch) => Promise<unknown> }
+    ).write;
+    if (typeof write !== "function") return Promise.resolve();
+    return write.call(this._storage, batch).then(() => {});
   }
-
-  // -------------------------------------------------------------------------
-  // Private: document iteration
-  // -------------------------------------------------------------------------
 
   /**
    * Iterate over all visible documents in `tableName`, including pending
@@ -1858,6 +1995,14 @@ export class Database {
     return rest as StoredDocument;
   }
 
+  private _stripIdentityScopes(
+    documents: readonly StoredDocument[],
+  ): StoredDocument[] {
+    return documents.map((doc) =>
+      this._stripIdentityScope(doc as IdentityScopedDocument),
+    );
+  }
+
   private _visibleDocumentInScope(
     tableName: TableName | undefined,
     document: IdentityScopedDocument,
@@ -1938,9 +2083,7 @@ export class Database {
     for (const doc of docs) {
       if (typeof doc._id === "string") {
         this._idTableMap.set(doc._id, tableName);
-        if (!this._store.isAuthoritative(tableName)) {
-          this._cacheCommittedDocument(tableName, doc);
-        }
+        this._cacheCommittedDocument(tableName, doc);
       }
     }
   }
@@ -1949,7 +2092,11 @@ export class Database {
     tableName: string,
     doc: StoredDocument,
   ): void {
-    const scoped = this._withIdentityScope(tableName, doc);
+    const scoped =
+      this._isIdentityScopedTable(tableName) &&
+      (doc as IdentityScopedDocument)[IDENTITY_SCOPE_FIELD] === undefined
+        ? this._withIdentityScope(tableName, doc)
+        : (doc as IdentityScopedDocument);
     this._documents[doc._id as DocumentId] = scoped;
     this._addCommittedIdToTable(tableName, doc._id);
   }
@@ -1999,8 +2146,6 @@ export class Database {
 
   private _resetBlobState(): void {
     this._blobStorage = {};
-    this._allBlobsHydrated = false;
-    this._blobHydration = null;
   }
 
   private _readOptimizedSource(
@@ -2011,7 +2156,6 @@ export class Database {
     fieldPathsToSortBy: string[];
     order: "asc" | "desc";
   } | null {
-    this._assertSyncAllowedForSource(source, "_readOptimizedSource");
     if (source.type === "FullTableScan") {
       const indexName =
         source.order === "desc" ? "by_creation_time_desc" : "by_creation_time";
@@ -2125,6 +2269,16 @@ export class Database {
     fieldPathsToSortBy: string[];
     order: "asc" | "desc";
   } | null> {
+    const sourceTable = sourceTableName(source);
+    if (
+      this.isTableHydrationAttempted(sourceTable) &&
+      source.type !== "Search"
+    ) {
+      const inMemory = this._readOptimizedSource(source, limit);
+      if (inMemory !== null) {
+        return inMemory;
+      }
+    }
     if (!this._hasPendingWritesForAnySource(source)) {
       const searchDefinition =
         source.type === "Search"
@@ -2141,7 +2295,7 @@ export class Database {
               (entry) => entry.indexName === source.indexName.split(".")[1],
             )?.fields ?? null)
           : null;
-      const results = await this._store.readSource(source, {
+      const results = await this._store.source(source, {
         limit,
         indexFields: indexFields ?? undefined,
         searchDefinition,
@@ -2152,7 +2306,7 @@ export class Database {
         const order =
           source.type === "Search" ? "asc" : (source.order ?? "asc");
         return {
-          results,
+          results: this._stripIdentityScopes(results),
           fieldPathsToSortBy:
             source.type === "FullTableScan" ? ["_creationTime"] : [],
           order,
@@ -2164,21 +2318,23 @@ export class Database {
       source.type === "FullTableScan" &&
       !this._hasPendingWritesForTable(source.tableName)
     ) {
-      const docs = await this._store.listDocuments(source.tableName);
+      const docs = await this._store.getDocuments(
+        source.tableName,
+        this._storageReadOptions(source.tableName),
+      );
       if (docs !== null) {
         this._rememberCommittedLookup(source.tableName, docs);
         return {
-          results: docs,
+          results: this._stripIdentityScopes(docs),
           fieldPathsToSortBy: ["_creationTime"],
           order: source.order ?? "asc",
         };
       }
     }
 
-    const sourceTable = sourceTableName(source);
     if (
       this._hasPendingWritesForAnySource(source) &&
-      this._store.isAuthoritative(sourceTable) &&
+      this._isQueryableTable(sourceTable) &&
       !this.isTableHydrationAttempted(sourceTable)
     ) {
       await this.hydrate({ tables: [sourceTable] });
@@ -2193,8 +2349,6 @@ export class Database {
     const { filters, limit } = this._extractNormalizedOperators(
       query.operators,
     );
-    this._assertSyncAllowedForSource(query.source, "_readOptimizedQuery");
-
     if (query.source.type === "FullTableScan") {
       const indexName =
         query.source.order === "desc"
@@ -2278,6 +2432,17 @@ export class Database {
       query.operators,
     );
 
+    const queryTable = sourceTableName(query.source);
+    if (
+      query.source.type !== "Search" &&
+      this.isTableHydrationAttempted(queryTable)
+    ) {
+      const inMemory = this._readOptimizedQuery(query);
+      if (inMemory !== null) {
+        return inMemory;
+      }
+    }
+
     if (
       (query.source.type === "FullTableScan" ||
         query.source.type === "IndexRange") &&
@@ -2293,7 +2458,7 @@ export class Database {
                 entry.indexName === query.source.indexName.split(".")[1],
             )?.fields ?? null)
           : null;
-      const pushedDown = await this._store.readQuery({
+      const pushedDown = await this._store.query({
         source: query.source,
         filters,
         limit,
@@ -2306,7 +2471,7 @@ export class Database {
           sourceTableName(query.source),
           pushedDown,
         );
-        return pushedDown;
+        return this._stripIdentityScopes(pushedDown);
       }
     }
 
@@ -2333,7 +2498,7 @@ export class Database {
             (entry) => entry.indexName === idx,
           )?.fields ?? null;
       }
-      const sourceResults = await this._store.readSource(query.source, {
+      const sourceResults = await this._store.source(query.source, {
         limit,
         indexFields: indexFields ?? undefined,
         searchDefinition,
@@ -2352,12 +2517,17 @@ export class Database {
       query.source.type === "FullTableScan" &&
       !this._hasPendingWritesForTable(query.source.tableName)
     ) {
-      const docs = await this._store.listDocuments(query.source.tableName);
+      const docs = await this._store.getDocuments(
+        query.source.tableName,
+        this._storageReadOptions(query.source.tableName),
+      );
       if (docs !== null) {
         this._rememberCommittedLookup(query.source.tableName, docs);
         const orderedDocs =
           query.source.order === "desc" ? [...docs].reverse() : docs;
-        return this._filterOrderedDocs(orderedDocs, filters, limit);
+        return this._stripIdentityScopes(
+          this._filterOrderedDocs(orderedDocs, filters, limit),
+        );
       }
     }
 
@@ -2808,17 +2978,47 @@ export class Database {
     return merged;
   }
 
+  private _allKnownTableNames(): Set<string> {
+    const names = new Set(this._tableDocuments.keys());
+    if (this._schema) {
+      for (const name of this._schema.tables.keys()) {
+        names.add(name);
+      }
+    }
+    return names;
+  }
+
   private _rebuildAllIndexes(): void {
     this._indexDocuments.clear();
-    for (const tableName of this._tableDocuments.keys()) {
-      this._rebuildTableIndexes(tableName);
+    for (const tableName of this._allKnownTableNames()) {
+      const rowCount = this._tableDocuments.get(tableName)?.size ?? 0;
+      withSpanSync(
+        "convex-embedded.db.rebuildTableIndexes",
+        () => this._rebuildTableIndexes(tableName),
+        {
+          attributes: {
+            "convex.table": tableName,
+            "convex.table.rows": rowCount,
+          },
+        },
+      );
     }
   }
 
   private _rebuildAllSearchIndexes(): void {
     this._searchIndexes.clear();
-    for (const tableName of this._tableDocuments.keys()) {
-      this._rebuildTableSearchIndexes(tableName);
+    for (const tableName of this._allKnownTableNames()) {
+      const rowCount = this._tableDocuments.get(tableName)?.size ?? 0;
+      withSpanSync(
+        "convex-embedded.db.rebuildTableSearchIndexes",
+        () => this._rebuildTableSearchIndexes(tableName),
+        {
+          attributes: {
+            "convex.table": tableName,
+            "convex.table.rows": rowCount,
+          },
+        },
+      );
     }
   }
 
@@ -2858,25 +3058,64 @@ export class Database {
 
   private _rebuildAllVectorIndexes(): void {
     this._vectorIndexes.clear();
-    for (const tableName of this._tableDocuments.keys()) {
-      this._rebuildTableVectorIndexes(tableName);
+    for (const tableName of this._allKnownTableNames()) {
+      const rowCount = this._tableDocuments.get(tableName)?.size ?? 0;
+      withSpanSync(
+        "convex-embedded.db.rebuildTableVectorIndexes",
+        () => this._rebuildTableVectorIndexes(tableName),
+        {
+          attributes: {
+            "convex.table": tableName,
+            "convex.table.rows": rowCount,
+          },
+        },
+      );
     }
   }
 
   private _rebuildTableIndexes(tableName: string): void {
-    const committedDocs = [...(this._tableDocuments.get(tableName) ?? [])]
-      .map((id) => this._documents[id as DocumentId])
-      .filter((doc): doc is StoredDocument => doc !== undefined);
+    const ids: string[] = [];
+    const docs = this._documents;
+    for (const id of this._tableDocuments.get(tableName) ?? []) {
+      if (docs[id as DocumentId] !== undefined) {
+        ids.push(id);
+      }
+    }
 
     for (const { indexName, fields } of this._getIndexDefinitions(tableName)) {
-      const sorted = [...committedDocs].sort((left, right) =>
-        this._compareDocsForIndex(indexName, fields, left, right),
-      );
+      if (ids.length === 0) {
+        this._indexDocuments.set(`${tableName}.${indexName}`, []);
+        continue;
+      }
 
-      this._indexDocuments.set(
-        `${tableName}.${indexName}`,
-        sorted.map((doc) => doc._id as string),
-      );
+      const keyed: Array<{ id: string; keys: Array<Value | undefined> }> =
+        new Array(ids.length);
+      for (let i = 0; i < ids.length; i++) {
+        const id = ids[i]!;
+        const doc = docs[id as DocumentId]!;
+        const keys: Array<Value | undefined> = new Array(fields.length);
+        for (let f = 0; f < fields.length; f++) {
+          keys[f] = evaluateFieldPath(fields[f]!, doc) as Value | undefined;
+        }
+        keyed[i] = { id, keys };
+      }
+
+      const desc = indexName === "by_creation_time_desc";
+      keyed.sort((left, right) => {
+        for (let f = 0; f < fields.length; f++) {
+          const cmp = compareValues(left.keys[f], right.keys[f]);
+          if (cmp !== 0) {
+            return desc ? -cmp : cmp;
+          }
+        }
+        return 0;
+      });
+
+      const sortedIds = new Array<string>(keyed.length);
+      for (let i = 0; i < keyed.length; i++) {
+        sortedIds[i] = keyed[i]!.id;
+      }
+      this._indexDocuments.set(`${tableName}.${indexName}`, sortedIds);
     }
   }
 
@@ -2887,6 +3126,9 @@ export class Database {
       if (key.startsWith(`${tableName}.`)) {
         this._searchIndexes.delete(key);
       }
+    }
+    if (searchIndexes.length === 0) {
+      return;
     }
     const rawDocs = [...(this._tableDocuments.get(tableName) ?? [])]
       .map(
@@ -2922,6 +3164,9 @@ export class Database {
       if (key.startsWith(`${tableName}.`)) {
         this._vectorIndexes.delete(key);
       }
+    }
+    if (vectorIndexes.length === 0) {
+      return;
     }
     const rawDocs = [...(this._tableDocuments.get(tableName) ?? [])]
       .map(
@@ -2962,7 +3207,7 @@ export class Database {
     }
 
     for (const [tableName, tableChanges] of changesByTable) {
-      if (this._store.isAuthoritative(tableName)) {
+      if (this._isQueryableTable(tableName)) {
         continue;
       }
 
@@ -2991,23 +3236,14 @@ export class Database {
     return tableName.startsWith("_");
   }
 
-  private _assertSyncAllowedForTable(tableName: string, site: string): void {
-    if (!this._store.isAuthoritative(tableName)) {
-      return;
-    }
-    if (this._tableDocuments.has(tableName)) {
-      return;
-    }
-    throw new Error(
-      `[convex-embedded] ${site}: synchronous reads are not supported for SQL-backed table "${tableName}". Use the async variant so reads route through the adapter read backend.`,
-    );
+  private _storageReadOptions(tableName: string): ReadOptions | undefined {
+    return this._isSystemTable(tableName)
+      ? undefined
+      : { activeIdentityKey: this._activeIdentityKey };
   }
 
-  private _assertSyncAllowedForSource(
-    source: SerializedQuery["source"],
-    site: string,
-  ): void {
-    this._assertSyncAllowedForTable(sourceTableName(source), site);
+  private _isQueryableTable(tableName: string): boolean {
+    return this._store.isQueryable() && !tableName.startsWith("_");
   }
 
   private _applyIncrementalIndexChanges(
@@ -3176,8 +3412,9 @@ export class Database {
   private _getIndexDefinitions(
     tableName: string,
   ): Array<{ indexName: string; fields: string[] }> {
+    const tableSchema = this._schema?.tables.get(tableName);
     const schemaIndexes =
-      this._schema?.tables.get(tableName)?.indexes.map((index) => ({
+      tableSchema?.indexes.map((index) => ({
         indexName: index.indexDescriptor,
         fields: [...index.fields, "_creationTime", "_id"],
       })) ?? [];
@@ -3275,6 +3512,15 @@ export class Database {
         inclusive = expression.type === "Lte";
       }
     }
+
+    let prefixLength = values.length;
+    for (let index = 0; index < values.length; index++) {
+      if (values[index] === undefined) {
+        prefixLength = index;
+        break;
+      }
+    }
+    values.length = prefixLength;
 
     return values.length === 0 ? null : { values, inclusive };
   }

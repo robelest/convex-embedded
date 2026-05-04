@@ -8,8 +8,12 @@ import { ActivityIndicator, InteractionManager, View } from "react-native";
 import { EmbeddedClientProvider, getClient } from "@/src/convex-client";
 import { OverlayGuardProvider } from "@/src/overlay-guard";
 import { ProjectSelectionProvider } from "@/src/project-selection";
+import { ensureTracingInstalled } from "@/src/tracing";
+import { TracingOverlay } from "@/src/tracing-overlay";
 
 import "react-native-reanimated";
+
+ensureTracingInstalled();
 
 const WarmTheme = {
   ...DefaultTheme,
@@ -50,6 +54,7 @@ export default function RootLayout() {
           <ActivityIndicator color={WarmTheme.colors.primary} />
           <StatusBar style="dark" />
         </View>
+        <TracingOverlay />
       </ThemeProvider>
     );
   }
@@ -90,6 +95,7 @@ export default function RootLayout() {
             </OverlayGuardProvider>
           </ProjectSelectionProvider>
           <StatusBar style="dark" />
+          <TracingOverlay />
         </ThemeProvider>
       </EmbeddedClientProvider>
     </ConvexProvider>

@@ -1,7 +1,7 @@
 /**
  * Platform-agnostic embedded client factory.
  *
- * This module composes runtime, persistence, auth, and remote sync into a
+ * This module composes runtime, storage, auth, and remote sync into a
  * standard `ConvexClient` instance.
  */
 
@@ -20,6 +20,7 @@ import {
   refreshAuthFromSource,
   registerAuthEntry,
 } from "@/client/auth";
+import { EmbeddedQueryCache } from "@/client/cache";
 import {
   deleteEmbeddedClientEntry,
   extractEmbeddedTableDefinitions,
@@ -43,9 +44,14 @@ import type { EmbeddedRuntimeOptions } from "@/runtime/embedded";
 import { LoadCoordinator } from "@/runtime/load";
 import { PENDING_STORE_MIGRATIONS } from "@/runtime/migrations/pending";
 import type { EmbeddedPlatformAdapter } from "@/runtime/platform";
+import {
+  createQueryCacheStorage,
+  type QueryCacheStorage,
+} from "@/runtime/sqlite/cache_table";
 import { SCHEDULED_FUNCTIONS_STORE_MIGRATIONS } from "@/scheduler/executor";
 import { createLogger } from "@/shared/logger";
 import type { PendingReplayMeta } from "@/shared/symbols";
+import { SqliteAdapter } from "@/storage/sqlite/adapter";
 import { PubSub } from "@/utils/pubsub";
 import { DisposableScope } from "@/utils/scope";
 
@@ -90,7 +96,7 @@ function installStorageSurface(
 
   runtime.setStorageSurface(storageSurface);
   log.info(
-    `storage surface installed after persistence attach (${storageSurface ? "enabled" : "none"})`,
+    `storage surface installed after storage attach (${storageSurface ? "enabled" : "none"})`,
   );
   return storageSurface;
 }
@@ -127,6 +133,8 @@ function createResolveAttachment(input: {
   getIdentityKeyForSync: () => string | null;
   getReplayPayloadVersion: (refName: string) => number;
   platformConfig: PlatformConfig;
+  cache: EmbeddedQueryCache;
+  getCacheStorage: () => QueryCacheStorage | null;
 }): ResolveAttachment {
   const { runtime, connectivity, processorId } = input.platformConfig;
 
@@ -140,6 +148,8 @@ function createResolveAttachment(input: {
     getReplayPayloadVersion: input.getReplayPayloadVersion,
     connectivity,
     processorId,
+    cache: input.cache,
+    getCacheStorage: input.getCacheStorage,
   });
 }
 
@@ -272,8 +282,8 @@ export function createEmbeddedClient(input: {
       log.error("[factory] load migrations:", error);
     },
     onRefreshError: (stage, error) => {
-      if (stage === "after-persistence") {
-        log.error("[factory] refresh local watches after persistence:", error);
+      if (stage === "after-storage") {
+        log.error("[factory] refresh local watches after storage:", error);
         return;
       }
       log.error("[factory] refresh local watches:", error);
@@ -285,9 +295,6 @@ export function createEmbeddedClient(input: {
     },
   });
 
-  // Without prefetch, block executeLocal until durable storage loads so
-  // restarts see persisted rows. With prefetch, serve the prefetch payload
-  // immediately and let `refreshLocalQueryWatches` catch watchers up later.
   if (!options.prefetch) {
     runtime.extendStorageReady(load.storageReady);
   }
@@ -299,7 +306,7 @@ export function createEmbeddedClient(input: {
     })
     .catch((error) => {
       log.error(
-        "storage surface install skipped after persistence failure",
+        "storage surface install skipped after storage failure",
         error,
       );
     });
@@ -311,6 +318,55 @@ export function createEmbeddedClient(input: {
       transport.webSocketConstructor as unknown as typeof WebSocket,
     unsavedChangesWarning: false,
   });
+
+  const queryCache = new EmbeddedQueryCache();
+  let queryCacheStorage: QueryCacheStorage | null = null;
+
+  void load.storageReady
+    .then(async () => {
+      if (clientClosed) return;
+      const storage = runtime.getStorage();
+      if (!(storage instanceof SqliteAdapter)) {
+        return;
+      }
+      const driver = storage.getDriver();
+      const cacheStorage = createQueryCacheStorage(driver);
+      try {
+        await cacheStorage.initSchema();
+        const rows = await cacheStorage.loadAll();
+        if (clientClosed) return;
+        for (const row of rows) {
+          let value: unknown;
+          try {
+            value = JSON.parse(row.valueJson);
+          } catch {
+            continue;
+          }
+          let args: unknown;
+          try {
+            args = JSON.parse(row.argsJson);
+          } catch {
+            continue;
+          }
+          queryCache.set(row.refName, args, {
+            value,
+            receivedAtMs: row.receivedAt,
+            ts: row.ts ?? undefined,
+            paginationCursor: row.paginationCursor ?? undefined,
+            paginationIsDone:
+              row.paginationIsDone === null
+                ? undefined
+                : row.paginationIsDone === 1,
+          });
+        }
+        queryCacheStorage = cacheStorage;
+      } catch (error) {
+        log.warn("query cache storage init failed", error);
+      }
+    })
+    .catch((error) => {
+      log.warn("query cache bootstrap skipped", error);
+    });
 
   registerEmbeddedClientEntry(client, {
     runtime,
@@ -349,6 +405,8 @@ export function createEmbeddedClient(input: {
         getReplayPayloadVersion: (refName) =>
           replayMetadata.get(refName)?.version ?? 1,
         platformConfig,
+        cache: queryCache,
+        getCacheStorage: () => queryCacheStorage,
       })
     : null;
 
@@ -357,9 +415,7 @@ export function createEmbeddedClient(input: {
       try {
         await resolveAttachment.close();
         deleteResolveEntry(client);
-      } catch {
-        // swallow close errors
-      }
+      } catch {}
     });
   }
 
@@ -380,6 +436,8 @@ export function createEmbeddedClient(input: {
           applyLocalEffects: true,
         }),
       connectivity: platform.connectivity,
+      cache: queryCache,
+      getCacheStorage: () => queryCacheStorage,
     });
   }
 

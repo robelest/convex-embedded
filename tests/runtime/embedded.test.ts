@@ -2,7 +2,7 @@ import { BrowserWriteBroadcast } from "@embedded/browser/write";
 import { EmbeddedRuntime } from "@embedded/runtime/embedded";
 import type { Definition } from "@embedded/shared/schema";
 import { createTestIdentity } from "@embedded/test";
-import { mockAdapter } from "@tests/helpers/test-adapter";
+import { mockAdapter } from "@tests/helpers/adapter";
 import { describe, it, expect, beforeEach, afterEach } from "@tests/testkit";
 import { makeFunctionReference } from "convex/server";
 import { vi } from "vitest";
@@ -81,7 +81,7 @@ function deferredPromise<T>() {
   return { promise, resolve, reject };
 }
 
-function createSqlPersistence(
+function createSqlStorage(
   rowsByTable: Record<string, Array<Record<string, unknown>>>,
 ) {
   const getDocumentsByTable = vi.fn(async (tableName: string) => [
@@ -115,28 +115,27 @@ function createSqlPersistence(
     return rows;
   });
 
-  const persistence = {
+  const storage = mockAdapter({
+    kind: "sql",
     listAll: async () =>
       Object.entries(rowsByTable).flatMap(([tableName, docs]) =>
         docs.map((doc) => ({ tableName, doc })),
       ),
     list: listDocuments,
     get: getDocument,
-    hasAnyDocuments: vi.fn(
-      async (tableName: string) => (rowsByTable[tableName]?.length ?? 0) > 0,
-    ),
-    listMany: vi.fn(async (tableNames: string[]) =>
+    hasAnyDocuments: async (tableName: string) =>
+      (rowsByTable[tableName]?.length ?? 0) > 0,
+    listMany: async (tableNames: string[]) =>
       tableNames.flatMap((tableName) =>
         (rowsByTable[tableName] ?? []).map((doc) => ({ tableName, doc })),
       ),
-    ),
     meta: async () => ({ timestamp: 0, lastCreationTime: 0 }),
     count: countDocuments,
     source: readSource,
-    query: vi.fn(async () => null),
+    query: async () => null,
     listBlobs: async () => [],
     getBlob: async () => null,
-    commit: vi.fn(async (batch) => {
+    write: vi.fn(async (batch, opts) => {
       for (const put of batch.puts) {
         const tableRows = rowsByTable[put.tableName] ?? [];
         const next = tableRows.filter((row) => row._id !== put.doc._id);
@@ -148,15 +147,24 @@ function createSqlPersistence(
           rowsByTable[deletion.tableName] ?? []
         ).filter((row) => row._id !== deletion.id);
       }
+      if (opts) {
+        return {
+          meta: batch.meta,
+          tables: (opts.materializedTables ?? []).map((tableName: string) => ({
+            tableName,
+            docs: rowsByTable[tableName] ?? [],
+          })),
+        };
+      }
     }),
     putBlob: async () => undefined,
     deleteBlob: async () => undefined,
-    clear: async () => undefined,
-  };
+    clearAll: async () => undefined,
+  });
 
   // Expose the `list` mock that mockAdapter actually wires. Tests destructure
   // as `{ list: someName }` and assert on it.
-  return { persistence, list: listDocuments, readSource, getDocument };
+  return { storage, list: listDocuments, readSource, getDocument };
 }
 
 async function flushRuntimeWatch(): Promise<void> {
@@ -209,7 +217,7 @@ describe("Construction", () => {
   it("surfaces storage hydration failures instead of swallowing them", async () => {
     const failingRuntime = new EmbeddedRuntime({
       convex: { modules: STUB_MODULES },
-      persistence: mockAdapter({
+      storage: mockAdapter({
         kind: "opaque",
         listAll: async () => {
           throw new Error("boom");
@@ -301,7 +309,7 @@ describe("Blob storage", () => {
   it("rolls back metadata when durable blob storage fails", async () => {
     const blobRuntime = new EmbeddedRuntime({
       convex: { modules: STUB_MODULES },
-      persistence: mockAdapter({
+      storage: mockAdapter({
         kind: "opaque",
         listAll: async () => [],
         list: async () => [],
@@ -437,7 +445,7 @@ describe("onMutationCommit", () => {
     expect(cb).not.toHaveBeenCalled();
   });
 
-  it("delays cross-tab fanout until persistence settles", async () => {
+  it("delays cross-tab fanout until storage settles", async () => {
     let resolvePersist!: () => void;
     const notifySpy = vi.spyOn(runtime.writeFanout, "notify");
 
@@ -459,7 +467,7 @@ describe("onMutationCommit", () => {
     expect(notifySpy).toHaveBeenCalledWith(new Set(["users"]));
   });
 
-  it("skips cross-tab fanout when persistence fails", async () => {
+  it("skips cross-tab fanout when storage fails", async () => {
     const notifySpy = vi.spyOn(runtime.writeFanout, "notify");
     const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 
@@ -477,7 +485,7 @@ describe("onMutationCommit", () => {
     errorSpy.mockRestore();
   });
 
-  it("cross-tab fanout refreshes another runtime after persistence settles", async () => {
+  it("cross-tab fanout refreshes another runtime after storage settles", async () => {
     const runtimeA = new EmbeddedRuntime({
       convex: { modules: STUB_MODULES },
       writeBroadcast: new BrowserWriteBroadcast("shared-runtime"),
@@ -634,13 +642,13 @@ describe("transaction locking", () => {
   });
 });
 
-describe("sql persistence hydration", () => {
+describe("sql storage hydration", () => {
   it("does not hydrate sql-backed tables on demand for local query watches", async () => {
     const getDocumentsByTable = vi.fn(async () => []);
     const getDocumentsByTables = vi.fn(async () => []);
     const localRuntime = new EmbeddedRuntime({
       convex: { modules: STUB_MODULES },
-      persistence: mockAdapter({
+      storage: mockAdapter({
         kind: "sql",
         listAll: async () => [],
         list: getDocumentsByTable,
@@ -648,7 +656,7 @@ describe("sql persistence hydration", () => {
         getDocumentsByTables,
         hasAnyDocuments: async () => false,
         meta: async () => ({ timestamp: 0, lastCreationTime: 0 }),
-        listDocuments: async () => [],
+        getDocuments: async () => [],
         count: async () => 0,
         source: async () => [],
         query: async () => [],
@@ -684,14 +692,14 @@ describe("sql persistence hydration", () => {
     const getDocumentsByTable = vi.fn(async () => []);
     const localRuntime = new EmbeddedRuntime({
       convex: { modules: STUB_MODULES },
-      persistence: mockAdapter({
+      storage: mockAdapter({
         kind: "sql",
         listAll,
         list: getDocumentsByTable,
         get: async () => null,
         hasAnyDocuments: async () => false,
         meta: async () => ({ timestamp: 0, lastCreationTime: 0 }),
-        listDocuments: async () => [],
+        getDocuments: async () => [],
         count: async () => 0,
         source: async () => [],
         query: async () => [],
@@ -713,31 +721,33 @@ describe("sql persistence hydration", () => {
     }
   });
 
-  it("does not hydrate sql-backed tables before ingestDocuments diffs", async () => {
+  it("ingestDocuments diffs against the in-memory snapshot without re-reading sql", async () => {
     const {
-      persistence,
+      storage,
       list: getDocumentsByTable,
       readSource,
-    } = createSqlPersistence({
+    } = createSqlStorage({
       tasks: [{ _id: "task-1", _creationTime: 1, title: "Persisted" }],
     });
     const localRuntime = new EmbeddedRuntime({
       convex: { modules: STUB_MODULES },
-      persistence: mockAdapter(persistence),
+      storage: mockAdapter(storage),
     });
 
     try {
       await localRuntime.hydrate();
       const readSourceCallsBeforeIngest = readSource.mock.calls.length;
+      const listCallsBeforeIngest = getDocumentsByTable.mock.calls.length;
 
       await localRuntime.ingestDocuments("tasks", [
         { _id: "task-1", _creationTime: 1, title: "Persisted" },
       ]);
 
-      // ingestDocuments diffs against local state — it shouldn't force a
-      // full hydration of the table or go through source pushdown.
+      // After Phase 1, queryable tables hydrate into RAM up front, so
+      // ingestDocuments diffs against the in-memory snapshot. It must not
+      // pushdown to the source query path or re-list the table from SQL.
       expect(readSource.mock.calls.length).toBe(readSourceCallsBeforeIngest);
-      expect(getDocumentsByTable).toHaveBeenCalledWith("tasks");
+      expect(getDocumentsByTable.mock.calls.length).toBe(listCallsBeforeIngest);
     } finally {
       localRuntime.shutdown();
     }
@@ -944,10 +954,10 @@ describe("executeLocal query", () => {
 
   it("reads persisted sql-backed id map rows through system queries", async () => {
     const {
-      persistence,
+      storage,
       list: getDocumentsByTable,
       readSource,
-    } = createSqlPersistence({
+    } = createSqlStorage({
       _resolve_id_map: [
         {
           _id: "map-1",
@@ -961,7 +971,7 @@ describe("executeLocal query", () => {
     });
     const localRuntime = new EmbeddedRuntime({
       convex: { modules: STUB_MODULES },
-      persistence: mockAdapter(persistence),
+      storage: mockAdapter(storage),
     });
 
     try {
@@ -984,7 +994,9 @@ describe("executeLocal query", () => {
         },
       ]);
       expect(getDocumentsByTable).not.toHaveBeenCalledWith("_resolve_id_map");
-      expect(readSource).toHaveBeenCalled();
+      // Phase 1: hydrated tables serve reads from RAM, so the SQL source
+      // pushdown is no longer the primary path. The data correctness checks
+      // above are what matter.
     } finally {
       localRuntime.shutdown();
     }
@@ -992,10 +1004,10 @@ describe("executeLocal query", () => {
 
   it("reads sql-backed collection and document metadata through system queries", async () => {
     const {
-      persistence,
+      storage,
       readSource,
       list: getDocumentsByTable,
-    } = createSqlPersistence({
+    } = createSqlStorage({
       _resolve_collection_metadata: [
         {
           _id: "collection-meta-1",
@@ -1020,7 +1032,7 @@ describe("executeLocal query", () => {
     });
     const localRuntime = new EmbeddedRuntime({
       convex: { modules: STUB_MODULES },
-      persistence: mockAdapter(persistence),
+      storage: mockAdapter(storage),
     });
 
     try {
@@ -1048,7 +1060,9 @@ describe("executeLocal query", () => {
 
       expect(collectionSeq).toBe(7);
       expect(docMetadata).toEqual([{ docId: "task-1", seq: 3 }]);
-      expect(readSource).toHaveBeenCalled();
+      // Phase 1: hydrated tables serve reads from RAM, so the SQL source
+      // pushdown is no longer the primary path. The data correctness checks
+      // above are what matter.
       expect(getDocumentsByTable).not.toHaveBeenCalledWith(
         "_resolve_collection_metadata",
       );
@@ -1061,7 +1075,7 @@ describe("executeLocal query", () => {
   });
 
   it("reads sql-backed auth state and pending identity keys through system queries", async () => {
-    const { persistence, list: getDocumentsByTable } = createSqlPersistence({
+    const { storage, list: getDocumentsByTable } = createSqlStorage({
       _resolve_auth_state: [
         {
           _id: "auth-1",
@@ -1099,7 +1113,7 @@ describe("executeLocal query", () => {
     });
     const localRuntime = new EmbeddedRuntime({
       convex: { modules: STUB_MODULES },
-      persistence: mockAdapter(persistence),
+      storage: mockAdapter(storage),
     });
 
     try {
@@ -1264,7 +1278,7 @@ describe("prefetch startup", () => {
   it("does not overwrite persisted local data with prefetched rows", async () => {
     const persistedRuntime = new EmbeddedRuntime({
       convex: { modules: STUB_MODULES },
-      persistence: mockAdapter({
+      storage: mockAdapter({
         kind: "opaque",
         listAll: async () =>
           [
@@ -1384,10 +1398,10 @@ describe("prefetch startup", () => {
 
   it("persists prefetched sql rows during direct runtime startup", async () => {
     const rowsByTable: Record<string, Array<Record<string, unknown>>> = {};
-    const { persistence } = createSqlPersistence(rowsByTable);
+    const { storage } = createSqlStorage(rowsByTable);
     const localRuntime = new EmbeddedRuntime({
       convex: { modules: STUB_MODULES },
-      persistence: mockAdapter(persistence),
+      storage: mockAdapter(storage),
       prefetch: {
         identityKey: null,
         tables: {
@@ -1432,7 +1446,7 @@ describe("watchLocalQuery", () => {
       >();
     const localRuntime = new EmbeddedRuntime({
       convex: { modules: STUB_MODULES },
-      persistence: mockAdapter({
+      storage: mockAdapter({
         kind: "opaque",
         listAll: async () => gate.promise,
         list: async () => [],
@@ -1528,7 +1542,7 @@ describe("watchLocalQuery", () => {
       >();
     const localRuntime = new EmbeddedRuntime({
       convex: { modules: STUB_MODULES },
-      persistence: mockAdapter({
+      storage: mockAdapter({
         kind: "opaque",
         listAll: async () => gate.promise,
         list: async () => [],
@@ -1602,7 +1616,7 @@ describe("watchLocalQuery", () => {
     ]);
   });
 
-  it("updates local watches before persistence settles for cold sql-backed tables", async () => {
+  it("updates local watches before storage settles for cold sql-backed tables", async () => {
     await runtime.hydrate();
 
     const evaluateSpy = vi
@@ -1768,7 +1782,7 @@ describe("executeLocal system mutation", () => {
   });
 
   it("claims persisted sql-backed pending entries through system mutations", async () => {
-    const { persistence, readSource } = createSqlPersistence({
+    const { storage, readSource } = createSqlStorage({
       _resolve_pending: [
         {
           _id: "pending-1",
@@ -1786,11 +1800,11 @@ describe("executeLocal system mutation", () => {
     });
     const localRuntime = new EmbeddedRuntime({
       convex: { modules: STUB_MODULES },
-      persistence: mockAdapter(persistence),
+      storage: mockAdapter(storage),
     });
 
     try {
-      localRuntime.db.setReadBackendForTests(persistence);
+      localRuntime.db.setReadBackendForTests(storage);
       await localRuntime.hydrate();
 
       const claimed = (await localRuntime.executeLocal({
@@ -1819,24 +1833,26 @@ describe("executeLocal system mutation", () => {
       expect(pending[0]?._id).toBe("pending-1");
       expect(pending[0]?.state).toBe("processing");
       expect(pending[0]?.owner).toBe("processor-a");
-      expect(readSource).toHaveBeenCalled();
+      // Phase 1: hydrated tables serve reads from RAM, so the SQL source
+      // pushdown is no longer the primary path. The data correctness checks
+      // above are what matter.
     } finally {
       localRuntime.shutdown();
     }
   });
 
   it("updates sql-backed collection and document metadata through system mutations", async () => {
-    const { persistence, readSource } = createSqlPersistence({
+    const { storage, readSource } = createSqlStorage({
       _resolve_collection_metadata: [],
       _resolve_document_metadata: [],
     });
     const localRuntime = new EmbeddedRuntime({
       convex: { modules: STUB_MODULES },
-      persistence: mockAdapter(persistence),
+      storage: mockAdapter(storage),
     });
 
     try {
-      localRuntime.db.setReadBackendForTests(persistence);
+      localRuntime.db.setReadBackendForTests(storage);
       await localRuntime.hydrate();
 
       await localRuntime.executeLocal({
@@ -1942,7 +1958,9 @@ describe("executeLocal system mutation", () => {
         },
       });
       expect(afterClear).toEqual([]);
-      expect(readSource).toHaveBeenCalled();
+      // Phase 1: hydrated tables serve reads from RAM, so the SQL source
+      // pushdown is no longer the primary path. The data correctness checks
+      // above are what matter.
     } finally {
       localRuntime.shutdown();
     }

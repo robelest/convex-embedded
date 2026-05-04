@@ -1,31 +1,32 @@
 /**
- * Runtime store — single facade over a {@link PersistenceAdapter}.
+ * Runtime store — single facade over a {@link StorageAdapter}.
  *
- * Consumes the normalized adapter surface (`list`, `get`, `query`, `source`,
- * `atomicCommit`, etc.). No `kind` branches; decisions are driven by the
- * adapter's `supportsAtomicCommit` flag. When a capability method returns
- * `null`, the Store falls back to the `list`-based materialized path.
+ * When the adapter is a {@link QueryableAdapter}, reads for user tables
+ * are served directly from the adapter (SQL). System tables (prefixed `_`)
+ * always fall back to in-memory so sync reads work.
  *
  * @internal
  */
 
-import { PersistenceAdapter } from "@/persistence/adapter";
-import type { AsyncReadBackend } from "@/runtime/db/async_backend";
+import type { AsyncReadBackend } from "@/runtime/db/backend";
 import type { Source, StoredDocument } from "@/runtime/db/types";
+import type { StorageAdapter } from "@/storage/adapter";
+import { isQueryable } from "@/storage/adapter";
 import type {
   CommitBatch,
   DatabaseMeta,
-  PersistenceQueryRead,
-  PersistenceReadOptions,
-  PersistenceVectorRead,
-  SqlCommitApplyOptions,
-  SqlCommitApplyResult,
+  QueryArgs,
+  ReadOptions,
+  VectorSearchArgs,
+  SqlWriteOptions,
+  SqlWriteResult,
   StoredDocumentWithTable,
 } from "@/storage/adapter";
 
 export interface Store {
-  setPersistence(storage: PersistenceAdapter | null): void;
+  setStorage(storage: StorageAdapter | null): void;
   setReadBackendForTests(readBackend: AsyncReadBackend | null): void;
+  isQueryable(): boolean;
   load(input?: { tables?: string[] }): Promise<{
     documents: StoredDocumentWithTable[];
     meta: DatabaseMeta | null;
@@ -35,183 +36,219 @@ export interface Store {
     meta: DatabaseMeta | null;
   }>;
   usesExternalCommitPath(): boolean;
-  applyTopLevelCommit(
+  write(
     batch: CommitBatch,
-    options: SqlCommitApplyOptions,
-  ): Promise<SqlCommitApplyResult | null>;
-  countDocuments(tableName: string): Promise<number | null>;
-  getDocument(tableName: string, id: string): Promise<StoredDocument | null>;
-  listDocuments(tableName: string): Promise<StoredDocument[] | null>;
-  readSource(
+    options: SqlWriteOptions,
+  ): Promise<SqlWriteResult | null>;
+  countDocuments(
+    tableName: string,
+    options?: ReadOptions,
+  ): Promise<number | null>;
+  getDocument(
+    tableName: string,
+    id: string,
+    options?: ReadOptions,
+  ): Promise<StoredDocument | null>;
+  getDocuments(
+    tableName: string,
+    options?: ReadOptions,
+  ): Promise<StoredDocument[] | null>;
+  source(
     source: Source,
-    options?: PersistenceReadOptions,
+    options?: ReadOptions,
   ): Promise<StoredDocument[] | null>;
-  readQuery(args: PersistenceQueryRead): Promise<StoredDocument[] | null>;
-  readVectorCandidates(
-    args: PersistenceVectorRead,
-  ): Promise<StoredDocument[] | null>;
-  isAuthoritative(tableName: string): boolean;
+  query(args: QueryArgs): Promise<StoredDocument[] | null>;
+  vectorSearch(args: VectorSearchArgs): Promise<StoredDocument[] | null>;
 }
 
-function isAuthoritative(
-  adapter: PersistenceAdapter,
-  tableName: string,
-): boolean {
-  const fn = (adapter as { isAuthoritative?: unknown }).isAuthoritative;
-  if (typeof fn !== "function") return false;
-  return Boolean((fn as (t: string) => boolean).call(adapter, tableName));
+interface DocumentAdapter {
+  getDocuments(
+    table?: string,
+    opts?: ReadOptions,
+  ): Promise<StoredDocumentWithTable[] | StoredDocument[]>;
+  getDocument(
+    table: string,
+    id: string,
+    opts?: ReadOptions,
+  ): Promise<StoredDocument | null>;
+  countDocuments(table: string, opts?: ReadOptions): Promise<number>;
+  getMetadata(): Promise<DatabaseMeta | null>;
+  write(
+    batch: CommitBatch,
+    opts?: SqlWriteOptions,
+  ): Promise<SqlWriteResult | void>;
+  hasDocuments?(table: string): Promise<boolean | null>;
+}
+
+function hasDocumentMethods(
+  adapter: StorageAdapter,
+): adapter is StorageAdapter & DocumentAdapter {
+  return typeof (adapter as any).getDocuments === "function";
+}
+
+function isSystemTable(tableName: string): boolean {
+  return tableName.startsWith("_");
 }
 
 class UnifiedStore implements Store {
-  private adapter: PersistenceAdapter | null = null;
+  private adapter: StorageAdapter | null = null;
   private readOverlay: AsyncReadBackend | null = null;
+  private _queryable = false;
+  private _hasDocuments = false;
 
-  setPersistence(storage: PersistenceAdapter | null): void {
+  setStorage(storage: StorageAdapter | null): void {
     this.adapter = storage;
+    this._queryable = storage != null && isQueryable(storage);
+    this._hasDocuments = storage != null && hasDocumentMethods(storage);
   }
 
   setReadBackendForTests(readBackend: AsyncReadBackend | null): void {
-    // Test-only overlay used by runtime/database tests to exercise pushdown
-    // paths without constructing a full adapter.
     this.readOverlay = readBackend;
+  }
+
+  isQueryable(): boolean {
+    return this._queryable;
   }
 
   async load(input?: { tables?: string[] }): Promise<{
     documents: StoredDocumentWithTable[];
     meta: DatabaseMeta | null;
   }> {
-    if (!this.adapter) {
+    if (!this.adapter || !hasDocumentMethods(this.adapter)) {
       return { documents: [], meta: null };
     }
+    const da = this.adapter;
     const tables = input?.tables;
-    const documents =
-      tables === undefined
-        ? await this.adapter.listAll()
-        : tables.length === 0
-          ? []
-          : await this.adapter.listMany(tables);
-    return { documents, meta: await this.adapter.meta() };
+    let documents: StoredDocumentWithTable[];
+    if (tables === undefined) {
+      documents = (await da.getDocuments()) as StoredDocumentWithTable[];
+    } else if (tables.length === 0) {
+      documents = [];
+    } else {
+      const results: StoredDocumentWithTable[] = [];
+      for (const tableName of tables) {
+        const docs = (await da.getDocuments(tableName)) as StoredDocument[];
+        results.push(...docs.map((doc) => ({ doc, tableName })));
+      }
+      documents = results;
+    }
+    return { documents, meta: await da.getMetadata() };
   }
 
   async refreshTable(input: { tableName: string }): Promise<{
     docs: StoredDocument[] | null;
     meta: DatabaseMeta | null;
   }> {
-    if (!this.adapter) {
+    if (!this.adapter || !hasDocumentMethods(this.adapter)) {
       return { docs: null, meta: null };
     }
-    if (this.adapter.isAuthoritative(input.tableName)) {
-      return { docs: null, meta: await this.adapter.meta() };
+    const da = this.adapter;
+    if (this._queryable && !isSystemTable(input.tableName)) {
+      return { docs: null, meta: await da.getMetadata() };
     }
     return {
-      docs: await this.adapter.list(input.tableName),
-      meta: await this.adapter.meta(),
+      docs: (await da.getDocuments(input.tableName)) as StoredDocument[],
+      meta: await da.getMetadata(),
     };
   }
 
   usesExternalCommitPath(): boolean {
-    return this.adapter?.supportsAtomicCommit === true;
+    return this._queryable;
   }
 
-  async applyTopLevelCommit(
+  async write(
     batch: CommitBatch,
-    options: SqlCommitApplyOptions,
-  ): Promise<SqlCommitApplyResult | null> {
-    if (!this.adapter) return null;
-    if (
-      typeof (this.adapter as { atomicCommit?: unknown }).atomicCommit !==
-      "function"
-    ) {
-      return null;
-    }
-    return this.adapter.atomicCommit(batch, options);
+    options: SqlWriteOptions,
+  ): Promise<SqlWriteResult | null> {
+    if (!this.adapter || !hasDocumentMethods(this.adapter)) return null;
+    const result = await this.adapter.write(batch, options);
+    if (!result) return null;
+    return result as SqlWriteResult;
   }
 
-  async countDocuments(tableName: string): Promise<number | null> {
+  async countDocuments(
+    tableName: string,
+    options?: ReadOptions,
+  ): Promise<number | null> {
     if (this.readOverlay?.countDocuments) {
       return this.readOverlay.countDocuments(tableName);
     }
-    if (!this.adapter) return null;
-    if (!isAuthoritative(this.adapter, tableName)) return null;
-    return this.adapter.count(tableName);
+    if (!this.adapter || !this._queryable || isSystemTable(tableName))
+      return null;
+    if (!hasDocumentMethods(this.adapter)) return null;
+    return this.adapter.countDocuments(tableName, options);
   }
 
   async getDocument(
     tableName: string,
     id: string,
+    options?: ReadOptions,
   ): Promise<StoredDocument | null> {
     if (this.readOverlay?.getDocument) {
       return this.readOverlay.getDocument(tableName, id as never);
     }
-    if (!this.adapter) return null;
-    if (!isAuthoritative(this.adapter, tableName)) return null;
-    return this.adapter.get(tableName, id);
+    if (!this.adapter || !this._queryable || isSystemTable(tableName))
+      return null;
+    if (!hasDocumentMethods(this.adapter)) return null;
+    return this.adapter.getDocument(tableName, id, options);
   }
 
-  async listDocuments(tableName: string): Promise<StoredDocument[] | null> {
-    if (this.readOverlay?.listDocuments) {
-      return this.readOverlay.listDocuments(tableName);
-    }
-    if (!this.adapter) return null;
-    if (!isAuthoritative(this.adapter, tableName)) return null;
-    return this.adapter.list(tableName);
-  }
-
-  async readSource(
-    source: Source,
-    options?: PersistenceReadOptions,
+  async getDocuments(
+    tableName: string,
+    options?: ReadOptions,
   ): Promise<StoredDocument[] | null> {
-    if (this.readOverlay?.readSource) {
-      const overlayResult = await this.readOverlay.readSource(source, options);
+    if (this.readOverlay?.getDocuments) {
+      return this.readOverlay.getDocuments(tableName);
+    }
+    if (!this.adapter || !this._queryable || isSystemTable(tableName))
+      return null;
+    if (!hasDocumentMethods(this.adapter)) return null;
+    return (await this.adapter.getDocuments(
+      tableName,
+      options,
+    )) as StoredDocument[];
+  }
+
+  async source(
+    source: Source,
+    options?: ReadOptions,
+  ): Promise<StoredDocument[] | null> {
+    if (this.readOverlay?.source) {
+      const overlayResult = await this.readOverlay.source(source, options);
       if (overlayResult !== null && overlayResult !== undefined) {
         return overlayResult;
       }
     }
-    if (!this.adapter) return null;
-    if (typeof (this.adapter as { source?: unknown }).source !== "function") {
+    if (!this.adapter || !isQueryable(this.adapter)) {
       return null;
     }
     return this.adapter.source(source, options);
   }
 
-  async readQuery(
-    args: PersistenceQueryRead,
-  ): Promise<StoredDocument[] | null> {
-    if (this.readOverlay?.readQuery) {
-      const overlayResult = await this.readOverlay.readQuery(args);
+  async query(args: QueryArgs): Promise<StoredDocument[] | null> {
+    if (this.readOverlay?.query) {
+      const overlayResult = await this.readOverlay.query(args);
       if (overlayResult !== null && overlayResult !== undefined) {
         return overlayResult;
       }
     }
-    if (!this.adapter) return null;
-    if (typeof (this.adapter as { query?: unknown }).query !== "function") {
+    if (!this.adapter || !isQueryable(this.adapter)) {
       return null;
     }
     return this.adapter.query(args);
   }
 
-  async readVectorCandidates(
-    args: PersistenceVectorRead,
-  ): Promise<StoredDocument[] | null> {
-    if (this.readOverlay?.readVectorCandidates) {
-      const overlayResult = await this.readOverlay.readVectorCandidates(args);
+  async vectorSearch(args: VectorSearchArgs): Promise<StoredDocument[] | null> {
+    if (this.readOverlay?.vectorSearch) {
+      const overlayResult = await this.readOverlay.vectorSearch(args);
       if (overlayResult !== null && overlayResult !== undefined) {
         return overlayResult;
       }
     }
-    if (!this.adapter) return null;
-    if (
-      typeof (this.adapter as { vectorSearch?: unknown }).vectorSearch !==
-      "function"
-    ) {
+    if (!this.adapter || !isQueryable(this.adapter)) {
       return null;
     }
     return this.adapter.vectorSearch(args);
-  }
-
-  isAuthoritative(tableName: string): boolean {
-    if (!this.adapter) return false;
-    return isAuthoritative(this.adapter, tableName);
   }
 }
 

@@ -1,516 +1,544 @@
-import { runMigrations, migration } from "@resolve/server/migration";
-import { define, register as registerField } from "@resolve/server/schema";
-import { describe, it, expect } from "@tests/testkit";
+import { embeddedTable } from "@embedded/server";
+import { register } from "@embedded/server/fields";
+import {
+  migration,
+  runMigrations,
+  type MigrationRuntimeAdapter,
+} from "@embedded/server/migration";
+import { describe, expect, it, vi } from "@tests/testkit";
 import { v } from "convex/values";
-import { vi } from "vitest";
 
-// ---------------------------------------------------------------------------
-// Mock Convex context
-// ---------------------------------------------------------------------------
+function createInMemoryAdapter(): MigrationRuntimeAdapter & {
+  rows: Record<string, Array<Record<string, unknown>>>;
+  schemaOps: Array<{ table: string; ops: unknown[] }>;
+} {
+  const rows: Record<string, Array<Record<string, unknown>>> = {};
+  const schemaOps: Array<{ table: string; ops: unknown[] }> = [];
+  let nextId = 1;
+  const allocId = () => `id_${nextId++}`;
 
-function createMockCtx() {
-  const tables: Record<string, any[]> = {};
-
-  return {
-    db: {
-      query: (tableName: string) => {
-        const data = tables[tableName] ?? [];
-        return {
-          withIndex: (indexName: string, builder: any) => ({
-            collect: async () => {
-              if (indexName !== "by_table") {
-                throw new Error(`Unexpected index ${indexName}`);
-              }
-
-              const predicate = builder({
-                eq: (fieldName: string, value: unknown) => ({
-                  fieldName,
-                  value,
-                }),
-              }) as {
-                fieldName: string;
-                value: unknown;
-              };
-
-              return data.filter(
-                (row) => row[predicate.fieldName] === predicate.value,
-              );
-            },
-          }),
-          collect: async () => data,
-        };
-      },
-      insert: async (tableName: string, row: any) => {
-        tables[tableName] ??= [];
-        const id = `id_${Date.now()}_${Math.random()}`;
-        tables[tableName].push({ ...row, _id: id });
-        return id;
-      },
-      patch: async (id: string, patches: any) => {
-        Object.values(tables)
-          .flatMap((rows) => rows as any[])
-          .filter((row) => row._id === id)
-          .forEach((row) => Object.assign(row, patches));
-      },
-      delete: async (id: string) => {
-        for (const [name, rows] of Object.entries(tables)) {
-          tables[name] = (rows as any[]).filter((r) => r._id !== id);
-        }
-      },
+  const adapter: MigrationRuntimeAdapter = {
+    systemReadByIndex: async ({ table, range }) => {
+      const tableRows = rows[table] ?? [];
+      return tableRows.filter((row) =>
+        range.every((entry) => row[entry.fieldPath] === entry.value),
+      );
     },
-    runMutation: vi.fn(),
-    _tables: tables,
+    systemInsert: async (table, doc) => {
+      const id = allocId();
+      const row = { _id: id, _creationTime: Date.now(), ...doc };
+      rows[table] ??= [];
+      rows[table].push(row);
+      return id;
+    },
+    systemPatch: async (id, fields) => {
+      for (const tableRows of Object.values(rows)) {
+        const row = tableRows.find((r) => r._id === id);
+        if (row) Object.assign(row, fields);
+      }
+    },
+    systemDelete: async (id) => {
+      for (const [table, tableRows] of Object.entries(rows)) {
+        rows[table] = tableRows.filter((r) => r._id !== id);
+      }
+    },
+    tableList: async (table) => rows[table] ?? [],
+    tableGet: async (table, id) =>
+      (rows[table] ?? []).find((r) => r._id === id) ?? null,
+    tableInsert: async (table, doc) => {
+      const id = allocId();
+      const row = { _id: id, _creationTime: Date.now(), ...doc };
+      rows[table] ??= [];
+      rows[table].push(row);
+      return id;
+    },
+    tablePatch: async (table, id, fields) => {
+      const tableRows = rows[table] ?? [];
+      const row = tableRows.find((r) => r._id === id);
+      if (row) Object.assign(row, fields);
+    },
+    tableReplace: async (table, id, fields) => {
+      const tableRows = rows[table] ?? [];
+      const idx = tableRows.findIndex((r) => r._id === id);
+      if (idx >= 0) tableRows[idx] = { ...fields };
+    },
+    tableDelete: async (table, id) => {
+      rows[table] = (rows[table] ?? []).filter((r) => r._id !== id);
+    },
+    applySchemaOps: async (table, ops) => {
+      schemaOps.push({ table, ops: [...ops] });
+    },
   };
+
+  return Object.assign(adapter, { rows, schemaOps });
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-describe("migration.VERSION_TABLE", () => {
-  it("is _resolve_schema_versions", () => {
+describe("migration constants", () => {
+  it("VERSION_TABLE is _resolve_schema_versions", () => {
     expect(migration.VERSION_TABLE).toBe("_resolve_schema_versions");
+  });
+
+  it("STEP_TABLE is _resolve_schema_steps", () => {
+    expect(migration.STEP_TABLE).toBe("_resolve_schema_steps");
   });
 });
 
-describe("runMigrations()", () => {
-  it("returns false when already at target version", async () => {
-    const ctx = createMockCtx();
-    const schemaDef = define({
-      version: 1,
-      shape: { title: registerField(v.string()) },
+describe("embeddedTable migrations option", () => {
+  it("derives version 1 when no migrations provided", () => {
+    const tasks = embeddedTable("tasks_v1", {
+      title: register(v.string()),
     });
-
-    // Pre-seed the version table
-    ctx._tables["_resolve_schema_versions"] = [
-      { _id: "v1", table: "tasks", version: 1 },
-    ];
-
-    const result = await runMigrations(ctx as any, {
-      table: "tasks",
-      schema: schemaDef,
-    });
-
-    expect(result).toBe(false);
+    expect((tasks as unknown as { schema: { version: number } }).schema.version).toBe(1);
   });
 
-  it("initializes version to 1 on first run", async () => {
-    const ctx = createMockCtx();
-    const schemaDef = define({
-      version: 1,
-      shape: { title: registerField(v.string()) },
-    });
-
-    const result = await runMigrations(ctx as any, {
-      table: "tasks",
-      schema: schemaDef,
-    });
-
-    // First run with target v1: initializes to v1 (no actual migrations to run,
-    // but returns true because initialization was performed)
-    expect(result).toBe(true);
-
-    // Version record should now exist
-    expect(ctx._tables["_resolve_schema_versions"]).toBeDefined();
-    expect(ctx._tables["_resolve_schema_versions"].length).toBeGreaterThan(0);
-  });
-
-  it("runs migration function for each version step", async () => {
-    const ctx = createMockCtx();
-    const schemaDef = define({
-      version: 3,
-      shape: { title: registerField(v.string()) },
-    });
-
-    // Start at version 1
-    ctx._tables["_resolve_schema_versions"] = [
-      { _id: "v1", table: "tasks", version: 1 },
-    ];
-
-    const migrationV2 = { _name: "migrationV2" } as any;
-    const migrationV3 = { _name: "migrationV3" } as any;
-
-    const result = await runMigrations(ctx as any, {
-      table: "tasks",
-      schema: schemaDef,
-      migrations: {
-        2: migrationV2,
-        3: migrationV3,
+  it("derives version from max migration key", () => {
+    const tasks = embeddedTable(
+      "tasks_v3",
+      {
+        title: register(v.string()),
       },
-    });
-
-    expect(result).toBe(true);
-    expect(ctx.runMutation).toHaveBeenCalledTimes(2);
-    expect(ctx.runMutation).toHaveBeenCalledWith(migrationV2, {});
-    expect(ctx.runMutation).toHaveBeenCalledWith(migrationV3, {});
-  });
-
-  it("applies defaults when no migration function exists", async () => {
-    const ctx = createMockCtx();
-    const schemaDef = define({
-      version: 2,
-      shape: { title: registerField(v.string()) },
-      defaults: { priority: "medium" },
-    });
-
-    // Start at version 1
-    ctx._tables["_resolve_schema_versions"] = [
-      { _id: "v1", table: "tasks", version: 1 },
-    ];
-
-    // Pre-seed the tasks table
-    ctx._tables["tasks"] = [
-      { _id: "t1", title: "Task 1" },
-      { _id: "t2", title: "Task 2" },
-    ];
-
-    const result = await runMigrations(ctx as any, {
-      table: "tasks",
-      schema: schemaDef,
-      // No migrations provided — should apply defaults
-    });
-
-    expect(result).toBe(true);
-    // Both tasks should have priority patched
-    expect(ctx._tables["tasks"][0].priority).toBe("medium");
-    expect(ctx._tables["tasks"][1].priority).toBe("medium");
-  });
-
-  it("does not overwrite existing values when applying defaults", async () => {
-    const ctx = createMockCtx();
-    const schemaDef = define({
-      version: 2,
-      shape: { title: registerField(v.string()) },
-      defaults: { priority: "medium" },
-    });
-
-    ctx._tables["_resolve_schema_versions"] = [
-      { _id: "v1", table: "tasks", version: 1 },
-    ];
-
-    ctx._tables["tasks"] = [{ _id: "t1", title: "Task 1", priority: "high" }];
-
-    await runMigrations(ctx as any, {
-      table: "tasks",
-      schema: schemaDef,
-    });
-
-    // Should not overwrite existing priority
-    expect(ctx._tables["tasks"][0].priority).toBe("high");
-  });
-
-  it("throws on newer local schema version", async () => {
-    const ctx = createMockCtx();
-    const schemaDef = define({
-      version: 1,
-      shape: { title: registerField(v.string()) },
-    });
-
-    // Already at version 3
-    ctx._tables["_resolve_schema_versions"] = [
-      { _id: "v1", table: "tasks", version: 3 },
-    ];
-
-    await expect(
-      runMigrations(ctx as any, {
-        table: "tasks",
-        schema: schemaDef,
-      }),
-    ).rejects.toThrow("Forward-only migrations");
-  });
-
-  it("runs local migration steps with document helpers", async () => {
-    const ctx = createMockCtx();
-    const schemaDef = define({
-      version: 2,
-      shape: {
-        title: registerField(v.string()),
-        priority: registerField(v.string()),
-      },
-      migrate: {
-        2: async ({ docs }) => {
-          await docs.patchMissing({ priority: "medium" });
+      {
+        migrations: {
+          2: async () => undefined,
+          3: async () => undefined,
         },
       },
-    });
-
-    ctx._tables["_resolve_schema_versions"] = [
-      { _id: "v1", table: "tasks", version: 1 },
-    ];
-    ctx._tables["tasks"] = [{ _id: "t1", _creationTime: 1, title: "Task 1" }];
-
-    const local = {
-      async transaction<T>(work: () => Promise<T> | T): Promise<T> {
-        return await work();
-      },
-      async list(table: string) {
-        return ctx._tables[table] ?? [];
-      },
-      async patch(_table: string, id: string, fields: Record<string, unknown>) {
-        await ctx.db.patch(id, fields);
-      },
-      async replace(
-        _table: string,
-        id: string,
-        fields: Record<string, unknown>,
-      ) {
-        const rows = Object.values(ctx._tables)
-          .flatMap((rows) => rows as any[])
-          .filter((row) => row._id === id);
-        rows.forEach((row) => {
-          const { _id, _creationTime } = row;
-          Object.keys(row).forEach((key) => delete row[key]);
-          Object.assign(row, { _id, _creationTime, ...fields });
-        });
-      },
-      async delete(idTable: string, id: string) {
-        await ctx.db.delete(id);
-      },
-    };
-
-    const result = await runMigrations(
-      {
-        ...(ctx as any),
-        local,
-      },
-      {
-        table: "tasks",
-        schema: schemaDef,
-        migrations: schemaDef.migrate,
-      },
     );
-
-    expect(result).toBe(true);
-    expect(ctx._tables["tasks"][0].priority).toBe("medium");
+    expect((tasks as unknown as { schema: { version: number } }).schema.version).toBe(3);
   });
+});
 
-  it("uses the highest stored version when duplicate rows exist", async () => {
-    const ctx = createMockCtx();
-    const schemaDef = define({
-      version: 2,
-      shape: { title: registerField(v.string()) },
-    });
-
-    ctx._tables["_resolve_schema_versions"] = [
-      { _id: "v1", table: "tasks", version: 1 },
-      { _id: "v2", table: "tasks", version: 2 },
+describe("runMigrations", () => {
+  it("returns false when already at target version", async () => {
+    const adapter = createInMemoryAdapter();
+    adapter.rows["_resolve_schema_versions"] = [
+      { _id: "v1", _creationTime: 0, table: "tasks", version: 1 },
     ];
 
-    const result = await runMigrations(ctx as any, {
+    const tasks = embeddedTable("tasks_already_v1", {
+      title: register(v.string()),
+    });
+
+    const result = await runMigrations({
       table: "tasks",
-      schema: schemaDef,
-      migrations: { 2: { _name: "shouldNotRun" } as any },
+      schema: (tasks as unknown as { schema: any }).schema,
+      adapter,
     });
 
     expect(result).toBe(false);
-    expect(ctx.runMutation).not.toHaveBeenCalled();
   });
 
-  it("treats malformed stored versions as missing instead of looping forever", async () => {
-    const ctx = createMockCtx();
-    const schemaDef = define({
-      version: 1,
-      shape: { title: registerField(v.string()) },
+  it("initializes to version 1 on first run", async () => {
+    const adapter = createInMemoryAdapter();
+    const tasks = embeddedTable("tasks_init", {
+      title: register(v.string()),
     });
 
-    ctx._tables["_resolve_schema_versions"] = [
-      { _id: "v1", table: "tasks", version: "not-a-number" },
-      { _id: "v2", table: "tasks", version: undefined },
-    ];
-
-    const result = await Promise.race([
-      runMigrations(ctx as any, {
-        table: "tasks",
-        schema: schemaDef,
-      }),
-      new Promise<never>((_resolve, reject) => {
-        setTimeout(() => reject(new Error("migration timeout")), 100);
-      }),
-    ]);
-
-    expect(result).toBe(true);
-    expect(ctx._tables["_resolve_schema_versions"]).toEqual([
-      expect.objectContaining({ table: "tasks", version: 1 }),
-    ]);
-  });
-
-  it("deduplicates version rows when storing a new version", async () => {
-    const ctx = createMockCtx();
-    const schemaDef = define({
-      version: 2,
-      shape: { title: registerField(v.string()) },
-      defaults: { priority: "medium" },
-    });
-
-    ctx._tables["_resolve_schema_versions"] = [
-      { _id: "v1", table: "tasks", version: 1 },
-      { _id: "v2", table: "tasks", version: 1 },
-    ];
-
-    await runMigrations(ctx as any, {
+    const result = await runMigrations({
       table: "tasks",
-      schema: schemaDef,
-    });
-
-    expect(ctx._tables["_resolve_schema_versions"]).toEqual([
-      expect.objectContaining({ table: "tasks", version: 2 }),
-    ]);
-  });
-
-  it("falls back to insert when patching stored version fails", async () => {
-    const ctx = createMockCtx();
-    const schemaDef = define({
-      version: 2,
-      shape: { title: registerField(v.string()) },
-    });
-
-    ctx._tables["_resolve_schema_versions"] = [
-      { _id: "v1", table: "tasks", version: 1 },
-    ];
-
-    const originalPatch = ctx.db.patch;
-    ctx.db.patch = vi.fn(async (id: string, patches: any) => {
-      if (id === "v1") {
-        throw new Error("patch failed");
-      }
-      await originalPatch(id, patches);
-    });
-
-    await runMigrations(ctx as any, {
-      table: "tasks",
-      schema: schemaDef,
-      migrations: { 2: { _name: "v2Migration" } as any },
-    });
-
-    expect(ctx._tables["_resolve_schema_versions"]).toEqual([
-      expect.objectContaining({ table: "tasks", version: 2 }),
-    ]);
-  });
-
-  it("calls onMigrationError when migration fails", async () => {
-    const ctx = createMockCtx();
-    const schemaDef = define({
-      version: 2,
-      shape: { title: registerField(v.string()) },
-    });
-
-    ctx._tables["_resolve_schema_versions"] = [
-      { _id: "v1", table: "tasks", version: 1 },
-    ];
-
-    const failingMigration = { _name: "failing" } as any;
-    ctx.runMutation.mockRejectedValue(new Error("migration failed"));
-
-    const onMigrationError = vi.fn().mockResolvedValue({ action: "retry" });
-
-    const result = await runMigrations(ctx as any, {
-      table: "tasks",
-      schema: schemaDef,
-      migrations: { 2: failingMigration },
-      onMigrationError,
+      schema: (tasks as unknown as { schema: any }).schema,
+      adapter,
     });
 
     expect(result).toBe(true);
-    expect(onMigrationError).toHaveBeenCalledWith(
-      expect.any(Error),
-      expect.objectContaining({
-        currentVersion: 1,
-        targetVersion: 2,
-        canResetSafely: true,
-      }),
+    const versionRows = adapter.rows["_resolve_schema_versions"] ?? [];
+    expect(versionRows).toHaveLength(1);
+    expect(versionRows[0]?.version).toBe(1);
+  });
+
+  it("runs each version step in sequence with the new ctx shape", async () => {
+    const adapter = createInMemoryAdapter();
+    adapter.rows["_resolve_schema_versions"] = [
+      { _id: "v1", _creationTime: 0, table: "tasks", version: 1 },
+    ];
+
+    const calls: number[] = [];
+    const tasks = embeddedTable(
+      "tasks_seq",
+      {
+        title: register(v.string()),
+      },
+      {
+        migrations: {
+          2: async (ctx) => {
+            calls.push(2);
+            expect(ctx.table).toBe("tasks");
+            expect(ctx.schema.fromVersion).toBe(1);
+            expect(ctx.schema.toVersion).toBe(2);
+          },
+          3: async (ctx) => {
+            calls.push(3);
+            expect(ctx.schema.fromVersion).toBe(2);
+            expect(ctx.schema.toVersion).toBe(3);
+          },
+        },
+      },
     );
-  });
 
-  it("throws when migration fails and no error handler", async () => {
-    const ctx = createMockCtx();
-    const schemaDef = define({
-      version: 2,
-      shape: { title: registerField(v.string()) },
+    await runMigrations({
+      table: "tasks",
+      schema: (tasks as unknown as { schema: any }).schema,
+      adapter,
     });
 
-    ctx._tables["_resolve_schema_versions"] = [
-      { _id: "v1", table: "tasks", version: 1 },
+    expect(calls).toEqual([2, 3]);
+    expect(adapter.rows["_resolve_schema_versions"]?.[0]?.version).toBe(3);
+  });
+
+  it("emits SchemaOps via ctx.schema.addColumn / addIndex", async () => {
+    const adapter = createInMemoryAdapter();
+    adapter.rows["_resolve_schema_versions"] = [
+      { _id: "v1", _creationTime: 0, table: "tasks", version: 1 },
     ];
 
-    ctx.runMutation.mockRejectedValue(new Error("boom"));
+    const tasks = embeddedTable(
+      "tasks_ddl",
+      {
+        title: register(v.string()),
+      },
+      {
+        migrations: {
+          2: async ({ schema: s }) => {
+            await s.addColumn("priority", v.string());
+            await s.addIndex("by_priority", ["priority"]);
+          },
+        },
+      },
+    );
+
+    await runMigrations({
+      table: "tasks",
+      schema: (tasks as unknown as { schema: any }).schema,
+      adapter,
+    });
+
+    expect(adapter.schemaOps).toHaveLength(2);
+    expect(adapter.schemaOps[0]).toEqual({
+      table: "tasks",
+      ops: [
+        {
+          type: "addColumn",
+          column: "priority",
+          sqlType: "TEXT",
+          defaultSql: undefined,
+        },
+      ],
+    });
+    expect(adapter.schemaOps[1]).toEqual({
+      table: "tasks",
+      ops: [
+        {
+          type: "addIndex",
+          name: "by_priority",
+          fields: ["priority"],
+          unique: undefined,
+        },
+      ],
+    });
+  });
+
+  it("ctx.step skips already-completed steps on retry", async () => {
+    const adapter = createInMemoryAdapter();
+    adapter.rows["_resolve_schema_versions"] = [
+      { _id: "v1", _creationTime: 0, table: "tasks", version: 1 },
+    ];
+    adapter.rows["_resolve_schema_steps"] = [
+      {
+        _id: "s1",
+        _creationTime: 0,
+        table: "tasks",
+        version: 2,
+        stepName: "backfill",
+      },
+    ];
+
+    const stepFn = vi.fn(async () => undefined);
+    const tasks = embeddedTable(
+      "tasks_step_resume",
+      { title: register(v.string()) },
+      {
+        migrations: {
+          2: async (ctx) => {
+            await ctx.step("backfill", stepFn);
+          },
+        },
+      },
+    );
+
+    await runMigrations({
+      table: "tasks",
+      schema: (tasks as unknown as { schema: any }).schema,
+      adapter,
+    });
+
+    expect(stepFn).not.toHaveBeenCalled();
+    expect(adapter.rows["_resolve_schema_versions"]?.[0]?.version).toBe(2);
+    expect(adapter.rows["_resolve_schema_steps"] ?? []).toHaveLength(0);
+  });
+
+  it("ctx.step records checkpoint after running and cleans up after version", async () => {
+    const adapter = createInMemoryAdapter();
+    adapter.rows["_resolve_schema_versions"] = [
+      { _id: "v1", _creationTime: 0, table: "tasks", version: 1 },
+    ];
+
+    let ranAt = 0;
+    const tasks = embeddedTable(
+      "tasks_step_record",
+      { title: register(v.string()) },
+      {
+        migrations: {
+          2: async (ctx) => {
+            await ctx.step("backfill", async () => {
+              ranAt += 1;
+            });
+          },
+        },
+      },
+    );
+
+    await runMigrations({
+      table: "tasks",
+      schema: (tasks as unknown as { schema: any }).schema,
+      adapter,
+    });
+
+    expect(ranAt).toBe(1);
+    expect(adapter.rows["_resolve_schema_versions"]?.[0]?.version).toBe(2);
+    expect(adapter.rows["_resolve_schema_steps"] ?? []).toHaveLength(0);
+  });
+
+  it("throws when stored version exceeds target", async () => {
+    const adapter = createInMemoryAdapter();
+    adapter.rows["_resolve_schema_versions"] = [
+      { _id: "v1", _creationTime: 0, table: "tasks", version: 5 },
+    ];
+
+    const tasks = embeddedTable("tasks_too_new", {
+      title: register(v.string()),
+    });
 
     await expect(
-      runMigrations(ctx as any, {
+      runMigrations({
         table: "tasks",
-        schema: schemaDef,
-        migrations: { 2: { _name: "failing" } as any },
+        schema: (tasks as unknown as { schema: any }).schema,
+        adapter,
       }),
-    ).rejects.toThrow("boom");
+    ).rejects.toThrow("Forward-only");
   });
 
-  it("recovery action 'reset' wipes table data", async () => {
-    const ctx = createMockCtx();
-    const schemaDef = define({
-      version: 2,
-      shape: { title: registerField(v.string()) },
-    });
-
-    ctx._tables["_resolve_schema_versions"] = [
-      { _id: "v1", table: "tasks", version: 1 },
+  it("ctx.db helpers operate on the table being migrated", async () => {
+    const adapter = createInMemoryAdapter();
+    adapter.rows["tasks"] = [
+      { _id: "t1", _creationTime: 0, title: "alpha" },
+      { _id: "t2", _creationTime: 0, title: "beta" },
     ];
-    ctx._tables["tasks"] = [
-      { _id: "t1", title: "Task 1" },
-      { _id: "t2", title: "Task 2" },
+    adapter.rows["_resolve_schema_versions"] = [
+      { _id: "v1", _creationTime: 0, table: "tasks", version: 1 },
     ];
 
-    ctx.runMutation.mockRejectedValue(new Error("migration failed"));
-
-    await runMigrations(ctx as any, {
-      table: "tasks",
-      schema: schemaDef,
-      migrations: { 2: { _name: "failing" } as any },
-      onMigrationError: async () => ({ action: "reset" as const }),
-    });
-
-    // Tasks should be wiped
-    expect(ctx._tables["tasks"]).toHaveLength(0);
-  });
-
-  it("uses the local adapter for reset recovery when available", async () => {
-    const ctx = createMockCtx();
-    const schemaDef = define({
-      version: 2,
-      shape: { title: registerField(v.string()) },
-    });
-
-    ctx._tables["_resolve_schema_versions"] = [
-      { _id: "v1", table: "tasks", version: 1 },
-    ];
-    ctx._tables["tasks"] = [{ _id: "t1", _creationTime: 1, title: "Task 1" }];
-    ctx.runMutation.mockRejectedValue(new Error("migration failed"));
-
-    const local = {
-      transaction: vi.fn(async (work: () => Promise<unknown>) => await work()),
-      list: vi.fn(async (table: string) => ctx._tables[table] ?? []),
-      patch: vi.fn(async () => undefined),
-      replace: vi.fn(async () => undefined),
-      delete: vi.fn(async (table: string, id: string) => {
-        ctx._tables[table] = (ctx._tables[table] ?? []).filter(
-          (row) => row._id !== id,
-        );
-      }),
-    };
-
-    await runMigrations(
+    const tasks = embeddedTable(
+      "tasks_db_ops",
+      { title: register(v.string()) },
       {
-        ...(ctx as any),
-        local,
-      },
-      {
-        table: "tasks",
-        schema: schemaDef,
-        migrations: { 2: { _name: "failing" } as any },
-        onMigrationError: async () => ({ action: "reset" as const }),
+        migrations: {
+          2: async ({ db }) => {
+            await db.patchMissing({ priority: "medium" });
+          },
+        },
       },
     );
 
-    expect(local.transaction).toHaveBeenCalled();
-    expect(local.delete).toHaveBeenCalledWith("tasks", "t1");
-    expect(ctx._tables["tasks"]).toHaveLength(0);
+    await runMigrations({
+      table: "tasks",
+      schema: (tasks as unknown as { schema: any }).schema,
+      adapter,
+    });
+
+    const taskRows = adapter.rows["tasks"];
+    expect(taskRows?.[0]?.priority).toBe("medium");
+    expect(taskRows?.[1]?.priority).toBe("medium");
+  });
+
+  it("handleRecovery action=reset wipes table data and advances version", async () => {
+    const adapter = createInMemoryAdapter();
+    adapter.rows["tasks"] = [
+      { _id: "t1", _creationTime: 0, title: "alpha" },
+      { _id: "t2", _creationTime: 0, title: "beta" },
+    ];
+    adapter.rows["_resolve_schema_versions"] = [
+      { _id: "v1", _creationTime: 0, table: "tasks", version: 1 },
+    ];
+
+    const tasks = embeddedTable(
+      "tasks_recovery_reset",
+      { title: register(v.string()) },
+      {
+        migrations: {
+          2: async () => {
+            throw new Error("intentional v2 failure");
+          },
+        },
+      },
+    );
+
+    const result = await runMigrations({
+      table: "tasks",
+      schema: (tasks as unknown as { schema: any }).schema,
+      adapter,
+      onMigrationError: async (_error, ctx) => {
+        expect(ctx.currentVersion).toBe(1);
+        expect(ctx.targetVersion).toBe(2);
+        return { action: "reset" };
+      },
+    });
+
+    expect(result).toBe(true);
+    expect(adapter.rows["tasks"]).toEqual([]);
+    expect(adapter.rows["_resolve_schema_versions"]?.[0]?.version).toBe(2);
+  });
+
+  it("handleRecovery action=retry leaves stored version unchanged", async () => {
+    const adapter = createInMemoryAdapter();
+    adapter.rows["_resolve_schema_versions"] = [
+      { _id: "v1", _creationTime: 0, table: "tasks", version: 1 },
+    ];
+
+    const tasks = embeddedTable(
+      "tasks_recovery_retry",
+      { title: register(v.string()) },
+      {
+        migrations: {
+          2: async () => {
+            throw new Error("intentional v2 failure");
+          },
+        },
+      },
+    );
+
+    await runMigrations({
+      table: "tasks",
+      schema: (tasks as unknown as { schema: any }).schema,
+      adapter,
+      onMigrationError: async () => ({ action: "retry" }),
+    });
+
+    expect(adapter.rows["_resolve_schema_versions"]?.[0]?.version).toBe(1);
+  });
+
+  it("handleRecovery action=custom invokes the supplied handler", async () => {
+    const adapter = createInMemoryAdapter();
+    adapter.rows["_resolve_schema_versions"] = [
+      { _id: "v1", _creationTime: 0, table: "tasks", version: 1 },
+    ];
+
+    const customHandler = vi.fn(async () => undefined);
+    const tasks = embeddedTable(
+      "tasks_recovery_custom",
+      { title: register(v.string()) },
+      {
+        migrations: {
+          2: async () => {
+            throw new Error("intentional v2 failure");
+          },
+        },
+      },
+    );
+
+    await runMigrations({
+      table: "tasks",
+      schema: (tasks as unknown as { schema: any }).schema,
+      adapter,
+      onMigrationError: async () => ({
+        action: "custom",
+        handler: customHandler,
+      }),
+    });
+
+    expect(customHandler).toHaveBeenCalledTimes(1);
+    expect(adapter.rows["_resolve_schema_versions"]?.[0]?.version).toBe(1);
+  });
+
+  it("resumes a multi-step migration after mid-step crash", async () => {
+    const adapter = createInMemoryAdapter();
+    adapter.rows["_resolve_schema_versions"] = [
+      { _id: "v1", _creationTime: 0, table: "tasks", version: 1 },
+    ];
+
+    const stepOne = vi.fn(async () => undefined);
+    const stepTwo = vi.fn(async () => undefined);
+    let shouldThrowMidStep = true;
+
+    const buildTable = () =>
+      embeddedTable(
+        "tasks_step_resume_after_crash",
+        { title: register(v.string()) },
+        {
+          migrations: {
+            2: async (ctx) => {
+              await ctx.step("backfill-priority", stepOne);
+              if (shouldThrowMidStep) {
+                throw new Error("crash between steps");
+              }
+              await ctx.step("backfill-tags", stepTwo);
+            },
+          },
+        },
+      );
+
+    await expect(
+      runMigrations({
+        table: "tasks",
+        schema: (buildTable() as unknown as { schema: any }).schema,
+        adapter,
+      }),
+    ).rejects.toThrow("crash between steps");
+
+    expect(stepOne).toHaveBeenCalledTimes(1);
+    expect(stepTwo).not.toHaveBeenCalled();
+    expect(adapter.rows["_resolve_schema_versions"]?.[0]?.version).toBe(1);
+    const checkpointRows = adapter.rows["_resolve_schema_steps"] ?? [];
+    expect(checkpointRows).toHaveLength(1);
+    expect(checkpointRows[0]?.stepName).toBe("backfill-priority");
+
+    shouldThrowMidStep = false;
+    await runMigrations({
+      table: "tasks",
+      schema: (buildTable() as unknown as { schema: any }).schema,
+      adapter,
+    });
+
+    expect(stepOne).toHaveBeenCalledTimes(1);
+    expect(stepTwo).toHaveBeenCalledTimes(1);
+    expect(adapter.rows["_resolve_schema_versions"]?.[0]?.version).toBe(2);
+    expect(adapter.rows["_resolve_schema_steps"] ?? []).toHaveLength(0);
+  });
+
+  it("cleans up duplicate version rows on advance", async () => {
+    const adapter = createInMemoryAdapter();
+    adapter.rows["_resolve_schema_versions"] = [
+      { _id: "v1a", _creationTime: 0, table: "tasks", version: 1 },
+      { _id: "v1b", _creationTime: 0, table: "tasks", version: 1 },
+    ];
+
+    const tasks = embeddedTable(
+      "tasks_dedupe",
+      { title: register(v.string()) },
+      {
+        migrations: {
+          2: async () => undefined,
+        },
+      },
+    );
+
+    await runMigrations({
+      table: "tasks",
+      schema: (tasks as unknown as { schema: any }).schema,
+      adapter,
+    });
+
+    const versionRows = adapter.rows["_resolve_schema_versions"] ?? [];
+    expect(versionRows).toHaveLength(1);
+    expect(versionRows[0]?.version).toBe(2);
   });
 });

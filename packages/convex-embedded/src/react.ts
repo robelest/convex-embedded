@@ -26,7 +26,6 @@ import {
   type AuthState,
   type ClientOptions,
   type ConvexInput,
-  type EncryptionOptions,
   type RemoteOptions,
   type RemoteState,
 } from "@/browser/index";
@@ -43,7 +42,6 @@ export type {
   AuthState,
   ClientOptions,
   ConvexInput,
-  EncryptionOptions,
   RemoteOptions,
   RemoteState,
 };

@@ -23,22 +23,21 @@ import {
   type ConnectivityAdapter,
 } from "@/runtime/platform";
 import { createLogger } from "@/shared/logger";
+import { matchTag } from "@/shared/match";
 import { getFunctionName, makeFunctionReference } from "@/shared/refs";
-import { initYjsDoc } from "@/shared/schema";
-import type { Definition } from "@/shared/schema";
+import { getCrdtType, type Definition } from "@/shared/schema";
+import { initYjsDoc } from "@/shared/yjs";
 import type {
   EngineStatus,
   ResolveDocumentResponse,
   ResolveProgress,
   ResolveResponse,
 } from "@/shared/types";
+import { runDetached } from "@/utils/detached";
 import { retryWithBackoff } from "@/utils/retry";
+import { withSpan } from "@/tracing/spans";
 
 const log = createLogger("resolve");
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 /**
  * Strip fields marked with `schema.omit()` from a set of documents.
@@ -123,12 +122,6 @@ function toErrorMessage(error: unknown): string {
   }
 }
 
-function runDetached(task: () => Promise<unknown>, label: string): void {
-  void task().catch((error) => {
-    console.error(label, error);
-  });
-}
-
 function createRemoteUpdateHandler(input: {
   ingestDocuments: (
     table: string,
@@ -201,14 +194,11 @@ const BUFFERED_SNAPSHOT_RETRY_MAX_MS = 1000;
 
 function extractPendingLogicalId(entry: PendingEntry): string | null {
   try {
-    // For create mutations, localResult is the new doc ID — prefer it
-    // over scanning args (which may contain parent IDs like projectId).
     const localResult = JSON.parse(entry.localResult) as unknown;
     if (typeof localResult === "string") {
       return localResult;
     }
 
-    // For update/delete mutations (localResult is null), scan args.
     const args = JSON.parse(entry.args) as Record<string, unknown>;
     if (typeof args.id === "string") {
       return args.id;
@@ -260,9 +250,7 @@ function parseErrorMetadata(error: Error): {
             : fallback.toLowerCase(),
       };
     }
-  } catch {
-    // Ignore non-JSON errors and fall back to string matching below.
-  }
+  } catch {}
   return { message: fallback.toLowerCase() };
 }
 
@@ -294,8 +282,6 @@ function projectRemoteSnapshot(input: {
       dirtyAliasKeys.add(alias);
     }
   }
-  // Also protect docs that were just replayed but whose subscription
-  // hasn't pushed fresh data yet.
   for (const id of input.recentlyReplayedIds) {
     for (const alias of input.getAliases(id)) {
       dirtyAliasKeys.add(alias);
@@ -338,8 +324,6 @@ function classifyReplayError(
   if (code === "FORBIDDEN") {
     return "authorizationDenied";
   }
-  // Fallback to message heuristics only for common backend/auth phrasing when
-  // structured codes are unavailable.
   if (
     lowered.includes("unauthenticated") ||
     lowered.includes("invalid token") ||
@@ -454,6 +438,16 @@ function registerRemoteSubscription(input: {
   tableConfig: TableConfig;
   tableName: string;
   scopeArgs?: Record<string, unknown>;
+  consumeExpectedSelfCausedSignal?: (
+    table: string,
+    signalSeq: number,
+  ) => boolean;
+  scheduleTableCoalesce?: (input: {
+    tableName: string;
+    scopeKey: string;
+    signalSeq: number;
+    runHandler: () => void;
+  }) => void;
 }) {
   const remoteClient = input.resolveServices.remoteClient;
   const baseHandler = createRemoteUpdateHandler({
@@ -470,14 +464,22 @@ function registerRemoteSubscription(input: {
     tableName: input.tableName,
   });
 
-  // Subscribe to the auto-generated resolve endpoint with stable args. Server
-  // sees no state vectors and always returns "full" mode with a fresh scoped
-  // snapshot of raw documents. Re-fires whenever the collection changes.
   const unwrapResolveResponse = (response: unknown) => {
-    const docs: Array<Record<string, unknown>> = [];
     const res = response as {
       documents?: Array<{ document?: unknown }>;
+      collectionSeq?: number;
     };
+    const signalSeq =
+      typeof res?.collectionSeq === "number" ? res.collectionSeq : -1;
+
+    if (
+      input.consumeExpectedSelfCausedSignal?.(input.tableName, signalSeq) ===
+      true
+    ) {
+      return;
+    }
+
+    const docs: Array<Record<string, unknown>> = [];
     if (res?.documents) {
       for (const entry of res.documents) {
         if (entry.document && typeof entry.document === "object") {
@@ -485,6 +487,18 @@ function registerRemoteSubscription(input: {
         }
       }
     }
+
+    if (input.scheduleTableCoalesce) {
+      const scopeKey = makeScopeKey(input.tableName, input.scopeArgs);
+      input.scheduleTableCoalesce({
+        tableName: input.tableName,
+        scopeKey,
+        signalSeq,
+        runHandler: () => baseHandler(docs),
+      });
+      return;
+    }
+
     baseHandler(docs);
   };
 
@@ -503,10 +517,6 @@ function registerRemoteSubscription(input: {
 
   input.onUnsubscribe(unsub);
 }
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
 
 /**
  * @internal
@@ -555,6 +565,7 @@ export interface EmbeddedClientLike {
   ingestDocuments(
     table: string,
     documents: Array<Record<string, unknown>>,
+    scopeArgs?: Record<string, unknown>,
   ): Promise<void>;
   canonicalizeMappedCreate(input: {
     localId: string;
@@ -773,27 +784,6 @@ export interface EngineInstance {
   [Symbol.asyncDispose](): Promise<void>;
 }
 
-// ---------------------------------------------------------------------------
-// State machine
-// ---------------------------------------------------------------------------
-
-/**
- * State transitions:
- *   [*] → Offline (no network)
- *   [*] → Resolving (network available)
- *   Offline → Resolving (online event)
- *   Resolving → Resolved (all resolve() calls succeed)
- *   Resolving → Error (resolve() fails after retries)
- *   Resolved → Offline (offline event)
- *   Resolved → Resolving (reconnect after temporary disconnect)
- *   Error → Resolving (retry / online event)
- *   Offline → Offline (mutations queue locally)
- */
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 /**
  * Infer the table name from a mutation function reference.
  *
@@ -807,7 +797,6 @@ function inferTableFromRef(
 ): string | null {
   const name = getFunctionName(ref as any);
 
-  // Extract module name (before the colon) and check if it's a known table.
   const moduleName = name.split(":")[0] ?? "";
   if (moduleName in tables) {
     return moduleName;
@@ -816,25 +805,14 @@ function inferTableFromRef(
   return null;
 }
 
-function matchTag<
-  T extends Record<K, string>,
-  K extends keyof T & string,
-  Handlers extends {
-    [V in T[K] & string]: (value: Extract<T, Record<K, V>>) => unknown;
-  },
->(value: T, key: K, handlers: Handlers): ReturnType<Handlers[T[K] & string]> {
-  const handler = handlers[value[key] as T[K] & string] as unknown as (
-    current: T,
-  ) => ReturnType<Handlers[T[K] & string]>;
-  return handler(value);
-}
-
 function getSyncCycleRoute(input: {
   aborted: boolean;
   forceResolve: boolean;
   hasPending: boolean;
   isOnline: boolean;
   started: boolean;
+  offlineTransitionsSinceBoot: number;
+  hasDirtyCrdtRows: boolean;
 }): SyncCycleRoute {
   if (input.aborted) return { _tag: "Skip" };
   if (!input.forceResolve && (!input.started || !input.isOnline)) {
@@ -842,6 +820,13 @@ function getSyncCycleRoute(input: {
   }
   if (input.hasPending) {
     return { _tag: "DeferUntilQueueDrains" };
+  }
+  if (
+    !input.forceResolve &&
+    input.offlineTransitionsSinceBoot === 0 &&
+    !input.hasDirtyCrdtRows
+  ) {
+    return { _tag: "Skip" };
   }
   return { _tag: "Resolve" };
 }
@@ -1311,6 +1296,19 @@ function createResolveRetrySchedule(input: {
   };
 }
 
+function mergeCrdtFieldsWithPlain(
+  schemaDef: Definition,
+  localDoc: Record<string, unknown>,
+  yjsDoc: Y.Doc,
+): Record<string, unknown> {
+  const merged: Record<string, unknown> = { ...localDoc };
+  const crdtFields = materializeYjsDoc(schemaDef, yjsDoc);
+  for (const [key, value] of Object.entries(crdtFields)) {
+    merged[key] = value;
+  }
+  return merged;
+}
+
 function mergeResolveResult(input: {
   localDocs: Array<Record<string, unknown>>;
   localYjsMap: Map<string, LocalYjsEntry>;
@@ -1387,10 +1385,14 @@ function mergeResolveResult(input: {
         return acc;
       }
 
-      const materialized = materializeYjsDoc(input.schemaDef, entry.yjsDoc);
-      materialized._id = entry.localDoc._id;
-      materialized._creationTime = entry.localDoc._creationTime;
-      mergedDocsById.set(docId, input.translateRemoteDocument(materialized));
+      const merged = mergeCrdtFieldsWithPlain(
+        input.schemaDef,
+        entry.localDoc,
+        entry.yjsDoc,
+      );
+      merged._id = entry.localDoc._id;
+      merged._creationTime = entry.localDoc._creationTime;
+      mergedDocsById.set(docId, input.translateRemoteDocument(merged));
       if (typeof seq === "number") {
         acc.metadataEntries.push({ docId, seq });
       }
@@ -1453,10 +1455,6 @@ function getQueueEntryRoute(input: {
     : { _tag: "Push", localResult };
 }
 
-// ---------------------------------------------------------------------------
-// engine.create()
-// ---------------------------------------------------------------------------
-
 function createEngine(config: EngineConfig): EngineInstance {
   const {
     embedded,
@@ -1471,12 +1469,9 @@ function createEngine(config: EngineConfig): EngineInstance {
     getReplayPayloadVersion,
   } = config;
 
-  // Destructure the embedded client for convenience.
   const localClient = embedded.client;
   const rawIngestDocuments = embedded.ingestDocuments.bind(embedded);
 
-  // Per-table async lock to prevent concurrent ingestion from subscription
-  // and resolve paths racing against each other.
   const ingestLockMap = new Map<string, Promise<void>>();
   function ingestDocuments(
     table: string,
@@ -1508,9 +1503,6 @@ function createEngine(config: EngineConfig): EngineInstance {
   const activatedRemoteTables = new Set(rootTablesByDependencies(tables));
   const processorHeartbeatMs = Math.max(1_000, Math.floor(leaseMs / 3));
 
-  // Doc IDs recently replayed — protected from stale subscription snapshots
-  // for a grace period after replay. Entries expire after REPLAY_GRACE_MS so
-  // the protection doesn't persist forever.
   const REPLAY_GRACE_MS = 3_000;
   const recentlyReplayedIds = new Map<string, number>();
 
@@ -1569,9 +1561,6 @@ function createEngine(config: EngineConfig): EngineInstance {
   let started = false;
   let abortController: AbortController | null = null;
 
-  // ID map and persistent pending queue.
-  // When executeLocal is available, hydration and bookkeeping bypass the
-  // patched ConvexClient methods entirely, preventing version/transition races.
   const idMap = new IdMap(
     localClient,
     executeLocalQuery,
@@ -1588,16 +1577,41 @@ function createEngine(config: EngineConfig): EngineInstance {
   const processorIdForReplay =
     processorId ?? `processor_${Math.random().toString(36).slice(2)}`;
 
-  // Track whether we believe we're online (based on network events)
   let isOnline = false;
+  let offlineTransitionsSinceBoot = 0;
+  let cameOnlineAfterOfflinePeriod = false;
+  const dirtyCrdtRows = new Set<string>();
+  const crdtFieldsByTable = new Map<string, Set<string>>();
+  for (const [tableName, tableConfig] of Object.entries(tables)) {
+    const shape = tableConfig.schema?.getShape?.() as
+      | Record<string, unknown>
+      | undefined;
+    if (!shape) continue;
+    const crdtFields = new Set<string>();
+    for (const [fieldName, fieldDef] of Object.entries(shape)) {
+      if (getCrdtType(fieldDef) !== null) {
+        crdtFields.add(fieldName);
+      }
+    }
+    if (crdtFields.size > 0) {
+      crdtFieldsByTable.set(tableName, crdtFields);
+    }
+  }
 
-  // Serial queue processor state
+  function markCrdtRowDirty(tableName: string, docId: string): void {
+    if (!crdtFieldsByTable.has(tableName)) return;
+    dirtyCrdtRows.add(`${tableName}:${docId}`);
+  }
+
+  function clearCrdtRowDirty(tableName: string, docId: string): void {
+    dirtyCrdtRows.delete(`${tableName}:${docId}`);
+  }
+
   let queueProcessingPromise: Promise<void> | null = null;
   let queueProcessingRequestedWhileActive = false;
   let syncCyclePromise: Promise<void> | null = null;
   let activeEntry: PendingEntry | null = null;
 
-  // Network event handlers
   let onOnline: (() => void) | null = null;
   let onOffline: (() => void) | null = null;
   let cleanupOnlineListener: (() => void) | null = null;
@@ -1605,10 +1619,134 @@ function createEngine(config: EngineConfig): EngineInstance {
   let processorHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
   let bufferedFlushScheduled = false;
   let bufferedFlushTimer: ReturnType<typeof setTimeout> | null = null;
-  // Active remote subscriptions keyed by (table, scopeHash). Each entry owns
-  // its onUpdate unsub and the scope args it was activated with. Unscoped
-  // subscriptions collapse to key === tableName.
   const activeScopes = new Map<string, ActiveScope>();
+
+  const RESOLVE_TABLE_COALESCE_MS = 32;
+  const expectedSelfCausedSignals = new Map<string, number[]>();
+  const lastKnownCollectionSeqByTable = new Map<string, number>();
+  type TableCoalesceEntry = {
+    signalSeqs: Set<number>;
+    pendingThunks: Map<string, () => void>;
+    timer: ReturnType<typeof setTimeout> | null;
+  };
+  const tableCoalesceMap = new Map<string, TableCoalesceEntry>();
+
+  function recordExpectedSelfCausedSignal(
+    tableName: string,
+    postCommitSeq: number,
+  ): void {
+    const existing = expectedSelfCausedSignals.get(tableName) ?? [];
+    existing.push(postCommitSeq);
+    existing.sort((a, b) => a - b);
+    expectedSelfCausedSignals.set(tableName, existing);
+  }
+
+  function nextExpectedSelfCausedSeq(tableName: string): number {
+    const lastKnown = lastKnownCollectionSeqByTable.get(tableName) ?? -1;
+    const pending = expectedSelfCausedSignals.get(tableName);
+    const highestPending =
+      pending && pending.length > 0 ? pending[pending.length - 1]! : -1;
+    return Math.max(lastKnown, highestPending) + 1;
+  }
+
+  function consumeExpectedSelfCausedSignal(
+    tableName: string,
+    signalSeq: number,
+  ): boolean {
+    const seqs = expectedSelfCausedSignals.get(tableName);
+    if (!seqs || seqs.length === 0) {
+      return false;
+    }
+    let bestIndex = -1;
+    for (let i = seqs.length - 1; i >= 0; i--) {
+      if (seqs[i]! <= signalSeq) {
+        bestIndex = i;
+        break;
+      }
+    }
+    if (bestIndex < 0) {
+      return false;
+    }
+    seqs.splice(bestIndex, 1);
+    if (seqs.length === 0) {
+      expectedSelfCausedSignals.delete(tableName);
+    } else {
+      expectedSelfCausedSignals.set(tableName, seqs);
+    }
+    if (signalSeq >= 0) {
+      lastKnownCollectionSeqByTable.set(tableName, signalSeq);
+    }
+    log.debug(
+      `sync: skipping self-caused bind for "${tableName}" (signalSeq=${signalSeq})`,
+    );
+    return true;
+  }
+
+  function fireCoalescedTableUpdate(tableName: string): void {
+    const entry = tableCoalesceMap.get(tableName);
+    if (!entry) return;
+    if (entry.timer !== null) {
+      clearTimeout(entry.timer);
+      entry.timer = null;
+    }
+    if (entry.pendingThunks.size === 0) {
+      tableCoalesceMap.delete(tableName);
+      return;
+    }
+    if (entry.signalSeqs.size > 0) {
+      const highestSeq = Math.max(...Array.from(entry.signalSeqs));
+      if (highestSeq >= 0) {
+        lastKnownCollectionSeqByTable.set(tableName, highestSeq);
+      }
+    }
+    const thunks = Array.from(entry.pendingThunks.values());
+    tableCoalesceMap.delete(tableName);
+    for (const thunk of thunks) {
+      try {
+        thunk();
+      } catch (err) {
+        log.warn(`sync: coalesced bind thunk for "${tableName}" failed`, err);
+      }
+    }
+  }
+
+  function scheduleTableCoalesce(input: {
+    tableName: string;
+    scopeKey: string;
+    signalSeq: number;
+    runHandler: () => void;
+  }): void {
+    const { tableName, scopeKey, signalSeq, runHandler } = input;
+    let entry = tableCoalesceMap.get(tableName);
+    if (!entry) {
+      entry = {
+        signalSeqs: new Set(),
+        pendingThunks: new Map(),
+        timer: null,
+      };
+      tableCoalesceMap.set(tableName, entry);
+    }
+    if (signalSeq >= 0) {
+      entry.signalSeqs.add(signalSeq);
+    }
+    entry.pendingThunks.set(scopeKey, runHandler);
+    if (entry.timer === null) {
+      entry.timer = setTimeout(() => {
+        fireCoalescedTableUpdate(tableName);
+      }, RESOLVE_TABLE_COALESCE_MS);
+    }
+  }
+
+  function clearTableCoalesceState(): void {
+    for (const entry of tableCoalesceMap.values()) {
+      if (entry.timer !== null) {
+        clearTimeout(entry.timer);
+      }
+    }
+    tableCoalesceMap.clear();
+    expectedSelfCausedSignals.clear();
+    lastKnownCollectionSeqByTable.clear();
+  }
 
   function getRemoteApplyOrder(): string[] {
     return orderedTables.filter((tableName) =>
@@ -1820,6 +1958,7 @@ function createEngine(config: EngineConfig): EngineInstance {
       state.retryCount = 0;
     }
     tableRemoteSyncStateMap.clear();
+    clearTableCoalesceState();
   }
 
   function ensureReplayProcessing(): void {
@@ -1831,9 +1970,6 @@ function createEngine(config: EngineConfig): EngineInstance {
       await processQueue();
 
       if (pendingQueue.isEmpty) {
-        // Discard any buffered snapshots that arrived before replay completed —
-        // they carry pre-replay state and would overwrite local edits. The live
-        // subscription will push fresh post-replay data momentarily.
         for (const state of tableRemoteSyncStateMap.values()) {
           state.bufferedSnapshot = null;
         }
@@ -1961,10 +2097,6 @@ function createEngine(config: EngineConfig): EngineInstance {
     }
   }
 
-  // -------------------------------------------------------------------------
-  // Serial queue processor — processes pending mutations one at a time
-  // -------------------------------------------------------------------------
-
   /**
    * Process the pending queue serially.
    *
@@ -2063,8 +2195,6 @@ function createEngine(config: EngineConfig): EngineInstance {
                       `sync: lost replay lease before remote push (table: ${entry.table})`,
                     );
                     shouldContinue = false;
-                    // Skip the rest of the Push branch — equivalent to
-                    // the original `break` out of the switch case.
                   } else {
                     log.warn(
                       `sync: continuing replay for current-session entry after lease renewal miss (table: ${entry.table})`,
@@ -2072,9 +2202,6 @@ function createEngine(config: EngineConfig): EngineInstance {
                   }
                 }
 
-                // Only proceed with remote push if we didn't bail above
-                // (i.e. shouldContinue was not explicitly set to false
-                // by the hydrated lease-lost path).
                 if (!(entry.hydrated === true && !leaseHeld)) {
                   const heartbeat = startReplayLeaseHeartbeat({
                     entry,
@@ -2094,6 +2221,11 @@ function createEngine(config: EngineConfig): EngineInstance {
                   } finally {
                     heartbeat.stop();
                   }
+
+                  recordExpectedSelfCausedSignal(
+                    entry.table,
+                    nextExpectedSelfCausedSeq(entry.table),
+                  );
 
                   if (
                     typeof route.localResult === "string" &&
@@ -2174,9 +2306,7 @@ function createEngine(config: EngineConfig): EngineInstance {
             `sync: continuing queue processing after concurrent enqueue (remaining: ${pendingQueue.length})`,
           );
         }
-      } catch {
-        // Swallow – matches original Effect.catch behavior
-      }
+      } catch {}
     })().finally(() => {
       queueProcessingPromise = null;
     });
@@ -2205,17 +2335,32 @@ function createEngine(config: EngineConfig): EngineInstance {
           hasPending: !pendingQueue.isEmpty,
           isOnline,
           started,
+          offlineTransitionsSinceBoot,
+          hasDirtyCrdtRows: dirtyCrdtRows.size > 0,
         });
 
         if (route._tag === "Skip") {
-          // no-op
+          if (isOnline && started && !signal.aborted) {
+            emit({ status: "resolved" });
+          }
         } else if (route._tag === "DeferUntilQueueDrains") {
           stopRemoteSubscriptions();
           log.warn(
             "sync: deferring resolve and remote subscriptions until pending queue drains",
           );
         } else if (route._tag === "Resolve") {
-          await resolveAll(signal);
+          if (
+            !options?.forceResolve &&
+            dirtyCrdtRows.size > 0 &&
+            offlineTransitionsSinceBoot > 0
+          ) {
+            await resolveDirtyCrdtRows(signal);
+          } else {
+            await resolveAll(signal);
+            if (!signal.aborted) {
+              dirtyCrdtRows.clear();
+            }
+          }
         }
 
         if (
@@ -2244,11 +2389,217 @@ function createEngine(config: EngineConfig): EngineInstance {
     return syncCyclePromise;
   }
 
-  // -------------------------------------------------------------------------
-  // Resolve — pulls remote state via CRDT diff
-  // -------------------------------------------------------------------------
+  async function resolveDirtyCrdtRows(signal?: AbortSignal): Promise<void> {
+    return withSpan("convex-embedded.resolveDirtyCrdtRows", () =>
+      resolveDirtyCrdtRowsImpl(signal),
+    );
+  }
+
+  async function resolveDirtyCrdtRowsImpl(
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (dirtyCrdtRows.size === 0) {
+      return;
+    }
+
+    const rowsByTable = new Map<string, Set<string>>();
+    for (const key of dirtyCrdtRows) {
+      const sep = key.indexOf(":");
+      if (sep < 0) continue;
+      const tableName = key.slice(0, sep);
+      const docId = key.slice(sep + 1);
+      if (!crdtFieldsByTable.has(tableName)) continue;
+      const set = rowsByTable.get(tableName) ?? new Set<string>();
+      set.add(docId);
+      rowsByTable.set(tableName, set);
+    }
+
+    if (rowsByTable.size === 0) {
+      dirtyCrdtRows.clear();
+      return;
+    }
+
+    const orderedDirtyTables = orderedTables.filter((tableName) =>
+      rowsByTable.has(tableName),
+    );
+
+    emit({
+      status: "resolving",
+      progress: {
+        tables: orderedDirtyTables,
+        completed: 0,
+        total: orderedDirtyTables.length,
+      },
+    });
+
+    try {
+      let completed = 0;
+      for (const tableName of orderedDirtyTables) {
+        if (signal?.aborted) {
+          throw new DOMException("Aborted", "AbortError");
+        }
+        const tableConfig = tables[tableName];
+        if (!tableConfig) {
+          completed += 1;
+          continue;
+        }
+        const docIds = rowsByTable.get(tableName);
+        if (!docIds || docIds.size === 0) {
+          completed += 1;
+          continue;
+        }
+        await resolveDirtyRowsForTable(tableName, tableConfig, docIds, signal);
+        completed += 1;
+        emit({
+          status: "resolving",
+          progress: {
+            tables: orderedDirtyTables,
+            completed,
+            total: orderedDirtyTables.length,
+          },
+        });
+        await yieldToEventLoop();
+      }
+      emit({ status: "resolved" });
+    } catch (err) {
+      if (signal?.aborted) return;
+      if (err instanceof DOMException && err.name === "AbortError") {
+        return;
+      }
+      log.error("sync: targeted CRDT merge failed", err);
+      emit({
+        status: "error",
+        error: err instanceof Error ? err : new Error(String(err)),
+      });
+    }
+  }
+
+  async function resolveDirtyRowsForTable(
+    tableName: string,
+    tableConfig: TableConfig,
+    docIds: Set<string>,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const localDocs = await getDocumentsForTable(tableName);
+    const dirtyLocalDocs = localDocs.filter(
+      (doc) => typeof doc._id === "string" && docIds.has(String(doc._id)),
+    );
+    if (dirtyLocalDocs.length === 0) {
+      for (const docId of docIds) {
+        clearCrdtRowDirty(tableName, docId);
+      }
+      return;
+    }
+
+    const dirtyDocIds = dirtyLocalDocs.flatMap((doc) =>
+      typeof doc._id === "string" ? [String(doc._id)] : [],
+    );
+    const metadata = await readResolveMetadata(
+      tableName,
+      tableConfig,
+      dirtyDocIds,
+    );
+    const { schemaDef, localYjsMap, resolveDocuments } = prepareResolveInput(
+      tableConfig.schema,
+      dirtyLocalDocs,
+      metadata,
+    );
+
+    if (resolveDocuments.length === 0) {
+      for (const docId of docIds) {
+        clearCrdtRowDirty(tableName, docId);
+      }
+      return;
+    }
+
+    const retrySchedule = createResolveRetrySchedule({
+      maxRetries,
+      retryDelayMs,
+      signal,
+    });
+    let attempts = 0;
+    const rawResolveResult = await retrySchedule<
+      ResolveResponse | Array<ResolveResultRow>
+    >(async () => {
+      if (signal?.aborted) {
+        throw new DOMException("Aborted", "AbortError");
+      }
+      attempts++;
+      try {
+        return (remoteClient as any).query(tableConfig.resolve, {
+          collectionSeq: metadata.collectionSeq,
+          documents: resolveDocuments,
+        } satisfies ResolveArgs) as Promise<
+          ResolveResponse | Array<ResolveResultRow>
+        >;
+      } catch (err) {
+        if (!(err instanceof DOMException && err.name === "AbortError")) {
+          log.warn(
+            `sync: targeted merge attempt ${attempts}/${maxRetries} failed for "${tableName}"`,
+            err,
+          );
+        }
+        throw err;
+      }
+    });
+    const resolveResult = normalizeResolveResponse(
+      rawResolveResult,
+      metadata.collectionSeq,
+    );
+
+    const { mergedDocs, metadataEntries, deletedDocIds } = mergeResolveResult({
+      localDocs: dirtyLocalDocs,
+      localYjsMap,
+      resolveResult,
+      schemaDef,
+      tableName,
+      translateRemoteDocument: (document) =>
+        stripOmittedFields(schemaDef, [document])[0] ?? document,
+    });
+
+    const { accepted: resolvableDocs } =
+      filterDocumentsWithResolvableReferences({
+        docs: mergedDocs,
+        schema: tableConfig.schema,
+        hasDocumentId: (id) => embedded.hasLocalDocumentId?.(id) ?? false,
+        getAliases: (id) => idMap.getAliases(id),
+      });
+
+    await ingestMergedDocs({
+      ingestDocuments,
+      mergedDocs: resolvableDocs,
+      tableName,
+    });
+
+    const resolvableDocIds = new Set(
+      resolvableDocs.flatMap((doc) =>
+        typeof doc._id === "string" ? [String(doc._id)] : [],
+      ),
+    );
+    const resolvableMetadataEntries = metadataEntries.filter((entry) =>
+      resolvableDocIds.has(entry.docId),
+    );
+
+    await persistResolveMetadata({
+      tableConfig,
+      tableName,
+      resolveResult,
+      metadataEntries: resolvableMetadataEntries,
+      deletedDocIds,
+    });
+
+    for (const docId of docIds) {
+      clearCrdtRowDirty(tableName, docId);
+    }
+  }
 
   async function resolveAll(signal?: AbortSignal): Promise<void> {
+    return withSpan("convex-embedded.resolveAll", () =>
+      resolveAllImpl(signal),
+    );
+  }
+
+  async function resolveAllImpl(signal?: AbortSignal): Promise<void> {
     const remoteApplyOrder = getRemoteApplyOrder();
     const scopedResolves = Array.from(activeScopes.values())
       .filter((entry) => Object.keys(entry.scopeArgs).length > 0)
@@ -2315,6 +2666,27 @@ function createEngine(config: EngineConfig): EngineInstance {
     signal?: AbortSignal,
     scopeArgs?: Record<string, unknown>,
   ): Promise<void> {
+    return withSpan(
+      "convex-embedded.resolveTableFx",
+      () =>
+        resolveTableFxImpl(tableName, tableConfig, signal, scopeArgs),
+      {
+        attributes: {
+          "convex.table": tableName,
+          "convex.resolve.scoped": Boolean(
+            scopeArgs && Object.keys(scopeArgs).length > 0,
+          ),
+        },
+      },
+    );
+  }
+
+  async function resolveTableFxImpl(
+    tableName: string,
+    tableConfig: TableConfig,
+    signal?: AbortSignal,
+    scopeArgs?: Record<string, unknown>,
+  ): Promise<void> {
     let attempts = 0;
     const retrySchedule = createResolveRetrySchedule({
       maxRetries,
@@ -2332,13 +2704,23 @@ function createEngine(config: EngineConfig): EngineInstance {
             ),
           )
         : localDocs;
-    const metadata = await readResolveMetadata(
-      tableName,
-      tableConfig,
-      scopedLocalDocs.flatMap((doc) =>
-        typeof doc._id === "string" ? [String(doc._id)] : [],
-      ),
+
+    const docIds = scopedLocalDocs.flatMap((doc) =>
+      typeof doc._id === "string" ? [String(doc._id)] : [],
     );
+
+    const hasPendingSelfCausedSignal =
+      (expectedSelfCausedSignals.get(tableName)?.length ?? 0) > 0;
+    const cachedCollectionSeq = lastKnownCollectionSeqByTable.get(tableName);
+    const metadata =
+      hasPendingSelfCausedSignal && typeof cachedCollectionSeq === "number"
+        ? await readResolveMetadataFastPath(
+            tableName,
+            tableConfig,
+            docIds,
+            cachedCollectionSeq,
+          )
+        : await readResolveMetadata(tableName, tableConfig, docIds);
 
     const { schemaDef, localYjsMap, resolveDocuments } = prepareResolveInput(
       tableConfig.schema,
@@ -2349,10 +2731,6 @@ function createEngine(config: EngineConfig): EngineInstance {
     log.debug(
       `sync: resolving "${tableName}" with ${resolveDocuments.length} local doc(s)`,
     );
-
-    // ------------------------------------------------------------------
-    // 2. Call the remote resolve query with retry.
-    // ------------------------------------------------------------------
 
     const fetchResolvePage = async (fullCursor?: string | null) => {
       const rawResolveResult = await retrySchedule<
@@ -2415,10 +2793,6 @@ function createEngine(config: EngineConfig): EngineInstance {
       }
     }
 
-    // ------------------------------------------------------------------
-    // 3. Apply diffs, materialize, and ingest.
-    // ------------------------------------------------------------------
-
     const { deletedDocIds, mergedDocs, diffCount, metadataEntries } =
       mergeResolveResult({
         localDocs: scopedLocalDocs,
@@ -2459,12 +2833,6 @@ function createEngine(config: EngineConfig): EngineInstance {
       resolvableDocIds.has(entry.docId),
     );
 
-    // ------------------------------------------------------------------
-    // 4. Ingest the merged documents.
-    //    ingestDocuments diffs against local state, so docs that didn't
-    //    change will be no-ops (no unnecessary writes).
-    // ------------------------------------------------------------------
-
     await runSpan({
       name: "convex_embedded.resolve.ingest",
       attributes: {
@@ -2497,10 +2865,6 @@ function createEngine(config: EngineConfig): EngineInstance {
     return;
   }
 
-  // -------------------------------------------------------------------------
-  // Reactive remote subscriptions
-  // -------------------------------------------------------------------------
-
   /**
    * Subscribe to each table's remote query via `remoteClient.onUpdate()`.
    *
@@ -2514,7 +2878,6 @@ function createEngine(config: EngineConfig): EngineInstance {
    * catch-up case.
    */
   function startRemoteSubscriptions(): void {
-    // Avoid duplicate subscriptions.
     stopRemoteSubscriptions();
 
     const remoteApplyOrder = getRemoteApplyOrder();
@@ -2562,6 +2925,8 @@ function createEngine(config: EngineConfig): EngineInstance {
         tableConfig,
         tableName: entry.tableName,
         scopeArgs: entry.scopeArgs,
+        consumeExpectedSelfCausedSignal,
+        scheduleTableCoalesce,
       });
       void yieldToEventLoop();
     }
@@ -2578,9 +2943,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     for (const entry of activeScopes.values()) {
       try {
         entry.unsub?.();
-      } catch {
-        // Ignore — the remote client may already be closed.
-      }
+      } catch {}
       entry.unsub = undefined;
     }
 
@@ -2641,24 +3004,27 @@ function createEngine(config: EngineConfig): EngineInstance {
       tableConfig,
       tableName,
       scopeArgs: normalizedScope,
+      consumeExpectedSelfCausedSignal,
+      scheduleTableCoalesce,
     });
   }
 
-  // -------------------------------------------------------------------------
-  // Network event handlers
-  // -------------------------------------------------------------------------
-
   function handleOnline() {
     log.info("sync: online event — flushing queue, resolving, subscribing");
+    if (cameOnlineAfterOfflinePeriod) {
+      offlineTransitionsSinceBoot += 1;
+      cameOnlineAfterOfflinePeriod = false;
+    }
     isOnline = true;
 
-    // Process the serial queue, pull remote state, then start reactive
-    // subscriptions so we receive ongoing changes from other clients.
     runDetached(() => runSyncCycle(), "[sync] handleOnline:");
   }
 
   function handleOffline() {
     log.info("sync: offline event");
+    if (isOnline) {
+      cameOnlineAfterOfflinePeriod = true;
+    }
     isOnline = false;
     abortController?.abort();
     abortController = null;
@@ -2741,6 +3107,31 @@ function createEngine(config: EngineConfig): EngineInstance {
     };
   }
 
+  async function readResolveMetadataFastPath(
+    tableName: string,
+    tableConfig: TableConfig,
+    docIds: string[],
+    knownCollectionSeq: number,
+  ): Promise<ResolveMetadata> {
+    const schemaVersion = tableConfig.schema.version;
+    const identityKey = getCurrentIdentityKey();
+    const documentEntries = await runLocalSystemQuery<
+      Array<{ docId: string; seq: number }>
+    >(SystemPaths.documentMetadataGetBatch, {
+      collection: tableName,
+      docIds,
+      identityKey,
+      schemaVersion,
+    });
+
+    return {
+      collectionSeq: knownCollectionSeq,
+      documentSeqById: new Map(
+        (documentEntries ?? []).map((entry) => [entry.docId, entry.seq]),
+      ),
+    };
+  }
+
   async function persistResolveMetadata(input: {
     tableConfig: TableConfig;
     tableName: string;
@@ -2751,8 +3142,6 @@ function createEngine(config: EngineConfig): EngineInstance {
     const schemaVersion = input.tableConfig.schema.version;
     const identityKey = getCurrentIdentityKey();
 
-    // Only advance collection seq, never regress — subscription and resolve
-    // handlers can race; the higher seq must win.
     const currentMeta = await readResolveMetadata(
       input.tableName,
       input.tableConfig,
@@ -2857,10 +3246,6 @@ function createEngine(config: EngineConfig): EngineInstance {
     );
   }
 
-  // -------------------------------------------------------------------------
-  // Public API
-  // -------------------------------------------------------------------------
-
   return {
     start() {
       if (started) return;
@@ -2869,9 +3254,6 @@ function createEngine(config: EngineConfig): EngineInstance {
       log.info("sync: started");
       startProcessorHeartbeat();
 
-      // Hydrate ID map and pending queue from embedded DB.
-      // This is fire-and-forget — the queue processor will wait
-      // for hydration to complete before accessing the data.
       const hydrationPromise = hydrateIdentityState();
 
       const runOnlineAfterHydration = createHydrationAwareOnlineHandler({
@@ -2951,10 +3333,6 @@ function createEngine(config: EngineConfig): EngineInstance {
       args: Record<string, unknown>,
       options?: { enqueueForReplay?: boolean },
     ): Promise<unknown> {
-      // 1. Execute against the embedded runtime directly.
-      // 2. Optionally persist the result to the pending queue for replay.
-      // 3. When online: creates wait for replay so the caller observes the
-      //    stable remote ID instead of a provisional local ID.
       const enqueueForReplay = options?.enqueueForReplay ?? true;
       const executeMutationLocally = executeLocalMutationWithEffects
         ? executeLocalMutationWithEffects
@@ -2963,7 +3341,29 @@ function createEngine(config: EngineConfig): EngineInstance {
 
       const refName = getFunctionName(ref as any);
       const localArgs = idMap.translateRemoteIdsToLocal(args);
-      const localResult = await executeMutationLocally(ref, localArgs);
+
+      let localResult: unknown = undefined;
+      let localFailed = false;
+      try {
+        localResult = await executeMutationLocally(ref, localArgs);
+      } catch (err) {
+        if (!isOnline) {
+          throw err;
+        }
+        localFailed = true;
+        log.debug(
+          `sync: local mutation "${refName}" failed; falling back to remote`,
+          err,
+        );
+      }
+
+      if (localFailed) {
+        const remoteResult = await (remoteClient as any).mutation(
+          ref,
+          args,
+        );
+        return remoteResult;
+      }
 
       if (isLocalUploadUrl(localResult)) {
         registerUploadUrlSource?.(localResult, refName);
@@ -2985,6 +3385,17 @@ function createEngine(config: EngineConfig): EngineInstance {
             table,
             getReplayPayloadVersion?.(refName) ?? 1,
           );
+
+          if (!isOnline && crdtFieldsByTable.has(table)) {
+            const docId =
+              typeof localResult === "string"
+                ? localResult
+                : (localArgs?.id as string | undefined) ??
+                  (localArgs?._id as string | undefined);
+            if (docId) {
+              markCrdtRowDirty(table, docId);
+            }
+          }
 
           if (isOnline) {
             ensureReplayProcessing();
@@ -3053,10 +3464,6 @@ function createEngine(config: EngineConfig): EngineInstance {
     },
   };
 }
-
-// ---------------------------------------------------------------------------
-// Export
-// ---------------------------------------------------------------------------
 
 /** @internal */
 export const engine = {

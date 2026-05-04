@@ -1,5 +1,5 @@
 import { BrowserSessionBroadcast } from "@/browser/session";
-import { openBrowserPersistence } from "@/browser/sqlite/adapter";
+import { openBrowserStorage } from "@/browser/sqlite/adapter";
 import { createBrowserStorageSurface } from "@/browser/storage";
 import { BrowserWriteBroadcast } from "@/browser/write";
 import { createAmbientCryptoProvider } from "@/runtime/crypto";
@@ -7,6 +7,9 @@ import {
   createAmbientConnectivityAdapter,
   type EmbeddedPlatformAdapter,
 } from "@/runtime/platform";
+import { createLogger } from "@/shared/logger";
+
+const log = createLogger("browser");
 
 const SQLITE_FILE_SUFFIXES = ["", "-journal", "-wal"] as const;
 
@@ -80,9 +83,9 @@ export async function clearBrowserLocalData(name: string): Promise<void> {
     return;
   }
 
-  const storage = await openBrowserPersistence({ name });
+  const storage = await openBrowserStorage({ name });
   try {
-    await storage.clear();
+    await storage.clearAll();
   } finally {
     await storage.close?.();
   }
@@ -91,7 +94,7 @@ export async function clearBrowserLocalData(name: string): Promise<void> {
 /**
  * Create the browser platform adapter used by embedded browser clients.
  *
- * @returns A platform adapter that provides OPFS-backed persistence, ambient
+ * @returns A platform adapter that provides OPFS-backed storage, ambient
  * browser crypto/connectivity, cross-tab broadcasts, and browser storage
  * surfaces.
  */
@@ -104,23 +107,20 @@ export function createBrowserPlatformAdapter(): EmbeddedPlatformAdapter {
 
   return {
     crypto: platformCrypto,
-    async openPersistence({
+    async openStorage({
       name,
-    }): Promise<import("@/persistence/adapter").PersistenceAdapter | null> {
-      console.info(
-        `[convex-embedded] starting browser sqlite persistence for ${name}`,
-      );
+      runtime,
+    }): Promise<import("@/storage/adapter").StorageAdapter | null> {
+      log.debug(`starting sqlite storage for ${name}`);
       try {
-        const storage = await openBrowserPersistence({ name });
-        console.info(
-          `[convex-embedded] browser sqlite persistence ready for ${name}`,
-        );
+        const storage = await openBrowserStorage({
+          name,
+          userTableSpecs: runtime.getUserTableSpecs() ?? undefined,
+        });
+        log.debug(`sqlite storage ready for ${name}`);
         return storage;
       } catch (error) {
-        console.error(
-          "[convex-embedded] browser sqlite init failed, continuing in-memory",
-          error,
-        );
+        log.error("sqlite init failed, continuing in-memory", error);
         return null;
       }
     },

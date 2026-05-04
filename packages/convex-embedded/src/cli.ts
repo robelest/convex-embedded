@@ -11,7 +11,7 @@ import {
   renderGeneratedFile,
   toModuleId,
   type GeneratedRemoteManifest,
-} from "@/cli_manifest";
+} from "@/manifest";
 
 async function listTsFiles(root: string): Promise<string[]> {
   const entries = await readdir(root, { withFileTypes: true });

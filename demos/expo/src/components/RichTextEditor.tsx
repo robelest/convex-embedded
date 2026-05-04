@@ -187,16 +187,7 @@ export default function RichTextEditor({
     editor.injectCSS(EDITOR_CSS);
     editor.setEditable(editable);
     editor.setPlaceholder(placeholder);
-    editor.setContent(normalizedContent);
-    lastAppliedContent.current = serializedContent;
-  }, [
-    editable,
-    editor,
-    editorState.isReady,
-    normalizedContent,
-    placeholder,
-    serializedContent,
-  ]);
+  }, [editable, editor, editorState.isReady, placeholder]);
 
   useEffect(() => {
     if (!editorState.isReady) {

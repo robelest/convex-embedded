@@ -1,4 +1,4 @@
-import { mockAdapter } from "@tests/helpers/test-adapter";
+import { mockAdapter } from "@tests/helpers/adapter";
 import { afterEach, describe, expect, it } from "@tests/testkit";
 import { vi } from "vitest";
 
@@ -47,7 +47,11 @@ function deferredPromise<T>() {
 }
 
 async function flushMicrotasks(): Promise<void> {
-  for (let i = 0; i < 10; i += 1) {
+  for (let i = 0; i < 50; i += 1) {
+    await Promise.resolve();
+  }
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  for (let i = 0; i < 50; i += 1) {
     await Promise.resolve();
   }
 }
@@ -98,17 +102,20 @@ describe("createEmbeddedClient prefetch bootstrap", () => {
         },
       },
       platform: {
-        openPersistence: vi.fn(async () => ({
-          listAll: () => persistedRows.promise as any,
-          list: vi.fn(async () => []),
-          meta: () => persistedMeta.promise,
-          listBlobs: vi.fn(async () => []),
-          commit: vi.fn(async () => undefined),
-          putBlob: vi.fn(async () => undefined),
-          deleteBlob: vi.fn(async () => undefined),
-          clear: vi.fn(async () => undefined),
-          close: vi.fn(async () => undefined),
-        })),
+        openStorage: vi.fn(async () =>
+          mockAdapter({
+            getDocuments: (table?: string) =>
+              table === undefined
+                ? (persistedRows.promise as any)
+                : Promise.resolve([]),
+            getMetadata: () => persistedMeta.promise,
+            write: vi.fn(async () => undefined),
+            putBlob: vi.fn(async () => undefined),
+            deleteBlob: vi.fn(async () => undefined),
+            clearAll: vi.fn(async () => undefined),
+            close: vi.fn(async () => undefined),
+          }),
+        ),
       },
     });
 
@@ -163,7 +170,7 @@ describe("createEmbeddedClient prefetch bootstrap", () => {
         name: "factory-pending-hit",
       },
       platform: {
-        openPersistence: vi.fn(async () =>
+        openStorage: vi.fn(async () =>
           mockAdapter({
             kind: "sql",
             listAll: async () => [],
@@ -171,7 +178,7 @@ describe("createEmbeddedClient prefetch bootstrap", () => {
             get: vi.fn(async () => null),
             meta: async () => ({ timestamp: 0, lastCreationTime: 0 }),
             listBlobs: vi.fn(async () => []),
-            listDocuments: vi.fn(async (tableName: string) =>
+            getDocuments: vi.fn(async (tableName: string) =>
               tableName === "_resolve_pending"
                 ? [
                     {
@@ -228,7 +235,7 @@ describe("createEmbeddedClient prefetch bootstrap", () => {
         name: "factory-pending-miss",
       },
       platform: {
-        openPersistence: vi.fn(async () =>
+        openStorage: vi.fn(async () =>
           mockAdapter({
             kind: "sql",
             listAll: async () => [],
@@ -236,7 +243,7 @@ describe("createEmbeddedClient prefetch bootstrap", () => {
             get: vi.fn(async () => null),
             meta: async () => ({ timestamp: 0, lastCreationTime: 0 }),
             listBlobs: vi.fn(async () => []),
-            listDocuments: vi.fn(async () => []),
+            getDocuments: vi.fn(async () => []),
             count: vi.fn(async () => 0),
             source: vi.fn(async () => []),
             query: vi.fn(async () => null),

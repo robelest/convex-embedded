@@ -103,19 +103,13 @@ describe("convex-embedded integration", () => {
     expect(result.seq).toBeTypeOf("number");
     expect(result.document).toBeDefined();
 
-    // 3. Seed a client Y.Doc from the returned full document
-    const clientDoc = initYjsDoc(
-      projects.schema,
-      result.document as Record<string, unknown>,
-    );
+    const document = result.document as Record<string, unknown>;
+    expect(document.name).toBe("Write tests");
 
-    // Verify the client doc has the expected data
-    // Register fields are stored as Y.Map<{value, timestamp}>
+    const clientDoc = initYjsDoc(projects.schema, document);
     const fields = clientDoc.getMap("fields");
-    expect(fields.get("name")).toBe("Write tests");
     expect(readRegister(fields, "status")).toBe("active");
 
-    // 4. Resolve again with the client's current state vector — should be up to date
     const clientVector = Y.encodeStateVector(clientDoc);
     const resolveResults2 = await t.query(api.projects.bind, {
       collectionSeq: null,
@@ -131,7 +125,6 @@ describe("convex-embedded integration", () => {
     expect(resolveResults2.documents).toHaveLength(1);
     const result2 = resolveResults2.documents[0]!;
     expect(result2.docId).toBe(projectId);
-    // Should be undefined (no diff) since client is up to date
     expect(result2.diff).toBeUndefined();
   });
 
@@ -174,15 +167,11 @@ describe("convex-embedded integration", () => {
     expect(result.docId).toBe(projectId);
     expect(result.document).toBeDefined();
 
-    // Apply the returned full document to a fresh client doc
-    const clientDoc = initYjsDoc(
-      projects.schema,
-      result.document as Record<string, unknown>,
-    );
+    const document = result.document as Record<string, unknown>;
+    expect(document.name).toBe("Original title");
 
-    // Verify updated values
+    const clientDoc = initYjsDoc(projects.schema, document);
     const fields = clientDoc.getMap("fields");
-    expect(fields.get("name")).toBe("Original title");
     expect(readRegister(fields, "status")).toBe("active");
 
     // Resolve again — client should now be up to date

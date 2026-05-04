@@ -18,10 +18,6 @@ import { materializeYjsDoc } from "@/shared/yjs";
 
 export { materializeYjsDoc };
 
-// ---------------------------------------------------------------------------
-// Prose helpers
-// ---------------------------------------------------------------------------
-
 /**
  * Extract plain text content from a Yjs document's prose field.
  * Returns the text content of the Y.XmlFragment.
@@ -55,13 +51,9 @@ export function extractProseText(doc: Y.Doc, fieldName: string): string {
  */
 export function createEmptyDoc(): Y.Doc {
   const doc = new Y.Doc();
-  doc.getMap("fields"); // Initialize the top-level map
+  doc.getMap("fields");
   return doc;
 }
-
-// ---------------------------------------------------------------------------
-// Register conflict helpers
-// ---------------------------------------------------------------------------
 
 /**
  * Check if a register field has a conflict (multiple concurrent values).
@@ -120,10 +112,6 @@ export function resolveRegister<T>(
   return conflict.latest();
 }
 
-// ---------------------------------------------------------------------------
-// Counter helpers
-// ---------------------------------------------------------------------------
-
 /**
  * Get the materialized value of a counter field (sum of all deltas).
  */
@@ -142,10 +130,6 @@ export function getCounterValue(doc: Y.Doc, fieldName: string): number {
   }
   return sum;
 }
-
-// ---------------------------------------------------------------------------
-// Set helpers
-// ---------------------------------------------------------------------------
 
 /**
  * Get all members of an add-wins set field.
@@ -166,10 +150,6 @@ export function getSetMembers<T = string>(doc: Y.Doc, fieldName: string): T[] {
   });
   return members;
 }
-
-// ---------------------------------------------------------------------------
-// State vector helpers
-// ---------------------------------------------------------------------------
 
 /**
  * Encode the state vector of a Y.Doc.
@@ -194,10 +174,6 @@ export function applyUpdate(doc: Y.Doc, update: Uint8Array): void {
 export function encodeState(doc: Y.Doc): Uint8Array {
   return Y.encodeStateAsUpdateV2(doc);
 }
-
-// ---------------------------------------------------------------------------
-// Export as namespace
-// ---------------------------------------------------------------------------
 
 export const clientSchema = {
   extractProseText,

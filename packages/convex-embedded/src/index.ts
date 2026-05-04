@@ -26,10 +26,6 @@
  * @packageDocumentation
  */
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
 export {
   EmbeddedRuntime,
   type EmbeddedRuntimeOptions,
@@ -60,23 +56,23 @@ export type {
 export { AuthResolver, getIdentityKey } from "@/auth";
 export type { UserIdentity } from "@/auth";
 
-// Public persistence API — class-based. The legacy `PersistenceAdapter`
-// interface + `kind` union previously re-exported from here is now internal
-// only; construct adapters via the class API below.
 export {
-  PersistenceAdapter,
-  OpaqueAdapter,
+  type StorageAdapter,
+  type QueryableAdapter,
+  isQueryable,
   SqliteAdapter,
-  type CommitBatch,
-  type DatabaseMeta,
-  type AtomicCommitOptions,
-  type AtomicCommitResult,
-} from "@/persistence";
+  type WriteBatch,
+  type StorageMetadata,
+  type WriteOptions,
+  type WriteResult,
+  type QueryArgs,
+  type VectorSearchArgs,
+} from "@/storage";
 
 export type {
   SqliteDriver,
   SqliteStatement,
-} from "@/persistence/sqlite/driver";
+} from "@/storage/sqlite/driver";
 
 export { SubscriptionManager } from "@/sync/subscriptions";
 
@@ -97,9 +93,13 @@ export {
   type EmbeddedClientOptions,
 } from "@/client/factory";
 
-// ---------------------------------------------------------------------------
-// Runtime and client factories
-// ---------------------------------------------------------------------------
+export { withSpan, withSpanSync, getTracer } from "@/tracing/spans";
+export { installInMemoryTracing } from "@/tracing/memory";
+export type {
+  BufferedSpan,
+  BufferingTracingHandle,
+  InMemoryTracingOptions,
+} from "@/tracing/memory";
 
 import {
   EmbeddedRuntime,

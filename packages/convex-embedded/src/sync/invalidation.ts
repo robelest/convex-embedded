@@ -42,6 +42,12 @@ export function dependencyOverlapsChanges(
       return true;
     }
 
+    if (dependency.type === "DocumentRead") {
+      return [before, after].some(
+        (doc) => doc !== null && doc._id === dependency.id,
+      );
+    }
+
     if (dependency.type === "IndexRange") {
       return [before, after].some(
         (doc) => doc !== null && matchesRangeExpressions(doc, dependency.range),

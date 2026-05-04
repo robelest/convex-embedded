@@ -17,7 +17,7 @@ beforeEach(() => {
 
   vi.doMock("@/browser/platform", () => ({
     createBrowserPlatformAdapter: vi.fn(() => ({
-      openPersistence: vi.fn(),
+      openStorage: vi.fn(),
     })),
     clearBrowserLocalData,
   }));

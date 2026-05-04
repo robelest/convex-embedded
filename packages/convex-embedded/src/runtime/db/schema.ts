@@ -7,10 +7,6 @@
 import type { JSONValue, Value } from "convex/values";
 import { convexToJson } from "convex/values";
 
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
-
 export type ObjectFieldType = {
   fieldType: ValidatorJSON;
   optional: boolean;
@@ -59,10 +55,6 @@ export type ParsedSchema = {
   schemaValidation: boolean;
   tables: Map<string, TableSchema>;
 };
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 /**
  * Look up the table name for a given document ID.
@@ -118,6 +110,41 @@ export function isValidIdentifier(name: string): boolean {
   return /(^_(id|creationTime)$)|^[a-zA-Z][a-zA-Z0-9_]*$/.test(name);
 }
 
+export type SqlColumnType = "TEXT" | "REAL" | "INTEGER" | "BLOB";
+
+export function validatorToSqlType(
+  validator: ValidatorJSON,
+): SqlColumnType | null {
+  switch (validator.type) {
+    case "string":
+    case "id":
+      return "TEXT";
+    case "number":
+      return "REAL";
+    case "bigint":
+      return "INTEGER";
+    case "boolean":
+      return "INTEGER";
+    case "bytes":
+      return "BLOB";
+    case "literal": {
+      const literal = validator.value;
+      if (typeof literal === "string") return "TEXT";
+      if (typeof literal === "number") return "REAL";
+      if (typeof literal === "boolean") return "INTEGER";
+      return null;
+    }
+    case "null":
+    case "any":
+    case "array":
+    case "object":
+    case "union":
+      return null;
+    default:
+      return null;
+  }
+}
+
 function validateFieldPath(fieldPath: string, errorPrefix: string): void {
   if (!fieldPath.includes(".") && !isValidIdentifier(fieldPath)) {
     throw new Error(
@@ -125,10 +152,6 @@ function validateFieldPath(fieldPath: string, errorPrefix: string): void {
     );
   }
 }
-
-// ---------------------------------------------------------------------------
-// Validation
-// ---------------------------------------------------------------------------
 
 /**
  * Validate a document value against a ValidatorJSON tree.
@@ -233,9 +256,7 @@ export function validateValidator(
           validateValidator(v, value, idLookup);
           isValid = true;
           break;
-        } catch {
-          // try next variant
-        }
+        } catch {}
       }
       if (!isValid) {
         throw new Error(

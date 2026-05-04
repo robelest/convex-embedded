@@ -7,9 +7,7 @@ export class PubSub<T> {
     for (const fn of this.subs) {
       try {
         fn(value);
-      } catch {
-        // Subscriber errors must not break other subscribers.
-      }
+      } catch {}
     }
   }
 

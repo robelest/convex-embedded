@@ -1,8 +1,7 @@
-import type { PersistenceAdapter } from "@/persistence/adapter";
+import type { StorageAdapter } from "@/storage/adapter";
 import type { EmbeddedCryptoProvider } from "@/runtime/crypto";
 import type { EmbeddedRuntime } from "@/runtime/embedded";
 import type { StorageSurface } from "@/runtime/storage";
-import type { EncryptionOptions } from "@/storage/encrypted";
 
 export type SessionEvent = { type: "authChanged" };
 
@@ -80,11 +79,10 @@ export interface ProcessorIdentity {
  */
 export interface EmbeddedPlatformAdapter {
   crypto?: EmbeddedCryptoProvider;
-  openPersistence(input: {
+  openStorage(input: {
     name: string;
     runtime: EmbeddedRuntime;
-    encryption?: Omit<EncryptionOptions, "getIdentityKey">;
-  }): Promise<PersistenceAdapter | null>;
+  }): Promise<StorageAdapter | null>;
   createSessionBroadcast?(input: { name: string }): SessionBroadcast;
   createWriteBroadcast?(input: { name: string }): WriteBroadcast;
   createStorageSurface?(input: {

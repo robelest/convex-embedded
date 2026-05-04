@@ -28,12 +28,7 @@ export function createExpoCryptoProvider(): EmbeddedCryptoProvider {
     },
     async sha256(data) {
       const input = data instanceof Uint8Array ? data : new Uint8Array(data);
-      return sha256(
-        input.buffer.slice(
-          input.byteOffset,
-          input.byteOffset + input.byteLength,
-        ) as ArrayBuffer,
-      );
+      return sha256(input);
     },
     async encryptAesGcm({ key, plaintext, nonce, additionalData }) {
       return gcm(asKeyBytes(key), nonce, additionalData).encrypt(plaintext);

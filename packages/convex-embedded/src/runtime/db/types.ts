@@ -6,10 +6,6 @@ import type { GenericId, JSONValue, Value } from "convex/values";
 /** Equivalent to `GenericDocument` from `convex/server`, defined locally to avoid pulling in `convex/server` in browser/expo bundles. */
 export type GenericDocument = Record<string, Value>;
 
-// ---------------------------------------------------------------------------
-// Document types
-// ---------------------------------------------------------------------------
-
 export type TableName = string;
 export type DocumentId = GenericId<TableName>;
 
@@ -17,10 +13,6 @@ export type StoredDocument = GenericDocument & {
   _id: DocumentId;
   _creationTime: number;
 };
-
-// ---------------------------------------------------------------------------
-// Query types
-// ---------------------------------------------------------------------------
 
 export type FilterJson =
   | { $eq: [FilterJson, FilterJson] }
@@ -102,6 +94,11 @@ export type QueryDependency =
       tableName: string;
     }
   | {
+      type: "DocumentRead";
+      tableName: string;
+      id: string;
+    }
+  | {
       type: "IndexRange";
       tableName: string;
       indexName: string;
@@ -121,10 +118,6 @@ export type QueryDependency =
       filter: VectorSearchExpression | null;
     };
 
-// ---------------------------------------------------------------------------
-// Index types
-// ---------------------------------------------------------------------------
-
 export type IndexInfo = {
   indexDescriptor: string;
   fields: string[];
@@ -137,18 +130,10 @@ export type VectorIndexInfo = {
   filterFields: string[];
 };
 
-// ---------------------------------------------------------------------------
-// Timestamp / MVCC
-// ---------------------------------------------------------------------------
-
 /**
  * Monotonic timestamp for MVCC versioning.
  * Increments on each committed mutation.
  */
 export type Timestamp = number;
 
-// ---------------------------------------------------------------------------
-// Bandwidth tracking
-// ---------------------------------------------------------------------------
-
-export const FUNCTION_MAX_BANDWIDTH_BYTES = 1 << 24; // 16 MiB
+export const FUNCTION_MAX_BANDWIDTH_BYTES = 1 << 24;

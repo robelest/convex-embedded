@@ -5,7 +5,7 @@ import schema from "../../convex/schema";
 import { DEMO_WORKSPACE_ID } from "../../convex/workspace";
 import { getEmbeddedClientEntry } from "../../packages/convex-embedded/src/client/entry";
 import { createConvexClient } from "../../packages/convex-embedded/src/node/index";
-import { openNodePersistence } from "../../packages/convex-embedded/src/node/sqlite/adapter";
+import { openNodeStorage } from "../../packages/convex-embedded/src/node/sqlite/adapter";
 import {
   createLiveModules,
   temporaryDatabasePath,
@@ -20,7 +20,7 @@ afterEach(async () => {
   }
 });
 
-describe("node platform persistence", () => {
+describe("node platform storage", () => {
   it("persists local runtime state across client restarts", async () => {
     const name = uniqueSuffix("node-persist");
     const databasePath = temporaryDatabasePath(name);
@@ -41,7 +41,7 @@ describe("node platform persistence", () => {
       workspaceId: DEMO_WORKSPACE_ID,
       name: `Node Persist ${name}`,
       identifier: name.slice(-6).toUpperCase(),
-      description: `Node persistence ${name}`,
+      description: `Node storage ${name}`,
     });
     const issueId = await firstClient.mutation(api.issues.create, {
       projectId,
@@ -115,12 +115,18 @@ describe("node platform persistence", () => {
       );
     }
     const hydratedProjects = await runtime.getDocumentsForTable("projects");
+    const userTableSpecs = runtime.getUserTableSpecs() ?? undefined;
     await secondClient.close();
     clientsToClose.length = 0;
 
-    const persistence = await openNodePersistence({ filename: databasePath });
-    const persistedProjects = await persistence.list("projects");
-    await persistence.close();
+    const storage = await openNodeStorage({
+      filename: databasePath,
+      userTableSpecs,
+    });
+    const persistedProjects = (await storage.getDocuments(
+      "projects",
+    )) as Array<Record<string, unknown>>;
+    await storage.close();
     expect(
       hydratedProjects
         .filter(

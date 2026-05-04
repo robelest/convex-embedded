@@ -24,10 +24,8 @@ export class TtlCache<K, V> {
   }
 
   set(key: K, value: V): void {
-    // Delete first so re-insertion moves key to end (Map insertion order)
     this.map.delete(key);
     if (this.map.size >= this.capacity) {
-      // Evict oldest (first inserted)
       const oldest = this.map.keys().next().value;
       if (oldest !== undefined) this.map.delete(oldest);
     }

@@ -22,10 +22,6 @@ export const CrdtType = {
  */
 export type CrdtType = (typeof CrdtType)[keyof typeof CrdtType];
 
-// ---------------------------------------------------------------------------
-// Conflict type — exposed to app code for custom resolvers on register fields
-// ---------------------------------------------------------------------------
-
 /**
  * Represents concurrent writes to a `schema.register()` field.
  * Passed to the custom `resolve` function when multiple clients
@@ -51,10 +47,6 @@ export interface ConflictEntry<T> {
   timestamp: number;
 }
 
-// ---------------------------------------------------------------------------
-// Engine status — used by the client-side engine state machine
-// ---------------------------------------------------------------------------
-
 /**
  * Snapshot of the local resolve engine state used by client UIs and devtools.
  */
@@ -76,10 +68,6 @@ export interface ResolveProgress {
   /** Total number of tables to resolve. */
   total: number;
 }
-
-// ---------------------------------------------------------------------------
-// Migration types
-// ---------------------------------------------------------------------------
 
 /**
  * Recovery instruction returned by a migration error handler.
@@ -113,10 +101,6 @@ export type MigrationErrorHandler = (
   error: Error,
   ctx: RecoveryContext,
 ) => Promise<RecoveryAction>;
-
-// ---------------------------------------------------------------------------
-// Schema definition types
-// ---------------------------------------------------------------------------
 
 /**
  * Minimal serializable schema descriptor used across runtime boundaries.
@@ -163,10 +147,6 @@ export interface FieldRef<
   /** Phantom type carrying the CRDT kind. */
   readonly __kind?: Kind;
 }
-
-// ---------------------------------------------------------------------------
-// Resolve / remote types — wire format between client and server
-// ---------------------------------------------------------------------------
 
 /**
  * Client-to-server resolve request.

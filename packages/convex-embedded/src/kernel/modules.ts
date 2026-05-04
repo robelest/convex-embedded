@@ -9,9 +9,9 @@
  * Also provides function handle creation/resolution for cross-component calls.
  */
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
+import { createLogger } from "@/shared/logger";
+
+const log = createLogger("loader");
 
 export type FunctionPath = {
   /** Component path (e.g. "" for root, "aggregate" for a child component). */
@@ -25,10 +25,6 @@ type FunctionAddress = {
   reference?: string;
   functionHandle?: string;
 };
-
-// ---------------------------------------------------------------------------
-// Global function-handle registry
-// ---------------------------------------------------------------------------
 
 const handleToPath = new Map<string, FunctionPath>();
 
@@ -50,8 +46,6 @@ export function getFunctionFromHandle(handle: string): FunctionPath {
   if (cached !== undefined) {
     return cached;
   }
-  // Parse the handle even if it wasn't created in this process (e.g. across
-  // serialisation boundaries).
   const payload = handle.split("function://")[1];
   if (payload === undefined) {
     throw new Error(`Invalid function handle: "${handle}"`);
@@ -64,10 +58,6 @@ export function getFunctionFromHandle(handle: string): FunctionPath {
   handleToPath.set(handle, path);
   return path;
 }
-
-// ---------------------------------------------------------------------------
-// resolveFunctionPath
-// ---------------------------------------------------------------------------
 
 /**
  * Resolve a function address (as emitted by the Convex runtime) into a
@@ -95,13 +85,11 @@ export function resolveFunctionPath(
 
   if (address.reference !== undefined) {
     const parts = address.reference.split("/");
-    // "_reference/childComponent/<componentName>/path/to/file/functionName"
     const childComponentName = parts[2];
     let componentPath = childComponentName ?? "";
     if (currentComponentPath.length > 0) {
       componentPath = `${currentComponentPath}/${componentPath}`;
     }
-    // Remaining segments form "path/to/file/functionName"
     const functionNameWithSlashes = parts.slice(3).join("/");
     const segments = functionNameWithSlashes.split("/");
     const functionName = segments.pop() ?? "default";
@@ -116,10 +104,6 @@ export function resolveFunctionPath(
     "Function address must have at least one of: name, reference, functionHandle",
   );
 }
-
-// ---------------------------------------------------------------------------
-// ModuleLoader
-// ---------------------------------------------------------------------------
 
 /**
  * Lazy module loader that resolves Convex UDF paths to their ES module exports.
@@ -188,8 +172,8 @@ export class ModuleLoader {
 
   constructor(modules: ConvexModuleRegistry) {
     this.modules = normalizeModuleRegistry(modules);
-    console.debug(
-      "[convex-embedded:loader] modules:",
+    log.debug(
+      "modules:",
       Object.keys(this.modules).filter((key) => !isGeneratedModuleId(key)),
     );
   }
@@ -214,16 +198,12 @@ export class ModuleLoader {
       );
     }
 
-    console.debug("[convex-embedded:loader] loading:", path);
+    log.debug("loading:", path);
     const loading = loader();
     this.loadedModules.set(path, loading);
     return loading;
   }
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 function normalizeModuleKey(key: string): string {
   let normalized = key;

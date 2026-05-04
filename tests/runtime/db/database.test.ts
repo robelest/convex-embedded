@@ -1,7 +1,6 @@
-import { OpaqueAdapter } from "@embedded/persistence/opaque/adapter";
 import { Database } from "@embedded/runtime/db/database";
 import type { ParsedSchema } from "@embedded/runtime/db/schema";
-import { mockAdapter } from "@tests/helpers/test-adapter";
+import { mockAdapter } from "@tests/helpers/adapter";
 import { describe, it, expect } from "@tests/testkit";
 import { vi } from "vitest";
 
@@ -171,6 +170,53 @@ describe("Database — CRUD", () => {
     expect(result).toBeNull();
     db.commit();
   });
+
+  it("strips identity scope markers from SQL-backed async reads", async () => {
+    const schema: ParsedSchema = {
+      schemaValidation: false,
+      tables: new Map([
+        [
+          "tasks",
+          {
+            indexes: [],
+            vectorIndexes: [],
+            searchIndexes: [],
+            documentType: { type: "any" },
+          },
+        ],
+      ]),
+    };
+    const scopedDoc = {
+      _id: "task-1" as any,
+      _creationTime: 1,
+      __identityKey: "user-1",
+      title: "private",
+    };
+    const db = new Database(
+      schema,
+      mockAdapter({
+        kind: "sql",
+        getDocument: async (_table, _id, opts) =>
+          opts?.activeIdentityKey === "user-1" ? scopedDoc : null,
+        getDocuments: async (_table, opts) =>
+          opts?.activeIdentityKey === "user-1" ? [scopedDoc] : [],
+      }),
+    );
+
+    db.setActiveIdentityKey("user-1");
+    const doc = await db.getAsync("tasks", "task-1" as any);
+    const docs = await db.listDocumentsAsync("tasks");
+
+    expect(doc).toEqual({
+      _id: "task-1",
+      _creationTime: 1,
+      title: "private",
+    });
+    expect(docs).toEqual([doc]);
+
+    db.setActiveIdentityKey("user-2");
+    await expect(db.getAsync("tasks", "task-1" as any)).resolves.toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -329,8 +375,8 @@ describe("Database — async read backend", () => {
     ];
     const readSource = vi.fn(async () => [docs[0]!, docs[2]!]);
     db.setReadBackendForTests({
-      readSource,
-      listDocuments: async () => docs,
+      source: readSource,
+      getDocuments: async () => docs,
       get: async () => null,
       count: async () => docs.length,
     });
@@ -373,9 +419,9 @@ describe("Database — async read backend", () => {
     ];
     const readQuery = vi.fn(async () => [docs[0]!]);
     db.setReadBackendForTests({
-      readQuery,
+      query: readQuery,
       source: async () => docs,
-      listDocuments: async () => docs,
+      getDocuments: async () => docs,
       get: async () => null,
       count: async () => docs.length,
     });
@@ -438,7 +484,7 @@ describe("Database — async read backend", () => {
       },
     ]);
     vectorDb.setReadBackendForTests({
-      readVectorCandidates,
+      vectorSearch: readVectorCandidates,
     });
     vectorDb.setStorage(
       mockAdapter({
@@ -449,10 +495,10 @@ describe("Database — async read backend", () => {
         listBlobs: async () => [],
         get: async () => null,
         count: async () => 0,
-        listDocuments: async () => [],
+        getDocuments: async () => [],
         source: async () => [],
         query: async () => [],
-        readVectorCandidates,
+        vectorSearch: readVectorCandidates,
         commit: async () => undefined,
         putBlob: async () => undefined,
         deleteBlob: async () => undefined,
@@ -523,7 +569,7 @@ describe("Database — committed indexes", () => {
 });
 
 describe("Database — sql committed state authority", () => {
-  it("does not materialize cold sql-backed user tables on outer commit", async () => {
+  it("mirrors writes into the in-memory snapshot for sql-backed user tables on outer commit", async () => {
     const applyCommitSpy = vi.fn(async (batch) => ({
       meta: batch.meta,
       tables: [],
@@ -538,7 +584,7 @@ describe("Database — sql committed state authority", () => {
         listBlobs: async () => [],
         get: async () => null,
         count: async () => 0,
-        listDocuments: async () => [],
+        getDocuments: async () => [],
         source: async () => [],
         query: async () => [],
         commit: async () => undefined,
@@ -550,21 +596,22 @@ describe("Database — sql committed state authority", () => {
     );
 
     db.startTransaction();
-    db.insert("tasks", { title: "persisted" });
+    const insertedId = db.insert("tasks", { title: "persisted" });
     const commit = await db.commitAsync();
 
     expect(commit.tablesWritten.has("tasks")).toBe(true);
-    expect(commit.invalidation).toEqual({
-      tables: new Set(["tasks"]),
-      changes: [],
-    });
-    expect(db.hasDocumentsForTable("tasks")).toBe(false);
+    expect(commit.invalidation.tables).toEqual(new Set(["tasks"]));
+    expect(commit.invalidation.changes).toHaveLength(1);
+    expect(commit.invalidation.changes[0]?.tableName).toBe("tasks");
+    expect(commit.invalidation.changes[0]?.before).toBeNull();
+    expect(commit.invalidation.changes[0]?.after?._id).toBe(insertedId);
+    expect(db.hasDocumentsForTable("tasks")).toBe(true);
 
     await commit.persisted;
     expect(applyCommitSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("reports coarse deletes for cold sql-backed tables without materializing them", async () => {
+  it("reports precise deletes for sql-backed tables and removes the in-memory row", async () => {
     const applyCommitSpy = vi.fn(async (batch) => ({
       meta: batch.meta,
       tables: [],
@@ -579,7 +626,7 @@ describe("Database — sql committed state authority", () => {
         listBlobs: async () => [],
         get: async () => null,
         count: async () => 0,
-        listDocuments: async () => [],
+        getDocuments: async () => [],
         source: async () => [],
         query: async () => [],
         commit: async () => undefined,
@@ -598,16 +645,16 @@ describe("Database — sql committed state authority", () => {
     const commit = await db.commitAsync();
 
     expect(commit.tablesWritten.has("tasks")).toBe(true);
-    expect(commit.invalidation).toEqual({
-      tables: new Set(["tasks"]),
-      changes: [],
-    });
+    expect(commit.invalidation.tables).toEqual(new Set(["tasks"]));
+    expect(commit.invalidation.changes).toHaveLength(1);
+    expect(commit.invalidation.changes[0]?.tableName).toBe("tasks");
+    expect(commit.invalidation.changes[0]?.after).toBeNull();
 
     await commit.persisted;
     expect(applyCommitSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("preserves the transaction until an outer sql commit succeeds", async () => {
+  it("commits to memory immediately and surfaces sql write failures via persisted", async () => {
     const db = createDb();
     db.setStorage(
       mockAdapter({
@@ -633,15 +680,15 @@ describe("Database — sql committed state authority", () => {
     db.startTransaction();
     db.insert("tasks", { title: "pending" });
 
-    await expect(db.commitAsync()).rejects.toThrow("sql write failed");
-    expect(() => db.rollbackWrites()).not.toThrow();
-    expect(db.timestamp).toBe(0);
+    const result = await db.commitAsync();
+    expect(db.timestamp).toBe(1);
+    await expect(result.persisted).rejects.toThrow("sql write failed");
   });
 });
 
 describe("Database — hydrate", () => {
   it("replaces existing in-memory state on full hydration", async () => {
-    const storage = new OpaqueAdapter();
+    const storage = mockAdapter();
     const db = createDb();
 
     db.startTransaction();
@@ -668,7 +715,7 @@ describe("Database — hydrate", () => {
   });
 
   it("replaces only the requested tables on scoped hydration", async () => {
-    const storage = new OpaqueAdapter();
+    const storage = mockAdapter();
     const db = createDb();
 
     db.startTransaction();
@@ -704,8 +751,8 @@ describe("Database — hydrate", () => {
 
   it("clears cached blobs when the storage adapter is replaced", async () => {
     const storageId = "blob-1";
-    const storage1 = new OpaqueAdapter();
-    const storage2 = new OpaqueAdapter();
+    const storage1 = mockAdapter();
+    const storage2 = mockAdapter();
     const fileDoc = { _id: storageId as any, _creationTime: 1 };
 
     await storage1.commit({

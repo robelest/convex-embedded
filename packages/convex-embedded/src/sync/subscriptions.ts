@@ -1,7 +1,6 @@
-import { convexToJson } from "convex/values";
-
 import { evaluateFieldPath, evaluateValue } from "@/runtime/db/query";
 import type { QueryDependency, StoredDocument } from "@/runtime/db/types";
+import { stableValueKey } from "@/shared/valuekey";
 import { dependencyOverlapsChanges } from "@/sync/invalidation";
 
 type ProtocolChangeLike = {
@@ -9,10 +8,6 @@ type ProtocolChangeLike = {
   before: StoredDocument | null;
   after: StoredDocument | null;
 };
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
 
 interface Subscription {
   tables: Set<string>;
@@ -25,12 +20,6 @@ type IndexRangeEqDependency = {
   fieldPath: string;
   valueKey: string;
 };
-
-function toValueKey(value: unknown): string {
-  return value === undefined
-    ? JSON.stringify({ $undefined: true })
-    : JSON.stringify(convexToJson(value as never));
-}
 
 function hasPreciseChange(change: ProtocolChangeLike): boolean {
   return change.before !== null || change.after !== null;
@@ -49,14 +38,10 @@ function getIndexRangeEqDependencies(
       .map((filter) => ({
         tableName: dependency.tableName,
         fieldPath: filter.fieldPath,
-        valueKey: toValueKey(evaluateValue(filter.value)),
+        valueKey: stableValueKey(evaluateValue(filter.value)),
       }));
   });
 }
-
-// ---------------------------------------------------------------------------
-// SubscriptionManager
-// ---------------------------------------------------------------------------
 
 /**
  * Manages reactive query invalidation.
@@ -189,6 +174,7 @@ export class SubscriptionManager {
     const { candidateTokens, changes, tablesWritten } =
       this._collectRelevantSubscriptions(changesOrTables);
 
+    let fired = 0;
     for (const token of candidateTokens) {
       const sub = this._subscriptions.get(token);
       if (!sub) {
@@ -203,7 +189,14 @@ export class SubscriptionManager {
 
       if (overlaps) {
         sub.callback();
+        fired += 1;
       }
+    }
+    if (fired > 0) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[invalidate] tables=${[...tablesWritten].join(",")} candidates=${candidateTokens.size} fired=${fired}`,
+      );
     }
   }
 
@@ -279,7 +272,7 @@ export class SubscriptionManager {
         for (const [fieldPath, valueMap] of fieldMap) {
           const values = [change.before, change.after]
             .filter((doc): doc is StoredDocument => doc !== null)
-            .map((doc) => toValueKey(evaluateFieldPath(fieldPath, doc)));
+            .map((doc) => stableValueKey(evaluateFieldPath(fieldPath, doc)));
           for (const valueKey of values) {
             for (const token of valueMap.get(valueKey) ?? []) {
               candidateTokens.add(token);

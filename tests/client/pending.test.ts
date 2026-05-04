@@ -1,6 +1,6 @@
 import {
   PendingQueue,
-  PendingQueuePersistenceError,
+  PendingQueueStorageError,
 } from "@resolve/client/pending";
 import { migratePendingEntries } from "@resolve/runtime/migrations/pending";
 import { describe, it, expect, beforeEach } from "@tests/testkit";
@@ -160,12 +160,12 @@ describe("push()", () => {
     expect(queue.peek()!.args).toBe(JSON.stringify({ title: "first" }));
   });
 
-  it("surfaces persistence failure while still keeping an ephemeral entry", async () => {
+  it("surfaces storage failure while still keeping an ephemeral entry", async () => {
     mockClient.mutation.mockRejectedValue(new Error("write failed"));
 
     await expect(
       queue.push("tasks:create", { title: "test" }, "uuid-1", "tasks"),
-    ).rejects.toBeInstanceOf(PendingQueuePersistenceError);
+    ).rejects.toBeInstanceOf(PendingQueueStorageError);
 
     expect(queue.length).toBe(1);
 
@@ -322,7 +322,7 @@ describe("remove()", () => {
 
     await expect(
       queue.push("tasks:create", { title: "test" }, "uuid-1", "tasks"),
-    ).rejects.toBeInstanceOf(PendingQueuePersistenceError);
+    ).rejects.toBeInstanceOf(PendingQueueStorageError);
     expect(queue.peek()!._id).toMatch(/^ephemeral_/);
 
     mockClient.mutation.mockClear();
@@ -392,7 +392,7 @@ describe("claimNext() / renewLease() / release()", () => {
     expect(entry?.leaseExpiresAt).toBe(123);
   });
 
-  it("does not claim a stale in-memory entry when persistence returns null", async () => {
+  it("does not claim a stale in-memory entry when storage returns null", async () => {
     mockClient.query
       .mockResolvedValueOnce([
         {

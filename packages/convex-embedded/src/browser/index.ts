@@ -13,7 +13,7 @@
  *   modules (from the lazy ESM registry) contain non-cloneable `Function`
  *   and `Proxy` objects that cannot cross a `postMessage` boundary.
  *
- * - **SQLite via OPFS** runs in a **Dedicated Worker** for persistence.
+ * - **SQLite via OPFS** runs in a **Dedicated Worker** for durable storage.
  *   Only plain JSON data (documents, metadata) and `ArrayBuffer`s
  *   (blobs) cross the worker boundary.
  *
@@ -70,14 +70,8 @@ import { createEmbeddedClient } from "@/client/factory";
 import type { Prefetch } from "@/client/prefetch";
 import { type RemoteOptions, type RemoteState } from "@/client/remote";
 import { type ConvexInput } from "@/kernel/modules";
-import type { EncryptionOptions } from "@/storage/encrypted";
 
 export type { ConvexInput } from "@/kernel/modules";
-export type { EncryptionOptions } from "@/storage/encrypted";
-
-// ---------------------------------------------------------------------------
-// Public interfaces & types
-// ---------------------------------------------------------------------------
 
 /**
  * Auth and remote sync types re-exported for convenience from the browser
@@ -103,7 +97,7 @@ export type { AuthOptions, AuthState, RemoteOptions, RemoteState };
  * function definitions and — when remote is enabled — `remote metadata`
  * constants exported by `register()`.
  *
- * **Persistence**: By default, documents are persisted to OPFS
+ * **Storage**: By default, documents are persisted to OPFS
  * via a dedicated sqlite worker. Tabs sharing the same `name` share the same
  * data and receive cross-tab updates via `BroadcastChannel`.
  *
@@ -260,10 +254,6 @@ export interface ClientOptions {
  *
  * @category Type
  */
-// ---------------------------------------------------------------------------
-// Factory
-// ---------------------------------------------------------------------------
-
 /**
  * Create a `ConvexClient` backed by the local embedded Convex runtime.
  *
@@ -274,7 +264,7 @@ export interface ClientOptions {
  * @remarks
  * **How it works**: The factory creates an embedded runtime on the
  * main thread, connects it to a `ConvexClient` via a loopback WebSocket
- * transport, and initialises browser sqlite persistence in a Dedicated Worker.
+ * transport, and initialises browser sqlite storage in a Dedicated Worker.
  * From the outside, the returned client behaves identically to a normal
  * `ConvexClient` connected to a remote deployment.
  *
@@ -422,7 +412,5 @@ function ensureConvexAllowFunctionsInBrowser(): void {
       writable: true,
       configurable: true,
     });
-  } catch {
-    // Best effort only: this flag only suppresses Convex's browser import guard.
-  }
+  } catch {}
 }

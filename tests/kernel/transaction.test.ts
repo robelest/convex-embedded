@@ -139,6 +139,7 @@ describe("OccConflictError", () => {
 
 function createMockDb() {
   return {
+    timestamp: 0,
     startTransaction: vi.fn(),
     commit: vi.fn(),
     commitAsync: vi.fn(async () => undefined),

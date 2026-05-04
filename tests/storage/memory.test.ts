@@ -1,9 +1,6 @@
-import { OpaqueAdapter } from "@embedded/persistence/opaque/adapter";
 import type { StoredDocument } from "@embedded/runtime/db/types";
-import type {
-  PersistenceAdapter,
-  CommitBatch,
-} from "@embedded/storage/adapter";
+import type { WriteBatch } from "@embedded/storage/adapter";
+import { OpaqueTestAdapter } from "@tests/helpers/adapter";
 import { describe, it, expect, beforeEach } from "@tests/testkit";
 
 // ---------------------------------------------------------------------------
@@ -33,7 +30,7 @@ function batch(
   puts: Array<{ doc: StoredDocument; tableName: string }> = [],
   deletes: Array<string | { id: string; tableName: string }> = [],
   meta = { timestamp: 1, lastCreationTime: 1000 },
-): CommitBatch {
+): WriteBatch {
   return {
     puts,
     deletes: deletes.map((entry) =>
@@ -48,10 +45,10 @@ function batch(
 // ---------------------------------------------------------------------------
 
 describe("ephemeralStorage", () => {
-  let storage: PersistenceAdapter;
+  let storage: OpaqueTestAdapter;
 
   beforeEach(() => {
-    storage = new OpaqueAdapter();
+    storage = new OpaqueTestAdapter();
   });
 
   // -- Hydration (empty state) --------------------------------------------

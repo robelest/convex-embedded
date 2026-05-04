@@ -1,6 +1,7 @@
 import type { ConvexClient } from "convex/browser";
 import { ConvexError } from "convex/values";
 
+import type { CachedEntry, EmbeddedQueryCache } from "@/client/cache";
 import {
   assertRemotePlanOnline,
   type MutationPlan,
@@ -11,6 +12,11 @@ import {
   isConnectivityOffline,
   type ConnectivityAdapter,
 } from "@/runtime/platform";
+import type { QueryCacheStorage } from "@/runtime/sqlite/cache_table";
+import { structuralEqual } from "@/shared/equals";
+import { nowMs } from "@/shared/perf";
+import { stableValueKey } from "@/shared/valuekey";
+import { withSpanSync } from "@/tracing/spans";
 
 function createNoopUnsubscribe(): any {
   const noop = (() => {}) as any;
@@ -27,6 +33,45 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
   const prototype = Object.getPrototypeOf(value);
   return prototype === null || prototype === Object.prototype;
+}
+
+function wouldShrinkRemoteResult(
+  previous: unknown,
+  next: unknown,
+): boolean {
+  if (Array.isArray(previous) && Array.isArray(next)) {
+    return next.length < previous.length;
+  }
+  if (isPlainObject(previous) && isPlainObject(next)) {
+    if (Array.isArray(previous.page) && Array.isArray(next.page)) {
+      return next.page.length < previous.page.length;
+    }
+  }
+  return false;
+}
+
+function collectDocs(
+  value: unknown,
+  out: Array<Record<string, unknown>>,
+  depth = 0,
+): void {
+  if (depth > 4) return;
+  if (Array.isArray(value)) {
+    for (const item of value) collectDocs(item, out, depth + 1);
+    return;
+  }
+  if (!isPlainObject(value)) return;
+  if (typeof value._id === "string") {
+    const creationTime =
+      typeof value._creationTime === "number" ? value._creationTime : 0;
+    out.push({ ...value, _creationTime: creationTime });
+    return;
+  }
+  for (const child of Object.values(value)) {
+    if (Array.isArray(child) || isPlainObject(child)) {
+      collectDocs(child, out, depth + 1);
+    }
+  }
 }
 
 function getStringId(value: unknown): string | null {
@@ -71,8 +116,6 @@ function dedupeTranslatedArray(
       continue;
     }
 
-    // Only collapse duplicates introduced by translation. If the raw result
-    // already exposed the same _id multiple times, preserve that behavior.
     if (group.rawIds.size <= 1 && group.translatedIds.size === 1) {
       continue;
     }
@@ -120,6 +163,584 @@ function normalizeClientResult(
 function toClientResult<T>(value: T, translate?: <U>(value: U) => U): T {
   const translated = translate?.(value) ?? value;
   return normalizeClientResult(value, translated) as T;
+}
+
+function isSystemRefName(refName: string): boolean {
+  return refName.startsWith("_system:");
+}
+
+function safeJsonStringify(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return JSON.stringify(null);
+  }
+}
+
+function safeJsonParse(text: string): unknown {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+}
+
+interface CachePipelineConfig {
+  cache: EmbeddedQueryCache;
+  getCacheStorage: () => QueryCacheStorage | null;
+  remoteClient: ConvexClient | null;
+  connectivity?: ConnectivityAdapter;
+  asError: (error: unknown) => Error;
+  runtime: EmbeddedRuntime;
+  translateLocalArgsToRuntime?: (
+    args: Record<string, unknown>,
+  ) => Record<string, unknown>;
+}
+
+interface ActiveSubscription {
+  refName: string;
+  args: unknown;
+  argsKey: string;
+  listeners: Set<(value: unknown) => void>;
+  errorListeners: Set<(error: Error) => void>;
+  currentValue: unknown;
+  hasValue: boolean;
+  remoteUnsubscribe: (() => void) | null;
+  storageLoadPromise: Promise<void> | null;
+  localUnsubscribe: (() => void) | null;
+}
+
+class CachePipeline {
+  private readonly active = new Map<string, ActiveSubscription>();
+  private readonly removeOnlineListener: (() => void) | null;
+
+  constructor(private readonly config: CachePipelineConfig) {
+    const connectivity = config.connectivity;
+    this.removeOnlineListener =
+      connectivity?.onOnline?.(() => {
+        this.openDeferredSubscriptions();
+      }) ?? null;
+  }
+
+  private openDeferredSubscriptions(): void {
+    if (!this.config.remoteClient) return;
+    if (isConnectivityOffline(this.config.connectivity)) return;
+    for (const entry of this.active.values()) {
+      if (entry.remoteUnsubscribe === null) {
+        this.openRemoteSubscription(entry);
+      }
+    }
+  }
+
+  getCurrentValue(refName: string, args: unknown): unknown {
+    const argsKey = `${refName} ${stableValueKey(args)}`;
+    const existing = this.active.get(argsKey);
+    if (existing && existing.hasValue) {
+      return existing.currentValue;
+    }
+    const cached = this.config.cache.get(refName, args);
+    return cached?.value;
+  }
+
+  subscribe(input: {
+    refName: string;
+    args: unknown;
+    onValue: (value: unknown) => void;
+    onError?: (error: Error) => void;
+  }): () => void {
+    const { refName, args } = input;
+    const argsKey = `${refName} ${stableValueKey(args)}`;
+    let entry = this.active.get(argsKey);
+    if (!entry) {
+      entry = {
+        refName,
+        args,
+        argsKey,
+        listeners: new Set(),
+        errorListeners: new Set(),
+        currentValue: undefined,
+        hasValue: false,
+        remoteUnsubscribe: null,
+        storageLoadPromise: null,
+        localUnsubscribe: null,
+      };
+      this.active.set(argsKey, entry);
+      this.bootstrapEntry(entry);
+    }
+
+    entry.listeners.add(input.onValue);
+    if (input.onError) {
+      entry.errorListeners.add(input.onError);
+    }
+    if (entry.listeners.size > 1) {
+      // eslint-disable-next-line no-console
+      console.log(
+        `[subscribe] ${entry.refName} listeners=${entry.listeners.size} stack:\n${new Error().stack?.split("\n").slice(2, 12).join("\n")}`,
+      );
+    }
+
+    if (entry.hasValue) {
+      try {
+        input.onValue(entry.currentValue);
+      } catch {
+        /* listener error */
+      }
+    }
+
+    return () => {
+      const current = this.active.get(argsKey);
+      if (!current) return;
+      current.listeners.delete(input.onValue);
+      if (input.onError) {
+        current.errorListeners.delete(input.onError);
+      }
+      if (current.listeners.size === 0 && current.errorListeners.size === 0) {
+        if (current.remoteUnsubscribe) {
+          try {
+            current.remoteUnsubscribe();
+          } catch {
+            /* ignore */
+          }
+          current.remoteUnsubscribe = null;
+        }
+        if (current.localUnsubscribe) {
+          try {
+            current.localUnsubscribe();
+          } catch {
+            /* ignore */
+          }
+          current.localUnsubscribe = null;
+        }
+        this.active.delete(argsKey);
+      }
+    };
+  }
+
+  private bootstrapEntry(entry: ActiveSubscription): void {
+    const cached = this.config.cache.get(entry.refName, entry.args);
+    if (cached) {
+      entry.currentValue = cached.value;
+      entry.hasValue = true;
+    } else if (this.config.getCacheStorage()) {
+      entry.storageLoadPromise = this.loadFromStorage(entry).catch(() => {
+        /* swallow */
+      });
+    }
+
+    if (
+      this.config.remoteClient &&
+      !isConnectivityOffline(this.config.connectivity)
+    ) {
+      this.openRemoteSubscription(entry);
+    }
+
+    this.openLocalWatch(entry);
+  }
+
+  private openLocalWatch(entry: ActiveSubscription): void {
+    const runtime = this.config.runtime;
+    if (!runtime || typeof runtime.watchLocalQuery !== "function") return;
+    const translatedArgs =
+      this.config.translateLocalArgsToRuntime?.(
+        entry.args as Record<string, unknown>,
+      ) ?? (entry.args as Record<string, unknown>);
+
+    let watch: any;
+    try {
+      watch = runtime.watchLocalQuery(entry.refName, translatedArgs);
+    } catch {
+      return;
+    }
+
+    const handleLocal = () => {
+      if (!this.active.has(entry.argsKey)) return;
+      withSpanSync(
+        "convex-embedded.cache.localUpdate",
+        (span) => {
+          const startedAt = nowMs();
+          let result: unknown;
+          try {
+            result = watch.localQueryResult();
+          } catch {
+            span.setAttributes({ "convex.cache.skip": "throw" });
+            return;
+          }
+          if (result === undefined) {
+            span.setAttributes({ "convex.cache.skip": "undefined" });
+            return;
+          }
+          const previous = this.config.cache.get(entry.refName, entry.args);
+          if (
+            previous !== undefined &&
+            wouldShrinkRemoteResult(previous.value, result)
+          ) {
+            span.setAttributes({ "convex.cache.skip": "shrink" });
+            return;
+          }
+          const nextEntry: CachedEntry = {
+            value: result,
+            receivedAtMs: Date.now(),
+            ts: previous?.ts,
+            paginationCursor: previous?.paginationCursor,
+            paginationIsDone: previous?.paginationIsDone,
+          };
+          const changed = this.config.cache.set(
+            entry.refName,
+            entry.args,
+            nextEntry,
+          );
+          const valueChanged =
+            !entry.hasValue || !structuralEqual(entry.currentValue, result);
+          entry.currentValue = result;
+          entry.hasValue = true;
+          if (changed) {
+            void this.persistEntry(entry, nextEntry);
+          }
+          span.setAttributes({
+            "convex.cache.ref": entry.refName,
+            "convex.cache.value_changed": valueChanged,
+            "convex.cache.eval_ms": +(nowMs() - startedAt).toFixed(2),
+          });
+          if (valueChanged) {
+            this.notifyListeners(entry);
+          }
+        },
+      );
+    };
+
+    let unsubscribe: (() => void) | null = null;
+    try {
+      const result = watch.onUpdate(handleLocal) as any;
+      if (typeof result === "function") {
+        unsubscribe = result;
+      } else if (result && typeof result.unsubscribe === "function") {
+        unsubscribe = () => result.unsubscribe();
+      }
+    } catch {
+      return;
+    }
+    entry.localUnsubscribe = unsubscribe;
+    handleLocal();
+  }
+
+
+  private async loadFromStorage(entry: ActiveSubscription): Promise<void> {
+    const storage = this.config.getCacheStorage();
+    if (!storage) return;
+    const argsHash = stableValueKey(entry.args);
+    let row;
+    try {
+      row = await storage.load(entry.refName, argsHash);
+    } catch {
+      return;
+    }
+    if (!row) return;
+    if (entry.hasValue) return;
+    if (!this.active.has(entry.argsKey)) return;
+    const value = safeJsonParse(row.valueJson);
+    const cacheEntry: CachedEntry = {
+      value,
+      receivedAtMs: row.receivedAt,
+      ts: row.ts ?? undefined,
+      paginationCursor: row.paginationCursor ?? undefined,
+      paginationIsDone:
+        row.paginationIsDone === null
+          ? undefined
+          : row.paginationIsDone === 1,
+    };
+    this.config.cache.set(entry.refName, entry.args, cacheEntry);
+    entry.currentValue = value;
+    entry.hasValue = true;
+    this.notifyListeners(entry);
+  }
+
+  private openRemoteSubscription(entry: ActiveSubscription): void {
+    const remoteClient = this.config.remoteClient;
+    if (!remoteClient) return;
+    const onUpdate = (remoteClient as any).onUpdate as
+      | ((
+          ref: unknown,
+          args: unknown,
+          callback: (value: unknown) => void,
+          onError?: (error: Error) => void,
+        ) => unknown)
+      | undefined;
+    if (typeof onUpdate !== "function") return;
+
+    const handlePush = (value: unknown) => {
+      if (!this.active.has(entry.argsKey)) return;
+      const previous = this.config.cache.get(entry.refName, entry.args);
+      const nextEntry: CachedEntry = {
+        value,
+        receivedAtMs: Date.now(),
+        ts: previous?.ts,
+        paginationCursor: previous?.paginationCursor,
+        paginationIsDone: previous?.paginationIsDone,
+      };
+      const changed = this.config.cache.set(
+        entry.refName,
+        entry.args,
+        nextEntry,
+      );
+      const valueChanged =
+        !entry.hasValue || !structuralEqual(entry.currentValue, value);
+      entry.currentValue = value;
+      entry.hasValue = true;
+      if (changed) {
+        void this.persistEntry(entry, nextEntry);
+      }
+      this.extractDocsToStore(entry.refName, value);
+      if (valueChanged) {
+        this.notifyListeners(entry);
+      }
+    };
+
+    const handleError = (error: Error) => {
+      const normalized = this.config.asError(error);
+      for (const listener of entry.errorListeners) {
+        try {
+          listener(normalized);
+        } catch {
+          /* listener error */
+        }
+      }
+    };
+
+    let unsubscribe: (() => void) | null = null;
+    try {
+      const result = onUpdate.call(
+        remoteClient,
+        entry.refName as unknown,
+        entry.args,
+        handlePush,
+        handleError,
+      ) as any;
+      if (typeof result === "function") {
+        unsubscribe = result;
+      } else if (result && typeof result.unsubscribe === "function") {
+        unsubscribe = () => result.unsubscribe();
+      }
+    } catch (error) {
+      handleError(this.config.asError(error));
+      return;
+    }
+    entry.remoteUnsubscribe = unsubscribe;
+  }
+
+  private extractDocsToStore(refName: string, value: unknown): void {
+    const tableName = refName.split(":")[0];
+    if (!tableName || tableName.startsWith("_")) return;
+    const docs: Array<Record<string, unknown>> = [];
+    collectDocs(value, docs);
+    if (docs.length === 0) return;
+    const runtime = this.config.runtime;
+    if (!runtime || typeof runtime.upsertDocsFromCache !== "function") return;
+    void runtime.upsertDocsFromCache(tableName, docs).catch(() => {
+      /* swallow extraction errors */
+    });
+  }
+
+  private async persistEntry(
+    entry: ActiveSubscription,
+    cacheEntry: CachedEntry,
+  ): Promise<void> {
+    const storage = this.config.getCacheStorage();
+    if (!storage) return;
+    const argsHash = stableValueKey(entry.args);
+    try {
+      await storage.upsert({
+        refName: entry.refName,
+        argsHash,
+        argsJson: safeJsonStringify(entry.args),
+        valueJson: safeJsonStringify(cacheEntry.value),
+        receivedAt: cacheEntry.receivedAtMs,
+        ts: cacheEntry.ts ?? null,
+        paginationCursor: cacheEntry.paginationCursor ?? null,
+        paginationIsDone:
+          cacheEntry.paginationIsDone === undefined
+            ? null
+            : cacheEntry.paginationIsDone
+              ? 1
+              : 0,
+      });
+    } catch {
+      /* swallow */
+    }
+  }
+
+  private notifyListeners(entry: ActiveSubscription): void {
+    if (entry.listeners.size === 0) return;
+    // eslint-disable-next-line no-console
+    console.log(
+      `[notify] ${entry.refName} listeners=${entry.listeners.size}`,
+    );
+    withSpanSync(
+      "convex-embedded.cache.notifyListeners",
+      (span) => {
+        const startedAt = nowMs();
+        let count = 0;
+        for (const listener of entry.listeners) {
+          try {
+            listener(entry.currentValue);
+            count += 1;
+          } catch {
+            /* listener error */
+          }
+        }
+        span.setAttributes({
+          "convex.cache.ref": entry.refName,
+          "convex.cache.listeners": count,
+          "convex.cache.notify_ms": +(nowMs() - startedAt).toFixed(2),
+        });
+      },
+    );
+  }
+}
+
+function createCacheOnUpdate(input: {
+  pipeline: CachePipeline;
+  getRefName: (ref: unknown) => string;
+  asError: (error: unknown) => Error;
+  translateLocalResultToClient?: <T>(value: T) => T;
+}) {
+  return (
+    ref: unknown,
+    args: Record<string, unknown>,
+    callback: (result: unknown, meta?: unknown) => unknown,
+    onError?: (error: Error, meta?: unknown) => unknown,
+  ) => {
+    const refName = input.getRefName(ref);
+
+    const fireValue = (raw: unknown) => {
+      try {
+        const translated = toClientResult(
+          raw,
+          input.translateLocalResultToClient,
+        );
+        callback(
+          translated,
+          "Second argument to onUpdate callback is reserved for later use",
+        );
+      } catch (error) {
+        const normalized = input.asError(error);
+        if (onError) {
+          onError(
+            normalized,
+            "Second argument to onUpdate onError is reserved for later use",
+          );
+        } else {
+          void Promise.reject(normalized);
+        }
+      }
+    };
+
+    const fireError = (error: Error) => {
+      const normalized = input.asError(error);
+      if (onError) {
+        onError(
+          normalized,
+          "Second argument to onUpdate onError is reserved for later use",
+        );
+      } else {
+        void Promise.reject(normalized);
+      }
+    };
+
+    const unsubscribe = input.pipeline.subscribe({
+      refName,
+      args: args ?? {},
+      onValue: fireValue,
+      onError: fireError,
+    }) as any;
+
+    unsubscribe.unsubscribe = unsubscribe;
+    unsubscribe.getCurrentValue = () => {
+      const raw = input.pipeline.getCurrentValue(refName, args ?? {});
+      if (raw === undefined) return undefined;
+      return toClientResult(raw, input.translateLocalResultToClient);
+    };
+    unsubscribe.getQueryLogs = () => undefined;
+    return unsubscribe;
+  };
+}
+
+function createCachePaginatedOnUpdate(input: {
+  pipeline: CachePipeline;
+  getRefName: (ref: unknown) => string;
+  asError: (error: unknown) => Error;
+  translateLocalResultToClient?: <T>(value: T) => T;
+}) {
+  return (
+    ref: unknown,
+    args: Record<string, unknown>,
+    options: { initialNumItems: number },
+    callback: (result: unknown, meta?: unknown) => unknown,
+    onError?: (error: Error, meta?: unknown) => unknown,
+  ) => {
+    const refName = input.getRefName(ref);
+
+    const baseArgs: Record<string, unknown> = {
+      ...(args ?? {}),
+      paginationOpts: {
+        cursor: null,
+        numItems: options.initialNumItems,
+        ...(isPlainObject((args ?? {}).paginationOpts)
+          ? ((args ?? {}).paginationOpts as Record<string, unknown>)
+          : {}),
+      },
+    };
+
+    const fireValue = (raw: unknown) => {
+      try {
+        const translated = toClientResult(
+          raw,
+          input.translateLocalResultToClient,
+        );
+        callback(
+          translated,
+          "Second argument to onUpdate callback is reserved for later use",
+        );
+      } catch (error) {
+        const normalized = input.asError(error);
+        if (onError) {
+          onError(
+            normalized,
+            "Second argument to onUpdate onError is reserved for later use",
+          );
+        } else {
+          void Promise.reject(normalized);
+        }
+      }
+    };
+
+    const fireError = (error: Error) => {
+      const normalized = input.asError(error);
+      if (onError) {
+        onError(
+          normalized,
+          "Second argument to onUpdate onError is reserved for later use",
+        );
+      } else {
+        void Promise.reject(normalized);
+      }
+    };
+
+    const unsubscribe = input.pipeline.subscribe({
+      refName,
+      args: baseArgs,
+      onValue: fireValue,
+      onError: fireError,
+    }) as any;
+
+    unsubscribe.unsubscribe = unsubscribe;
+    unsubscribe.getCurrentValue = () => {
+      const raw = input.pipeline.getCurrentValue(refName, baseArgs);
+      if (raw === undefined) return undefined;
+      return toClientResult(raw, input.translateLocalResultToClient);
+    };
+    unsubscribe.getQueryLogs = () => undefined;
+    return unsubscribe;
+  };
 }
 
 function createRuntimeLocalOnUpdate(input: {
@@ -257,6 +878,7 @@ function patchBaseClientLocalQueryAccess(input: {
     args: Record<string, unknown>,
   ) => Record<string, unknown>;
   translateLocalResultToClient?: <T>(value: T) => T;
+  cache?: EmbeddedQueryCache | null;
 }) {
   const baseClient = (input.client as any).client as any;
   if (!baseClient) {
@@ -274,6 +896,16 @@ function patchBaseClientLocalQueryAccess(input: {
     ) => {
       if (input.resolveReadPlanByName(refName).kind !== "local") {
         return originalLocalQueryResult(refName, args);
+      }
+
+      if (input.cache && !isSystemRefName(refName)) {
+        const cached = input.cache.get(refName, args ?? {});
+        if (cached !== undefined) {
+          return toClientResult(
+            cached.value,
+            input.translateLocalResultToClient,
+          );
+        }
       }
 
       const translatedArgs =
@@ -397,6 +1029,8 @@ export function patchRoutedConvexClient(input: {
   waitUntilReady?: WaitUntilReady;
   isReady?: () => boolean;
   connectivity?: ConnectivityAdapter;
+  cache?: EmbeddedQueryCache | null;
+  getCacheStorage?: () => QueryCacheStorage | null;
 }) {
   patchBaseClientLocalQueryAccess({
     client: input.client,
@@ -405,25 +1039,86 @@ export function patchRoutedConvexClient(input: {
     ensureReadReady: input.ensureReadReady,
     translateLocalArgsToRuntime: input.translateLocalArgsToRuntime,
     translateLocalResultToClient: input.translateLocalResultToClient,
+    cache: input.cache ?? null,
   });
 
-  const localOnUpdate = createRuntimeLocalOnUpdate({
-    runtime: input.runtime,
-    getRefName: input.getRefName,
-    asError: input.asError,
-    ensureReadReady: input.ensureReadReady,
-    translateLocalArgsToRuntime: input.translateLocalArgsToRuntime,
-    translateLocalResultToClient: input.translateLocalResultToClient,
-  });
-  const localPaginatedOnUpdate = createRuntimeLocalPaginatedOnUpdate({
-    runtime: input.runtime,
-    getRefName: input.getRefName,
-    asError: input.asError,
-    ensureReadReady: input.ensureReadReady,
-    translateLocalArgsToRuntime: input.translateLocalArgsToRuntime,
-    translateLocalResultToClient: input.translateLocalResultToClient,
-  });
+  const cache = input.cache ?? null;
+  const getCacheStorage = input.getCacheStorage ?? (() => null);
   const remoteClient = input.remoteClient ?? null;
+
+  const pipeline = cache
+    ? new CachePipeline({
+        cache,
+        getCacheStorage,
+        remoteClient,
+        connectivity: input.connectivity,
+        asError: input.asError,
+        runtime: input.runtime,
+        translateLocalArgsToRuntime: input.translateLocalArgsToRuntime,
+      })
+    : null;
+
+  const runtimeLocalOnUpdate = createRuntimeLocalOnUpdate({
+    runtime: input.runtime,
+    getRefName: input.getRefName,
+    asError: input.asError,
+    ensureReadReady: input.ensureReadReady,
+    translateLocalArgsToRuntime: input.translateLocalArgsToRuntime,
+    translateLocalResultToClient: input.translateLocalResultToClient,
+  });
+  const runtimeLocalPaginatedOnUpdate = createRuntimeLocalPaginatedOnUpdate({
+    runtime: input.runtime,
+    getRefName: input.getRefName,
+    asError: input.asError,
+    ensureReadReady: input.ensureReadReady,
+    translateLocalArgsToRuntime: input.translateLocalArgsToRuntime,
+    translateLocalResultToClient: input.translateLocalResultToClient,
+  });
+  const cacheOnUpdate = pipeline
+    ? createCacheOnUpdate({
+        pipeline,
+        getRefName: input.getRefName,
+        asError: input.asError,
+        translateLocalResultToClient: input.translateLocalResultToClient,
+      })
+    : null;
+  const cachePaginatedOnUpdate = pipeline
+    ? createCachePaginatedOnUpdate({
+        pipeline,
+        getRefName: input.getRefName,
+        asError: input.asError,
+        translateLocalResultToClient: input.translateLocalResultToClient,
+      })
+    : null;
+
+  const localOnUpdate = (...args: any[]): any => {
+    const refName = input.getRefName(args[0]);
+    if (cacheOnUpdate && !isSystemRefName(refName)) {
+      return cacheOnUpdate(args[0], args[1], args[2], args[3]);
+    }
+    return runtimeLocalOnUpdate(args[0], args[1], args[2], args[3]);
+  };
+
+  const localPaginatedOnUpdate = (...args: any[]): any => {
+    const refName = input.getRefName(args[0]);
+    if (cachePaginatedOnUpdate && !isSystemRefName(refName)) {
+      return cachePaginatedOnUpdate(
+        args[0],
+        args[1],
+        args[2],
+        args[3],
+        args[4],
+      );
+    }
+    return runtimeLocalPaginatedOnUpdate(
+      args[0],
+      args[1],
+      args[2],
+      args[3],
+      args[4],
+    );
+  };
+
   const waitUntilReady = input.waitUntilReady ?? ((run) => run());
   const isReady = input.isReady ?? (() => true);
 
@@ -622,6 +1317,17 @@ export function patchRoutedConvexClient(input: {
       : () => createNoopUnsubscribe(),
     3,
   );
+
+  (input.client as any).peekCurrentValue = (
+    ref: unknown,
+    args: unknown,
+  ): unknown => {
+    if (!pipeline) return undefined;
+    const refName = input.getRefName(ref);
+    const raw = pipeline.getCurrentValue(refName, args ?? {});
+    if (raw === undefined) return undefined;
+    return toClientResult(raw, input.translateLocalResultToClient);
+  };
 
   if (
     typeof (input.client as any).onPaginatedUpdate_experimental === "function"

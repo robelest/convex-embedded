@@ -2,7 +2,7 @@
  * Expo entry point for `@robelest/convex-embedded/expo`.
  *
  * This surface mirrors the browser embedded client while wiring in Expo-native
- * persistence, crypto, connectivity, and blob storage adapters.
+ * storage, crypto, connectivity, and blob storage adapters.
  *
  * @packageDocumentation
  */
@@ -20,7 +20,7 @@ export type { ConvexInput } from "@/kernel/modules";
  * Options for {@link createConvexClient} in Expo environments.
  *
  * This mirrors the browser client configuration while adding Expo-specific
- * persistence directories and returning a React-compatible client wrapper for
+ * storage directories and returning a React-compatible client wrapper for
  * `convex/react` hooks.
  *
  * @see createConvexClient
@@ -74,7 +74,7 @@ ensureConvexAllowFunctionsInBrowser();
  * Create an Expo embedded client.
  *
  * The Expo entry keeps the same embedded runtime and remote sync core as the
- * browser entry, but wires in Expo-native persistence adapters and returns a
+ * browser entry, but wires in Expo-native storage adapters and returns a
  * React-compatible client wrapper for use with `convex/react` hooks.
  *
  * @param options - Expo client configuration.
@@ -93,8 +93,6 @@ ensureConvexAllowFunctionsInBrowser();
  * @category Factory
  */
 export function createConvexClient(options: ClientOptions) {
-  // Lazy imports — native deps (expo-sqlite, expo-crypto, expo-file-system)
-  // are only loaded when a client is actually created, not at module import time.
   const { createExpoPlatformAdapter } =
     require("@/expo/platform") as typeof import("@/expo/platform");
   const { wrapConvexClientForReact } =
@@ -159,7 +157,5 @@ function ensureConvexAllowFunctionsInBrowser(): void {
       writable: true,
       configurable: true,
     });
-  } catch {
-    // Best effort only: this flag only suppresses Convex's browser import guard.
-  }
+  } catch {}
 }

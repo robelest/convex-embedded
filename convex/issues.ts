@@ -1,4 +1,5 @@
 import { bindTable } from "@robelest/convex-embedded/server";
+import { paginationOptsValidator } from "convex/server";
 import { ConvexError, v } from "convex/values";
 
 import { components } from "./_generated/api";
@@ -17,22 +18,25 @@ export const list = issues.query({
 });
 
 export const forProject = issues.query({
-  args: { projectId: v.id("projects") },
+  args: {
+    projectId: v.id("projects"),
+    paginationOpts: paginationOptsValidator,
+  },
   handler: async (ctx, args) => {
     const project = await ctx.db.get(args.projectId);
     if (!project) {
       throw new ConvexError("Project not found");
     }
 
-    const sorted = (
-      await ctx.db
-        .query("issues")
-        .withIndex("by_projectId", (q) => q.eq("projectId", args.projectId))
-        .collect()
-    ).sort((a, b) => a.position - b.position);
+    const page = await ctx.db
+      .query("issues")
+      .withIndex("by_projectId", (q) => q.eq("projectId", args.projectId))
+      .order("asc")
+      .paginate(args.paginationOpts);
 
     return {
-      issues: sorted.map((issue) => ({
+      ...page,
+      page: page.page.map((issue) => ({
         _id: issue._id,
         identifier: `${project.identifier}-${issue.number}`,
         number: issue.number,
@@ -41,6 +45,7 @@ export const forProject = issues.query({
         status: issue.status,
         priority: issue.priority,
         labels: issue.labels,
+        position: issue.position,
         assigneeName: issue.assigneeUserId
           ? userSummary(issue.assigneeUserId).name
           : null,

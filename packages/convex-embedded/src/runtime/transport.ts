@@ -8,10 +8,6 @@
 import { LoopbackWebSocketConstructor } from "@/runtime/loopback";
 import type { LoopbackWebSocket } from "@/runtime/loopback";
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
 /**
  * Minimal interface for the embedded runtime's protocol handler.
  * The runtime must expose a `handleMessage` that accepts a JSON string
@@ -91,10 +87,6 @@ export interface EmbeddedTransport {
   pushMessage(sessionId: string, data: string): void;
 }
 
-// ---------------------------------------------------------------------------
-// createTransport
-// ---------------------------------------------------------------------------
-
 /**
  * Build the transport config that ConvexClient expects.
  *
@@ -117,7 +109,6 @@ export function createTransport(
   runtime: ProtocolHandler,
   ready: Promise<void> = Promise.resolve(),
 ): EmbeddedTransport {
-  // Track live WebSocket instances so we can close them on shutdown.
   const activeSockets = new Set<LoopbackWebSocket>();
   const sessionRegistry: SessionSocketRegistry = {
     socketsBySession: new Map(),
@@ -125,13 +116,11 @@ export function createTransport(
   };
 
   const webSocketConstructor = LoopbackWebSocketConstructor(() => {
-    // Per-connection session ID — captured from the first Connect message.
     let connectionSessionId: string | undefined;
     let socketRef: LoopbackWebSocket | undefined;
 
     const handler = async (message: string): Promise<string[]> => {
       await ready;
-      // Peek at the message to capture sessionId from Connect.
       try {
         const parsed = JSON.parse(message);
         if (parsed.type === "Connect" && parsed.sessionId) {
@@ -144,15 +133,11 @@ export function createTransport(
             );
           }
         }
-        // Inject the captured sessionId so that EmbeddedRuntime.handleMessage
-        // always has a consistent sessionId for this connection.
         if (connectionSessionId && !parsed.sessionId) {
           parsed.sessionId = connectionSessionId;
           return runtime.handleMessage(JSON.stringify(parsed));
         }
-      } catch {
-        // Parse failed — fall through to let handleMessage deal with it.
-      }
+      } catch {}
       return runtime.handleMessage(message);
     };
 
@@ -165,15 +150,11 @@ export function createTransport(
     return handler;
   });
 
-  // Wrap the constructor to track/untrack instances.
   const TrackedWsConstructor = class extends webSocketConstructor {
     constructor(url: string) {
       super(url);
       const socket = this as unknown as LoopbackWebSocket;
       activeSockets.add(socket);
-      // Remove from tracking when the socket closes (whether via
-      // explicit close() or runtime shutdown).
-      // Listen via addEventListener so we don't clobber the SDK's onclose.
       socket.addEventListener("close", () => {
         activeSockets.delete(socket);
         const sessionId = sessionRegistry.sessionBySocket.get(socket);
@@ -195,7 +176,6 @@ export function createTransport(
     url: "http://embedded.local",
     webSocketConstructor: TrackedWsConstructor,
     closeAll(): void {
-      // Snapshot the set since close() triggers removal via the listener.
       for (const ws of Array.from(activeSockets)) {
         ws.close(1001, "runtime shutdown");
       }

@@ -5,6 +5,7 @@ export interface EngineResolveInput {
   readonly ingestDocuments: (
     table: string,
     documents: Array<Record<string, unknown>>,
+    scopeArgs?: Record<string, unknown>,
   ) => Promise<void>;
   readonly getDocumentsForTable: (
     table: string,

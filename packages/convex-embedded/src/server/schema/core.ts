@@ -1,9 +1,5 @@
 import type { Validator } from "convex/values";
 
-// ---------------------------------------------------------------------------
-// CRDT types
-// ---------------------------------------------------------------------------
-
 /**
  * Internal CRDT field kind constants used by schema descriptors.
  */
@@ -102,10 +98,6 @@ export type OmittedFieldDescriptor<T> = TypedFieldDescriptor<
   Validator<T, any, any>
 >;
 
-// ---------------------------------------------------------------------------
-// Field detection
-// ---------------------------------------------------------------------------
-
 const CRDT_FIELD = Symbol.for("convex-embedded:crdt-field");
 
 /**
@@ -139,100 +131,14 @@ export function getCrdtType(field: unknown): CrdtTypeValue | null {
 /** @internal Symbol used to tag embedded CRDT field descriptors. */
 export { CRDT_FIELD };
 
-// ---------------------------------------------------------------------------
-// Definition builder
-// ---------------------------------------------------------------------------
-
-/**
- * Migration callback used by versioned local tables.
- */
-export type LocalTableMigrationStep = (ctx: {
-  table: string;
-  fromVersion: number;
-  toVersion: number;
-  targetVersion: number;
-  schema: Definition;
-  docs: {
-    all(): Promise<Array<Record<string, unknown>>>;
-    patchMissing(fields: Record<string, unknown>): Promise<number>;
-    patch(id: unknown, fields: Record<string, unknown>): Promise<void>;
-    replace(id: unknown, fields: Record<string, unknown>): Promise<void>;
-    delete(id: unknown): Promise<void>;
-    modify(
-      transform: (
-        doc: Record<string, unknown>,
-      ) =>
-        | Record<string, unknown>
-        | null
-        | void
-        | Promise<Record<string, unknown> | null | void>,
-    ): Promise<number>;
-  };
-}) => Promise<void> | void;
-
-/**
- * Options for `define(...)`.
- */
-export interface DefineOptions {
-  version: number;
-  shape: Record<string, unknown>;
-  defaults?: Record<string, unknown>;
-  migrate?: Record<number, LocalTableMigrationStep>;
-}
-
-/**
- * Normalized embedded schema definition returned by `define(...)`.
- */
-export interface Definition {
-  version: number;
-  shape: Record<string, unknown>;
-  defaults: Record<string, unknown>;
-  migrate: Record<number, LocalTableMigrationStep>;
-  getShape(): Record<string, unknown>;
-  getCrdtFields(): Map<string, CrdtFieldDescriptor>;
-  getOmittedFields(): string[];
-}
-
-/**
- * Build a normalized embedded schema definition.
- *
- * @param options - Versioned schema configuration.
- * @returns A schema helper object used by embedded table builders.
- */
-export function define(options: DefineOptions): Definition {
-  const { version, shape, defaults = {}, migrate = {} } = options;
-  return {
-    version,
-    shape,
-    defaults,
-    migrate,
-    getShape() {
-      return shape;
-    },
-    getCrdtFields() {
-      const fields = new Map<string, CrdtFieldDescriptor>();
-      for (const [key, value] of Object.entries(shape)) {
-        if (isCrdtField(value)) {
-          fields.set(key, value);
-        }
-      }
-      return fields;
-    },
-    getOmittedFields() {
-      const omitted: string[] = [];
-      for (const [key, value] of Object.entries(shape)) {
-        if (isCrdtField(value) && value.type === CrdtType.Omitted) {
-          omitted.push(key);
-        }
-      }
-      return omitted;
-    },
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Field value inference
-// ---------------------------------------------------------------------------
+// Definition + define() are owned by `@/shared/schema`. Re-export here so
+// existing `from "@/server/schema/core"` imports keep working.
+export {
+  define,
+  type DefineOptions,
+  type Definition,
+  type LocalTableMigrationStep,
+} from "@/shared/schema";
 
 /**
  * Infer the runtime CRDT kind string for a field descriptor.

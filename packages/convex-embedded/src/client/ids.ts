@@ -16,10 +16,6 @@ import { createLogger } from "@/shared/logger";
 
 const log = createLogger("id-map");
 
-// ---------------------------------------------------------------------------
-// System function paths (must match convex-embedded's SYSTEM_FUNCTIONS keys)
-// ---------------------------------------------------------------------------
-
 const SYS_ID_MAP_SET = "_system:idMapSet";
 const SYS_ID_MAP_GET_ALL = "_system:idMapGetAll";
 const SYS_ID_MAP_DELETE = "_system:idMapDelete";
@@ -29,10 +25,6 @@ export const ID_MAP_STORE_MIGRATIONS: StoreMigrationManifest = {
   scope: "identity",
   version: 1,
 };
-
-// ---------------------------------------------------------------------------
-// IdMap
-// ---------------------------------------------------------------------------
 
 /**
  * Optional local query executor. When provided, hydration reads use this
@@ -51,25 +43,12 @@ export type LocalMutationExecutorFn = (
 export type LocalDocumentPresenceFn = (id: string) => boolean;
 
 export class IdMap {
-  /** In-memory cache: localId → remoteId */
   private _cache = new Map<string, string>();
-
-  /** Reverse cache: remoteId → localId (for bidirectional lookups) */
   private _reverse = new Map<string, string>();
-
-  /** The local embedded client for persisting to _resolve_id_map. */
   private _localClient: ConvexClient;
-
-  /** Local query executor used for runtime-first hydration reads. */
   private _queryFn: LocalQueryExecutorFn | null;
-
-  /** Local mutation executor used for runtime-first bookkeeping writes. */
   private _mutationFn: LocalMutationExecutorFn | null;
-
-  /** Active identity namespace for persistence. */
   private _getIdentityKey: (() => string | null) | null;
-
-  /** Synchronous local document presence lookup for active aliasing. */
   private _hasLocalDocumentId: LocalDocumentPresenceFn | null;
 
   constructor(
@@ -85,10 +64,6 @@ export class IdMap {
     this._getIdentityKey = getIdentityKey ?? null;
     this._hasLocalDocumentId = hasLocalDocumentId ?? null;
   }
-
-  // -----------------------------------------------------------------------
-  // Hydration
-  // -----------------------------------------------------------------------
 
   /**
    * Load all persisted mappings from the embedded DB into the cache.
@@ -134,10 +109,6 @@ export class IdMap {
       log.warn("id-map: hydration failed (starting with empty map)", err);
     }
   }
-
-  // -----------------------------------------------------------------------
-  // Read
-  // -----------------------------------------------------------------------
 
   /**
    * Look up the remote ID for a local UUID.
@@ -186,14 +157,9 @@ export class IdMap {
     return aliases;
   }
 
-  /** Number of cached mappings. */
   get size(): number {
     return this._cache.size;
   }
-
-  // -----------------------------------------------------------------------
-  // Write
-  // -----------------------------------------------------------------------
 
   /**
    * Record a mapping from local UUID to remote Convex ID.
@@ -255,10 +221,6 @@ export class IdMap {
       log.warn("id-map: failed to delete mapping", err);
     }
   }
-
-  // -----------------------------------------------------------------------
-  // Translation
-  // -----------------------------------------------------------------------
 
   /**
    * Deep-walk `args` and replace any string value that is a known local

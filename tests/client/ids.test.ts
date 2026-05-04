@@ -149,7 +149,7 @@ describe("IdMap", () => {
       expect(idMap.getLocalId("remote-2")).toBe("local-1");
     });
 
-    it("recovers gracefully on persistence failure (cache still updated)", async () => {
+    it("recovers gracefully on storage failure (cache still updated)", async () => {
       mockClient.mutation.mockRejectedValue(new Error("persist failed"));
 
       await idMap.set("local-1", "remote-1", "tasks");

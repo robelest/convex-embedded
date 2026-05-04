@@ -1,5 +1,5 @@
 import { api } from "$convex/_generated/api";
-import { useQuery } from "convex/react";
+import { usePaginatedQuery } from "convex/react";
 import * as Haptics from "expo-haptics";
 import { router } from "expo-router";
 import React from "react";
@@ -71,14 +71,18 @@ export default function IssuesScreen() {
     [projects, selectedProjectId],
   );
 
-  const issuesData = useQuery(
+  const {
+    results: issues,
+    status: issuesStatus,
+    loadMore,
+  } = usePaginatedQuery(
     api.issues.forProject,
     readyForSync && selectedProject
       ? { projectId: selectedProject._id }
       : "skip",
+    { initialNumItems: 30 },
   );
 
-  const issues = issuesData?.issues ?? [];
   type IssueItem = (typeof issues)[number];
   const sections = STATUS_ORDER.map((status) => ({
     title: STATUS_LABELS[status],
@@ -104,7 +108,12 @@ export default function IssuesScreen() {
     });
   }, [requestOverlay, selectedProject]);
 
-  if (!workspace || !selectedProject || !readyForSync || !issuesData) {
+  if (
+    !workspace ||
+    !selectedProject ||
+    !readyForSync ||
+    issuesStatus === "LoadingFirstPage"
+  ) {
     return (
       <View style={styles.loading}>
         <ActivityIndicator color={colors.accent[500]} />
@@ -135,6 +144,10 @@ export default function IssuesScreen() {
         stickySectionHeadersEnabled
         contentInsetAdjustmentBehavior="automatic"
         contentContainerStyle={styles.content}
+        onEndReachedThreshold={0.5}
+        onEndReached={() => {
+          if (issuesStatus === "CanLoadMore") loadMore(30);
+        }}
         ListHeaderComponent={
           <View style={styles.headerStack}>
             <View style={styles.workspaceRow}>

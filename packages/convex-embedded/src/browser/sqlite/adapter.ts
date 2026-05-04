@@ -1,28 +1,36 @@
 import { openBrowserSqlClient } from "@/browser/sqlite/client";
-import { SqliteAdapter } from "@/persistence/sqlite/adapter";
+import { createLogger } from "@/shared/logger";
+import { SqliteAdapter } from "@/storage/sqlite/adapter";
+import type { InternalTableSpec } from "@/storage/sqlite/factory";
+
+const log = createLogger("browser-sqlite");
 
 const now = () => globalThis.performance?.now?.() ?? Date.now();
 
-export async function openBrowserPersistence(options: {
+export async function openBrowserStorage(options: {
   name: string;
+  userTableSpecs?: Map<string, InternalTableSpec>;
 }): Promise<SqliteAdapter> {
   const openStarted = now();
   const client = await openBrowserSqlClient(options);
 
-  console.info(
-    `[convex-embedded] browser sqlite schema ready for ${options.name} in ${(now() - openStarted).toFixed(1)}ms`,
+  log.debug(
+    `schema ready for ${options.name} in ${(now() - openStarted).toFixed(1)}ms`,
   );
 
-  return SqliteAdapter.open({
-    query: (sql, params) => client.query(sql, [...(params ?? [])]),
-    execute: (sql, params) => client.execute(sql, [...(params ?? [])]),
-    executeBatch: (statements) =>
-      client.executeBatch(
-        statements.map((statement) => ({
-          sql: statement.sql,
-          params: statement.params ? [...statement.params] : undefined,
-        })),
-      ),
-    close: () => client.close(),
-  });
+  return new SqliteAdapter(
+    {
+      query: (sql, params) => client.query(sql, [...(params ?? [])]),
+      execute: (sql, params) => client.execute(sql, [...(params ?? [])]),
+      executeBatch: (statements) =>
+        client.executeBatch(
+          statements.map((statement) => ({
+            sql: statement.sql,
+            params: statement.params ? [...statement.params] : undefined,
+          })),
+        ),
+      close: () => client.close(),
+    },
+    { userTableSpecs: options.userTableSpecs },
+  );
 }

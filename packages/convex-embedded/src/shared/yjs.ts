@@ -16,13 +16,14 @@ export function initYjsDoc(
 ): Y.Doc {
   const doc = new Y.Doc();
   const fields = doc.getMap("fields");
+  const shape = schemaDef.getShape();
 
-  for (const [key, value] of Object.entries(row)) {
-    if (key === "_id" || key === "_creationTime") continue;
-    const fieldDef = schemaDef.shape[key];
+  for (const [key, fieldDef] of Object.entries(shape)) {
     const crdtType = getCrdtType(fieldDef);
-
+    if (crdtType === null) continue;
     if (crdtType === CrdtType.Omitted) continue;
+
+    const value = row[key];
 
     if (crdtType === CrdtType.Prose) {
       if (options?.skipProse) continue;
@@ -53,8 +54,6 @@ export function initYjsDoc(
         }
       }
       fields.set(key, setMap);
-    } else {
-      fields.set(key, value as never);
     }
   }
 
@@ -154,14 +153,12 @@ export function materializeYjsDoc(
   doc: Y.Doc,
 ): Record<string, unknown> {
   const result: Record<string, unknown> = {};
-  const fields = doc.getMap("fields");
 
-  for (const [key, fieldDef] of Object.entries(schemaDef.shape)) {
+  for (const [key, fieldDef] of Object.entries(schemaDef.getShape())) {
     const crdtType = getCrdtType(fieldDef);
 
-    if (crdtType === CrdtType.Omitted) {
-      continue;
-    }
+    if (crdtType === null) continue;
+    if (crdtType === CrdtType.Omitted) continue;
 
     if (crdtType === CrdtType.Prose) {
       result[key] =
@@ -179,8 +176,6 @@ export function materializeYjsDoc(
       result[key] = getCounterValue(doc, key);
     } else if (crdtType === CrdtType.Set) {
       result[key] = getSetMembers(doc, key);
-    } else {
-      result[key] = fields.get(key);
     }
   }
 

@@ -1,4 +1,8 @@
-import { createSqlitePersistenceAdapter } from "@embedded/persistence/sqlite/factory";
+import type { TableSchema } from "@embedded/runtime/db/schema";
+import {
+  buildUserTableSpec,
+  createSqliteStorage,
+} from "@embedded/storage/sqlite/factory";
 import { describe, expect, it, vi } from "@tests/testkit";
 
 const ADAPTER_META_TABLE = "_convex_sqlite_adapter_meta";
@@ -85,10 +89,36 @@ function createMockDriver(options?: {
   };
 }
 
-describe("createSqlitePersistenceAdapter", () => {
+function tasksTableSchema(): TableSchema {
+  return {
+    indexes: [{ indexDescriptor: "by_priority", fields: ["priority"] }],
+    vectorIndexes: [],
+    searchIndexes: [],
+    documentType: {
+      type: "object",
+      value: {
+        title: { fieldType: { type: "string" }, optional: false },
+        priority: { fieldType: { type: "number" }, optional: false },
+        tags: {
+          fieldType: { type: "array", value: { type: "string" } },
+          optional: false,
+        },
+        meta: {
+          fieldType: {
+            type: "union",
+            value: [{ type: "string" }, { type: "null" }],
+          },
+          optional: true,
+        },
+      },
+    },
+  };
+}
+
+describe("createSqliteStorage", () => {
   it("stores projected creation_time and identity_key in a routed physical table", async () => {
     const { driver, executeBatch } = createMockDriver();
-    const adapter = await createSqlitePersistenceAdapter({ driver });
+    const adapter = await createSqliteStorage({ driver });
 
     await adapter.commit({
       puts: [
@@ -114,9 +144,6 @@ describe("createSqlitePersistenceAdapter", () => {
       'CREATE TABLE IF NOT EXISTS "documents__tasks"',
     );
     expect(migrationStatements[3]?.sql).toContain(TABLE_ROUTING_TABLE);
-    expect(migrationStatements[4]?.sql).toContain(
-      'INSERT OR REPLACE INTO "documents__tasks"',
-    );
 
     const writeStatements = executeBatch.mock.calls[1]?.[0] as Array<{
       sql: string;
@@ -163,7 +190,7 @@ describe("createSqlitePersistenceAdapter", () => {
         return [];
       },
     });
-    const adapter = await createSqlitePersistenceAdapter({ driver });
+    const adapter = await createSqliteStorage({ driver });
 
     await expect(adapter.listDocuments("tasks")).resolves.toEqual([taskDoc]);
     await expect(adapter.getDocument("tasks", "task-1")).resolves.toEqual(
@@ -177,11 +204,68 @@ describe("createSqlitePersistenceAdapter", () => {
     );
   });
 
+  it("scopes user table SQL reads to the active identity", async () => {
+    const taskDoc = {
+      _id: "task-1",
+      _creationTime: 42,
+      __identityKey: "user-1",
+      title: "hello",
+    };
+    const seen: Array<{ sql: string; params?: unknown[] }> = [];
+    const { driver } = createMockDriver({
+      existingTables: [ADAPTER_META_TABLE, "documents", "meta", "blobs"],
+      routes: { tasks: "documents__tasks" },
+      customQuery: async (sql: string, params?: unknown[]) => {
+        seen.push({ sql, params });
+        if (sql.startsWith('SELECT data FROM "documents__tasks"')) {
+          return [{ data: JSON.stringify(taskDoc) }];
+        }
+        if (
+          sql.startsWith('SELECT COUNT(*) AS count FROM "documents__tasks"')
+        ) {
+          return [{ count: 1 }];
+        }
+        return [];
+      },
+    });
+    const adapter = await createSqliteStorage({ driver });
+    const readOptions = { activeIdentityKey: "user-1" };
+
+    await expect(adapter.listDocuments("tasks", readOptions)).resolves.toEqual([
+      taskDoc,
+    ]);
+    await expect(
+      adapter.getDocument("tasks", "task-1", readOptions),
+    ).resolves.toEqual(taskDoc);
+    await expect(adapter.countDocuments("tasks", readOptions)).resolves.toBe(1);
+    await expect(
+      adapter.query({
+        source: { type: "FullTableScan", tableName: "tasks", order: "asc" },
+        filters: [],
+        limit: null,
+        activeIdentityKey: "user-1",
+      }),
+    ).resolves.toEqual([taskDoc]);
+
+    expect(seen).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sql: expect.stringContaining("WHERE identity_key = ?"),
+          params: ["user-1"],
+        }),
+        expect.objectContaining({
+          sql: expect.stringContaining("WHERE id = ? AND identity_key = ?"),
+          params: ["task-1", "user-1"],
+        }),
+      ]),
+    );
+  });
+
   it("uses table-qualified deletes for legacy shared rows", async () => {
     const { driver, executeBatch } = createMockDriver({
       existingTables: [ADAPTER_META_TABLE, "documents", "meta", "blobs"],
     });
-    const adapter = await createSqlitePersistenceAdapter({ driver });
+    const adapter = await createSqliteStorage({ driver });
 
     await adapter.commit({
       puts: [],
@@ -233,9 +317,9 @@ describe("createSqlitePersistenceAdapter", () => {
         return [];
       },
     });
-    const adapter = await createSqlitePersistenceAdapter({ driver });
+    const adapter = await createSqliteStorage({ driver });
 
-    const results = await adapter.readVectorCandidates({
+    const results = await adapter.vectorSearch({
       tableName: "tasks",
       indexName: "by_embedding",
       definition: {
@@ -261,7 +345,7 @@ describe("createSqlitePersistenceAdapter", () => {
 
   it("writes adapter-owned search side-table rows on applyCommit", async () => {
     const { driver, executeBatch } = createMockDriver();
-    const adapter = await createSqlitePersistenceAdapter({ driver });
+    const adapter = await createSqliteStorage({ driver });
 
     await adapter.applyCommit(
       {
@@ -319,7 +403,7 @@ describe("createSqlitePersistenceAdapter", () => {
 
   it("writes adapter-owned vector side-table rows on applyCommit", async () => {
     const { driver, executeBatch } = createMockDriver();
-    const adapter = await createSqlitePersistenceAdapter({ driver });
+    const adapter = await createSqliteStorage({ driver });
 
     await adapter.applyCommit(
       {
@@ -376,58 +460,123 @@ describe("createSqlitePersistenceAdapter", () => {
     ).toBe(true);
   });
 
-  it("migrates legacy shared table rows into physical tables before routed reads", async () => {
-    const { driver, executeBatch } = createMockDriver({
+  it("writes per-column SQL when userTableSpecs is provided", async () => {
+    const { driver, executeBatch } = createMockDriver();
+    const userTableSpecs = new Map([
+      ["tasks", buildUserTableSpec("tasks", tasksTableSchema())],
+    ]);
+    const adapter = await createSqliteStorage({ driver, userTableSpecs });
+
+    await adapter.commit({
+      puts: [
+        {
+          tableName: "tasks",
+          doc: {
+            _id: "task-1" as any,
+            _creationTime: 42,
+            __identityKey: "user-1",
+            title: "ship it",
+            priority: 7,
+            tags: ["urgent", "demo"],
+            meta: null,
+          },
+        },
+      ],
+      deletes: [],
+      meta: { timestamp: 1, lastCreationTime: 42 },
+    });
+
+    const allWriteStatements = executeBatch.mock.calls.flatMap(
+      (call) =>
+        call[0] as Array<{
+          sql: string;
+          params?: unknown[];
+        }>,
+    );
+
+    const insertStatement = allWriteStatements.find((statement) =>
+      statement.sql.includes('INSERT OR REPLACE INTO "documents__tasks"'),
+    );
+    expect(insertStatement).toBeDefined();
+    expect(insertStatement?.sql).toBe(
+      'INSERT OR REPLACE INTO "documents__tasks" ("id", "creation_time", "title", "priority", "tags", "meta", "identity_key") VALUES (?, ?, ?, ?, ?, ?, ?)',
+    );
+    expect(insertStatement?.params).toEqual([
+      "task-1",
+      42,
+      "ship it",
+      7,
+      JSON.stringify(["urgent", "demo"]),
+      null,
+      "user-1",
+    ]);
+
+    expect(
+      allWriteStatements.some((statement) =>
+        statement.sql.includes(
+          'INSERT OR REPLACE INTO "documents__tasks" (id, creation_time, identity_key, data)',
+        ),
+      ),
+    ).toBe(false);
+  });
+
+  it("round-trips a doc through the columnar reads path", async () => {
+    const taskDoc = {
+      _id: "task-1",
+      _creationTime: 42,
+      __identityKey: "user-1",
+      title: "ship it",
+      priority: 7,
+      tags: ["urgent", "demo"],
+      meta: null,
+    };
+
+    const userTableSpecs = new Map([
+      ["tasks", buildUserTableSpec("tasks", tasksTableSchema())],
+    ]);
+
+    const { driver, query } = createMockDriver({
       existingTables: [
         ADAPTER_META_TABLE,
-        TABLE_ROUTING_TABLE,
         "documents",
         "meta",
         "blobs",
+        "documents__tasks",
       ],
+      routes: { tasks: "documents__tasks" },
       customQuery: async (sql: string) => {
         if (
-          sql ===
-          "SELECT DISTINCT table_name FROM documents WHERE table_name IS NOT NULL AND table_name != ''"
+          sql.startsWith(
+            'SELECT id, creation_time, "title", "priority", "tags", "meta", "identity_key" FROM "documents__tasks"',
+          )
         ) {
-          return [{ table_name: "tasks" }];
-        }
-        if (
-          sql ===
-          'SELECT data FROM "documents__tasks" ORDER BY creation_time ASC, id ASC'
-        ) {
-          return [];
+          return [
+            {
+              id: "task-1",
+              creation_time: 42,
+              title: "ship it",
+              priority: 7,
+              tags: JSON.stringify(["urgent", "demo"]),
+              meta: null,
+              identity_key: "user-1",
+            },
+          ];
         }
         return [];
       },
     });
+    const adapter = await createSqliteStorage({ driver, userTableSpecs });
 
-    const adapter = await createSqlitePersistenceAdapter({ driver });
-    await adapter.listDocuments("tasks");
+    await expect(adapter.listDocuments("tasks")).resolves.toEqual([taskDoc]);
+    await expect(adapter.getDocument("tasks", "task-1")).resolves.toEqual(
+      taskDoc,
+    );
 
-    expect(executeBatch.mock.calls.length).toBeGreaterThan(0);
-    const migrationStatements = executeBatch.mock.calls.at(-1)?.[0] as Array<{
-      sql: string;
-      params?: unknown[];
-    }>;
+    const sqlsCalled = query.mock.calls.map((call) => call[0]);
     expect(
-      migrationStatements.some((statement) =>
-        statement.sql.includes('CREATE TABLE IF NOT EXISTS "documents__tasks"'),
+      sqlsCalled.some((s) =>
+        s.startsWith('SELECT data FROM "documents__tasks"'),
       ),
-    ).toBe(true);
-    expect(
-      migrationStatements.some((statement) =>
-        statement.sql.includes(TABLE_ROUTING_TABLE),
-      ),
-    ).toBe(true);
-    expect(
-      migrationStatements.some((statement) =>
-        statement.sql.includes('INSERT OR REPLACE INTO "documents__tasks"'),
-      ),
-    ).toBe(true);
-    expect(migrationStatements).toContainEqual({
-      sql: "DELETE FROM documents WHERE table_name = ?",
-      params: ["tasks"],
-    });
+    ).toBe(false);
   });
 });

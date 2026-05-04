@@ -1,6 +1,5 @@
-import { convexToJson } from "convex/values";
-
 import type { QueryDependency } from "@/runtime/db/types";
+import { stableValueKey } from "@/shared/valuekey";
 import type { ProtocolChange } from "@/sync/protocol";
 import type { SubscriptionManager } from "@/sync/subscriptions";
 
@@ -31,19 +30,11 @@ export interface RuntimeQueryObserver<TMeta> {
   dependencies: QueryDependency[];
   evaluation: Promise<void> | null;
   needsReevaluation: boolean;
+  manualRefresh: boolean;
+  depVersions: Map<string, number> | null;
 }
 
-function stableValueKey(value: unknown): string {
-  if (value === undefined) {
-    return JSON.stringify({ $undefined: true });
-  }
-
-  try {
-    return JSON.stringify(convexToJson(value as never));
-  } catch {
-    return JSON.stringify(value);
-  }
-}
+export type TableVersionGetter = (tableName: string) => number;
 
 function errorKey(error: Error | null): string | null {
   return error === null ? null : `${error.name}:${error.message}`;
@@ -84,12 +75,16 @@ export class RuntimeQueryObserverRegistry<TMeta> {
     { observer: RuntimeQueryObserver<TMeta>; unsubscribe: () => void }
   >();
 
-  constructor(private readonly _subscriptions: SubscriptionManager) {}
+  constructor(
+    private readonly _subscriptions: SubscriptionManager,
+    private readonly _getTableVersion: TableVersionGetter = () => 0,
+  ) {}
 
   ensure(
     token: string,
     meta: TMeta,
     evaluate: () => Promise<QueryEvaluation>,
+    options?: { manualRefresh?: boolean },
   ): RuntimeQueryObserver<TMeta> {
     const existing = this._entries.get(token)?.observer;
     if (existing) {
@@ -111,15 +106,43 @@ export class RuntimeQueryObserverRegistry<TMeta> {
       dependencies: [],
       evaluation: null,
       needsReevaluation: false,
+      manualRefresh: options?.manualRefresh ?? false,
+      depVersions: null,
     };
 
     this._entries.set(token, {
       observer,
-      unsubscribe: this._subscriptions.subscribe(token, new Set(), [], () => {
-        void this.refresh(token);
-      }),
+      unsubscribe: this._subscriptions.subscribe(
+        token,
+        new Set(),
+        [],
+        this._invalidateCallback(observer),
+      ),
     });
     return observer;
+  }
+
+  private _invalidateCallback(
+    observer: RuntimeQueryObserver<TMeta>,
+  ): () => void {
+    if (observer.manualRefresh) {
+      return () => undefined;
+    }
+    return () => {
+      void this.refresh(observer);
+    };
+  }
+
+  private _captureDepVersions(observer: RuntimeQueryObserver<TMeta>): void {
+    if (observer.tablesRead.size === 0) {
+      observer.depVersions = new Map();
+      return;
+    }
+    const versions = new Map<string, number>();
+    for (const tableName of observer.tablesRead) {
+      versions.set(tableName, this._getTableVersion(tableName));
+    }
+    observer.depVersions = versions;
   }
 
   get(token: string): RuntimeQueryObserver<TMeta> | undefined {
@@ -165,12 +188,42 @@ export class RuntimeQueryObserverRegistry<TMeta> {
       return;
     }
 
+    if (
+      observer.hasValue &&
+      observer.currentError === null &&
+      observer.depVersions !== null
+    ) {
+      let stillFresh = true;
+      for (const [tableName, version] of observer.depVersions) {
+        if (this._getTableVersion(tableName) !== version) {
+          stillFresh = false;
+          break;
+        }
+      }
+      if (stillFresh) {
+        return;
+      }
+    }
+
+    const refreshStart =
+      globalThis.performance?.now?.() ?? Date.now();
     observer.evaluation = (async () => {
       do {
         observer.needsReevaluation = false;
         try {
+          const evalStart =
+            globalThis.performance?.now?.() ?? Date.now();
           const evaluation = await observer.evaluate();
-          this.syncState(observer, evaluation);
+          const evalMs =
+            (globalThis.performance?.now?.() ?? Date.now()) - evalStart;
+          if (evalMs > 5) {
+            // eslint-disable-next-line no-console
+            console.log(
+              `[refresh] ${observer.token} eval=${evalMs.toFixed(1)}ms`,
+            );
+          }
+          this.syncState(observer, evaluation, { notify: false });
+          this._captureDepVersions(observer);
         } catch (error) {
           observer.currentValue = undefined;
           observer.currentError =
@@ -179,6 +232,7 @@ export class RuntimeQueryObserverRegistry<TMeta> {
           observer.hasValue = true;
           observer.tablesRead = new Set();
           observer.dependencies = [];
+          observer.depVersions = null;
           const entry = this._entries.get(observer.token);
           entry?.unsubscribe();
           this._entries.set(observer.token, {
@@ -187,16 +241,26 @@ export class RuntimeQueryObserverRegistry<TMeta> {
               observer.token,
               new Set(),
               [],
-              () => {
-                void this.refresh(observer);
-              },
+              this._invalidateCallback(observer),
             ),
           });
         }
 
         if (stateChanged(observer)) {
+          const notifyStart =
+            globalThis.performance?.now?.() ?? Date.now();
           for (const listener of Array.from(observer.listeners)) {
             listener();
+          }
+          const notifyMs =
+            (globalThis.performance?.now?.() ?? Date.now()) - notifyStart;
+          const totalMs =
+            (globalThis.performance?.now?.() ?? Date.now()) - refreshStart;
+          if (totalMs > 5) {
+            // eslint-disable-next-line no-console
+            console.log(
+              `[refresh] ${observer.token} total=${totalMs.toFixed(1)}ms notify=${notifyMs.toFixed(1)}ms listeners=${observer.listeners.size}`,
+            );
           }
         }
       } while (observer.needsReevaluation);
@@ -213,6 +277,7 @@ export class RuntimeQueryObserverRegistry<TMeta> {
   syncState(
     tokenOrObserver: string | RuntimeQueryObserver<TMeta>,
     state: QueryObserverStateInput,
+    options: { notify?: boolean } = {},
   ): void {
     const observer =
       typeof tokenOrObserver === "string"
@@ -237,13 +302,11 @@ export class RuntimeQueryObserverRegistry<TMeta> {
         observer.token,
         state.tablesRead,
         state.dependencies,
-        () => {
-          void this.refresh(observer);
-        },
+        this._invalidateCallback(observer),
       ),
     });
 
-    if (stateChanged(observer)) {
+    if ((options.notify ?? true) && stateChanged(observer)) {
       for (const listener of Array.from(observer.listeners)) {
         listener();
       }
@@ -264,6 +327,7 @@ export class RuntimeQueryObserverRegistry<TMeta> {
 
     observer.tablesRead = tracking.tablesRead;
     observer.dependencies = tracking.dependencies;
+    this._captureDepVersions(observer);
 
     const entry = this._entries.get(observer.token);
     entry?.unsubscribe();
@@ -273,9 +337,7 @@ export class RuntimeQueryObserverRegistry<TMeta> {
         observer.token,
         tracking.tablesRead,
         tracking.dependencies,
-        () => {
-          void this.refresh(observer);
-        },
+        this._invalidateCallback(observer),
       ),
     });
   }
@@ -379,6 +441,7 @@ export class RuntimeProtocolQueryRegistry {
       tokenFor(sessionId, query.queryId),
       query,
       evaluate,
+      { manualRefresh: true },
     );
   }
 

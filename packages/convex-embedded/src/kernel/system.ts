@@ -522,6 +522,9 @@ const pendingRenewLease: SystemFunctionDef = {
  * Remove a specific pending mutation by document ID.
  *
  * Args: `{ id: string }`
+ *
+ * Returns `true` when the entry was deleted, `false` when the row no longer
+ * exists or is owned by a different processor (lease lost / stale remove).
  */
 const pendingRemove: SystemFunctionDef = {
   type: "mutation",
@@ -530,8 +533,9 @@ const pendingRemove: SystemFunctionDef = {
     const doc = await readPendingById(db, id);
     if (doc !== null && (owner === undefined || doc.owner === owner)) {
       db.delete("_resolve_pending", id as DocumentId);
+      return true;
     }
-    return null;
+    return false;
   },
 };
 

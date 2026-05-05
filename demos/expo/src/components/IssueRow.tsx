@@ -15,17 +15,21 @@ interface IssueItem {
   assigneeName: string | null;
 }
 
-export function IssueRow({
+function IssueRowImpl({
   issue,
   onPress,
 }: {
   issue: IssueItem;
-  onPress?: () => void;
+  onPress?: (id: string) => void;
 }) {
+  const handlePress = React.useCallback(() => {
+    onPress?.(issue._id);
+  }, [onPress, issue._id]);
+
   return (
     <Pressable
       style={({ pressed }) => [styles.row, pressed && styles.pressed]}
-      onPress={onPress}
+      onPress={handlePress}
     >
       <StatusDot status={issue.status} />
       <Text style={styles.identifier}>{issue.identifier}</Text>
@@ -47,6 +51,20 @@ export function IssueRow({
     </Pressable>
   );
 }
+
+export const IssueRow = React.memo(IssueRowImpl, (prev, next) => {
+  if (prev.onPress !== next.onPress) return false;
+  const a = prev.issue;
+  const b = next.issue;
+  return (
+    a._id === b._id &&
+    a.identifier === b.identifier &&
+    a.title === b.title &&
+    a.status === b.status &&
+    a.priority === b.priority &&
+    a.assigneeName === b.assigneeName
+  );
+});
 
 const styles = StyleSheet.create({
   row: {

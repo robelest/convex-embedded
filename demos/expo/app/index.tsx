@@ -1,45 +1,31 @@
 import { api } from "$convex/_generated/api";
-import { usePaginatedQuery } from "convex/react";
+import { useQuery } from "convex/react";
 import * as Haptics from "expo-haptics";
 import { router } from "expo-router";
 import React from "react";
 import {
   ActivityIndicator,
   Alert,
+  FlatList,
   InteractionManager,
   Pressable,
-  SectionList,
   StyleSheet,
   Text,
   View,
 } from "react-native";
 
 import { IssueRow } from "@/src/components/IssueRow";
-import { SectionHeader } from "@/src/components/SectionHeader";
 import { useEmbeddedClient } from "@/src/convex-client";
 import { useOverlayGuard } from "@/src/overlay-guard";
 import { useProjectSelection } from "@/src/project-selection";
 import { colors } from "@/src/theme";
+import { markUiClick } from "@/src/ui-timing";
 import {
   type WorkspaceProject,
   useWorkspaceData,
 } from "@/src/use-workspace-data";
 
-const STATUS_ORDER = [
-  "in_progress",
-  "todo",
-  "backlog",
-  "done",
-  "cancelled",
-] as const;
-
-const STATUS_LABELS: Record<string, string> = {
-  in_progress: "In Progress",
-  todo: "Todo",
-  backlog: "Backlog",
-  done: "Done",
-  cancelled: "Cancelled",
-};
+const Separator = () => <View style={styles.separator} />;
 
 export default function IssuesScreen() {
   const client = useEmbeddedClient();
@@ -71,23 +57,44 @@ export default function IssuesScreen() {
     [projects, selectedProjectId],
   );
 
-  const {
-    results: issues,
-    status: issuesStatus,
-    loadMore,
-  } = usePaginatedQuery(
-    api.issues.forProject,
+  const issues = useQuery(
+    api.issues.forProjectAll,
     readyForSync && selectedProject
       ? { projectId: selectedProject._id }
       : "skip",
-    { initialNumItems: 30 },
   );
 
-  type IssueItem = (typeof issues)[number];
-  const sections = STATUS_ORDER.map((status) => ({
-    title: STATUS_LABELS[status],
-    data: issues.filter((issue: IssueItem) => issue.status === status),
-  })).filter((section) => section.data.length > 0);
+  type IssueItem = NonNullable<typeof issues>[number];
+
+  const handleRowPress = React.useCallback(
+    (id: string) => {
+      markUiClick("issue.open", { id });
+      requestOverlay(`issue:${id}`, () => {
+        router.push(`/issue/${id}`);
+      });
+    },
+    [requestOverlay],
+  );
+
+  const renderItem = React.useCallback(
+    ({ item }: { item: IssueItem }) => (
+      <IssueRow issue={item} onPress={handleRowPress} />
+    ),
+    [handleRowPress],
+  );
+
+  const keyExtractor = React.useCallback((item: IssueItem) => item._id, []);
+
+  const handleOpenProjects = React.useCallback(() => {
+    if (!selectedProject) return;
+    markUiClick("projects.open");
+    requestOverlay("project-picker", () => {
+      router.push({
+        pathname: "/project-picker",
+        params: { project: selectedProject._id },
+      });
+    });
+  }, [requestOverlay, selectedProject]);
 
   const handleCreateIssue = React.useCallback(() => {
     if (!selectedProject) return;
@@ -112,7 +119,7 @@ export default function IssuesScreen() {
     !workspace ||
     !selectedProject ||
     !readyForSync ||
-    issuesStatus === "LoadingFirstPage"
+    issues === undefined
   ) {
     return (
       <View style={styles.loading}>
@@ -123,31 +130,16 @@ export default function IssuesScreen() {
 
   return (
     <View style={styles.root}>
-      <SectionList
-        sections={sections}
-        keyExtractor={(item) => item._id}
-        renderItem={({ item }) => (
-          <IssueRow
-            issue={item}
-            onPress={() => {
-              requestOverlay(`issue:${item._id}`, () => {
-                router.push(`/issue/${item._id}`);
-              });
-            }}
-          />
-        )}
-        renderSectionHeader={({ section }) => (
-          <SectionHeader title={section.title} count={section.data.length} />
-        )}
-        ItemSeparatorComponent={() => <View style={styles.separator} />}
-        SectionSeparatorComponent={() => <View style={styles.sectionGap} />}
-        stickySectionHeadersEnabled
+      <FlatList
+        data={issues}
+        keyExtractor={keyExtractor}
+        renderItem={renderItem}
+        ItemSeparatorComponent={Separator}
         contentInsetAdjustmentBehavior="automatic"
         contentContainerStyle={styles.content}
-        onEndReachedThreshold={0.5}
-        onEndReached={() => {
-          if (issuesStatus === "CanLoadMore") loadMore(30);
-        }}
+        windowSize={5}
+        initialNumToRender={20}
+        maxToRenderPerBatch={10}
         ListHeaderComponent={
           <View style={styles.headerStack}>
             <View style={styles.workspaceRow}>
@@ -160,14 +152,7 @@ export default function IssuesScreen() {
 
                 <View style={styles.workspaceActions}>
                   <Pressable
-                    onPress={() =>
-                      requestOverlay("project-picker", () => {
-                        router.push({
-                          pathname: "/project-picker",
-                          params: { project: selectedProject._id },
-                        });
-                      })
-                    }
+                    onPress={handleOpenProjects}
                     style={styles.secondaryButton}
                   >
                     <Text selectable style={styles.secondaryButtonLabel}>
@@ -262,7 +247,6 @@ const styles = StyleSheet.create({
     backgroundColor: colors.warm[200],
     marginLeft: 14,
   },
-  sectionGap: { height: 8 },
   emptyCard: {
     borderRadius: 18,
     borderCurve: "continuous",

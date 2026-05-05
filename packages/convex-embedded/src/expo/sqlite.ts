@@ -51,7 +51,22 @@ export async function openOpSqliteStorage(
   await database.execute("PRAGMA busy_timeout = 5000");
   await database.execute("PRAGMA cache_size = -32000");
   await database.execute("PRAGMA mmap_size = 268435456");
-  await database.execute("PRAGMA wal_autocheckpoint = 1000");
+  await database.execute("PRAGMA wal_autocheckpoint = 10000");
+
+  let checkpointTimer: ReturnType<typeof setTimeout> | null = null;
+  let closing = false;
+
+  const scheduleCheckpoint = (): void => {
+    if (closing) return;
+    if (checkpointTimer !== null) clearTimeout(checkpointTimer);
+    checkpointTimer = setTimeout(() => {
+      checkpointTimer = null;
+      if (closing) return;
+      void database
+        .execute("PRAGMA wal_checkpoint(PASSIVE)")
+        .catch(() => undefined);
+    }, 500);
+  };
 
   let queue: Promise<unknown> = Promise.resolve();
 
@@ -113,6 +128,7 @@ export async function openOpSqliteStorage(
           "execute",
           async (db) => {
             await db.execute(sql, bindParams(params));
+            scheduleCheckpoint();
           },
           { params: params?.length ?? 0, sql: sql.slice(0, 160) },
         ),
@@ -151,8 +167,16 @@ export async function openOpSqliteStorage(
               await flushExecBuffer();
             }),
           { statements: statements.length },
-        ),
+        ).then((result) => {
+          scheduleCheckpoint();
+          return result;
+        }),
       close: async () => {
+        closing = true;
+        if (checkpointTimer !== null) {
+          clearTimeout(checkpointTimer);
+          checkpointTimer = null;
+        }
         await enqueue("close", async (db) => {
           await db.closeAsync();
         });

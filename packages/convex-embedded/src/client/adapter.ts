@@ -14,12 +14,15 @@ import {
 } from "@/runtime/platform";
 import type { QueryCacheStorage } from "@/runtime/sqlite/cache_table";
 import { structuralEqual } from "@/shared/equals";
+import { createLogger } from "@/shared/logger";
 import { nowMs } from "@/shared/perf";
 import { stableValueKey } from "@/shared/valuekey";
 import { withSpanSync } from "@/tracing/spans";
 
 import { effectToTransitions } from "@/client/optimistic/apply";
 import { deriveOptimisticEffect } from "@/client/optimistic/derive";
+
+const log = createLogger("cache");
 
 function createNoopUnsubscribe(): any {
   const noop = (() => {}) as any;
@@ -36,21 +39,6 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
   const prototype = Object.getPrototypeOf(value);
   return prototype === null || prototype === Object.prototype;
-}
-
-function wouldShrinkRemoteResult(
-  previous: unknown,
-  next: unknown,
-): boolean {
-  if (Array.isArray(previous) && Array.isArray(next)) {
-    return next.length < previous.length;
-  }
-  if (isPlainObject(previous) && isPlainObject(next)) {
-    if (Array.isArray(previous.page) && Array.isArray(next.page)) {
-      return next.page.length < previous.page.length;
-    }
-  }
-  return false;
 }
 
 function collectDocs(
@@ -77,76 +65,15 @@ function collectDocs(
   }
 }
 
-function getStringId(value: unknown): string | null {
-  return isPlainObject(value) && typeof value._id === "string"
-    ? value._id
-    : null;
-}
-
-function dedupeTranslatedArray(
-  rawValues: unknown[],
-  translatedValues: unknown[],
-): unknown[] {
-  const groups = new Map<
-    string,
-    { indexes: number[]; rawIds: Set<string>; translatedIds: Set<string> }
-  >();
-
-  for (let index = 0; index < translatedValues.length; index += 1) {
-    const translatedId = getStringId(translatedValues[index]);
-    if (translatedId === null) {
-      continue;
-    }
-    const rawId = getStringId(rawValues[index]);
-    const group = groups.get(translatedId) ?? {
-      indexes: [],
-      rawIds: new Set<string>(),
-      translatedIds: new Set<string>(),
-    };
-    group.indexes.push(index);
-    group.translatedIds.add(translatedId);
-    if (rawId !== null) {
-      group.rawIds.add(rawId);
-    }
-    groups.set(translatedId, group);
-  }
-
-  const keep = new Set<number>(translatedValues.map((_, index) => index));
-  let changed = false;
-
-  for (const group of groups.values()) {
-    if (group.indexes.length < 2) {
-      continue;
-    }
-
-    if (group.rawIds.size <= 1 && group.translatedIds.size === 1) {
-      continue;
-    }
-
-    changed = true;
-    const lastIndex = group.indexes[group.indexes.length - 1]!;
-    for (const index of group.indexes) {
-      if (index !== lastIndex) {
-        keep.delete(index);
-      }
-    }
-  }
-
-  return changed
-    ? translatedValues.filter((_, index) => keep.has(index))
-    : translatedValues;
-}
-
 function normalizeClientResult(
   rawValue: unknown,
   translatedValue: unknown,
 ): unknown {
   if (Array.isArray(translatedValue)) {
     const rawItems = Array.isArray(rawValue) ? rawValue : [];
-    const normalizedItems = translatedValue.map((entryValue, index) =>
+    return translatedValue.map((entryValue, index) =>
       normalizeClientResult(rawItems[index], entryValue),
     );
-    return dedupeTranslatedArray(rawItems, normalizedItems);
   }
 
   if (!isPlainObject(translatedValue)) {
@@ -208,9 +135,11 @@ interface ActiveSubscription {
   errorListeners: Set<(error: Error) => void>;
   currentValue: unknown;
   hasValue: boolean;
+  lastRemoteValue: unknown;
   remoteUnsubscribe: (() => void) | null;
   storageLoadPromise: Promise<void> | null;
   localUnsubscribe: (() => void) | null;
+  localHandle: (() => void) | null;
 }
 
 class CachePipeline {
@@ -330,9 +259,11 @@ class CachePipeline {
         errorListeners: new Set(),
         currentValue: undefined,
         hasValue: false,
+        lastRemoteValue: undefined,
         remoteUnsubscribe: null,
         storageLoadPromise: null,
         localUnsubscribe: null,
+        localHandle: null,
       };
       this.active.set(argsKey, entry);
       this.bootstrapEntry(entry);
@@ -385,6 +316,7 @@ class CachePipeline {
     if (cached) {
       entry.currentValue = cached.value;
       entry.hasValue = true;
+      entry.lastRemoteValue = cached.value;
     } else if (this.config.getCacheStorage()) {
       entry.storageLoadPromise = this.loadFromStorage(entry).catch(() => {
         /* swallow */
@@ -423,24 +355,54 @@ class CachePipeline {
         (span) => {
           const startedAt = nowMs();
           let result: unknown;
+          let usedRemoteFallback = false;
           try {
             result = watch.localQueryResult();
-          } catch {
-            span.setAttributes({ "convex.cache.skip": "throw" });
-            return;
+          } catch (error) {
+            log.debug(
+              `local-watch eval threw for ${entry.refName}: ${(error as Error).message}`,
+            );
+            if (entry.lastRemoteValue === undefined) {
+              span.setAttributes({ "convex.cache.skip": "throw" });
+              return;
+            }
+            result = entry.lastRemoteValue;
+            usedRemoteFallback = true;
           }
           if (result === undefined) {
-            span.setAttributes({ "convex.cache.skip": "undefined" });
+            if (entry.lastRemoteValue === undefined) {
+              span.setAttributes({ "convex.cache.skip": "undefined" });
+              return;
+            }
+            result = entry.lastRemoteValue;
+            usedRemoteFallback = true;
+          }
+          if (
+            !usedRemoteFallback &&
+            entry.lastRemoteValue !== undefined &&
+            Array.isArray(result) &&
+            Array.isArray(entry.lastRemoteValue) &&
+            result.length < entry.lastRemoteValue.length
+          ) {
+            log.debug(
+              `local-watch ${entry.refName} smaller than remote (${result.length} < ${entry.lastRemoteValue.length}); preferring remote`,
+            );
+            result = entry.lastRemoteValue;
+            usedRemoteFallback = true;
+          }
+          log.debug(
+            `local-watch ${entry.refName} result.length=${Array.isArray(result) ? result.length : "non-array"} fallback=${usedRemoteFallback}`,
+          );
+          const valueChanged =
+            !entry.hasValue || !structuralEqual(entry.currentValue, result);
+          if (!valueChanged) {
+            span.setAttributes({
+              "convex.cache.skip": "unchanged",
+              "convex.cache.eval_ms": +(nowMs() - startedAt).toFixed(2),
+            });
             return;
           }
           const previous = this.config.cache.get(entry.refName, entry.args);
-          if (
-            previous !== undefined &&
-            wouldShrinkRemoteResult(previous.value, result)
-          ) {
-            span.setAttributes({ "convex.cache.skip": "shrink" });
-            return;
-          }
           const nextEntry: CachedEntry = {
             value: result,
             receivedAtMs: Date.now(),
@@ -453,8 +415,6 @@ class CachePipeline {
             entry.args,
             nextEntry,
           );
-          const valueChanged =
-            !entry.hasValue || !structuralEqual(entry.currentValue, result);
           entry.currentValue = result;
           entry.hasValue = true;
           if (changed) {
@@ -462,12 +422,11 @@ class CachePipeline {
           }
           span.setAttributes({
             "convex.cache.ref": entry.refName,
-            "convex.cache.value_changed": valueChanged,
+            "convex.cache.value_changed": true,
             "convex.cache.eval_ms": +(nowMs() - startedAt).toFixed(2),
+            "convex.cache.fallback": usedRemoteFallback,
           });
-          if (valueChanged) {
-            this.notifyListeners(entry);
-          }
+          this.notifyListeners(entry);
         },
       );
     };
@@ -484,6 +443,7 @@ class CachePipeline {
       return;
     }
     entry.localUnsubscribe = unsubscribe;
+    entry.localHandle = handleLocal;
     handleLocal();
   }
 
@@ -515,6 +475,7 @@ class CachePipeline {
     this.config.cache.set(entry.refName, entry.args, cacheEntry);
     entry.currentValue = value;
     entry.hasValue = true;
+    entry.lastRemoteValue = value;
     this.notifyListeners(entry);
   }
 
@@ -533,29 +494,26 @@ class CachePipeline {
 
     const handlePush = (value: unknown) => {
       if (!this.active.has(entry.argsKey)) return;
+      log.debug(
+        `remote-push ${entry.refName} value.length=${Array.isArray(value) ? value.length : "non-array"} type=${Array.isArray(value) ? "array" : typeof value}`,
+      );
+      const remoteChanged =
+        entry.lastRemoteValue === undefined ||
+        !structuralEqual(entry.lastRemoteValue, value);
+      if (!remoteChanged) return;
+      entry.lastRemoteValue = value;
+      this.extractDocsToStore(entry.refName, value);
       const previous = this.config.cache.get(entry.refName, entry.args);
-      const nextEntry: CachedEntry = {
+      const persistedEntry: CachedEntry = {
         value,
         receivedAtMs: Date.now(),
         ts: previous?.ts,
         paginationCursor: previous?.paginationCursor,
         paginationIsDone: previous?.paginationIsDone,
       };
-      const changed = this.config.cache.set(
-        entry.refName,
-        entry.args,
-        nextEntry,
-      );
-      const valueChanged =
-        !entry.hasValue || !structuralEqual(entry.currentValue, value);
-      entry.currentValue = value;
-      entry.hasValue = true;
-      if (changed) {
-        void this.persistEntry(entry, nextEntry);
-      }
-      this.extractDocsToStore(entry.refName, value);
-      if (valueChanged) {
-        this.notifyListeners(entry);
+      void this.persistEntry(entry, persistedEntry);
+      if (entry.localHandle) {
+        entry.localHandle();
       }
     };
 
@@ -634,9 +592,8 @@ class CachePipeline {
 
   private notifyListeners(entry: ActiveSubscription): void {
     if (entry.listeners.size === 0) return;
-    // eslint-disable-next-line no-console
-    console.log(
-      `[notify] ${entry.refName} listeners=${entry.listeners.size} ts=${nowMs().toFixed(1)}`,
+    log.debug(
+      `notify ${entry.refName} listeners=${entry.listeners.size} ts=${nowMs().toFixed(1)}`,
     );
     withSpanSync(
       "convex-embedded.cache.notifyListeners",

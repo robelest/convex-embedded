@@ -59,13 +59,11 @@ describe("node platform storage", () => {
     });
     clientsToClose.push(secondClient as { close(): Promise<void> });
 
-    const result = (await secondClient.query(api.issues.forProject, {
+    const issues = (await secondClient.query(api.issues.forProjectAll, {
       projectId,
-    })) as {
-      issues: Array<{ _id: string; title: string }>;
-    };
+    })) as Array<{ _id: string; title: string }>;
 
-    expect(result.issues).toEqual(
+    expect(issues).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           _id: issueId,

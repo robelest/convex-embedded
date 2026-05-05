@@ -1381,25 +1381,56 @@ export class EmbeddedRuntime {
       return;
     }
 
-    const validDocs = docs.filter(
-      (doc) =>
-        typeof doc?._id === "string" &&
-        typeof doc?._creationTime === "number",
-    ) as Array<Record<string, unknown> & { _id: string; _creationTime: number }>;
-    if (validDocs.length === 0) return;
+    const candidates = docs.filter(
+      (doc): doc is Record<string, unknown> & { _id: string } =>
+        typeof doc?._id === "string",
+    );
+    if (candidates.length === 0) return;
 
-    const changed = validDocs.filter((doc) => {
+    const merged: Array<Record<string, unknown> & { _id: string; _creationTime: number }> = [];
+    for (const doc of candidates) {
       const existing = this.db.get(
         table,
         doc._id as unknown as DocumentId,
       ) as Record<string, unknown> | null;
-      return existing === null || !structuralEqual(existing, doc);
-    });
-    if (changed.length === 0) return;
+      const existingCreationTime =
+        typeof existing?._creationTime === "number"
+          ? (existing._creationTime as number)
+          : null;
+      const docCreationTime =
+        typeof doc._creationTime === "number" ? (doc._creationTime as number) : null;
+
+      if (existing === null) {
+        if (docCreationTime !== null) {
+          merged.push(
+            doc as Record<string, unknown> & { _id: string; _creationTime: number },
+          );
+        } else {
+          merged.push({
+            ...doc,
+            _creationTime: 0,
+          } as Record<string, unknown> & { _id: string; _creationTime: number });
+        }
+        continue;
+      }
+
+      const next = {
+        ...existing,
+        ...doc,
+        _id: doc._id,
+        _creationTime: docCreationTime ?? existingCreationTime ?? 0,
+      } as Record<string, unknown> & { _id: string; _creationTime: number };
+
+      if (!structuralEqual(existing, next)) {
+        merged.push(next);
+      }
+    }
+
+    if (merged.length === 0) return;
 
     this.db.startTransaction();
     try {
-      for (const doc of changed) {
+      for (const doc of merged) {
         try {
           this.db.putDocument(table, doc, { validate: false });
         } catch {
@@ -1991,6 +2022,10 @@ export class EmbeddedRuntime {
           "convex.query.tables_read": tablesRead.size,
           "convex.query.dependencies": dependencies.length,
         });
+
+        runtimeLog.debug(
+          `evaluateLocalQuery ${pathName} args=${JSON.stringify(args)} result.length=${Array.isArray(result) ? result.length : "non-array"} tables=${[...tablesRead].join(",")}`,
+        );
 
         return {
           result,

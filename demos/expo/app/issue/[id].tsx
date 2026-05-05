@@ -23,6 +23,7 @@ import { useOverlayRegistration } from "@/src/overlay-guard";
 import { useProjectSelection } from "@/src/project-selection";
 import { colors } from "@/src/theme";
 import {
+  clearUiMark,
   endUiMark,
   markUiClick,
   useTimeUiUpdate,
@@ -58,6 +59,11 @@ export default function IssueDetail() {
     api.issues.detail,
     typeof id === "string" ? { issueId: id as Id<"issues"> } : "skip",
   );
+  React.useEffect(() => {
+    if (!issue) return;
+    endUiMark("issue.open", "ready");
+    clearUiMark("issue.open");
+  }, [issue]);
   useTimeUiUpdate("issue.status", issue?.status ?? null);
   useTimeUiUpdate("issue.priority", issue?.priority ?? null);
   useTimeUiUpdate("issue.title", issue?.title ?? null);
@@ -227,9 +233,9 @@ export default function IssueDetail() {
       </View>
 
       {/* Labels */}
-      {issue.labels.length > 0 && (
+      {(issue.labels?.length ?? 0) > 0 && (
         <View style={styles.labelsRow}>
-          {issue.labels.map((label: string) => (
+          {issue.labels?.map((label: string) => (
             <View key={label} style={styles.labelChip}>
               <Text style={styles.labelText}>{label}</Text>
             </View>

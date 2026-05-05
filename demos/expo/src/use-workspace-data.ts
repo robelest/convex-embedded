@@ -1,7 +1,6 @@
 import { api } from "$convex/_generated/api";
 import type { Id } from "$convex/_generated/dataModel";
 import { useQuery } from "convex/react";
-import React from "react";
 
 export interface WorkspaceProject {
   _id: Id<"projects">;
@@ -16,24 +15,20 @@ export interface WorkspaceProject {
   issueCounter: number;
 }
 
+const WORKSPACE_GET_ARGS = {} as const;
+const EMPTY_PROJECTS: WorkspaceProject[] = [];
+
 export function useWorkspaceData() {
-  const workspace = useQuery(api.workspace.get, {});
+  const workspace = useQuery(api.workspace.get, WORKSPACE_GET_ARGS);
   const workspaceId = workspace?.selectedWorkspace?.groupId;
   const projects = useQuery(
     api.projects.list,
     workspaceId ? { workspaceId } : "skip",
   );
 
-  const workspaceProjects = React.useMemo(() => {
-    if (!projects) {
-      return [] as WorkspaceProject[];
-    }
-    return projects as WorkspaceProject[];
-  }, [projects]);
-
   return {
     workspace,
     workspaceId,
-    projects: workspaceProjects,
+    projects: (projects ?? EMPTY_PROJECTS) as WorkspaceProject[],
   };
 }

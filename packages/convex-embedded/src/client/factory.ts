@@ -44,10 +44,7 @@ import type { EmbeddedRuntimeOptions } from "@/runtime/embedded";
 import { LoadCoordinator } from "@/runtime/load";
 import { PENDING_STORE_MIGRATIONS } from "@/runtime/migrations/pending";
 import type { EmbeddedPlatformAdapter } from "@/runtime/platform";
-import {
-  createQueryCacheStorage,
-  type QueryCacheStorage,
-} from "@/runtime/sqlite/cache_table";
+import type { QueryCacheStorage } from "@/runtime/sqlite/cache_table";
 import { SCHEDULED_FUNCTIONS_STORE_MIGRATIONS } from "@/scheduler/executor";
 import { createLogger } from "@/shared/logger";
 import type { PendingReplayMeta } from "@/shared/symbols";
@@ -322,53 +319,7 @@ export function createEmbeddedClient(input: {
   });
 
   const queryCache = new EmbeddedQueryCache();
-  let queryCacheStorage: QueryCacheStorage | null = null;
-
-  void load.storageReady
-    .then(async () => {
-      if (clientClosed) return;
-      const storage = runtime.getStorage();
-      if (!(storage instanceof SqliteAdapter)) {
-        return;
-      }
-      const driver = storage.getDriver();
-      const cacheStorage = createQueryCacheStorage(driver);
-      try {
-        await cacheStorage.initSchema();
-        const rows = await cacheStorage.loadAll();
-        if (clientClosed) return;
-        for (const row of rows) {
-          let value: unknown;
-          try {
-            value = JSON.parse(row.valueJson);
-          } catch {
-            continue;
-          }
-          let args: unknown;
-          try {
-            args = JSON.parse(row.argsJson);
-          } catch {
-            continue;
-          }
-          queryCache.set(row.refName, args, {
-            value,
-            receivedAtMs: row.receivedAt,
-            ts: row.ts ?? undefined,
-            paginationCursor: row.paginationCursor ?? undefined,
-            paginationIsDone:
-              row.paginationIsDone === null
-                ? undefined
-                : row.paginationIsDone === 1,
-          });
-        }
-        queryCacheStorage = cacheStorage;
-      } catch (error) {
-        log.warn("query cache storage init failed", error);
-      }
-    })
-    .catch((error) => {
-      log.warn("query cache bootstrap skipped", error);
-    });
+  const queryCacheStorage: QueryCacheStorage | null = null;
 
   registerEmbeddedClientEntry(client, {
     runtime,

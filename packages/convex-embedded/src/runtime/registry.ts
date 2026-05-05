@@ -32,6 +32,7 @@ export interface RuntimeQueryObserver<TMeta> {
   needsReevaluation: boolean;
   manualRefresh: boolean;
   depVersions: Map<string, number> | null;
+  pendingDelete: boolean;
 }
 
 export type TableVersionGetter = (tableName: string) => number;
@@ -108,6 +109,7 @@ export class RuntimeQueryObserverRegistry<TMeta> {
       needsReevaluation: false,
       manualRefresh: options?.manualRefresh ?? false,
       depVersions: null,
+      pendingDelete: false,
     };
 
     this._entries.set(token, {
@@ -163,11 +165,9 @@ export class RuntimeQueryObserverRegistry<TMeta> {
       return () => {};
     }
     observer.listeners.add(callback);
+    observer.pendingDelete = false;
     return () => {
       observer.listeners.delete(callback);
-      if (observer.listeners.size === 0) {
-        this.delete(token);
-      }
     };
   }
 

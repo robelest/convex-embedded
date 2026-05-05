@@ -38,25 +38,28 @@ export default function ProjectWorkbenchScreen() {
     if (!project || message.length === 0) return;
     setIsAskingAssistant(true);
     setAssistantDraft("");
-    const nextHistory = [
-      ...assistantMessages,
-      { role: "user" as const, content: message },
-    ];
-    setAssistantMessages(nextHistory);
+    let historySnapshot: Array<{
+      role: "user" | "assistant";
+      content: string;
+    }> = [];
+    setAssistantMessages((prev) => {
+      historySnapshot = prev;
+      return [...prev, { role: "user", content: message }];
+    });
     try {
       const result = await client.action(api.agent.chatProject, {
         projectId: project._id as Id<"projects">,
-        history: assistantMessages,
+        history: historySnapshot,
         message,
       });
-      setAssistantMessages([
-        ...nextHistory,
-        { role: "assistant" as const, content: result.reply },
+      setAssistantMessages((prev) => [
+        ...prev,
+        { role: "assistant", content: result.reply },
       ]);
     } finally {
       setIsAskingAssistant(false);
     }
-  }, [assistantDraft, assistantMessages, project]);
+  }, [assistantDraft, project, client]);
 
   if (!project) {
     return <View style={styles.loading} />;

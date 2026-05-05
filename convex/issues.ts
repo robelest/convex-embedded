@@ -17,6 +17,14 @@ export const list = issues.query({
   },
 });
 
+const STATUS_ORDINAL: Record<string, number> = {
+  in_progress: 0,
+  todo: 1,
+  backlog: 2,
+  done: 3,
+  cancelled: 4,
+};
+
 export const forProject = issues.query({
   args: {
     projectId: v.id("projects"),
@@ -34,26 +42,64 @@ export const forProject = issues.query({
       .order("asc")
       .paginate(args.paginationOpts);
 
-    return {
-      ...page,
-      page: page.page.map((issue) => ({
+    const rows = page.page
+      .map((issue) => ({
         _id: issue._id,
         identifier: `${project.identifier}-${issue.number}`,
-        number: issue.number,
         title: issue.title,
-        description: prose.normalize(issue.description),
         status: issue.status,
         priority: issue.priority,
-        labels: issue.labels,
         position: issue.position,
         assigneeName: issue.assigneeUserId
           ? userSummary(issue.assigneeUserId).name
           : null,
+      }))
+      .sort((a, b) => {
+        const ord = (STATUS_ORDINAL[a.status] ?? 99) - (STATUS_ORDINAL[b.status] ?? 99);
+        if (ord !== 0) return ord;
+        return a.position - b.position;
+      });
+
+    return { ...page, page: rows };
+  },
+});
+
+export const forProjectAll = issues.query({
+  args: { projectId: v.id("projects") },
+  handler: async (ctx, args) => {
+    const project = await ctx.db.get(args.projectId);
+    if (!project) {
+      throw new ConvexError("Project not found");
+    }
+
+    const all = await ctx.db
+      .query("issues")
+      .withIndex("by_projectId", (q) => q.eq("projectId", args.projectId))
+      .collect();
+
+    return all
+      .map((issue) => ({
+        _id: issue._id,
+        _creationTime: issue._creationTime,
+        projectId: issue.projectId,
+        number: issue.number,
+        identifier: `${project.identifier}-${issue.number}`,
+        title: issue.title,
+        status: issue.status,
+        priority: issue.priority,
+        position: issue.position,
         assigneeUserId: issue.assigneeUserId ?? null,
-        createdByName: userSummary(issue.createdByUserId).name,
-        createdByUserId: issue.createdByUserId,
-      })),
-    };
+        assigneeName: issue.assigneeUserId
+          ? userSummary(issue.assigneeUserId).name
+          : null,
+      }))
+      .sort((a, b) => {
+        const ord =
+          (STATUS_ORDINAL[a.status] ?? 99) -
+          (STATUS_ORDINAL[b.status] ?? 99);
+        if (ord !== 0) return ord;
+        return a.position - b.position;
+      });
   },
 });
 

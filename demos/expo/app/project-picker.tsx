@@ -6,6 +6,7 @@ import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { useOverlayRegistration } from "@/src/overlay-guard";
 import { useProjectSelection } from "@/src/project-selection";
 import { colors } from "@/src/theme";
+import { clearUiMark, endUiMark } from "@/src/ui-timing";
 import {
   type WorkspaceProject,
   useWorkspaceData,
@@ -17,6 +18,12 @@ export default function ProjectPickerScreen() {
   const { setSelectedProjectId } = useProjectSelection();
 
   useOverlayRegistration("project-picker");
+
+  React.useEffect(() => {
+    if (projects.length === 0) return;
+    endUiMark("projects.open", "ready");
+    clearUiMark("projects.open");
+  }, [projects.length]);
 
   return (
     <ScrollView

@@ -317,7 +317,7 @@ describe("Pending Queue", () => {
     ].handler(db, { id });
     db.commit();
 
-    expect(removeResult).toBeNull();
+    expect(removeResult).toBe(true);
 
     db.startTransaction();
     const all = await SYSTEM_FUNCTIONS[SystemPaths.pendingGetAll].handler(
@@ -339,7 +339,7 @@ describe("Pending Queue", () => {
     );
     db.commit();
 
-    expect(result).toBeNull();
+    expect(result).toBe(false);
   });
 
   it("pendingClear removes all entries", async () => {

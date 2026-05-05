@@ -15,6 +15,10 @@ import type {
 } from "convex/server";
 import { startTransition } from "react";
 
+import { createLogger } from "@/shared/logger";
+
+const log = createLogger("react");
+
 type WatchQueryOptions = {
   journal?: QueryJournal;
   componentPath?: string;
@@ -118,9 +122,8 @@ export class EmbeddedConvexReactClient extends ConvexReactClient {
         args,
         () => {
           const ts = globalThis.performance?.now?.() ?? Date.now();
-          // eslint-disable-next-line no-console
-          console.log(
-            `[react-notify] listeners=${listeners.size} ts=${ts.toFixed(1)}`,
+          log.debug(
+            `react-notify listeners=${listeners.size} ts=${ts.toFixed(1)}`,
           );
           for (const listener of listeners) {
             listener();

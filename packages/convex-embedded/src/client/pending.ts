@@ -301,7 +301,10 @@ export class PendingQueue {
             owner,
           }) as Promise<unknown>));
 
-      if (result === undefined) {
+      if (result === false) {
+        log.warn(
+          `pending-queue: remove rejected for ${entry.ref} (lease lost or stale)`,
+        );
         return undefined;
       }
       this._entries.splice(index, 1);

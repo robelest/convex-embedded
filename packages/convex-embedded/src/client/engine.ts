@@ -1484,6 +1484,11 @@ function createEngine(config: EngineConfig): EngineInstance {
       () => rawIngestDocuments(table, docs, scopeArgs),
     );
     ingestLockMap.set(table, next);
+    void next.finally(() => {
+      if (ingestLockMap.get(table) === next) {
+        ingestLockMap.delete(table);
+      }
+    });
     return next;
   }
   const canonicalizeMappedCreate =
@@ -1506,18 +1511,27 @@ function createEngine(config: EngineConfig): EngineInstance {
   const REPLAY_GRACE_MS = 3_000;
   const recentlyReplayedIds = new Map<string, number>();
 
+  function sweepRecentlyReplayed(now: number): void {
+    for (const [id, timestamp] of recentlyReplayedIds) {
+      if (now - timestamp >= REPLAY_GRACE_MS) {
+        recentlyReplayedIds.delete(id);
+      }
+    }
+  }
+
   function addRecentlyReplayed(id: string): void {
-    recentlyReplayedIds.set(id, Date.now());
+    const now = Date.now();
+    sweepRecentlyReplayed(now);
+    recentlyReplayedIds.set(id, now);
   }
 
   function getRecentlyReplayedIdSet(): ReadonlySet<string> {
     const now = Date.now();
+    sweepRecentlyReplayed(now);
     const active = new Set<string>();
     for (const [id, timestamp] of recentlyReplayedIds) {
       if (now - timestamp < REPLAY_GRACE_MS) {
         active.add(id);
-      } else {
-        recentlyReplayedIds.delete(id);
       }
     }
     return active;
@@ -3361,9 +3375,8 @@ function createEngine(config: EngineConfig): EngineInstance {
 
       const __localDone =
         globalThis.performance?.now?.() ?? Date.now();
-      // eslint-disable-next-line no-console
-      console.log(
-        `[engine.mutation] local-done t+${(__localDone - __mutStart).toFixed(1)}ms ref=${refName}`,
+      log.debug(
+        `engine.mutation local-done t+${(__localDone - __mutStart).toFixed(1)}ms ref=${refName}`,
       );
 
       if (localFailed) {
@@ -3403,9 +3416,8 @@ function createEngine(config: EngineConfig): EngineInstance {
           );
           const __pushDone =
             globalThis.performance?.now?.() ?? Date.now();
-          // eslint-disable-next-line no-console
-          console.log(
-            `[engine.mutation] queue.push push=${(__pushDone - __pushStart).toFixed(1)}ms ref=${refName}`,
+          log.debug(
+            `engine.mutation queue.push push=${(__pushDone - __pushStart).toFixed(1)}ms ref=${refName}`,
           );
           if (!isOnline && crdtFieldsByTable.has(table)) {
             const docId =
@@ -3427,9 +3439,8 @@ function createEngine(config: EngineConfig): EngineInstance {
 
       const __chainDone =
         globalThis.performance?.now?.() ?? Date.now();
-      // eslint-disable-next-line no-console
-      console.log(
-        `[engine.mutation] chain-done t+${(__chainDone - __mutStart).toFixed(1)}ms ref=${refName}`,
+      log.debug(
+        `engine.mutation chain-done t+${(__chainDone - __mutStart).toFixed(1)}ms ref=${refName}`,
       );
       return localResult;
     },

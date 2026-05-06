@@ -421,6 +421,31 @@ export class UdfExecutor {
   }
 
   /**
+   * Execute an HTTP action (registered via {@link httpRouter}).
+   *
+   * HTTP actions are actions semantically — no transaction, syscalls available
+   * via {@link runQuery} / {@link runMutation} — but their public entry point
+   * takes a `Request` and returns a `Response`. The caller is responsible for
+   * route matching; this just runs the chosen handler under the action
+   * runtime.
+   */
+  async executeHttpAction(
+    action: { invokeHttpAction?: (request: Request) => Promise<Response> },
+    request: Request,
+    executionContext: ExecutionContext = {},
+  ): Promise<Response> {
+    if (typeof action.invokeHttpAction !== "function") {
+      throw new Error(
+        "[convex-embedded] httpAction is missing invokeHttpAction; route handler is not a Convex httpAction.",
+      );
+    }
+    return this._runWithGlobals(
+      () => action.invokeHttpAction!(request),
+      executionContext,
+    );
+  }
+
+  /**
    * Run a callback with:
    * - A fresh {@link OpsContext} providing deterministic random/time
    * - Patched globals (Math.random, Date.now, crypto.randomUUID)

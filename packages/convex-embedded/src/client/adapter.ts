@@ -1571,6 +1571,10 @@ export function patchRoutedConvexClient(input: {
   (input.client as any).getWorkScheduler = (): WorkScheduler | undefined =>
     pipeline?.getWorkScheduler();
 
+  (input.client as any).dispatchHttpRequest = (
+    request: Request,
+  ): Promise<Response> => input.runtime.dispatchHttpRequest(request);
+
   if (
     typeof (input.client as any).onPaginatedUpdate_experimental === "function"
   ) {

@@ -59,6 +59,10 @@ import type { EmbeddedTransport } from "@/runtime/transport";
 import { discoverCronJobs } from "@/scheduler/cron-discover";
 import { CronRunner } from "@/scheduler/cron-runner";
 import { SchedulerExecutor } from "@/scheduler/executor";
+import {
+  createHttpDispatcher,
+  type HttpDispatcher,
+} from "@/runtime/http";
 import { canonicalizeMappedCreateTable } from "@/shared/canonicalize";
 import { structuralEqual } from "@/shared/equals";
 import { createLogger, setLoggerDebug } from "@/shared/logger";
@@ -82,6 +86,17 @@ import { DisposableScope } from "@/utils/scope";
 
 const storageLog = createLogger("runtime-storage");
 const runtimeLog = createLogger("runtime");
+
+const noopHttpDispatcher: HttpDispatcher = {
+  dispatch: () =>
+    Promise.resolve(
+      new Response("Not Found", {
+        status: 404,
+        headers: { "content-type": "text/plain" },
+      }),
+    ),
+  hasRoutes: () => false,
+};
 
 function readDebugEnvFlag(): boolean {
   if (typeof process === "undefined") return false;
@@ -366,6 +381,7 @@ export class EmbeddedRuntime {
     | null;
   readonly scheduler: SchedulerExecutor;
   readonly cronRunner: CronRunner;
+  private _httpDispatcher: HttpDispatcher | null = null;
   private readonly _protocolQueryObservers: RuntimeQueryObserverRegistry<ProtocolQueryRecord>;
   private readonly _localQueryWatches: RuntimeQueryObserverRegistry<LocalQueryWatchRecord>;
   private readonly _localPaginatedQueryWatches: RuntimeQueryObserverRegistry<LocalPaginatedWatchRecord>;
@@ -498,6 +514,7 @@ export class EmbeddedRuntime {
           await this._resumeScheduledFunctions();
         }
         await this._startCronRunner();
+        await this._initializeHttpDispatcher();
       } catch (err) {
         console.error("[convex-embedded] hydration failed:", err);
         throw err;
@@ -2322,6 +2339,37 @@ export class EmbeddedRuntime {
     } catch (err) {
       console.error("[convex-embedded] cron runner start failed:", err);
     }
+  }
+
+  private async _initializeHttpDispatcher(): Promise<void> {
+    try {
+      this._httpDispatcher = await createHttpDispatcher(
+        this.moduleLoader,
+        this.executor,
+      );
+      runtimeLog.debug(
+        `http dispatcher initialized (hasRoutes=${this._httpDispatcher.hasRoutes()})`,
+      );
+    } catch (err) {
+      console.error(
+        "[convex-embedded] http dispatcher init failed:",
+        err,
+      );
+    }
+  }
+
+  /**
+   * Dispatch a `Request` against the user's `convex/http.ts` route table and
+   * return the resulting `Response`.
+   *
+   * Mirrors what Convex's hosted `httpAction` does, except the call is in-
+   * process. Use this directly from any Web fetch-handler runtime
+   * (Bun/Deno/Cloudflare Workers/Hono) or wrap with
+   * `@whatwg-node/server`'s `createServerAdapter` for Node.
+   */
+  async dispatchHttpRequest(request: Request): Promise<Response> {
+    await this._storageHydrated;
+    return (this._httpDispatcher ?? noopHttpDispatcher).dispatch(request);
   }
 
   private async _resumeScheduledFunctions(): Promise<void> {

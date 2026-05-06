@@ -17,6 +17,10 @@ import { structuralEqual } from "@/shared/equals";
 import { createLogger } from "@/shared/logger";
 import { nowMs } from "@/shared/perf";
 import { stableValueKey } from "@/shared/valuekey";
+import {
+  createDefaultWorkScheduler,
+  type WorkScheduler,
+} from "@/shared/work";
 import { withSpanSync } from "@/tracing/spans";
 
 import { effectToTransitions } from "@/client/optimistic/apply";
@@ -141,7 +145,13 @@ interface ActiveSubscription {
   storageLoadPromise: Promise<void> | null;
   localUnsubscribe: (() => void) | null;
   localHandle: (() => void) | null;
+  pendingPushValue: unknown;
+  pendingPushHasValue: boolean;
+  pendingPushTimer: ReturnType<typeof setTimeout> | null;
+  lastPushAtMs: number;
 }
+
+const REMOTE_PUSH_COALESCE_MS = 16;
 
 const OPTIMISTIC_PROTECTION_MS = 500;
 
@@ -178,10 +188,19 @@ class CachePipeline {
   }
 
   private deferredScheduler: (fn: () => void) => void = (fn) => fn();
+  private workScheduler: WorkScheduler = createDefaultWorkScheduler();
 
   setDeferredScheduler(scheduler: (fn: () => void) => void): void {
     this.deferredScheduler =
       typeof scheduler === "function" ? scheduler : (fn) => fn();
+  }
+
+  setWorkScheduler(scheduler: WorkScheduler | null): void {
+    this.workScheduler = scheduler ?? createDefaultWorkScheduler();
+  }
+
+  getWorkScheduler(): WorkScheduler {
+    return this.workScheduler;
   }
 
   applyOptimisticTransition(
@@ -269,6 +288,10 @@ class CachePipeline {
         storageLoadPromise: null,
         localUnsubscribe: null,
         localHandle: null,
+        pendingPushValue: undefined,
+        pendingPushHasValue: false,
+        pendingPushTimer: null,
+        lastPushAtMs: 0,
       };
       this.active.set(argsKey, entry);
       this.bootstrapEntry(entry);
@@ -295,6 +318,12 @@ class CachePipeline {
         current.errorListeners.delete(input.onError);
       }
       if (current.listeners.size === 0 && current.errorListeners.size === 0) {
+        if (current.pendingPushTimer !== null) {
+          clearTimeout(current.pendingPushTimer);
+          current.pendingPushTimer = null;
+          current.pendingPushHasValue = false;
+          current.pendingPushValue = undefined;
+        }
         if (current.remoteUnsubscribe) {
           try {
             current.remoteUnsubscribe();
@@ -523,18 +552,17 @@ class CachePipeline {
       | undefined;
     if (typeof onUpdate !== "function") return;
 
-    const handlePush = (value: unknown) => {
+    const applyPush = (value: unknown) => {
       if (!this.active.has(entry.argsKey)) return;
-      log.debug(
-        `remote-push ${entry.refName} value.length=${Array.isArray(value) ? value.length : "non-array"} type=${Array.isArray(value) ? "array" : typeof value}`,
-      );
       const remoteChanged =
         entry.lastRemoteValue === undefined ||
         !structuralEqual(entry.lastRemoteValue, value);
       if (!remoteChanged) return;
       const previousRemote = entry.lastRemoteValue;
       entry.lastRemoteValue = value;
-      this.extractDocsToStore(entry.refName, value, previousRemote);
+      this.workScheduler.post("background", () => {
+        this.extractDocsToStore(entry.refName, value, previousRemote);
+      });
       const previous = this.config.cache.get(entry.refName, entry.args);
       const persistedEntry: CachedEntry = {
         value,
@@ -547,6 +575,43 @@ class CachePipeline {
       if (entry.localHandle) {
         entry.localHandle();
       }
+    };
+
+    const flushPending = () => {
+      entry.pendingPushTimer = null;
+      if (!entry.pendingPushHasValue) return;
+      const value = entry.pendingPushValue;
+      entry.pendingPushHasValue = false;
+      entry.pendingPushValue = undefined;
+      log.debug(
+        `remote-push ${entry.refName} flushing coalesced value.length=${Array.isArray(value) ? value.length : "non-array"}`,
+      );
+      applyPush(value);
+    };
+
+    const handlePush = (value: unknown) => {
+      if (!this.active.has(entry.argsKey)) return;
+      log.debug(
+        `remote-push ${entry.refName} value.length=${Array.isArray(value) ? value.length : "non-array"} type=${Array.isArray(value) ? "array" : typeof value}`,
+      );
+      const now = nowMs();
+      if (
+        entry.lastPushAtMs > 0 &&
+        now - entry.lastPushAtMs < REMOTE_PUSH_COALESCE_MS
+      ) {
+        entry.pendingPushValue = value;
+        entry.pendingPushHasValue = true;
+        if (entry.pendingPushTimer === null) {
+          const delay = Math.max(
+            0,
+            REMOTE_PUSH_COALESCE_MS - (now - entry.lastPushAtMs),
+          );
+          entry.pendingPushTimer = setTimeout(flushPending, delay);
+        }
+        return;
+      }
+      entry.lastPushAtMs = now;
+      applyPush(value);
     };
 
     const handleError = (error: Error) => {
@@ -1507,6 +1572,37 @@ export function patchRoutedConvexClient(input: {
     scheduler: (fn: () => void) => void,
   ): void => {
     pipeline?.setDeferredScheduler(scheduler);
+  };
+
+  (input.client as any).setWorkScheduler = (
+    scheduler: WorkScheduler | null,
+  ): void => {
+    pipeline?.setWorkScheduler(scheduler);
+  };
+
+  (input.client as any).getWorkScheduler = (): WorkScheduler | undefined =>
+    pipeline?.getWorkScheduler();
+
+  (input.client as any).applyOptimisticEffects = (
+    effects: ReadonlyArray<{ kind: string }>,
+  ): void => {
+    if (!pipeline || !cache) return;
+    const transitions: Array<{
+      refName: string;
+      args: unknown;
+      value: unknown;
+      priority?: "discrete" | "transition";
+    }> = [];
+    for (const effect of effects) {
+      const updates = effectToTransitions(
+        effect as Parameters<typeof effectToTransitions>[0],
+        cache,
+      );
+      for (const update of updates) transitions.push(update);
+    }
+    if (transitions.length > 0) {
+      pipeline.applyOptimisticTransition(transitions);
+    }
   };
 
   if (

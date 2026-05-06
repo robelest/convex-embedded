@@ -130,6 +130,8 @@ export {
   switchIdentity,
 } from "@/client/auth";
 
+export { createExpoWorkScheduler } from "@/expo/work";
+
 /**
  * Read the current remote sync state for an Expo embedded client.
  *

@@ -420,6 +420,15 @@ export function createEmbeddedClient(input: {
   );
   rootScope.addFinalizer(() => unsubscribeSessionFanout());
 
+  if (platform.workScheduler) {
+    const setWorkScheduler = (client as unknown as {
+      setWorkScheduler?: (s: unknown) => void;
+    }).setWorkScheduler;
+    if (typeof setWorkScheduler === "function") {
+      setWorkScheduler.call(client, platform.workScheduler);
+    }
+  }
+
   const originalClose = client.close.bind(client);
   let closePromise: Promise<void> | null = null;
   (client as any).close = async function patchedClose(): Promise<void> {

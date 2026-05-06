@@ -1,5 +1,6 @@
 import type { StorageAdapter } from "@/storage/adapter";
 import type { EmbeddedCryptoProvider } from "@/runtime/crypto";
+import type { WorkScheduler } from "@/shared/work";
 import type { EmbeddedRuntime } from "@/runtime/embedded";
 import type { StorageSurface } from "@/runtime/storage";
 
@@ -92,4 +93,5 @@ export interface EmbeddedPlatformAdapter {
   }): (StorageSurface & { close(): void }) | null;
   connectivity?: ConnectivityAdapter;
   processorIdentity?: ProcessorIdentity;
+  workScheduler?: WorkScheduler;
 }

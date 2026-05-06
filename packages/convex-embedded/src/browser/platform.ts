@@ -1,6 +1,7 @@
 import { BrowserSessionBroadcast } from "@/browser/session";
 import { openBrowserStorage } from "@/browser/sqlite/adapter";
 import { createBrowserStorageSurface } from "@/browser/storage";
+import { createBrowserWorkScheduler } from "@/browser/work";
 import { BrowserWriteBroadcast } from "@/browser/write";
 import { createAmbientCryptoProvider } from "@/runtime/crypto";
 import {
@@ -137,5 +138,6 @@ export function createBrowserPlatformAdapter(): EmbeddedPlatformAdapter {
     processorIdentity: {
       getProcessorId: createProcessorId,
     },
+    workScheduler: createBrowserWorkScheduler(),
   };
 }

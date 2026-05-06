@@ -3,6 +3,7 @@ import { createExpoConnectivityAdapter } from "@/expo/connectivity";
 import { createExpoCryptoProvider } from "@/expo/crypto";
 import { openOpSqliteStorage } from "@/expo/sqlite";
 import { createExpoStorageSurface } from "@/expo/storage";
+import { createExpoWorkScheduler } from "@/expo/work";
 import type { EmbeddedPlatformAdapter } from "@/runtime/platform";
 
 export interface ExpoPlatformOptions {
@@ -44,5 +45,6 @@ export function createExpoPlatformAdapter(
         return `${name}:expo:${crypto.randomUUID()}`;
       },
     },
+    workScheduler: createExpoWorkScheduler(),
   };
 }

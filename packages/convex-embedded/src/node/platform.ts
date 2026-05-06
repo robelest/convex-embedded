@@ -1,6 +1,7 @@
 import { resolve } from "node:path";
 
 import { openNodeStorage } from "@/node/sqlite/adapter";
+import { createNodeWorkScheduler } from "@/node/work";
 import { createAmbientCryptoProvider } from "@/runtime/crypto";
 import {
   createAmbientConnectivityAdapter,
@@ -44,5 +45,6 @@ export function createNodePlatformAdapter(
         return `${name}:node:${platformCrypto.randomUUID()}`;
       },
     },
+    workScheduler: createNodeWorkScheduler(),
   };
 }

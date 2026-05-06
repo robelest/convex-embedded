@@ -27,6 +27,7 @@ import type {
 export type { AuthOptions, AuthState, RemoteOptions, RemoteState };
 export type { ConvexInput } from "@/kernel/modules";
 export { createNodePlatformAdapter, openNodeStorage };
+export { createNodeWorkScheduler } from "@/node/work";
 export type { NodePlatformOptions } from "@/node/platform";
 
 export interface ClientOptions {

@@ -376,6 +376,7 @@ export function createConvexClient(options: ClientOptions): ConvexClient {
  * @see createConvexClient
  */
 export { createBrowserPlatformAdapter } from "@/browser/platform";
+export { createBrowserWorkScheduler } from "@/browser/work";
 
 /**
  * Embedded auth helpers for browser clients.

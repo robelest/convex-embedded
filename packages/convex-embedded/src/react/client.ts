@@ -90,7 +90,22 @@ export class EmbeddedConvexReactClient extends ConvexReactClient {
       setOptimisticDeferredScheduler?: (fn: (work: () => void) => void) => void;
     }).setOptimisticDeferredScheduler;
     if (typeof setScheduler === "function") {
-      setScheduler((work) => startTransition(work));
+      const queue: Array<() => void> = [];
+      let pending = false;
+      const flush = () => {
+        pending = false;
+        const tasks = queue.splice(0);
+        if (tasks.length === 0) return;
+        startTransition(() => {
+          for (const task of tasks) task();
+        });
+      };
+      setScheduler((work) => {
+        queue.push(work);
+        if (pending) return;
+        pending = true;
+        setTimeout(flush, 0);
+      });
     }
   }
 

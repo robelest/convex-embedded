@@ -61,6 +61,7 @@ import { canonicalizeMappedCreateTable } from "@/shared/canonicalize";
 import { structuralEqual } from "@/shared/equals";
 import { createLogger, setLoggerDebug } from "@/shared/logger";
 import { matchTag } from "@/shared/match";
+import { nowMs } from "@/shared/perf";
 import { componentRouteTargetLabel } from "@/shared/route";
 import type { Definition } from "@/shared/schema";
 import { stableValueKey } from "@/shared/valuekey";
@@ -1150,20 +1151,26 @@ export class EmbeddedRuntime {
    */
   onMutationCommit(commit: DatabaseCommitResult): void {
     if (commit.tablesWritten.size === 0) return;
+    const startedAt = nowMs();
 
     this.db.bumpTableVersions(commit.tablesWritten);
 
     const changes = this._commitToQueryUpdates(commit.invalidation);
     const tablesWritten = commit.invalidation.tables;
+    const invalidateStart = nowMs();
     if (changes.length > 0) {
       this.subscriptions.invalidate(changes);
     } else if (tablesWritten.size > 0) {
       this.subscriptions.invalidate(tablesWritten);
     }
+    const invalidateMs = nowMs() - invalidateStart;
     this._notifyTableWriteListeners(tablesWritten);
     runDetached(
       () => this._notifyCrossTabAfterStorage(commit),
       "[convex-embedded] post-commit fanout failed:",
+    );
+    runtimeLog.debug(
+      `onMutationCommit tables=${[...tablesWritten].join(",")} changes=${changes.length} invalidate_ms=${invalidateMs.toFixed(1)} total_ms=${(nowMs() - startedAt).toFixed(1)}`,
     );
   }
 
@@ -1375,6 +1382,7 @@ export class EmbeddedRuntime {
     docs: Array<Record<string, unknown>>,
   ): Promise<void> {
     if (docs.length === 0) return;
+    const totalStart = nowMs();
     try {
       await this._storageHydrated;
     } catch {
@@ -1387,7 +1395,38 @@ export class EmbeddedRuntime {
     );
     if (candidates.length === 0) return;
 
+    const tableSpec = this._userTableSpecs?.get(table) ?? null;
+    const requiredFields = tableSpec
+      ? Object.entries(tableSpec.fields)
+          .filter(([, spec]) => spec.notNull === true)
+          .map(([name]) => name)
+      : [];
+    const knownFields = tableSpec ? new Set(Object.keys(tableSpec.fields)) : null;
+
+    const docHasRequired = (doc: Record<string, unknown>): boolean => {
+      if (requiredFields.length === 0) return true;
+      for (const field of requiredFields) {
+        if (doc[field] === undefined || doc[field] === null) return false;
+      }
+      return true;
+    };
+
+    const stripUnknownFields = (
+      doc: Record<string, unknown>,
+    ): Record<string, unknown> => {
+      if (!knownFields) return doc;
+      const out: Record<string, unknown> = {};
+      for (const key of Object.keys(doc)) {
+        if (key === "_id" || key === "_creationTime" || knownFields.has(key)) {
+          out[key] = doc[key];
+        }
+      }
+      return out;
+    };
+
+    const diffStart = nowMs();
     const merged: Array<Record<string, unknown> & { _id: string; _creationTime: number }> = [];
+    let skippedPartial = 0;
     for (const doc of candidates) {
       const existing = this.db.get(
         table,
@@ -1401,33 +1440,54 @@ export class EmbeddedRuntime {
         typeof doc._creationTime === "number" ? (doc._creationTime as number) : null;
 
       if (existing === null) {
+        if (!docHasRequired(doc)) {
+          skippedPartial += 1;
+          continue;
+        }
+        const stripped = stripUnknownFields(doc);
         if (docCreationTime !== null) {
           merged.push(
-            doc as Record<string, unknown> & { _id: string; _creationTime: number },
+            stripped as Record<string, unknown> & { _id: string; _creationTime: number },
           );
         } else {
           merged.push({
-            ...doc,
+            ...stripped,
             _creationTime: 0,
           } as Record<string, unknown> & { _id: string; _creationTime: number });
         }
         continue;
       }
 
-      const next = {
+      const candidateNext = {
         ...existing,
         ...doc,
         _id: doc._id,
         _creationTime: docCreationTime ?? existingCreationTime ?? 0,
-      } as Record<string, unknown> & { _id: string; _creationTime: number };
+      };
+      const next = stripUnknownFields(candidateNext) as Record<
+        string,
+        unknown
+      > & { _id: string; _creationTime: number };
+
+      if (!docHasRequired(next)) {
+        skippedPartial += 1;
+        continue;
+      }
 
       if (!structuralEqual(existing, next)) {
         merged.push(next);
       }
     }
+    const diffMs = nowMs() - diffStart;
 
-    if (merged.length === 0) return;
+    if (merged.length === 0) {
+      runtimeLog.debug(
+        `upsertDocsFromCache ${table} candidates=${candidates.length} merged=0 skipped_partial=${skippedPartial} diff_ms=${diffMs.toFixed(1)} total_ms=${(nowMs() - totalStart).toFixed(1)}`,
+      );
+      return;
+    }
 
+    const writeStart = nowMs();
     this.db.startTransaction();
     try {
       for (const doc of merged) {
@@ -1446,6 +1506,9 @@ export class EmbeddedRuntime {
     } catch {
       this.db.rollbackWrites();
     }
+    runtimeLog.debug(
+      `upsertDocsFromCache ${table} candidates=${candidates.length} merged=${merged.length} skipped_partial=${skippedPartial} diff_ms=${diffMs.toFixed(1)} write_ms=${(nowMs() - writeStart).toFixed(1)} total_ms=${(nowMs() - totalStart).toFixed(1)}`,
+    );
   }
 
   async canonicalizeMappedCreate(input: {
@@ -1983,6 +2046,7 @@ export class EmbeddedRuntime {
     return withSpan(
       "convex-embedded.evaluateLocalQuery",
       async (span) => {
+        const startedAt = nowMs();
         const path = resolveFunctionPath({ name: pathName });
         const systemFn = SYSTEM_FUNCTIONS[path.udfPath];
 
@@ -2006,6 +2070,7 @@ export class EmbeddedRuntime {
           };
         }
 
+        const lockStart = nowMs();
         const dependencies: QueryDependency[] = [];
         const result = await this._runWithTransactionLock(() =>
           this.executor.executeQuery(path, args, {
@@ -2013,6 +2078,7 @@ export class EmbeddedRuntime {
             dependencies,
           }),
         );
+        const evalMs = nowMs() - lockStart;
 
         const tablesRead = new Set(
           dependencies.map((dependency) => dependency.tableName),
@@ -2024,7 +2090,7 @@ export class EmbeddedRuntime {
         });
 
         runtimeLog.debug(
-          `evaluateLocalQuery ${pathName} args=${JSON.stringify(args)} result.length=${Array.isArray(result) ? result.length : "non-array"} tables=${[...tablesRead].join(",")}`,
+          `evaluateLocalQuery ${pathName} result.length=${Array.isArray(result) ? result.length : "non-array"} tables=${[...tablesRead].join(",")} eval_ms=${evalMs.toFixed(1)} total_ms=${(nowMs() - startedAt).toFixed(1)}`,
         );
 
         return {

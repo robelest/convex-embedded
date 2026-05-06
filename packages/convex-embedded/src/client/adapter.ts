@@ -136,11 +136,14 @@ interface ActiveSubscription {
   currentValue: unknown;
   hasValue: boolean;
   lastRemoteValue: unknown;
+  optimisticAppliedAtMs: number;
   remoteUnsubscribe: (() => void) | null;
   storageLoadPromise: Promise<void> | null;
   localUnsubscribe: (() => void) | null;
   localHandle: (() => void) | null;
 }
+
+const OPTIMISTIC_PROTECTION_MS = 500;
 
 class CachePipeline {
   private readonly active = new Map<string, ActiveSubscription>();
@@ -234,6 +237,7 @@ class CachePipeline {
         !entry.hasValue || !structuralEqual(entry.currentValue, update.value);
       entry.currentValue = update.value;
       entry.hasValue = true;
+      entry.optimisticAppliedAtMs = nowMs();
       if (valueChanged) {
         this.notifyListeners(entry);
       }
@@ -260,6 +264,7 @@ class CachePipeline {
         currentValue: undefined,
         hasValue: false,
         lastRemoteValue: undefined,
+        optimisticAppliedAtMs: 0,
         remoteUnsubscribe: null,
         storageLoadPromise: null,
         localUnsubscribe: null,
@@ -312,15 +317,19 @@ class CachePipeline {
   }
 
   private bootstrapEntry(entry: ActiveSubscription): void {
+    const startedAt = nowMs();
     const cached = this.config.cache.get(entry.refName, entry.args);
+    let cacheState: "hit" | "miss-disk" | "miss-cold" = "miss-cold";
     if (cached) {
       entry.currentValue = cached.value;
       entry.hasValue = true;
       entry.lastRemoteValue = cached.value;
+      cacheState = "hit";
     } else if (this.config.getCacheStorage()) {
       entry.storageLoadPromise = this.loadFromStorage(entry).catch(() => {
         /* swallow */
       });
+      cacheState = "miss-disk";
     }
 
     if (
@@ -331,6 +340,9 @@ class CachePipeline {
     }
 
     this.openLocalWatch(entry);
+    log.debug(
+      `bootstrapEntry ${entry.refName} ${cacheState} ms=${(nowMs() - startedAt).toFixed(1)}`,
+    );
   }
 
   private openLocalWatch(entry: ActiveSubscription): void {
@@ -390,18 +402,37 @@ class CachePipeline {
             result = entry.lastRemoteValue;
             usedRemoteFallback = true;
           }
-          log.debug(
-            `local-watch ${entry.refName} result.length=${Array.isArray(result) ? result.length : "non-array"} fallback=${usedRemoteFallback}`,
-          );
+          const equalStart = nowMs();
           const valueChanged =
             !entry.hasValue || !structuralEqual(entry.currentValue, result);
+          const equalMs = nowMs() - equalStart;
           if (!valueChanged) {
             span.setAttributes({
               "convex.cache.skip": "unchanged",
               "convex.cache.eval_ms": +(nowMs() - startedAt).toFixed(2),
             });
+            log.debug(
+              `local-watch ${entry.refName} unchanged read_ms=${(equalStart - startedAt).toFixed(1)} equal_ms=${equalMs.toFixed(1)}`,
+            );
             return;
           }
+          if (
+            entry.hasValue &&
+            entry.optimisticAppliedAtMs > 0 &&
+            nowMs() - entry.optimisticAppliedAtMs < OPTIMISTIC_PROTECTION_MS
+          ) {
+            span.setAttributes({
+              "convex.cache.skip": "optimistic-window",
+              "convex.cache.eval_ms": +(nowMs() - startedAt).toFixed(2),
+            });
+            log.debug(
+              `local-watch ${entry.refName} skipped (optimistic-window ${(nowMs() - entry.optimisticAppliedAtMs).toFixed(1)}ms ago)`,
+            );
+            return;
+          }
+          log.debug(
+            `local-watch ${entry.refName} result.length=${Array.isArray(result) ? result.length : "non-array"} fallback=${usedRemoteFallback} read_ms=${(equalStart - startedAt).toFixed(1)} equal_ms=${equalMs.toFixed(1)}`,
+          );
           const previous = this.config.cache.get(entry.refName, entry.args);
           const nextEntry: CachedEntry = {
             value: result,
@@ -501,8 +532,9 @@ class CachePipeline {
         entry.lastRemoteValue === undefined ||
         !structuralEqual(entry.lastRemoteValue, value);
       if (!remoteChanged) return;
+      const previousRemote = entry.lastRemoteValue;
       entry.lastRemoteValue = value;
-      this.extractDocsToStore(entry.refName, value);
+      this.extractDocsToStore(entry.refName, value, previousRemote);
       const previous = this.config.cache.get(entry.refName, entry.args);
       const persistedEntry: CachedEntry = {
         value,
@@ -549,15 +581,47 @@ class CachePipeline {
     entry.remoteUnsubscribe = unsubscribe;
   }
 
-  private extractDocsToStore(refName: string, value: unknown): void {
+  private extractDocsToStore(
+    refName: string,
+    value: unknown,
+    previousValue: unknown,
+  ): void {
     const tableName = refName.split(":")[0];
     if (!tableName || tableName.startsWith("_")) return;
+    const collectStart = nowMs();
     const docs: Array<Record<string, unknown>> = [];
     collectDocs(value, docs);
     if (docs.length === 0) return;
+
+    let changed: Array<Record<string, unknown>> = docs;
+    if (previousValue !== undefined && Array.isArray(value) && Array.isArray(previousValue)) {
+      const previousById = new Map<string, unknown>();
+      for (const item of previousValue) {
+        if (isPlainObject(item) && typeof item._id === "string") {
+          previousById.set(item._id, item);
+        }
+      }
+      changed = docs.filter((doc) => {
+        const id = typeof doc._id === "string" ? doc._id : null;
+        if (id === null) return true;
+        const prior = previousById.get(id);
+        if (prior === undefined) return true;
+        return !structuralEqual(prior, doc);
+      });
+    }
+    const collectMs = nowMs() - collectStart;
+    if (changed.length === 0) {
+      log.debug(
+        `extractDocsToStore ${refName} table=${tableName} docs=${docs.length} unchanged collect_ms=${collectMs.toFixed(1)}`,
+      );
+      return;
+    }
     const runtime = this.config.runtime;
     if (!runtime || typeof runtime.upsertDocsFromCache !== "function") return;
-    void runtime.upsertDocsFromCache(tableName, docs).catch(() => {
+    log.debug(
+      `extractDocsToStore ${refName} table=${tableName} docs=${docs.length} changed=${changed.length} collect_ms=${collectMs.toFixed(1)}`,
+    );
+    void runtime.upsertDocsFromCache(tableName, changed).catch(() => {
       /* swallow extraction errors */
     });
   }

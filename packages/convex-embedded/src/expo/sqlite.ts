@@ -4,7 +4,6 @@ import {
   IOS_LIBRARY_PATH,
   open,
   type DB,
-  type PreparedStatement,
   type Scalar,
 } from "@op-engineering/op-sqlite";
 
@@ -46,7 +45,7 @@ export async function openOpSqliteStorage(
   });
 
   await database.execute("PRAGMA journal_mode = WAL");
-  await database.execute("PRAGMA synchronous = NORMAL");
+  await database.execute("PRAGMA synchronous = OFF");
   await database.execute("PRAGMA temp_store = MEMORY");
   await database.execute("PRAGMA busy_timeout = 5000");
   await database.execute("PRAGMA cache_size = -32000");
@@ -111,18 +110,21 @@ export async function openOpSqliteStorage(
 
   return new SqliteAdapter(
     {
-      query: <T extends Record<string, unknown> = Record<string, unknown>>(
+      query: async <T extends Record<string, unknown> = Record<string, unknown>>(
         sql: string,
         params?: readonly unknown[],
-      ) =>
-        enqueue(
-          "query",
-          async (db) => {
-            const result = await db.execute(sql, bindParams(params));
-            return (result.rows ?? []) as T[];
-          },
-          { params: params?.length ?? 0, sql: sql.slice(0, 160) },
-        ),
+      ): Promise<T[]> => {
+        const startedAt = nowMs();
+        try {
+          const result = await database.execute(sql, bindParams(params));
+          return (result.rows ?? []) as T[];
+        } finally {
+          logSlow(`sqlite.query`, startedAt, {
+            params: params?.length ?? 0,
+            sql: sql.slice(0, 160),
+          });
+        }
+      },
       execute: (sql, params) =>
         enqueue(
           "execute",
@@ -132,45 +134,67 @@ export async function openOpSqliteStorage(
           },
           { params: params?.length ?? 0, sql: sql.slice(0, 160) },
         ),
-      executeBatch: (statements) =>
-        enqueue(
+      executeBatch: (statements) => {
+        const phases = {
+          executeMs: 0,
+          bufferFlushMs: 0,
+          executeCalls: 0,
+          bufferFlushes: 0,
+          txOverheadMs: 0,
+          error: null as string | null,
+        };
+        return enqueue(
           "executeBatch",
-          (db) =>
-            db.transaction(async (tx) => {
-              const prepared = new Map<string, PreparedStatement>();
-              const execBuffer: string[] = [];
+          async (db) => {
+            const txStart = nowMs();
+            try {
+              await db.transaction(async (tx) => {
+                const execBuffer: string[] = [];
 
-              const flushExecBuffer = async () => {
-                if (execBuffer.length === 0) {
-                  return;
+                const flushExecBuffer = async () => {
+                  if (execBuffer.length === 0) {
+                    return;
+                  }
+                  const start = nowMs();
+                  await tx.execute(`${execBuffer.join(";\n")};`);
+                  phases.bufferFlushMs += nowMs() - start;
+                  phases.bufferFlushes += 1;
+                  execBuffer.length = 0;
+                };
+
+                for (const statement of statements) {
+                  const params = bindParams(statement.params);
+                  if (params.length === 0) {
+                    execBuffer.push(statement.sql);
+                    continue;
+                  }
+
+                  await flushExecBuffer();
+                  const start = nowMs();
+                  await tx.execute(statement.sql, params);
+                  phases.executeMs += nowMs() - start;
+                  phases.executeCalls += 1;
                 }
-                await tx.execute(`${execBuffer.join(";\n")};`);
-                execBuffer.length = 0;
-              };
-
-              for (const statement of statements) {
-                const params = bindParams(statement.params);
-                if (params.length === 0) {
-                  execBuffer.push(statement.sql);
-                  continue;
-                }
-
                 await flushExecBuffer();
-                let compiled = prepared.get(statement.sql);
-                if (!compiled) {
-                  compiled = db.prepareStatement(statement.sql);
-                  prepared.set(statement.sql, compiled);
-                }
-                await compiled.bind(params);
-                await compiled.execute();
-              }
-              await flushExecBuffer();
-            }),
-          { statements: statements.length },
+              });
+            } catch (err) {
+              phases.error = err instanceof Error ? err.message : String(err);
+              throw err;
+            } finally {
+              const totalMs = nowMs() - txStart;
+              phases.txOverheadMs =
+                totalMs - phases.executeMs - phases.bufferFlushMs;
+            }
+          },
+          {
+            statements: statements.length,
+            phases,
+          },
         ).then((result) => {
           scheduleCheckpoint();
           return result;
-        }),
+        });
+      },
       close: async () => {
         closing = true;
         if (checkpointTimer !== null) {

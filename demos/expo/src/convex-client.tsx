@@ -1,4 +1,4 @@
-import { convex } from "$convex/embedded.modules";
+import { convex } from "$convex/_generated/embedded";
 import schema, { comments, issues, projects } from "$convex/schema";
 import { createConvexClient } from "@robelest/convex-embedded/expo";
 import type { ConvexReactClient } from "convex/react";

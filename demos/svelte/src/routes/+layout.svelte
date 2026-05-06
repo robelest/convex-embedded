@@ -13,7 +13,7 @@
 	} from "@robelest/convex-embedded/browser";
 	import type { UserIdentity } from "@robelest/convex-embedded/auth";
 	import type { LayoutData } from "./$types";
-	import { convex } from "$convex/embedded.modules";
+	import { convex } from "$convex/_generated/embedded";
 	import schema from "$convex/schema";
 
 	let { children, data }: { children: Snippet; data: LayoutData } =

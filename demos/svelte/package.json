@@ -4,6 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "predev": "vp run -w codegen:embedded",
+    "prebuild": "vp run -w codegen:embedded",
     "dev": "vp dev",
     "build": "vp run --filter @robelest/convex-embedded build && vp build",
     "deploy": "vp exec wrangler deploy",

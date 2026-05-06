@@ -25,9 +25,9 @@ module.exports = withConvexEmbeddedExpoMetro(config, {
       __dirname,
       "../../packages/convex-embedded/dist/crdt/index.js",
     ),
-    "$convex/embedded.modules": path.resolve(
+    "$convex/_generated/embedded": path.resolve(
       __dirname,
-      "../../convex/embedded.modules.ts",
+      "../../convex/_generated/embedded.ts",
     ),
     "$convex/projects": path.resolve(__dirname, "../../convex/projects.ts"),
     "$convex/issues": path.resolve(__dirname, "../../convex/issues.ts"),

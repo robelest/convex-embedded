@@ -7,7 +7,6 @@ import { watchCodegen } from "@/cli/watch";
 
 const DEFAULT_CONVEX_DIR = "./convex";
 const DEFAULT_OUT_FILE = "./convex/_generated/embedded.ts";
-const LEGACY_OUT_FILE = "./convex/embedded.modules.ts";
 
 function logResult(prefix: string, result: {
   modulesIncluded: string[];
@@ -63,14 +62,6 @@ Clerc.create()
         convexDir: ctx.flags["convex-dir"],
         outFile: ctx.flags.out,
       };
-
-      if (input.outFile === LEGACY_OUT_FILE) {
-        // eslint-disable-next-line no-console
-        console.warn(
-          `[convex-embedded] writing to legacy path "${LEGACY_OUT_FILE}". ` +
-            `The new default is "${DEFAULT_OUT_FILE}". Update your --out flag or remove it to adopt.`,
-        );
-      }
 
       if (ctx.flags.watch) {
         await watchCodegen({

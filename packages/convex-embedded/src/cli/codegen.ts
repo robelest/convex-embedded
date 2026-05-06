@@ -36,14 +36,9 @@ export async function runCodegen(
   const outFile = path.resolve(cwd, input.outFile);
   const strippedDir = path.resolve(convexRoot, STRIPPED_DIR);
 
-  const legacyEmbeddedModules = path.resolve(
-    convexRoot,
-    "embedded.modules.ts",
-  );
   const allFiles = (await listTsFiles(convexRoot)).filter(
     (filePath) =>
       path.resolve(filePath) !== outFile &&
-      path.resolve(filePath) !== legacyEmbeddedModules &&
       !filePath.startsWith(strippedDir + path.sep),
   );
 

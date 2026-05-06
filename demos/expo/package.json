@@ -4,6 +4,10 @@
   "private": true,
   "main": "expo-router/entry",
   "scripts": {
+    "prestart": "vp run -w codegen:embedded",
+    "preandroid": "vp run -w codegen:embedded",
+    "preios": "vp run -w codegen:embedded",
+    "preweb": "vp run -w codegen:embedded",
     "start": "expo start",
     "reset-project": "node ./scripts/reset-project.js",
     "android": "expo run:android",

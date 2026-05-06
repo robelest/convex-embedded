@@ -101,6 +101,7 @@ export {
 export {
   convexEmbeddedCollectionOptions,
   type ConvexEmbeddedCollectionOptions,
+  type ConvexEmbeddedCollectionMutationRefs,
 } from "@/client/optimistic";
 
 export { withSpan, withSpanSync, getTracer } from "@/tracing/spans";

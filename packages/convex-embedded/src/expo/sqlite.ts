@@ -8,6 +8,10 @@ import {
 } from "@op-engineering/op-sqlite";
 
 import { logSlow, nowMs } from "@/shared/perf";
+import {
+  createDefaultWorkScheduler,
+  type WorkScheduler,
+} from "@/shared/work";
 import { SqliteAdapter } from "@/storage/sqlite/adapter";
 import type { InternalTableSpec } from "@/storage/sqlite/factory";
 import { withSpan } from "@/tracing/spans";
@@ -16,6 +20,7 @@ export interface OpSqliteStorageOptions {
   name: string;
   directory?: string;
   userTableSpecs?: Map<string, InternalTableSpec>;
+  workScheduler?: WorkScheduler;
 }
 
 function defaultLocation(): string | undefined {
@@ -43,6 +48,7 @@ export async function openOpSqliteStorage(
     name: `${options.name}.db`,
     ...(location ? { location } : {}),
   });
+  const scheduler = options.workScheduler ?? createDefaultWorkScheduler();
 
   await database.execute("PRAGMA journal_mode = WAL");
   await database.execute("PRAGMA synchronous = OFF");
@@ -162,6 +168,7 @@ export async function openOpSqliteStorage(
                   execBuffer.length = 0;
                 };
 
+                let yieldChecks = 0;
                 for (const statement of statements) {
                   const params = bindParams(statement.params);
                   if (params.length === 0) {
@@ -174,6 +181,11 @@ export async function openOpSqliteStorage(
                   await tx.execute(statement.sql, params);
                   phases.executeMs += nowMs() - start;
                   phases.executeCalls += 1;
+                  yieldChecks += 1;
+                  if (yieldChecks >= 32 && scheduler.shouldYield()) {
+                    yieldChecks = 0;
+                    await scheduler.yield();
+                  }
                 }
                 await flushExecBuffer();
               });

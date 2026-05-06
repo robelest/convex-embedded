@@ -16,6 +16,7 @@ export function createExpoPlatformAdapter(
 ): EmbeddedPlatformAdapter {
   const crypto = createExpoCryptoProvider();
   const connectivity = createExpoConnectivityAdapter();
+  const workScheduler = createExpoWorkScheduler();
 
   return {
     crypto,
@@ -25,6 +26,7 @@ export function createExpoPlatformAdapter(
           name,
           directory: options.databaseDirectory,
           userTableSpecs: runtime.getUserTableSpecs() ?? undefined,
+          workScheduler,
         });
       } catch (error) {
         console.error(
@@ -45,6 +47,6 @@ export function createExpoPlatformAdapter(
         return `${name}:expo:${crypto.randomUUID()}`;
       },
     },
-    workScheduler: createExpoWorkScheduler(),
+    workScheduler,
   };
 }

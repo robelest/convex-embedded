@@ -159,16 +159,27 @@ export async function collectRemoteManifest(input: {
   return { routeModes, tables, uploadUrl };
 }
 
+export interface RegistryEntry {
+  /** Path used to derive the module id (always the original file). */
+  originalFile: string;
+  /** Path the dynamic import points at — either the original or a stripped companion. */
+  importFile: string;
+}
+
 export function renderGeneratedFile(input: {
   outFile: string;
-  moduleFiles: string[];
+  moduleFiles: ReadonlyArray<string | RegistryEntry>;
   convexDir: string;
   manifest: GeneratedRemoteManifest;
 }): string {
   const imports = input.moduleFiles
-    .map((filePath) => {
-      const moduleId = toModuleId(input.convexDir, filePath);
-      const importPath = toImportPath(input.outFile, filePath);
+    .map((entry) => {
+      const originalFile =
+        typeof entry === "string" ? entry : entry.originalFile;
+      const importFile =
+        typeof entry === "string" ? entry : entry.importFile;
+      const moduleId = toModuleId(input.convexDir, originalFile);
+      const importPath = toImportPath(input.outFile, importFile);
       return `    ${JSON.stringify(moduleId)}: () => import(${JSON.stringify(importPath)}),`;
     })
     .join("\n");

@@ -89,6 +89,11 @@
     "./expo/metro": {
       "default": "./src/expo/metro.cjs"
     },
+    "./vite": {
+      "types": "./dist/vite.d.ts",
+      "import": "./dist/vite.js",
+      "default": "./dist/vite.js"
+    },
     "./server": {
       "@convex-dev/component-source": "./src/server/index.ts",
       "types": "./dist/server/index.d.ts",
@@ -182,7 +187,8 @@
     "expo-file-system": ">=19",
     "expo-network": ">=8",
     "react": ">=18",
-    "react-native": ">=0.74"
+    "react-native": ">=0.74",
+    "typescript": ">=5.0.0"
   },
   "peerDependenciesMeta": {
     "@op-engineering/op-sqlite": {
@@ -204,6 +210,9 @@
       "optional": true
     },
     "react-native": {
+      "optional": true
+    },
+    "typescript": {
       "optional": true
     }
   },

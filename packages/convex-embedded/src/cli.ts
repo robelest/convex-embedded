@@ -1,103 +1,93 @@
 #!/usr/bin/env node
 
-import type { Dirent } from "node:fs";
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
-import path from "node:path";
+import { Clerc, SingleCommand } from "clerc";
 
-import { Clerc } from "clerc";
+import { runCodegen } from "@/cli/codegen";
+import { watchCodegen } from "@/cli/watch";
 
-import {
-  collectRemoteManifest,
-  renderGeneratedFile,
-  toModuleId,
-  type GeneratedRemoteManifest,
-} from "@/manifest";
+const DEFAULT_CONVEX_DIR = "./convex";
+const DEFAULT_OUT_FILE = "./convex/_generated/embedded.ts";
+const LEGACY_OUT_FILE = "./convex/embedded.modules.ts";
 
-async function listTsFiles(root: string): Promise<string[]> {
-  const entries = await readdir(root, { withFileTypes: true });
-  const files = await Promise.all(
-    entries.map(async (entry: Dirent) => {
-      const next = path.join(root, entry.name);
-      if (entry.isDirectory()) {
-        if (entry.name === "_generated") {
-          return [] as string[];
-        }
-        return listTsFiles(next);
-      }
-      if (!entry.isFile()) {
-        return [] as string[];
-      }
-      if (!/\.(ts|tsx|mts|cts)$/.test(entry.name)) {
-        return [] as string[];
-      }
-      if (entry.name.endsWith(".d.ts")) {
-        return [] as string[];
-      }
-      return [next];
-    }),
-  );
-  return files.flat().sort();
-}
-
-async function generate(convexDir: string, out: string): Promise<void> {
-  const cwd = process.cwd();
-  const convexRoot = path.resolve(cwd, convexDir);
-  const outFile = path.resolve(cwd, out);
-  const files = (await listTsFiles(convexRoot)).filter(
-    (filePath) => path.resolve(filePath) !== outFile,
-  );
-  const moduleFiles: string[] = [];
-  const manifest: GeneratedRemoteManifest = {
-    routeModes: {},
-    tables: {},
-  };
-
-  for (const filePath of files) {
-    const source = await readFile(filePath, "utf8");
-    moduleFiles.push(filePath);
-    const remote = await collectRemoteManifest({
-      convexRoot,
-      moduleId: toModuleId(convexRoot, filePath),
-      source,
-    });
-    Object.assign(manifest.routeModes, remote.routeModes);
-    Object.assign(manifest.tables, remote.tables);
-    manifest.uploadUrl ??= remote.uploadUrl;
+function logResult(prefix: string, result: {
+  modulesIncluded: string[];
+  modulesStripped: string[];
+  modulesExcluded: string[];
+}): void {
+  const parts: string[] = [];
+  parts.push(`${result.modulesIncluded.length} included`);
+  if (result.modulesStripped.length > 0) {
+    parts.push(`${result.modulesStripped.length} stripped`);
   }
-
-  await mkdir(path.dirname(outFile), { recursive: true });
-  await writeFile(
-    outFile,
-    renderGeneratedFile({
-      outFile,
-      moduleFiles,
-      convexDir: convexRoot,
-      manifest,
-    }),
-    "utf8",
-  );
-
-  console.log(`generated ${out}`);
+  if (result.modulesExcluded.length > 0) {
+    parts.push(`${result.modulesExcluded.length} excluded`);
+  }
+  // eslint-disable-next-line no-console
+  console.log(`${prefix} ${parts.join(", ")}`);
 }
 
 Clerc.create()
   .name("convex-embedded")
+  .description("Generate the embedded module registry from convex/")
   .version("0.0.1")
-  .command("", "Generate convex modules and manifest", {
+  .command(SingleCommand, "Generate the embedded module registry from convex/", {
     flags: {
       "convex-dir": {
         type: String,
         description: "Path to the Convex source directory",
-        default: "./convex",
+        default: DEFAULT_CONVEX_DIR,
       },
       out: {
         type: String,
-        description: "Path to the generated convex modules file",
-        default: "./convex/embedded.modules.ts",
+        description:
+          "Path to the generated registry file (defaults to convex/_generated/embedded.ts)",
+        default: DEFAULT_OUT_FILE,
+      },
+      watch: {
+        type: Boolean,
+        description: "Re-run codegen on convex/ file changes",
+        default: false,
       },
     },
   })
-  .on("", async (ctx: { flags: { "convex-dir": string; out: string } }) => {
-    await generate(ctx.flags["convex-dir"], ctx.flags.out);
-  })
+  .on(
+    SingleCommand,
+    async (ctx: {
+      flags: {
+        "convex-dir": string;
+        out: string;
+        watch: boolean;
+      };
+    }) => {
+      const input = {
+        convexDir: ctx.flags["convex-dir"],
+        outFile: ctx.flags.out,
+      };
+
+      if (input.outFile === LEGACY_OUT_FILE) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[convex-embedded] writing to legacy path "${LEGACY_OUT_FILE}". ` +
+            `The new default is "${DEFAULT_OUT_FILE}". Update your --out flag or remove it to adopt.`,
+        );
+      }
+
+      if (ctx.flags.watch) {
+        await watchCodegen({
+          ...input,
+          onResult: (result) => logResult("regenerated:", result),
+          onError: (err) => {
+            // eslint-disable-next-line no-console
+            console.error("[convex-embedded] codegen failed:", err);
+          },
+        });
+        // eslint-disable-next-line no-console
+        console.log(`watching ${input.convexDir} (Ctrl+C to stop)`);
+        return;
+      }
+
+      const result = await runCodegen(input);
+      logResult(`generated ${input.outFile}:`, result);
+    },
+  )
   .parse();

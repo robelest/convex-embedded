@@ -56,6 +56,8 @@ import {
 import type { StorageSurface } from "@/runtime/storage";
 import { createTransport } from "@/runtime/transport";
 import type { EmbeddedTransport } from "@/runtime/transport";
+import { discoverCronJobs } from "@/scheduler/cron-discover";
+import { CronRunner } from "@/scheduler/cron-runner";
 import { SchedulerExecutor } from "@/scheduler/executor";
 import { canonicalizeMappedCreateTable } from "@/shared/canonicalize";
 import { structuralEqual } from "@/shared/equals";
@@ -204,6 +206,7 @@ type RuntimeState = {
   sessions: SessionManager;
   writeFanout: WriteBroadcast;
   scheduler: SchedulerExecutor;
+  cronRunner: CronRunner;
 };
 
 interface RuntimeInput {
@@ -362,6 +365,7 @@ export class EmbeddedRuntime {
     | ((token: string) => Promise<UserIdentity | null>)
     | null;
   readonly scheduler: SchedulerExecutor;
+  readonly cronRunner: CronRunner;
   private readonly _protocolQueryObservers: RuntimeQueryObserverRegistry<ProtocolQueryRecord>;
   private readonly _localQueryWatches: RuntimeQueryObserverRegistry<LocalQueryWatchRecord>;
   private readonly _localPaginatedQueryWatches: RuntimeQueryObserverRegistry<LocalPaginatedWatchRecord>;
@@ -416,6 +420,7 @@ export class EmbeddedRuntime {
     this.sessions = state.sessions;
     this.writeFanout = state.writeFanout;
     this.scheduler = state.scheduler;
+    this.cronRunner = state.cronRunner;
     this._prefetchSchemaVersions = extractPrefetchSchemaVersions(
       options.schema,
     );
@@ -458,6 +463,7 @@ export class EmbeddedRuntime {
       }
       this._transports.length = 0;
       this.scheduler.shutdown();
+      this.cronRunner.shutdown();
       for (const timerId of this._activeTimers) {
         clearTimeout(timerId);
       }
@@ -491,6 +497,7 @@ export class EmbeddedRuntime {
         if (hasInitialStorage) {
           await this._resumeScheduledFunctions();
         }
+        await this._startCronRunner();
       } catch (err) {
         console.error("[convex-embedded] hydration failed:", err);
         throw err;
@@ -2306,6 +2313,17 @@ export class EmbeddedRuntime {
       : this._runWithTransactionLock(runSystemFunction);
   }
 
+  private async _startCronRunner(): Promise<void> {
+    try {
+      const jobs = await discoverCronJobs(this.moduleLoader);
+      this.cronRunner.setJobs(jobs);
+      this.cronRunner.start();
+      runtimeLog.debug(`cron runner started with ${jobs.length} job(s)`);
+    } catch (err) {
+      console.error("[convex-embedded] cron runner start failed:", err);
+    }
+  }
+
   private async _resumeScheduledFunctions(): Promise<void> {
     const qid = this.db.startQueryAsync({
       source: {
@@ -2627,6 +2645,17 @@ export class EmbeddedRuntime {
       },
     });
 
+    const cronRunner = new CronRunner({
+      jobs: [],
+      runFunction: async (type, functionName, args) => {
+        await runtime._runUdf(
+          type,
+          resolveFunctionPath({ name: functionName }),
+          args,
+        );
+      },
+    });
+
     return {
       schema,
       storageAdapter,
@@ -2646,6 +2675,7 @@ export class EmbeddedRuntime {
       sessions,
       writeFanout,
       scheduler,
+      cronRunner,
     } satisfies RuntimeState;
   }
 }

@@ -1484,11 +1484,13 @@ function createEngine(config: EngineConfig): EngineInstance {
       () => rawIngestDocuments(table, docs, scopeArgs),
     );
     ingestLockMap.set(table, next);
-    void next.finally(() => {
-      if (ingestLockMap.get(table) === next) {
-        ingestLockMap.delete(table);
-      }
-    });
+    next
+      .finally(() => {
+        if (ingestLockMap.get(table) === next) {
+          ingestLockMap.delete(table);
+        }
+      })
+      .catch(() => undefined);
     return next;
   }
   const canonicalizeMappedCreate =

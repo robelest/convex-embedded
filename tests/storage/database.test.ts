@@ -37,6 +37,7 @@ function insertAndCommit(
   db.startTransaction();
   const id = db.insert(table, fields);
   const result = db.commit();
+  result.persisted.catch(() => undefined);
   return { id, ...result };
 }
 

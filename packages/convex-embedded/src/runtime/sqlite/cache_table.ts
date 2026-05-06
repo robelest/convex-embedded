@@ -136,7 +136,7 @@ export function createQueryCacheStorage(
     if (flushTimer !== null) return;
     flushTimer = setTimeout(() => {
       flushTimer = null;
-      void flush();
+      flush().catch(() => undefined);
     }, BATCH_FLUSH_MS);
   };
 

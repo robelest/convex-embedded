@@ -51,8 +51,6 @@ export type {
  */
 export { createBrowserPlatformAdapter };
 
-export { useEmbeddedSelector } from "@/react/useEmbeddedSelector";
-
 /**
  * React entry point for `@robelest/convex-embedded/react`.
  *

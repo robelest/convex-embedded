@@ -16,6 +16,11 @@ import type {
 import { startTransition } from "react";
 
 import { createLogger } from "@/shared/logger";
+import {
+  createDefaultWorkScheduler,
+  type WorkPriority,
+  type WorkScheduler,
+} from "@/shared/work";
 
 const log = createLogger("react");
 
@@ -86,27 +91,23 @@ export class EmbeddedConvexReactClient extends ConvexReactClient {
       enumerable: false,
       writable: false,
     });
-    const setScheduler = (embeddedClient as unknown as {
-      setOptimisticDeferredScheduler?: (fn: (work: () => void) => void) => void;
-    }).setOptimisticDeferredScheduler;
-    if (typeof setScheduler === "function") {
-      const queue: Array<() => void> = [];
-      let pending = false;
-      const flush = () => {
-        pending = false;
-        const tasks = queue.splice(0);
-        if (tasks.length === 0) return;
-        startTransition(() => {
-          for (const task of tasks) task();
-        });
-      };
-      setScheduler((work) => {
-        queue.push(work);
-        if (pending) return;
-        pending = true;
-        setTimeout(flush, 0);
-      });
-    }
+    const augmented = embeddedClient as unknown as {
+      getWorkScheduler?: () => WorkScheduler | undefined;
+      setWorkScheduler?: (scheduler: WorkScheduler | null) => void;
+    };
+    const base = augmented.getWorkScheduler?.() ?? createDefaultWorkScheduler();
+    const reactScheduler: WorkScheduler = {
+      post(priority: WorkPriority, work: () => void) {
+        if (priority === "user-visible") {
+          base.post(priority, () => startTransition(work));
+          return;
+        }
+        base.post(priority, work);
+      },
+      yield: () => base.yield(),
+      shouldYield: () => base.shouldYield(),
+    };
+    augmented.setWorkScheduler?.(reactScheduler);
   }
 
   setAuth(...args: Parameters<ConvexReactClient["setAuth"]>): void {

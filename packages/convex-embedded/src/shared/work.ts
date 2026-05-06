@@ -81,12 +81,3 @@ export function createDefaultWorkScheduler(): WorkScheduler {
   };
 }
 
-let active: WorkScheduler = createDefaultWorkScheduler();
-
-export function getWorkScheduler(): WorkScheduler {
-  return active;
-}
-
-export function setWorkScheduler(scheduler: WorkScheduler | null): void {
-  active = scheduler ?? createDefaultWorkScheduler();
-}

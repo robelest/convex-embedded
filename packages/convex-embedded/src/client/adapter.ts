@@ -187,13 +187,7 @@ class CachePipeline {
     return cached?.value;
   }
 
-  private deferredScheduler: (fn: () => void) => void = (fn) => fn();
   private workScheduler: WorkScheduler = createDefaultWorkScheduler();
-
-  setDeferredScheduler(scheduler: (fn: () => void) => void): void {
-    this.deferredScheduler =
-      typeof scheduler === "function" ? scheduler : (fn) => fn();
-  }
 
   setWorkScheduler(scheduler: WorkScheduler | null): void {
     this.workScheduler = scheduler ?? createDefaultWorkScheduler();
@@ -221,7 +215,7 @@ class CachePipeline {
       this.applyOptimisticOne(update);
     }
     if (transition.length > 0) {
-      this.deferredScheduler(() => {
+      this.workScheduler.post("user-visible", () => {
         for (const update of transition) {
           this.applyOptimisticOne(update);
         }
@@ -1568,12 +1562,6 @@ export function patchRoutedConvexClient(input: {
     explicitOptimistic.set(ref, callback);
   };
 
-  (input.client as any).setOptimisticDeferredScheduler = (
-    scheduler: (fn: () => void) => void,
-  ): void => {
-    pipeline?.setDeferredScheduler(scheduler);
-  };
-
   (input.client as any).setWorkScheduler = (
     scheduler: WorkScheduler | null,
   ): void => {
@@ -1582,28 +1570,6 @@ export function patchRoutedConvexClient(input: {
 
   (input.client as any).getWorkScheduler = (): WorkScheduler | undefined =>
     pipeline?.getWorkScheduler();
-
-  (input.client as any).applyOptimisticEffects = (
-    effects: ReadonlyArray<{ kind: string }>,
-  ): void => {
-    if (!pipeline || !cache) return;
-    const transitions: Array<{
-      refName: string;
-      args: unknown;
-      value: unknown;
-      priority?: "discrete" | "transition";
-    }> = [];
-    for (const effect of effects) {
-      const updates = effectToTransitions(
-        effect as Parameters<typeof effectToTransitions>[0],
-        cache,
-      );
-      for (const update of updates) transitions.push(update);
-    }
-    if (transitions.length > 0) {
-      pipeline.applyOptimisticTransition(transitions);
-    }
-  };
 
   if (
     typeof (input.client as any).onPaginatedUpdate_experimental === "function"

@@ -94,35 +94,14 @@ export {
 } from "@/client/factory";
 export {
   createDefaultWorkScheduler,
-  getWorkScheduler,
-  setWorkScheduler,
   type WorkPriority,
   type WorkScheduler,
 } from "@/shared/work";
 
 export {
-  signal,
-  computed,
-  effect,
-  batch,
-  untracked,
-  type Signal,
-} from "@/shared/signal";
-
-export {
-  createOptimisticAction,
-  type OptimisticAction,
-  type OptimisticActionContext,
-  type OptimisticActionInput,
-  type OptimisticEffectInput,
-} from "@/client/action";
-
-export type {
-  EffectDescriptor,
-  PatchEffect,
-  InsertEffect,
-  DeleteEffect,
-} from "@/client/optimistic/derive";
+  convexEmbeddedCollectionOptions,
+  type ConvexEmbeddedCollectionOptions,
+} from "@/client/tanstack";
 
 export { withSpan, withSpanSync, getTracer } from "@/tracing/spans";
 export { installInMemoryTracing } from "@/tracing/memory";

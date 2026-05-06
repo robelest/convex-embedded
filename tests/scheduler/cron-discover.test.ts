@@ -1,5 +1,6 @@
 import { ModuleLoader } from "@embedded/kernel/modules";
 import { discoverCronJobs } from "@embedded/scheduler/cron-discover";
+import { remoteOnly } from "@embedded/server/markers";
 import { describe, expect, it } from "@tests/testkit";
 
 function makeLoader(modules: Record<string, () => Promise<unknown>>) {
@@ -70,6 +71,37 @@ describe("scheduler/cron-discover", () => {
       type: "cron",
       cron: "0 9 * * 1-5",
     });
+  });
+
+  it("skips jobs whose target function is wrapped in remoteOnly()", async () => {
+    const loader = makeLoader({
+      crons: () =>
+        Promise.resolve({
+          default: {
+            isCrons: true,
+            crons: {
+              "local cleanup": {
+                name: "cleanup:run",
+                args: [{}],
+                schedule: { type: "interval", minutes: 5 },
+              },
+              "remote daily email": {
+                name: "emails:sendDigest",
+                args: [{}],
+                schedule: { type: "daily", hourUTC: 9, minuteUTC: 0 },
+              },
+            },
+          },
+        }),
+      cleanup: () => Promise.resolve({ run: { isMutation: true } }),
+      emails: () =>
+        Promise.resolve({
+          sendDigest: remoteOnly({ isAction: true }),
+        }),
+    });
+
+    const jobs = await discoverCronJobs(loader);
+    expect(jobs.map((j) => j.name)).toEqual(["local cleanup"]);
   });
 
   it("skips jobs whose target function is missing or invalid type", async () => {

@@ -55,6 +55,10 @@ export function isRemoteOnly(value: unknown): boolean {
   return getRouteMode(value) === "remote";
 }
 
+export function isLocalOnly(value: unknown): boolean {
+  return getRouteMode(value) === "local";
+}
+
 export function componentRouteTargetLabel(path: {
   componentPath: string;
   udfPath: string;

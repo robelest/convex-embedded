@@ -1,5 +1,6 @@
 import type { ModuleLoader } from "@/kernel/modules";
 import { createLogger } from "@/shared/logger";
+import { getRouteMode, type RouteMode } from "@/shared/route";
 
 import type { CronSchedule } from "./cron";
 import type {
@@ -60,9 +61,9 @@ async function materializeCronJob(
     return null;
   }
   const args = parseArgs(raw.args);
-  let type: CronFunctionType;
+  let resolved: { type: CronFunctionType; routeMode: RouteMode | null };
   try {
-    type = await resolveFunctionType(moduleLoader, raw.name);
+    resolved = await resolveFunction(moduleLoader, raw.name);
   } catch (error) {
     log.warn(
       `cron "${identifier}" target "${raw.name}" could not be resolved; skipping`,
@@ -70,10 +71,16 @@ async function materializeCronJob(
     );
     return null;
   }
+  if (resolved.routeMode === "remote") {
+    log.debug(
+      `cron "${identifier}" target "${raw.name}" is remoteOnly; skipping local schedule`,
+    );
+    return null;
+  }
   return {
     name: identifier,
     functionName: raw.name,
-    type,
+    type: resolved.type,
     args,
     schedule,
   };
@@ -156,10 +163,10 @@ function parseArgs(raw: unknown): Record<string, unknown> {
   return {};
 }
 
-async function resolveFunctionType(
+async function resolveFunction(
   moduleLoader: ModuleLoader,
   functionPath: string,
-): Promise<CronFunctionType> {
+): Promise<{ type: CronFunctionType; routeMode: RouteMode | null }> {
   const colonIdx = functionPath.lastIndexOf(":");
   const modulePath =
     colonIdx >= 0 ? functionPath.slice(0, colonIdx) : functionPath;
@@ -173,8 +180,9 @@ async function resolveFunctionType(
     );
   }
   const flags = exported as { isMutation?: unknown; isAction?: unknown };
-  if (flags.isAction === true) return "action";
-  if (flags.isMutation === true) return "mutation";
+  const routeMode = getRouteMode(exported);
+  if (flags.isAction === true) return { type: "action", routeMode };
+  if (flags.isMutation === true) return { type: "mutation", routeMode };
   throw new Error(
     `Cron target "${functionPath}" must be a mutation or action; got ${typeof exported}.`,
   );

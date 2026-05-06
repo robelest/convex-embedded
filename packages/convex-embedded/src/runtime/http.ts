@@ -1,6 +1,7 @@
 import type { ModuleLoader } from "@/kernel/modules";
 import type { UdfExecutor } from "@/kernel/udf";
 import { createLogger } from "@/shared/logger";
+import { isRemoteOnly } from "@/shared/route";
 
 const log = createLogger("http");
 
@@ -93,6 +94,15 @@ export async function createHttpDispatcher(
       });
     }
     const [action, routedMethod, routedPath] = match;
+    if (isRemoteOnly(action)) {
+      log.debug(
+        `dispatch ${method} ${url.pathname} matched remoteOnly handler ${routedPath}; returning 404`,
+      );
+      return new Response("Not Found", {
+        status: 404,
+        headers: { "content-type": "text/plain" },
+      });
+    }
     log.debug(
       `dispatch ${method} ${url.pathname} -> ${routedMethod} ${routedPath}`,
     );

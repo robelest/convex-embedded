@@ -1,4 +1,5 @@
 import { EmbeddedRuntime } from "@embedded/runtime/embedded";
+import { remoteOnly } from "@embedded/server/markers";
 import { afterEach, beforeEach, describe, expect, it } from "@tests/testkit";
 import {
   httpActionGeneric,
@@ -131,6 +132,57 @@ describe("EmbeddedRuntime.dispatchHttpRequest", () => {
     );
     expect(response.status).toBe(500);
     expect(await response.text()).toContain("intentional handler explosion");
+  });
+});
+
+describe("EmbeddedRuntime.dispatchHttpRequest with remoteOnly handlers", () => {
+  it("returns 404 for routes whose handler is wrapped in remoteOnly()", async () => {
+    const localHello = httpActionGeneric(
+      async () =>
+        new Response("local-hello", { status: 200 }),
+    );
+    const stripeWebhook = remoteOnly(
+      httpActionGeneric(
+        async () =>
+          new Response("should never run locally", { status: 200 }),
+      ),
+    );
+
+    const http = httpRouter();
+    http.route({ path: "/api/hello", method: "GET", handler: localHello });
+    http.route({
+      path: "/webhooks/stripe",
+      method: "POST",
+      handler: stripeWebhook,
+    });
+
+    const runtime = new EmbeddedRuntime({
+      convex: {
+        modules: {
+          "_generated/api": () => Promise.resolve({}),
+          http: () => Promise.resolve({ default: http }),
+        },
+      },
+    });
+    await runtime.hydrate();
+
+    try {
+      const local = await runtime.dispatchHttpRequest(
+        new Request("http://embedded.local/api/hello", { method: "GET" }),
+      );
+      expect(local.status).toBe(200);
+      expect(await local.text()).toBe("local-hello");
+
+      const remote = await runtime.dispatchHttpRequest(
+        new Request("http://embedded.local/webhooks/stripe", {
+          method: "POST",
+          body: "{}",
+        }),
+      );
+      expect(remote.status).toBe(404);
+    } finally {
+      runtime.shutdown();
+    }
   });
 });
 

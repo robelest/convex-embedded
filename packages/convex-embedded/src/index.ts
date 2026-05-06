@@ -101,7 +101,7 @@ export {
 export {
   convexEmbeddedCollectionOptions,
   type ConvexEmbeddedCollectionOptions,
-} from "@/client/tanstack";
+} from "@/client/optimistic";
 
 export { withSpan, withSpanSync, getTracer } from "@/tracing/spans";
 export { installInMemoryTracing } from "@/tracing/memory";

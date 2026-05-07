@@ -474,6 +474,76 @@ describe("createJsSyscall — Storage", () => {
     expect(await retrieved.text()).toBe("hello world");
   });
 
+  it("storage/storeBlob does NOT enqueue a pending-upload row by default", async () => {
+    db.startTransaction();
+    const jsSyscall = createJsSyscall(db);
+
+    await jsSyscall("storage/storeBlob", {
+      blob: new Blob(["x"], { type: "text/plain" }),
+    });
+    db.commit();
+
+    db.startTransaction();
+    const qid = db.startQuery({
+      source: {
+        type: "FullTableScan",
+        tableName: "_resolve_pending_uploads",
+        order: "asc",
+      },
+      operators: [],
+    });
+    const rows: unknown[] = [];
+    while (true) {
+      const next = db.queryNext(qid);
+      if (next.done) break;
+      rows.push(next.value);
+    }
+    db.queryCleanup(qid);
+    db.rollbackWrites();
+
+    expect(rows).toHaveLength(0);
+  });
+
+  it("storage/storeBlob enqueues a pending-upload row when shouldQueueUploads returns true", async () => {
+    db.startTransaction();
+    const jsSyscall = createJsSyscall(db, undefined, {
+      getIdentityKey: () => "user-1",
+      shouldQueueUploads: () => true,
+    });
+
+    const storageId = (await jsSyscall("storage/storeBlob", {
+      blob: new Blob(["hi"], { type: "image/png" }),
+    })) as string;
+    db.commit();
+
+    db.startTransaction();
+    const qid = db.startQuery({
+      source: {
+        type: "FullTableScan",
+        tableName: "_resolve_pending_uploads",
+        order: "asc",
+      },
+      operators: [],
+    });
+    const rows: Array<Record<string, unknown>> = [];
+    while (true) {
+      const next = db.queryNext(qid);
+      if (next.done) break;
+      rows.push(next.value as Record<string, unknown>);
+    }
+    db.queryCleanup(qid);
+    db.rollbackWrites();
+
+    expect(rows).toHaveLength(1);
+    const row = rows[0]!;
+    expect(row.localStorageId).toBe(storageId);
+    expect(row.contentType).toBe("image/png");
+    expect(row.size).toBe(2);
+    expect(row.identityKey).toBe("user-1");
+    expect(row.state).toBe("pending");
+    expect(typeof row.sha256).toBe("string");
+  });
+
   it("throws on unknown js op", async () => {
     const jsSyscall = createJsSyscall(db);
 

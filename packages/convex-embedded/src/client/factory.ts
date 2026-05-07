@@ -43,6 +43,7 @@ import { EmbeddedRuntime } from "@/runtime/embedded";
 import type { EmbeddedRuntimeOptions } from "@/runtime/embedded";
 import { LoadCoordinator } from "@/runtime/load";
 import { PENDING_STORE_MIGRATIONS } from "@/runtime/migrations/pending";
+import { PENDING_UPLOADS_STORE_MIGRATIONS } from "@/runtime/migrations/pending-uploads";
 import type { EmbeddedPlatformAdapter } from "@/runtime/platform";
 import type { QueryCacheStorage } from "@/runtime/sqlite/cache_table";
 import { SCHEDULED_FUNCTIONS_STORE_MIGRATIONS } from "@/scheduler/executor";
@@ -270,6 +271,7 @@ export function createEmbeddedClient(input: {
       SCHEDULED_FUNCTIONS_STORE_MIGRATIONS,
       ID_MAP_STORE_MIGRATIONS,
       PENDING_STORE_MIGRATIONS,
+      PENDING_UPLOADS_STORE_MIGRATIONS,
     ],
     onIdentityError: (error) => {
       log.warn(

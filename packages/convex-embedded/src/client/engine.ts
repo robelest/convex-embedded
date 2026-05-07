@@ -13,6 +13,10 @@ import * as Y from "yjs";
 
 import { IdMap } from "@/client/ids";
 import { PendingQueue } from "@/client/pending";
+import {
+  PendingUploadQueue,
+  type PendingUploadEntry,
+} from "@/client/pending-uploads";
 import type { PendingEntry } from "@/client/pending";
 import { materializeYjsDoc } from "@/client/schema";
 import type { EngineResolveInput } from "@/client/services/engine";
@@ -1595,6 +1599,16 @@ function createEngine(config: EngineConfig): EngineInstance {
     "pending_queue.depth",
     () => pendingQueue.length,
   );
+  const pendingUploadQueue = new PendingUploadQueue(
+    localClient,
+    executeLocalQuery,
+    executeLocalMutationWithoutEffects,
+    getIdentityKey,
+  );
+  const unregisterPendingUploadsDepth = registerGauge(
+    "pending_uploads.depth",
+    () => pendingUploadQueue.length,
+  );
   const processorIdForReplay =
     processorId ?? `processor_${Math.random().toString(36).slice(2)}`;
 
@@ -1983,11 +1997,13 @@ function createEngine(config: EngineConfig): EngineInstance {
   }
 
   function ensureReplayProcessing(): void {
-    if (!isOnline || pendingQueue.isEmpty) {
-      return;
-    }
+    if (!isOnline) return;
+    const hasPendingMutation = !pendingQueue.isEmpty;
+    const hasPendingUpload = pendingUploadQueue.length > 0;
+    if (!hasPendingMutation && !hasPendingUpload) return;
 
     runDetached(async () => {
+      await processUploadQueue();
       await processQueue();
 
       if (pendingQueue.isEmpty) {
@@ -2115,6 +2131,88 @@ function createEngine(config: EngineConfig): EngineInstance {
         heartbeat.stop();
       }
       await idMap.set(dependency.localStorageId, remoteStorageId, "_storage");
+    }
+  }
+
+  /**
+   * Drain the pending uploads queue. Runs before mutation replay so that
+   * any local storage IDs queued mutations reference are already mapped to
+   * remote IDs by the time those mutations process.
+   */
+  async function processUploadQueue(signal?: AbortSignal): Promise<void> {
+    if (!getStorageBlob || !getStorageMetadata) return;
+    if (uploadUrlRef === undefined || uploadUrlRef === null) {
+      // No upload URL function discovered → nothing to do; the just-in-time
+      // path inside processQueue() will surface a clear error if any
+      // mutation actually references a storage id.
+      return;
+    }
+    while (true) {
+      if (signal?.aborted) return;
+      let entry: PendingUploadEntry | undefined;
+      try {
+        entry = await pendingUploadQueue.claimNext(
+          processorIdForReplay,
+          leaseMs,
+        );
+      } catch (err) {
+        log.warn("sync: pending-upload claim failed", err);
+        return;
+      }
+      if (!entry) return;
+
+      try {
+        if (idMap.getRemoteId(entry.localStorageId) !== null) {
+          await pendingUploadQueue.remove(entry, processorIdForReplay);
+          continue;
+        }
+        const blob = await getStorageBlob(entry.localStorageId);
+        if (blob === null) {
+          log.warn(
+            `sync: pending-upload missing local blob (storageId: ${entry.localStorageId}); dropping`,
+          );
+          await pendingUploadQueue.remove(entry, processorIdForReplay);
+          continue;
+        }
+        const heartbeat = startReplayLeaseHeartbeat({
+          entry: entry as unknown as PendingEntry,
+          renew: () =>
+            pendingUploadQueue.renewLease(
+              entry!,
+              processorIdForReplay,
+              leaseMs,
+            ),
+          leaseMs,
+        });
+        let remoteStorageId: string;
+        try {
+          const uploadRef =
+            typeof uploadUrlRef === "string"
+              ? makeFunctionReference<"mutation">(uploadUrlRef)
+              : uploadUrlRef;
+          remoteStorageId = await heartbeat.race(
+            uploadBlobToRemote({
+              remoteClient,
+              uploadUrlRef: uploadRef,
+              blob,
+              contentType: entry.contentType,
+            }),
+          );
+        } finally {
+          heartbeat.stop();
+        }
+        await idMap.set(entry.localStorageId, remoteStorageId, "_storage");
+        await pendingUploadQueue.remove(entry, processorIdForReplay);
+      } catch (err) {
+        log.warn(
+          `sync: pending-upload failed (storageId: ${entry.localStorageId}); will retry next cycle`,
+          err,
+        );
+        try {
+          await pendingUploadQueue.release(entry, processorIdForReplay);
+        } catch {}
+        return;
+      }
     }
   }
 
@@ -2370,6 +2468,7 @@ function createEngine(config: EngineConfig): EngineInstance {
 
     syncCyclePromise = (async () => {
       try {
+        await processUploadQueue(signal);
         await processQueue(signal);
 
         const route = getSyncCycleRoute({
@@ -3080,7 +3179,11 @@ function createEngine(config: EngineConfig): EngineInstance {
 
   async function hydrateIdentityState(): Promise<void> {
     try {
-      await Promise.all([idMap.hydrate(), pendingQueue.hydrate()]);
+      await Promise.all([
+        idMap.hydrate(),
+        pendingQueue.hydrate(),
+        pendingUploadQueue.hydrate(),
+      ]);
     } catch (err) {
       log.warn("sync: hydration failed", err);
     }
@@ -3339,6 +3442,7 @@ function createEngine(config: EngineConfig): EngineInstance {
       log.info("sync: stopped");
       stopProcessorHeartbeat();
       unregisterPendingDepth();
+      unregisterPendingUploadsDepth();
 
       abortController?.abort();
       abortController = null;

@@ -615,19 +615,50 @@ export function createAsyncSyscall(
  * - `storage/storeBlob`
  * - `storage/getBlob`
  */
+export interface JsSyscallOptions {
+  /**
+   * Returns the active identity key for the current request, used to
+   * partition upload-queue rows. Defaults to `null` (anonymous).
+   */
+  getIdentityKey?: () => string | null;
+  /**
+   * When `true`, `storage/storeBlob` also writes a row into
+   * `_resolve_pending_uploads` so the engine can replay the upload to the
+   * remote deployment on reconnect. Set when a sync engine is configured.
+   */
+  shouldQueueUploads?: () => boolean;
+}
+
 export function createJsSyscall(
   db: Database,
   crypto: EmbeddedCryptoProvider = createAmbientCryptoProvider(),
+  options: JsSyscallOptions = {},
 ): (op: string, args: Record<string, unknown>) => Promise<unknown> {
   const handlers: Record<string, JsSyscallHandler> = {
     "storage/storeBlob": async (args) => {
       const { blob } = args as { blob: Blob };
+      const sha256 = await blobShaBase64(blob, crypto);
+      const contentType = blob.type || undefined;
       const storageId = db.insert("_storage", {
         size: blob.size,
-        sha256: await blobShaBase64(blob, crypto),
-        contentType: blob.type || undefined,
+        sha256,
+        contentType,
       });
       await db.storeFile(storageId, blob);
+      if (options.shouldQueueUploads?.() === true) {
+        db.insert("_resolve_pending_uploads", {
+          localStorageId: String(storageId),
+          sha256,
+          size: blob.size,
+          contentType: contentType ?? "application/octet-stream",
+          identityKey: options.getIdentityKey?.() ?? null,
+          state: "pending" as const,
+          owner: { $undefined: true },
+          processingStartedAt: { $undefined: true },
+          leaseExpiresAt: { $undefined: true },
+          createdAt: Date.now(),
+        });
+      }
       return storageId;
     },
     "storage/getBlob": async (args) => {

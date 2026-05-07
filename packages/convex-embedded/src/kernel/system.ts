@@ -621,6 +621,234 @@ const pendingUnblockAll: SystemFunctionDef = {
   },
 };
 
+// ---------------------------------------------------------------------------
+// Pending blob uploads — mirrors the pending mutations queue but for
+// `ctx.storage.store(blob)` calls that need to upload to remote.
+// ---------------------------------------------------------------------------
+
+async function readPendingUploadById(
+  db: Database,
+  id: string,
+): Promise<
+  | (StoredDocument & {
+      owner?: string;
+      state?: string;
+      localStorageId?: string;
+    })
+  | null
+> {
+  if (db.getTableForId(id) !== "_resolve_pending_uploads") {
+    return null;
+  }
+  return (await db.getAsync("_resolve_pending_uploads", id as DocumentId)) as
+    | (StoredDocument & {
+        owner?: string;
+        state?: string;
+        localStorageId?: string;
+      })
+    | null;
+}
+
+const pendingUploadPush: SystemFunctionDef = {
+  type: "mutation",
+  handler: (db, args) => {
+    const {
+      localStorageId,
+      sha256,
+      size,
+      contentType,
+      identityKey,
+    } = args as {
+      localStorageId: string;
+      sha256: string;
+      size: number;
+      contentType: string;
+      identityKey?: string | null;
+    };
+    const id = db.insert("_resolve_pending_uploads", {
+      localStorageId,
+      sha256,
+      size,
+      contentType,
+      identityKey: identityKey ?? null,
+      state: "pending" as const,
+      owner: { $undefined: true },
+      processingStartedAt: { $undefined: true },
+      leaseExpiresAt: { $undefined: true },
+      createdAt: Date.now(),
+    });
+    return id as string;
+  },
+};
+
+const pendingUploadGetAll: SystemFunctionDef = {
+  type: "query",
+  handler: async (db, args) => {
+    const { identityKey } = args as { identityKey?: string | null };
+    return (
+      await allByIndex(
+        db,
+        "_resolve_pending_uploads",
+        "by_identity_key_and_creation_time",
+        [
+          {
+            type: "Eq",
+            fieldPath: "identityKey",
+            value: identityKey ?? null,
+          },
+        ],
+      )
+    ).map((doc) => ({
+      _id: doc._id,
+      localStorageId: (doc as any).localStorageId,
+      sha256: (doc as any).sha256,
+      size: (doc as any).size,
+      contentType: (doc as any).contentType,
+      identityKey: (doc as any).identityKey,
+      state: (doc as any).state,
+      owner: (doc as any).owner,
+      processingStartedAt: (doc as any).processingStartedAt,
+      leaseExpiresAt: (doc as any).leaseExpiresAt,
+      createdAt: (doc as any).createdAt,
+    }));
+  },
+};
+
+const pendingUploadClaimNext: SystemFunctionDef = {
+  type: "mutation",
+  handler: async (db, args) => {
+    const { identityKey, owner, leaseMs, processorStaleMs } = args as {
+      identityKey?: string | null;
+      owner: string;
+      leaseMs?: number;
+      processorStaleMs?: number;
+    };
+    const now = Date.now();
+    const expiresAt = now + (leaseMs ?? 30_000);
+    const processorCutoff = now - (processorStaleMs ?? leaseMs ?? 30_000);
+
+    const candidates = await allByIndex(
+      db,
+      "_resolve_pending_uploads",
+      "by_identity_key_and_creation_time",
+      [
+        {
+          type: "Eq",
+          fieldPath: "identityKey",
+          value: identityKey ?? null,
+        },
+      ],
+    );
+    for (const doc of candidates) {
+      const state = (doc as { state?: string }).state ?? "pending";
+      const processingOwner = (doc as { owner?: string }).owner ?? null;
+      const leaseExpiresAt = (doc as { leaseExpiresAt?: number })
+        .leaseExpiresAt;
+      const processor =
+        processingOwner === null
+          ? null
+          : await readProcessor(db, identityKey ?? null, processingOwner);
+      const processorStale =
+        processingOwner !== null &&
+        (processor === null ||
+          typeof processor.lastSeenAt !== "number" ||
+          processor.lastSeenAt <= processorCutoff);
+      const claimable =
+        state === "pending" ||
+        (state === "processing" &&
+          ((typeof leaseExpiresAt === "number" && leaseExpiresAt <= now) ||
+            processorStale));
+      if (!claimable) continue;
+
+      db.patch("_resolve_pending_uploads", doc._id as DocumentId, {
+        state: "processing",
+        owner,
+        processingStartedAt: now,
+        leaseExpiresAt: expiresAt,
+      });
+      const claimed = (await db.getAsync(
+        "_resolve_pending_uploads",
+        doc._id as DocumentId,
+      )) as
+        | (StoredDocument & {
+            localStorageId?: string;
+            sha256?: string;
+            size?: number;
+            contentType?: string;
+            identityKey?: string | null;
+            state?: string;
+            owner?: string;
+            processingStartedAt?: number;
+            leaseExpiresAt?: number;
+            createdAt?: number;
+          })
+        | null;
+      if (!claimed) return null;
+      return {
+        _id: claimed._id,
+        localStorageId: claimed.localStorageId,
+        sha256: claimed.sha256,
+        size: claimed.size,
+        contentType: claimed.contentType,
+        identityKey: claimed.identityKey,
+        state: claimed.state,
+        owner: claimed.owner,
+        processingStartedAt: claimed.processingStartedAt,
+        leaseExpiresAt: claimed.leaseExpiresAt,
+        createdAt: claimed.createdAt,
+      };
+    }
+    return null;
+  },
+};
+
+const pendingUploadRenewLease: SystemFunctionDef = {
+  type: "mutation",
+  handler: async (db, args) => {
+    const { id, owner, leaseMs } = args as {
+      id: string;
+      owner: string;
+      leaseMs?: number;
+    };
+    const doc = await readPendingUploadById(db, id);
+    if (doc === null || doc.owner !== owner) return false;
+    db.patch("_resolve_pending_uploads", id as DocumentId, {
+      leaseExpiresAt: Date.now() + (leaseMs ?? 30_000),
+    });
+    return true;
+  },
+};
+
+const pendingUploadRemove: SystemFunctionDef = {
+  type: "mutation",
+  handler: async (db, args) => {
+    const { id, owner } = args as { id: string; owner?: string };
+    const doc = await readPendingUploadById(db, id);
+    if (doc !== null && (owner === undefined || doc.owner === owner)) {
+      db.delete("_resolve_pending_uploads", id as DocumentId);
+      return true;
+    }
+    return false;
+  },
+};
+
+const pendingUploadRelease: SystemFunctionDef = {
+  type: "mutation",
+  handler: async (db, args) => {
+    const { id, owner } = args as { id: string; owner?: string };
+    const doc = await readPendingUploadById(db, id);
+    if (doc !== null && (owner === undefined || doc.owner === owner)) {
+      db.patch("_resolve_pending_uploads", id as DocumentId, {
+        state: "pending",
+        owner: { $undefined: true },
+        processingStartedAt: { $undefined: true },
+        leaseExpiresAt: { $undefined: true },
+      });
+    }
+    return null;
+  },
+};
+
 const processorHeartbeat: SystemFunctionDef = {
   type: "mutation",
   handler: async (db, args) => {
@@ -922,6 +1150,12 @@ export const SYSTEM_FUNCTIONS: Record<string, SystemFunctionDef> = {
   "_system:pendingClear": pendingClear,
   "_system:pendingBlock": pendingBlock,
   "_system:pendingUnblockAll": pendingUnblockAll,
+  "_system:pendingUploadPush": pendingUploadPush,
+  "_system:pendingUploadGetAll": pendingUploadGetAll,
+  "_system:pendingUploadClaimNext": pendingUploadClaimNext,
+  "_system:pendingUploadRenewLease": pendingUploadRenewLease,
+  "_system:pendingUploadRemove": pendingUploadRemove,
+  "_system:pendingUploadRelease": pendingUploadRelease,
   "_system:processorHeartbeat": processorHeartbeat,
   "_system:processorRemove": processorRemove,
   "_system:collectionMetadataGet": collectionMetadataGet,
@@ -954,6 +1188,12 @@ export const SystemPaths = {
   pendingClear: "_system:pendingClear",
   pendingBlock: "_system:pendingBlock",
   pendingUnblockAll: "_system:pendingUnblockAll",
+  pendingUploadPush: "_system:pendingUploadPush",
+  pendingUploadGetAll: "_system:pendingUploadGetAll",
+  pendingUploadClaimNext: "_system:pendingUploadClaimNext",
+  pendingUploadRenewLease: "_system:pendingUploadRenewLease",
+  pendingUploadRemove: "_system:pendingUploadRemove",
+  pendingUploadRelease: "_system:pendingUploadRelease",
   processorHeartbeat: "_system:processorHeartbeat",
   processorRemove: "_system:processorRemove",
   collectionMetadataGet: "_system:collectionMetadataGet",

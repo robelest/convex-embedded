@@ -774,8 +774,8 @@ describe("Auth State", () => {
 // ---------------------------------------------------------------------------
 
 describe("SYSTEM_FUNCTIONS registry", () => {
-  it("contains exactly 25 entries", () => {
-    expect(Object.keys(SYSTEM_FUNCTIONS)).toHaveLength(25);
+  it("contains exactly 31 entries", () => {
+    expect(Object.keys(SYSTEM_FUNCTIONS)).toHaveLength(31);
   });
 
   it("has all expected keys", () => {
@@ -793,6 +793,12 @@ describe("SYSTEM_FUNCTIONS registry", () => {
       "_system:pendingClear",
       "_system:pendingBlock",
       "_system:pendingUnblockAll",
+      "_system:pendingUploadPush",
+      "_system:pendingUploadGetAll",
+      "_system:pendingUploadClaimNext",
+      "_system:pendingUploadRenewLease",
+      "_system:pendingUploadRemove",
+      "_system:pendingUploadRelease",
       "_system:authStateSetActive",
       "_system:authStateGetActive",
       "_system:pendingListIdentityKeys",

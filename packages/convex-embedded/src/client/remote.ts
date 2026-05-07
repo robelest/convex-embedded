@@ -513,6 +513,13 @@ export function attachResolve(input: {
     entry.stateHub.shutdown();
   });
 
+  // Sync engine is attaching — start enqueuing every storage.store(blob) so
+  // the engine can replay the upload to remote on reconnect.
+  runtime.setUploadQueueEnabled(true);
+  entry.scope.addFinalizer(() => {
+    runtime.setUploadQueueEnabled(false);
+  });
+
   patchRoutedConvexClient({
     client,
     runtime,

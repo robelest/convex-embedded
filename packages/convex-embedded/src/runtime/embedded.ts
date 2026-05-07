@@ -648,6 +648,17 @@ export class EmbeddedRuntime {
   }
 
   /**
+   * Toggle the storage upload queue. When enabled, every
+   * `ctx.storage.store(blob)` call also writes a row into
+   * `_resolve_pending_uploads` so the engine can replay the upload to the
+   * remote deployment on reconnect. The sync engine flips this on at attach
+   * time and off on detach.
+   */
+  setUploadQueueEnabled(enabled: boolean): void {
+    this.executor.setShouldQueueUploads(enabled);
+  }
+
+  /**
    * Replace the durable storage adapter backing the runtime.
    *
    * @param storage - Storage adapter for durable writes.

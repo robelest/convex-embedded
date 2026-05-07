@@ -143,6 +143,16 @@ const SYSTEM_INDEX_DEFINITIONS: Record<
       fields: ["identityKey", "_creationTime", "_id"],
     },
   ],
+  _resolve_pending_uploads: [
+    {
+      indexName: "by_identity_key_and_creation_time",
+      fields: ["identityKey", "_creationTime", "_id"],
+    },
+    {
+      indexName: "by_local_storage_id",
+      fields: ["localStorageId", "_creationTime", "_id"],
+    },
+  ],
   _resolve_processors: [
     {
       indexName: "by_identity_key_and_processor_id",

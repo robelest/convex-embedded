@@ -264,6 +264,7 @@ export class UdfExecutor {
   private _getIdentity?: () => Promise<unknown>;
   private _activeTimers?: Set<ReturnType<typeof setTimeout>>;
   private _storageSurface: StorageSurface | null;
+  private _shouldQueueUploads = false;
   private _contextStack: ExecutionContext[] = [];
   private _actionRequestCounter = 0;
   private _installedConvex!: NonNullable<typeof globalThis.Convex>;
@@ -303,12 +304,25 @@ export class UdfExecutor {
           onDependency: (dependency) => this._pushDependency(dependency),
         },
       ),
-      jsSyscall: createJsSyscall(this._db, this._crypto),
+      jsSyscall: createJsSyscall(this._db, this._crypto, {
+        getIdentityKey: () =>
+          this._currentExecutionContext().identityKey ?? null,
+        shouldQueueUploads: () => this._shouldQueueUploads,
+      }),
     };
   }
 
   setStorageSurface(surface: StorageSurface | null): void {
     this._storageSurface = surface;
+  }
+
+  /**
+   * Toggle the upload queue. When enabled, `ctx.storage.store(blob)` writes
+   * a row into `_resolve_pending_uploads` so the engine can replay the
+   * upload to the remote deployment on reconnect.
+   */
+  setShouldQueueUploads(enabled: boolean): void {
+    this._shouldQueueUploads = enabled;
   }
 
   /**

@@ -38,15 +38,15 @@ export interface PendingUploadEntry {
   hydrated?: boolean;
 }
 
-export type LocalQueryFn = (
-  path: string,
-  args: Record<string, unknown>,
-) => Promise<unknown>;
+import type {
+  LocalQueryExecutorFn,
+  LocalMutationExecutorFn,
+} from "@/client/system-fns";
 
-export type LocalMutationFn = (
-  path: string,
-  args: Record<string, unknown>,
-) => Promise<unknown>;
+export type {
+  LocalQueryExecutorFn,
+  LocalMutationExecutorFn,
+} from "@/client/system-fns";
 
 /**
  * Persistent queue of `ctx.storage.store(blob)` calls that still need to be
@@ -58,8 +58,8 @@ export class PendingUploadQueue {
 
   constructor(
     private readonly _localClient: ConvexClient,
-    private readonly _queryFn: LocalQueryFn | null = null,
-    private readonly _mutationFn: LocalMutationFn | null = null,
+    private readonly _queryFn: LocalQueryExecutorFn | null = null,
+    private readonly _mutationFn: LocalMutationExecutorFn | null = null,
     private readonly _getIdentityKey: (() => string | null) | null = null,
   ) {}
 

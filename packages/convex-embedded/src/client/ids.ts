@@ -26,19 +26,14 @@ export const ID_MAP_STORE_MIGRATIONS: StoreMigrationManifest = {
   version: 1,
 };
 
-/**
- * Optional local query executor. When provided, hydration reads use this
- * instead of `localClient.query()` to stay on the runtime-first execution path.
- */
-export type LocalQueryExecutorFn = (
-  path: string,
-  args: Record<string, unknown>,
-) => Promise<unknown>;
-
-export type LocalMutationExecutorFn = (
-  path: string,
-  args: Record<string, unknown>,
-) => Promise<unknown>;
+export type {
+  LocalQueryExecutorFn,
+  LocalMutationExecutorFn,
+} from "@/client/system-fns";
+import type {
+  LocalQueryExecutorFn,
+  LocalMutationExecutorFn,
+} from "@/client/system-fns";
 
 export type LocalDocumentPresenceFn = (id: string) => boolean;
 

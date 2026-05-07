@@ -69,18 +69,14 @@ export class PendingQueueStorageError extends Error {
   }
 }
 
-/**
- * Optional local query executor used for runtime-first hydration reads.
- */
-export type LocalQueryExecutorFn = (
-  path: string,
-  args: Record<string, unknown>,
-) => Promise<unknown>;
-
-export type LocalMutationExecutorFn = (
-  path: string,
-  args: Record<string, unknown>,
-) => Promise<unknown>;
+export type {
+  LocalQueryExecutorFn,
+  LocalMutationExecutorFn,
+} from "@/client/system-fns";
+import type {
+  LocalQueryExecutorFn,
+  LocalMutationExecutorFn,
+} from "@/client/system-fns";
 
 export class PendingQueue {
   private _entries: PendingEntry[] = [];

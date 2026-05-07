@@ -42,10 +42,12 @@ import { createAmbientCryptoProvider } from "@/runtime/crypto";
 import { EmbeddedRuntime } from "@/runtime/embedded";
 import type { EmbeddedRuntimeOptions } from "@/runtime/embedded";
 import { LoadCoordinator } from "@/runtime/load";
-import { PENDING_STORE_MIGRATIONS } from "@/runtime/migrations/pending";
-import { PENDING_UPLOADS_STORE_MIGRATIONS } from "@/runtime/migrations/pending-uploads";
+import {
+  PENDING_STORE_MIGRATIONS,
+  PENDING_UPLOADS_STORE_MIGRATIONS,
+} from "@/runtime/migrations/pending";
 import type { EmbeddedPlatformAdapter } from "@/runtime/platform";
-import type { QueryCacheStorage } from "@/runtime/sqlite/cache-table";
+import type { QueryCacheStorage } from "@/runtime/sqlite/cache";
 import { SCHEDULED_FUNCTIONS_STORE_MIGRATIONS } from "@/scheduler/executor";
 import { createLogger } from "@/shared/logger";
 import type { PendingReplayMeta } from "@/shared/symbols";

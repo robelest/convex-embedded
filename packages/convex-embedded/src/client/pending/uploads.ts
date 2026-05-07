@@ -41,12 +41,12 @@ export interface PendingUploadEntry {
 import type {
   LocalQueryExecutorFn,
   LocalMutationExecutorFn,
-} from "@/client/system-fns";
+} from "@/client/ids";
 
 export type {
   LocalQueryExecutorFn,
   LocalMutationExecutorFn,
-} from "@/client/system-fns";
+} from "@/client/ids";
 
 /**
  * Persistent queue of `ctx.storage.store(blob)` calls that still need to be

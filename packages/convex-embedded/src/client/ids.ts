@@ -26,14 +26,29 @@ export const ID_MAP_STORE_MIGRATIONS: StoreMigrationManifest = {
   version: 1,
 };
 
-export type {
-  LocalQueryExecutorFn,
-  LocalMutationExecutorFn,
-} from "@/client/system-fns";
-import type {
-  LocalQueryExecutorFn,
-  LocalMutationExecutorFn,
-} from "@/client/system-fns";
+/**
+ * Optional local query executor. When provided, hydration reads use
+ * this instead of `localClient.query()` to stay on the runtime-first
+ * execution path. Used by {@link IdMap}, the mutation pending queue,
+ * and the upload pending queue.
+ *
+ * @public
+ */
+export type LocalQueryExecutorFn = (
+  path: string,
+  args: Record<string, unknown>,
+) => Promise<unknown>;
+
+/**
+ * Optional local mutation executor. Same shape and motivation as
+ * {@link LocalQueryExecutorFn} but for write paths.
+ *
+ * @public
+ */
+export type LocalMutationExecutorFn = (
+  path: string,
+  args: Record<string, unknown>,
+) => Promise<unknown>;
 
 export type LocalDocumentPresenceFn = (id: string) => boolean;
 

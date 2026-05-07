@@ -8,6 +8,12 @@ export const PENDING_STORE_MIGRATIONS: StoreMigrationManifest = {
   version: 1,
 };
 
+export const PENDING_UPLOADS_STORE_MIGRATIONS: StoreMigrationManifest = {
+  store: "pendingUploadsQueue",
+  scope: "identity",
+  version: 1,
+};
+
 export interface PendingEntryStoreAdapter {
   transaction<T>(work: () => Promise<T> | T): Promise<T>;
   list(identityKey: string | null): Promise<Array<Record<string, unknown>>>;

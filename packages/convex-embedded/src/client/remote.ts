@@ -28,7 +28,7 @@ import type { ResolveInput } from "@/client/services/resolve";
 import type { ConvexInput } from "@/kernel/modules";
 import type { EmbeddedRuntime } from "@/runtime/embedded";
 import type { ConnectivityAdapter } from "@/runtime/platform";
-import type { QueryCacheStorage } from "@/runtime/sqlite/cache-table";
+import type { QueryCacheStorage } from "@/runtime/sqlite/cache";
 import type { RouteMode } from "@/shared/route";
 import { PubSub } from "@/utils/pubsub";
 import { DisposableScope } from "@/utils/scope";

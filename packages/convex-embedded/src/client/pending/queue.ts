@@ -72,11 +72,11 @@ export class PendingQueueStorageError extends Error {
 export type {
   LocalQueryExecutorFn,
   LocalMutationExecutorFn,
-} from "@/client/system-fns";
+} from "@/client/ids";
 import type {
   LocalQueryExecutorFn,
   LocalMutationExecutorFn,
-} from "@/client/system-fns";
+} from "@/client/ids";
 
 export class PendingQueue {
   private _entries: PendingEntry[] = [];

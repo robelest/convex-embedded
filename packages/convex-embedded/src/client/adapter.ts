@@ -12,7 +12,7 @@ import {
   isConnectivityOffline,
   type ConnectivityAdapter,
 } from "@/runtime/platform";
-import type { QueryCacheStorage } from "@/runtime/sqlite/cache-table";
+import type { QueryCacheStorage } from "@/runtime/sqlite/cache";
 import { structuralEqual } from "@/shared/equals";
 import { createLogger } from "@/shared/logger";
 import { nowMs } from "@/shared/perf";

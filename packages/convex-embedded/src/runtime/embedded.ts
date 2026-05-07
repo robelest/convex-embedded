@@ -56,8 +56,8 @@ import {
 import type { StorageSurface } from "@/runtime/storage";
 import { createTransport } from "@/runtime/transport";
 import type { EmbeddedTransport } from "@/runtime/transport";
-import { discoverCronJobs } from "@/scheduler/cron-discover";
-import { CronRunner } from "@/scheduler/cron-runner";
+import { discoverCronJobs } from "@/scheduler/cron/discover";
+import { CronRunner } from "@/scheduler/cron/runner";
 import { SchedulerExecutor } from "@/scheduler/executor";
 import {
   createHttpDispatcher,

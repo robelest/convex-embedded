@@ -1,5 +1,5 @@
 import { ModuleLoader } from "@embedded/kernel/modules";
-import { discoverCronJobs } from "@embedded/scheduler/cron-discover";
+import { discoverCronJobs } from "@embedded/scheduler/cron/discover";
 import { remoteOnly } from "@embedded/server/markers";
 import { describe, expect, it } from "@tests/testkit";
 

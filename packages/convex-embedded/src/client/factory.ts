@@ -45,7 +45,7 @@ import { LoadCoordinator } from "@/runtime/load";
 import { PENDING_STORE_MIGRATIONS } from "@/runtime/migrations/pending";
 import { PENDING_UPLOADS_STORE_MIGRATIONS } from "@/runtime/migrations/pending-uploads";
 import type { EmbeddedPlatformAdapter } from "@/runtime/platform";
-import type { QueryCacheStorage } from "@/runtime/sqlite/cache_table";
+import type { QueryCacheStorage } from "@/runtime/sqlite/cache-table";
 import { SCHEDULED_FUNCTIONS_STORE_MIGRATIONS } from "@/scheduler/executor";
 import { createLogger } from "@/shared/logger";
 import type { PendingReplayMeta } from "@/shared/symbols";

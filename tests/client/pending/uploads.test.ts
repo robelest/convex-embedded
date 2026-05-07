@@ -1,4 +1,4 @@
-import { PendingUploadQueue } from "@resolve/client/pending-uploads";
+import { PendingUploadQueue } from "@resolve/client/pending/uploads";
 import { beforeEach, describe, expect, it } from "@tests/testkit";
 import { vi } from "vitest";
 

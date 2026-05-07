@@ -3,11 +3,11 @@ import { createLogger } from "@/shared/logger";
 import { getRouteMode, type RouteMode } from "@/shared/route";
 import { recordCounter } from "@/tracing/metrics";
 
-import type { CronSchedule } from "./cron";
+import type { CronSchedule } from "./schedule";
 import type {
   CronFunctionType,
   CronJobDefinition,
-} from "./cron-runner";
+} from "./runner";
 
 const log = createLogger("cron-discover");
 

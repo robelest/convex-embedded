@@ -12,12 +12,12 @@ import type { ConvexClient } from "convex/browser";
 import * as Y from "yjs";
 
 import { IdMap } from "@/client/ids";
-import { PendingQueue } from "@/client/pending";
+import { PendingQueue } from "@/client/pending/queue";
 import {
   PendingUploadQueue,
   type PendingUploadEntry,
-} from "@/client/pending-uploads";
-import type { PendingEntry } from "@/client/pending";
+} from "@/client/pending/uploads";
+import type { PendingEntry } from "@/client/pending/queue";
 import { materializeYjsDoc } from "@/client/schema";
 import type { EngineResolveInput } from "@/client/services/engine";
 import { SystemPaths } from "@/kernel/system";

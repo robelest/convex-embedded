@@ -8,7 +8,7 @@ import {
   toModuleId,
   type GeneratedRemoteManifest,
   type RegistryEntry,
-} from "@/manifest";
+} from "@/cli/manifest";
 
 import { stripRemoteOnlyExports, type StripResult } from "./strip";
 

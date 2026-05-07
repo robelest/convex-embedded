@@ -3,7 +3,7 @@ import {
   nextFireMs,
   parseCronExpression,
   type CronSchedule,
-} from "@embedded/scheduler/cron";
+} from "@embedded/scheduler/cron/schedule";
 import { describe, expect, it } from "@tests/testkit";
 
 const T = (iso: string): number => Date.parse(iso);

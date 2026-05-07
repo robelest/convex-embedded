@@ -2,7 +2,7 @@ import {
   createQueryCacheStorage,
   type QueryCacheStorage,
   type SqliteCacheRow,
-} from "@embedded/runtime/sqlite/cache_table";
+} from "@embedded/runtime/sqlite/cache-table";
 import type {
   SqliteDriver,
   SqliteStatement,

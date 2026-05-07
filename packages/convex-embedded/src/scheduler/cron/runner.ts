@@ -12,7 +12,7 @@ import { createLogger } from "@/shared/logger";
 import { recordCounter } from "@/tracing/metrics";
 import { withSpan } from "@/tracing/spans";
 
-import { nextFireMs, type CronSchedule } from "./cron";
+import { nextFireMs, type CronSchedule } from "./schedule";
 
 const log = createLogger("cron");
 

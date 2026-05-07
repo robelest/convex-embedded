@@ -1,7 +1,7 @@
 import {
   CronRunner,
   type CronJobDefinition,
-} from "@embedded/scheduler/cron-runner";
+} from "@embedded/scheduler/cron/runner";
 import { afterEach, beforeEach, describe, expect, it } from "@tests/testkit";
 import { vi } from "vitest";
 

@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { beforeEach, describe, expect, it } from "@tests/testkit";
 
-import { collectRemoteManifest } from "../../packages/convex-embedded/src/manifest";
+import { collectRemoteManifest } from "../../packages/convex-embedded/src/cli/manifest";
 
 describe("cli manifest generation", () => {
   let convexRoot: string;

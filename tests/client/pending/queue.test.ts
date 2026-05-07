@@ -1,7 +1,7 @@
 import {
   PendingQueue,
   PendingQueueStorageError,
-} from "@resolve/client/pending";
+} from "@resolve/client/pending/queue";
 import { migratePendingEntries } from "@resolve/runtime/migrations/pending";
 import { describe, it, expect, beforeEach } from "@tests/testkit";
 import { vi } from "vitest";

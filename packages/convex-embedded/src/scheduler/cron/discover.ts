@@ -54,7 +54,7 @@ export async function discoverCronJobs(
 
   const jobs: CronJobDefinition[] = [];
   for (const [identifier, raw] of Object.entries(shape.crons)) {
-    const job = await materializeCronJob(moduleLoader, identifier, raw);
+    const job = await resolveCronJobDefinition(moduleLoader, identifier, raw);
     if (job !== null) {
       jobs.push(job);
     }
@@ -62,7 +62,7 @@ export async function discoverCronJobs(
   return jobs;
 }
 
-async function materializeCronJob(
+async function resolveCronJobDefinition(
   moduleLoader: ModuleLoader,
   identifier: string,
   raw: CronJobShape,

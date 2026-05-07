@@ -351,15 +351,41 @@ describe("createAsyncSyscall — Error", () => {
     db.rollbackWrites();
   });
 
-  it("fails closed for unsupported nested udf types", async () => {
+  it("dispatches nested action calls (ctx.runAction from inside an action)", async () => {
+    db.startTransaction();
+    mockRunUdf.mockResolvedValueOnce({ delivered: true });
+    const asyncSyscall = createAsyncSyscall(db, mockRunUdf);
+
+    const result = JSON.parse(
+      await asyncSyscall(
+        "1.0/runUdf",
+        JSON.stringify({
+          udfType: "action",
+          name: "messages:send",
+          args: {},
+        }),
+      ),
+    );
+
+    expect(mockRunUdf).toHaveBeenCalledWith(
+      "action",
+      expect.objectContaining({ udfPath: "messages:send" }),
+      {},
+    );
+    expect(result).toEqual({ delivered: true });
+
+    db.rollbackWrites();
+  });
+
+  it("fails closed for genuinely unknown nested udf types", async () => {
     db.startTransaction();
     const asyncSyscall = createAsyncSyscall(db, mockRunUdf);
 
     const error = await asyncSyscall(
       "1.0/runUdf",
       JSON.stringify({
-        udfType: "action",
-        name: "messages:send",
+        udfType: "httpAction",
+        name: "messages:webhook",
         args: {},
       }),
     ).catch((err: unknown) => err);
@@ -368,7 +394,7 @@ describe("createAsyncSyscall — Error", () => {
       "NESTED_UDF_TYPE_UNSUPPORTED",
     );
     expect((error as Error).message).toMatch(
-      /does not support nested udf type.*action.*route\.remote\(\)/,
+      /does not support nested udf type.*httpAction/,
     );
 
     db.rollbackWrites();

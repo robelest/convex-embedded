@@ -530,19 +530,18 @@ export function createAsyncSyscall(
         reference,
         functionHandle,
       });
-      if (udfType === "query") {
-        const result = await runUdf("query", functionPath, udfArgs);
-        return JSON.stringify(convexToJson(result as Value));
-      }
-      if (udfType === "mutation") {
-        const result = await runUdf("mutation", functionPath, udfArgs);
+      if (
+        udfType === "query" ||
+        udfType === "mutation" ||
+        udfType === "action"
+      ) {
+        const result = await runUdf(udfType, functionPath, udfArgs);
         return JSON.stringify(convexToJson(result as Value));
       }
       throw new ConvexError({
         code: "NESTED_UDF_TYPE_UNSUPPORTED",
         message:
-          `[convex-embedded] Local execution does not support nested udf type "${udfType}" in alpha. ` +
-          "Use route.remote() or mark the caller remoteOnly().",
+          `[convex-embedded] Local execution does not support nested udf type "${udfType}".`,
         udfType,
       });
     },

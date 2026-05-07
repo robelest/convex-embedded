@@ -16,11 +16,37 @@ import {
   type BufferingTracingHandle,
 } from "@/tracing/buffer";
 
+/**
+ * Options for {@link installInMemoryTracing}.
+ *
+ * @public
+ */
 export interface InMemoryTracingOptions {
+  /**
+   * Maximum number of spans to keep in the rolling buffer. Older
+   * spans are evicted FIFO once exceeded. Default 2000; clamped to a
+   * minimum of 16.
+   */
   capacity?: number;
+  /**
+   * Optional OTel `Resource` describing the process. When omitted the
+   * SDK's default resource is used.
+   */
   resource?: Resource;
 }
 
+/**
+ * Install in-memory tracer + meter providers and return a queryable
+ * handle. Use in tests + dev tools to introspect everything the
+ * runtime emits — spans, events, counters, gauges — without standing
+ * up a real OTel collector.
+ *
+ * Calling this replaces the global tracer + meter providers, so it
+ * affects every consumer of `getTracer()` / `getMeter()` in the
+ * process. Tests should close the returned handle in teardown.
+ *
+ * @public
+ */
 export function installInMemoryTracing(
   options: InMemoryTracingOptions = {},
 ): BufferingTracingHandle {

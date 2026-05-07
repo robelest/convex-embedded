@@ -32,8 +32,23 @@ interface HttpRouterLike {
   prefixRoutes?: Map<RoutableMethod, Map<string, unknown>>;
 }
 
+/**
+ * The runtime's local httpAction dispatcher. Built from the user's
+ * `convex/http.ts` route table, returned by {@link createHttpDispatcher},
+ * and invoked from `client.dispatchHttpRequest(request)` /
+ * `runtime.dispatchHttpRequest(request)`.
+ *
+ * @public
+ */
 export interface HttpDispatcher {
+  /**
+   * Match a `Request` against the user's `httpRouter` and run the
+   * matched handler under the action runtime. Returns a 404 when no
+   * route matches or when the matched handler is wrapped in
+   * `remoteOnly()`. Returns 500 when a handler throws.
+   */
   dispatch(request: Request): Promise<Response>;
+  /** Whether any routes are registered. False for projects without `convex/http.ts`. */
   hasRoutes(): boolean;
 }
 
@@ -48,6 +63,17 @@ const NO_ROUTES_DISPATCHER: HttpDispatcher = {
   hasRoutes: () => false,
 };
 
+/**
+ * Build the embedded runtime's httpAction dispatcher. Loads the user's
+ * `convex/http.ts` (if present) via the module loader and freezes the
+ * route table at startup. When the registry has no `http` module or
+ * the default export isn't an `HttpRouter`, returns a no-op dispatcher
+ * that always returns 404.
+ *
+ * Called once per runtime by the hydration path; not for direct app use.
+ *
+ * @internal
+ */
 export async function createHttpDispatcher(
   moduleLoader: ModuleLoader,
   executor: UdfExecutor,

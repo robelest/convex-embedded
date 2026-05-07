@@ -9,16 +9,33 @@ function isRemoteOnlyPackage(spec: string): boolean {
   );
 }
 
+/**
+ * Output of {@link stripRemoteOnlyExports}.
+ *
+ * @public
+ */
 export interface StripResult {
+  /** Rewritten module source with `remoteOnly` exports + their dead
+   * dependencies removed. Returned as-is when no changes are needed. */
   source: string;
+  /** Whether the rewritten source still has at least one export. */
   hasAnyExports: boolean;
+  /** Names of `remoteOnly` exports that were removed. */
   removedExports: string[];
+  /** Local names of imports that were removed because nothing kept references them. */
   removedImports: string[];
+  /** Names of other top-level bindings (consts, functions, classes) that were removed. */
   removedTopLevelBindings: string[];
 }
 
+/**
+ * Input to {@link stripRemoteOnlyExports}.
+ *
+ * @public
+ */
 export interface StripInput {
   source: string;
+  /** Path used by the TS parser for diagnostics; defaults to `"input.ts"`. */
   fileName?: string;
 }
 

@@ -12,22 +12,56 @@ import {
 
 import { stripRemoteOnlyExports, type StripResult } from "./strip";
 
+/**
+ * Inputs to {@link runCodegen}.
+ *
+ * @public
+ */
 export interface RunCodegenInput {
+  /** Path to the convex directory (relative to `cwd`). */
   convexDir: string;
+  /** Where to write the generated registry file (relative to `cwd`). */
   outFile: string;
+  /** Working directory to resolve paths against. Defaults to `process.cwd()`. */
   cwd?: string;
 }
 
+/**
+ * Result of one {@link runCodegen} pass.
+ *
+ * @public
+ */
 export interface RunCodegenResult {
+  /** Absolute path to the generated registry file. */
   outFile: string;
+  /** Modules included in the registry as-is (no `remoteOnly` exports). */
   modulesIncluded: string[];
+  /** Modules with mixed exports — stripped companion emitted under `_generated/embedded/`. */
   modulesStripped: string[];
+  /** Modules excluded entirely (every Convex export was `remoteOnly`). */
   modulesExcluded: string[];
+  /** Absolute paths of every stripped companion file written. */
   companionFiles: string[];
 }
 
 const STRIPPED_DIR = "_generated/embedded";
 
+/**
+ * Walk `convexDir`, AST-strip every module that has `remoteOnly()`
+ * exports, and write the dynamic-import registry to `outFile`.
+ *
+ * The registry maps each user module path to a dynamic `import()` of
+ * either the original file (no `remoteOnly` exports) or a stripped
+ * companion at `_generated/embedded/<original-relative-path>`.
+ * Modules whose every Convex export was `remoteOnly` are dropped from
+ * the registry entirely — their routing entries still appear in the
+ * manifest so client calls forward to remote, but the bundler has no
+ * static path to the source.
+ *
+ * Used both by the `convex-embedded` CLI and the Vite plugin.
+ *
+ * @public
+ */
 export async function runCodegen(
   input: RunCodegenInput,
 ): Promise<RunCodegenResult> {

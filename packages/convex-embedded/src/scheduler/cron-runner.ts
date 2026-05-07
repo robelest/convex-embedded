@@ -1,3 +1,13 @@
+/**
+ * Per-job timer-based cron runner. Discovery (see
+ * `cron-discover.ts`) produces {@link CronJobDefinition}s; this class
+ * schedules a `setTimeout` per job whose delay is computed by
+ * `nextFireMs`, fires the configured runFunction when each timer
+ * elapses, and re-schedules.
+ *
+ * @packageDocumentation
+ */
+
 import { createLogger } from "@/shared/logger";
 import { recordCounter } from "@/tracing/metrics";
 import { withSpan } from "@/tracing/spans";
@@ -6,16 +16,39 @@ import { nextFireMs, type CronSchedule } from "./cron";
 
 const log = createLogger("cron");
 
+/**
+ * Whether a cron's target function is a mutation or an action.
+ * Determined by discovery from the target's runtime metadata
+ * (`isMutation` / `isAction` flags).
+ *
+ * @public
+ */
 export type CronFunctionType = "mutation" | "action";
 
+/**
+ * A discovered cron job ready to be scheduled.
+ *
+ * @public
+ */
 export interface CronJobDefinition {
+  /** User-supplied identifier from `crons.daily(name, ...)` etc. */
   name: string;
+  /** Convex function reference name (e.g. `"emails:sendDigest"`). */
   functionName: string;
   type: CronFunctionType;
+  /** Args to pass to the target function. */
   args: Record<string, unknown>;
   schedule: CronSchedule;
 }
 
+/**
+ * Options for {@link CronRunner}. The runner's only required input
+ * is `runFunction` — a callback that dispatches a job to the runtime
+ * (typically wired to `runtime._runUdf`). Tests inject `now`,
+ * `setTimeoutFn`, `clearTimeoutFn` to control time + isolate timers.
+ *
+ * @public
+ */
 export interface CronRunnerOptions {
   jobs: ReadonlyArray<CronJobDefinition>;
   runFunction: (
@@ -23,8 +56,11 @@ export interface CronRunnerOptions {
     functionName: string,
     args: Record<string, unknown>,
   ) => Promise<unknown>;
+  /** @internal — clock injection for tests; defaults to `Date.now`. */
   now?: () => number;
+  /** @internal — `setTimeout` injection for tests. */
   setTimeoutFn?: (fn: () => void, delayMs: number) => unknown;
+  /** @internal — `clearTimeout` injection for tests. */
   clearTimeoutFn?: (handle: unknown) => void;
 }
 
@@ -33,6 +69,21 @@ interface ScheduledTimer {
   fireAtMs: number;
 }
 
+/**
+ * Per-job timer-based cron runner.
+ *
+ * After construction the runner is dormant. Call {@link setJobs} (or
+ * pass `jobs` to the constructor) and then {@link start} to schedule
+ * the first fire of each job. {@link shutdown} cancels all pending
+ * timers and is safe to call from any state.
+ *
+ * The runner is a single-tab scheduler — every tab runs its own
+ * timers. Multi-tab dedup via system-mutation lease is a planned
+ * follow-on; for now most idempotent crons are fine and remoteOnly
+ * crons are skipped at discovery so they only fire on the server.
+ *
+ * @public
+ */
 export class CronRunner {
   private jobs: ReadonlyArray<CronJobDefinition>;
   private readonly runFunction: CronRunnerOptions["runFunction"];

@@ -126,6 +126,29 @@ function defaultCollectionId<Q extends FunctionReference<"query">>(
  *
  * `@tanstack/db` is an optional peer dependency — install it only if you
  * need this seam.
+ *
+ * @example
+ * ```ts
+ * import { createCollection } from "@tanstack/db";
+ * import { convexEmbeddedCollectionOptions } from "@robelest/convex-embedded";
+ *
+ * const issues = createCollection(
+ *   convexEmbeddedCollectionOptions({
+ *     client,
+ *     query: api.issues.forProject,
+ *     args: { projectId },
+ *     mutations: {
+ *       insert: api.issues.create,
+ *       update: api.issues.update,
+ *       delete: api.issues.remove,
+ *     },
+ *   }),
+ * );
+ * ```
+ *
+ * @see https://tanstack.com/db
+ *
+ * @public
  */
 export function convexEmbeddedCollectionOptions<
   Q extends FunctionReference<"query">,

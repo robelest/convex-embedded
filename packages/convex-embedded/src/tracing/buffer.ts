@@ -1,22 +1,57 @@
+/**
+ * In-memory buffering for OpenTelemetry spans + metrics. Used by
+ * {@link installInMemoryTracing} to give tests, dev overlays, and
+ * debug surfaces a queryable handle without standing up a full OTel
+ * collector pipeline.
+ *
+ * @packageDocumentation
+ */
+
 import type {
   ReadableSpan,
   SpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
 import { SpanStatusCode } from "@opentelemetry/api";
 
+/**
+ * A snapshot of a finished span captured by {@link BufferingSpanProcessor}.
+ * Mirrors `ReadableSpan` but flattens the parts callers actually inspect:
+ * timing in milliseconds (not hrtime tuples), status as a string union, and
+ * events with their attributes inlined.
+ *
+ * @public
+ */
 export interface BufferedSpan {
+  /** Span name (e.g. `convex-embedded.runUdf.mutation`). */
   name: string;
   spanId: string;
   parentSpanId?: string;
   traceId: string;
+  /** Span start time in milliseconds since the unix epoch. */
   startMs: number;
+  /** Wall-clock duration of the span in milliseconds. */
   durMs: number;
   attributes: Record<string, unknown>;
   status: "ok" | "error" | "unset";
+  /** Populated only when `status === "error"`. */
   error?: string;
+  /**
+   * Span events recorded via `span.addEvent(...)` — used for
+   * state-transition signals like `lease.acquired`, `replay.failed`,
+   * `cron.skipped_remote_only`.
+   */
   events: Array<{ name: string; timeMs: number; attributes?: Record<string, unknown> }>;
 }
 
+/**
+ * A single observation of a counter / gauge / histogram emitted by
+ * the embedded runtime, returned from
+ * {@link BufferingTracingHandle.getMetrics}. One metric (e.g.
+ * `convex.embedded.http_dispatch`) may produce multiple points across
+ * different attribute sets (e.g. `result: "ok"` vs `result: "404"`).
+ *
+ * @public
+ */
 export interface BufferedMetricPoint {
   /** Metric name (e.g. `convex.embedded.replay.success`). */
   name: string;
@@ -30,9 +65,21 @@ export interface BufferedMetricPoint {
   timeMs: number;
 }
 
+/**
+ * Handle returned by {@link installInMemoryTracing}. Lets tests and
+ * dev tools introspect everything the runtime emits — spans, events,
+ * counters, gauges — without standing up a real OTel collector.
+ *
+ * Closing the handle disables the global tracer + meter providers,
+ * so call it in test teardown to avoid leakage between cases.
+ *
+ * @public
+ */
 export interface BufferingTracingHandle {
+  /** Snapshot of every span finished since installation (or last `clearSpans`). */
   getSpans(): BufferedSpan[];
   clearSpans(): void;
+  /** Subscribe to a debounced callback that fires when new spans arrive. */
   subscribe(callback: () => void): () => void;
   /**
    * Force a metrics collection cycle and return every captured point. When
@@ -40,6 +87,7 @@ export interface BufferingTracingHandle {
    * returns an empty array.
    */
   getMetrics(): Promise<BufferedMetricPoint[]>;
+  /** Tear down the providers + clear all buffers. */
   close(): Promise<void>;
 }
 

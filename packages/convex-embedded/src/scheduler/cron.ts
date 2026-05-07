@@ -1,3 +1,26 @@
+/**
+ * Pure-logic core of the cron implementation: schedule shapes plus
+ * `nextFireMs` (computes when a given schedule should next fire) plus
+ * a 5-field cron-expression parser. The runner ({@link CronRunner})
+ * uses these to schedule per-job timers.
+ *
+ * @packageDocumentation
+ */
+
+/**
+ * The five Convex schedule shapes plus a 5-field cron expression.
+ * Mirrors `Schedule` from `convex/server`.
+ *
+ * @remarks
+ * `interval` accepts one of `seconds`, `minutes`, or `hours`. Absolute
+ * schedules (`hourly`, `daily`, `weekly`, `monthly`) take wall-clock
+ * UTC fields; clients in different timezones see the same fire time.
+ * `cron` accepts a standard 5-field expression
+ * (`minute hour day-of-month month day-of-week`) with ranges, step
+ * values, and day/month name aliases.
+ *
+ * @public
+ */
 export type CronSchedule =
   | { type: "interval"; seconds: number }
   | { type: "interval"; minutes: number }
@@ -30,6 +53,12 @@ const DAYS_OF_WEEK = [
   "saturday",
 ] as const;
 
+/**
+ * Period of an `interval` schedule in milliseconds. Internal helper
+ * shared between `nextFireMs` and the runner's debounce logic.
+ *
+ * @public
+ */
 export function intervalMs(
   schedule: Extract<CronSchedule, { type: "interval" }>,
 ): number {
@@ -39,6 +68,19 @@ export function intervalMs(
   return 0;
 }
 
+/**
+ * When should this schedule fire next?
+ *
+ * @param schedule — the user's cron definition
+ * @param nowMs — current time in ms since epoch (injectable for tests)
+ * @param lastFireMs — when the schedule last fired; used for `interval`
+ *   to anchor on the prior tick (so a 30-second interval that fired at
+ *   T-32s next fires at T-2s, not T+30s). Absolute schedules ignore
+ *   this and compute purely from `nowMs`.
+ * @returns the next fire time in ms since epoch.
+ *
+ * @public
+ */
 export function nextFireMs(
   schedule: CronSchedule,
   nowMs: number,
@@ -255,6 +297,17 @@ const CRON_DAY_ALIASES: Record<string, number> = {
   sat: 6,
 };
 
+/**
+ * Parse a 5-field cron expression
+ * (`minute hour day-of-month month day-of-week`) into the per-field
+ * sets used by `nextCronExpression`. Throws on malformed input.
+ *
+ * Supports ranges (e.g. `9-17`), step values (e.g. every 15 minutes
+ * via `*\/15`), and the standard day/month aliases (`mon`–`sun`,
+ * `jan`–`dec`, case-insensitive).
+ *
+ * @public
+ */
 export function parseCronExpression(expression: string): ParsedCron {
   const fields = expression.trim().split(/\s+/);
   if (fields.length !== 5) {

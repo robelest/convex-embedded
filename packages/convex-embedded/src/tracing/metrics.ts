@@ -1,3 +1,14 @@
+/**
+ * OpenTelemetry metrics helpers used by the embedded runtime to emit
+ * counters (cumulative — replay successes, http dispatch results,
+ * cron firings) and gauges (instantaneous — pending queue depth,
+ * pending uploads depth, cache entry count). The runtime calls these
+ * at strategic points; consumers inspect via the in-memory tracer's
+ * `getMetrics()` or pipe to a real OTel collector.
+ *
+ * @packageDocumentation
+ */
+
 import type { Attributes, Counter, ObservableGauge } from "@opentelemetry/api";
 
 import { getMeter } from "@/tracing/spans";
@@ -16,6 +27,20 @@ function counterFor(name: string, description?: string): Counter {
   return counter;
 }
 
+/**
+ * Increment a named counter, lazily creating the OTel `Counter`
+ * instrument on first call. The full metric name is
+ * `convex.embedded.<name>` (so `recordCounter("replay.success")`
+ * reports `convex.embedded.replay.success`).
+ *
+ * @param name — short, dot-separated metric name (no prefix).
+ * @param attributes — optional attribute set; counters with different
+ *   attribute sets aggregate independently.
+ * @param value — increment amount (default 1; use larger values for
+ *   batched events).
+ *
+ * @public
+ */
 export function recordCounter(
   name: string,
   attributes?: Attributes,
@@ -56,11 +81,20 @@ function ensureGaugeProvider(): void {
 }
 
 /**
- * Register an observable gauge. The runtime polls `read()` on each metrics
- * collection cycle. `name` becomes the `state` attribute value on the
- * shared `convex.embedded.runtime.state` gauge.
+ * Register an observable gauge. The runtime polls `read()` on each
+ * metrics collection cycle (typically once per minute when piped to a
+ * collector, or on-demand via `installInMemoryTracing().getMetrics()`).
  *
- * Returns an `unregister` function.
+ * All gauges share a single OTel `convex.embedded.runtime.state`
+ * observable, distinguished by the `state` attribute. This avoids
+ * creating one OTel instrument per metric — a practical concession
+ * since each instrument has a non-trivial cost and we have many
+ * gauges (queue depths, cache entries, processor lease state, etc.).
+ *
+ * @returns an `unregister` function. Engines call this in their
+ *   shutdown path so torn-down components stop being polled.
+ *
+ * @public
  */
 export function registerGauge(
   name: string,
@@ -73,7 +107,12 @@ export function registerGauge(
   };
 }
 
-/** Reset all metric registrations. Tests + module-hot-reload only. */
+/**
+ * Reset every counter + gauge registration. Tests + module-hot-reload
+ * scenarios only — calling this in production silently drops metrics.
+ *
+ * @internal
+ */
 export function resetMetricsRegistrations(): void {
   counters.clear();
   gaugeRegistrations.clear();

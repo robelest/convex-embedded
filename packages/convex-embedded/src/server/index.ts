@@ -18,6 +18,7 @@ export {
   remoteOnly,
   storageUploadUrl,
   getTableRegistry,
+  /** @internal — test-only registry reset; not part of the public API */
   _resetRegistry,
   REMOTE_META,
   PENDING_REPLAY_META,

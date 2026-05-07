@@ -22,6 +22,21 @@ interface CronsShape {
   crons?: Record<string, CronJobShape>;
 }
 
+/**
+ * Walk the `crons` module from the user's module registry and produce
+ * {@link CronJobDefinition}s for each entry on the default-exported
+ * `cronJobs()` object. Skips:
+ *
+ * - Jobs whose target function can't be loaded (logs + drops)
+ * - Jobs whose target is wrapped in `remoteOnly()` — those fire on
+ *   the server only; the embedded runtime ignores them
+ * - Jobs with malformed schedules
+ *
+ * @returns the materialized job definitions; empty if `crons` is not
+ *   in the registry or its default export isn't a `Crons` object.
+ *
+ * @public
+ */
 export async function discoverCronJobs(
   moduleLoader: ModuleLoader,
 ): Promise<CronJobDefinition[]> {

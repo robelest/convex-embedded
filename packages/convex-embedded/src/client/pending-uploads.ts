@@ -11,18 +11,30 @@ const SYS_RENEW_LEASE = "_system:pendingUploadRenewLease";
 const SYS_REMOVE = "_system:pendingUploadRemove";
 const SYS_RELEASE = "_system:pendingUploadRelease";
 
+/**
+ * One blob waiting to be uploaded to the remote Convex deployment.
+ * Persisted in `_resolve_pending_uploads`; the engine drains the queue
+ * on reconnect, calls `generateUploadUrl` + PUTs the blob, records
+ * the local→remote ID translation in {@link IdMap}, then removes the
+ * row.
+ *
+ * @public
+ */
 export interface PendingUploadEntry {
   _id: string;
+  /** The local storage id returned to user code from `ctx.storage.store()`. */
   localStorageId: string;
   sha256: string;
   size: number;
   contentType: string;
   identityKey?: string | null;
   state?: "pending" | "processing";
+  /** Processor id holding the lease while uploading. */
   owner?: string;
   processingStartedAt?: number;
   leaseExpiresAt?: number;
   createdAt?: number;
+  /** True when this entry was loaded from storage during hydrate. */
   hydrated?: boolean;
 }
 

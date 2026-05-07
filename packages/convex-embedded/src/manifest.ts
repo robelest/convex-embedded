@@ -1,6 +1,23 @@
+/**
+ * Build-time helpers consumed by the codegen CLI to produce the
+ * embedded module registry. The runtime side reads the resulting
+ * `manifest.remote` field from the generated file at startup; nothing
+ * here is meant for direct app consumption.
+ *
+ * @packageDocumentation
+ */
+
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 
+/**
+ * Build-time metadata captured by the codegen analyzer and written
+ * into the generated registry's `manifest.remote` field. The runtime
+ * uses this at startup to decide how to route function references
+ * without having to load every module.
+ *
+ * @public
+ */
 export type GeneratedRemoteManifest = {
   routeModes: Record<string, "local" | "remote">;
   tables: Record<
@@ -14,6 +31,7 @@ export type GeneratedRemoteManifest = {
   uploadUrl?: string;
 };
 
+/** @internal — codegen-internal path normalization helper. */
 export function normalizePath(value: string): string {
   return value.split(path.sep).join("/");
 }
@@ -22,11 +40,24 @@ function sanitizeModuleId(value: string): string {
   return value.replace(/[.-]/g, "_");
 }
 
+/**
+ * Convert a filesystem path under `root` into the canonical Convex
+ * module id (slash-separated, no extension, dots/dashes sanitized).
+ *
+ * @internal
+ */
 export function toModuleId(root: string, filePath: string): string {
   const relative = normalizePath(path.relative(root, filePath));
   return sanitizeModuleId(relative.replace(/\.[^.]+$/, ""));
 }
 
+/**
+ * Compute the relative ES-module specifier `fromFile` should use to
+ * import `targetFile`, including a leading `./` for in-tree paths and
+ * the trailing extension stripped.
+ *
+ * @internal
+ */
 export function toImportPath(fromFile: string, targetFile: string): string {
   const relative = normalizePath(
     path.relative(path.dirname(fromFile), targetFile),
@@ -34,6 +65,7 @@ export function toImportPath(fromFile: string, targetFile: string): string {
   return relative.startsWith(".") ? relative : `./${relative}`;
 }
 
+/** @internal — codegen-internal module-id resolution helper. */
 export function canonicalizeRelativeModuleId(
   currentModuleId: string,
   importPath: string,
@@ -49,6 +81,7 @@ export function canonicalizeRelativeModuleId(
   );
 }
 
+/** @internal — codegen-internal import-statement scanner. */
 export function collectImports(
   currentModuleId: string,
   source: string,
@@ -85,6 +118,7 @@ export function collectImports(
   return imports;
 }
 
+/** @internal — codegen-internal table-name resolver for `bindTable()`. */
 export async function resolveEmbeddedTableName(input: {
   convexRoot: string;
   schemaModule?: string;
@@ -107,6 +141,14 @@ export async function resolveEmbeddedTableName(input: {
   }
 }
 
+/**
+ * Scan a single user module's source for the metadata the runtime
+ * cares about: per-export `localOnly()` / `remoteOnly()` route modes,
+ * `bindTable()` table bindings, and `storageUploadUrl()` markers.
+ * Used by the codegen orchestrator; not for direct app use.
+ *
+ * @internal
+ */
 export async function collectRemoteManifest(input: {
   convexRoot: string;
   moduleId: string;
@@ -159,6 +201,15 @@ export async function collectRemoteManifest(input: {
   return { routeModes, tables, uploadUrl };
 }
 
+/**
+ * One entry in the input array passed to {@link renderGeneratedFile}.
+ * Lets the codegen distinguish the file used for module-id derivation
+ * (always the original under `convex/`) from the file the dynamic
+ * import points at (either the original or a stripped companion under
+ * `_generated/embedded/`).
+ *
+ * @internal
+ */
 export interface RegistryEntry {
   /** Path used to derive the module id (always the original file). */
   originalFile: string;
@@ -166,6 +217,13 @@ export interface RegistryEntry {
   importFile: string;
 }
 
+/**
+ * Render the generated `_generated/embedded.ts` source. Emits the
+ * dynamic-import registry plus the `manifest.remote` block; the
+ * runtime imports both at startup.
+ *
+ * @internal
+ */
 export function renderGeneratedFile(input: {
   outFile: string;
   moduleFiles: ReadonlyArray<string | RegistryEntry>;

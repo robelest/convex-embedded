@@ -3,12 +3,27 @@ import path from "node:path";
 
 import { runCodegen, type RunCodegenInput, type RunCodegenResult } from "./codegen";
 
+/**
+ * Input to {@link watchCodegen}. Extends {@link RunCodegenInput} with
+ * watch-mode hooks.
+ *
+ * @public
+ */
 export interface WatchCodegenInput extends RunCodegenInput {
+  /** Called after each successful regeneration. */
   onResult?: (result: RunCodegenResult) => void;
+  /** Called when codegen throws; the watcher continues running. */
   onError?: (error: unknown) => void;
+  /** How long to coalesce rapid file events (default 50ms). */
   debounceMs?: number;
 }
 
+/**
+ * Handle returned by {@link watchCodegen}. Call `close()` to stop the
+ * watcher and free the underlying `fs.watch` resource.
+ *
+ * @public
+ */
 export interface WatchCodegenHandle {
   close(): void;
 }

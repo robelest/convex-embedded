@@ -35,6 +35,7 @@ import type {
 } from "@/shared/types";
 import { runDetached } from "@/utils/detached";
 import { retryWithBackoff } from "@/utils/retry";
+import { recordCounter, registerGauge } from "@/tracing/metrics";
 import { withSpan } from "@/tracing/spans";
 
 const log = createLogger("resolve");
@@ -1590,6 +1591,10 @@ function createEngine(config: EngineConfig): EngineInstance {
     executeLocalMutationWithoutEffects,
     getIdentityKey,
   );
+  const unregisterPendingDepth = registerGauge(
+    "pending_queue.depth",
+    () => pendingQueue.length,
+  );
   const processorIdForReplay =
     processorId ?? `processor_${Math.random().toString(36).slice(2)}`;
 
@@ -2189,6 +2194,7 @@ function createEngine(config: EngineConfig): EngineInstance {
               log.debug(
                 `sync: dropping already-mapped create mutation (remaining: ${pendingQueue.length})`,
               );
+              recordCounter("replay.outcome", { result: "drop_mapped" });
               shouldContinue = true;
             } else if (route._tag === "Push") {
               try {
@@ -2271,6 +2277,10 @@ function createEngine(config: EngineConfig): EngineInstance {
                   log.debug(
                     `sync: pushed mutation to remote (table: ${entry.table}, remaining: ${pendingQueue.length})`,
                   );
+                  recordCounter("replay.outcome", {
+                    result: "success",
+                    "convex.table": entry.table,
+                  });
                   shouldContinue = true;
                 }
               } catch (err) {
@@ -2281,21 +2291,38 @@ function createEngine(config: EngineConfig): EngineInstance {
                   log.debug(
                     `sync: dropping already-applied mutation (table: ${entry.table}, remaining: ${pendingQueue.length})`,
                   );
+                  recordCounter("replay.outcome", {
+                    result: "drop_already_applied",
+                    "convex.table": entry.table,
+                  });
                   shouldContinue = true;
                 } else if (err instanceof ReplayLeaseLostError) {
                   activeEntry = null;
                   log.warn(
                     `sync: replay lease lost while processing ${entry.ref}`,
                   );
+                  recordCounter("replay.outcome", {
+                    result: "lease_lost",
+                    "convex.table": entry.table,
+                  });
                   shouldContinue = false;
                 } else {
                   const reason = classifyReplayError(err as Error);
                   if (reason !== "unknown") {
                     await pendingQueue.block(entry, reason);
                     activeEntry = null;
+                    recordCounter("replay.outcome", {
+                      result: "blocked",
+                      reason,
+                      "convex.table": entry.table,
+                    });
                   } else {
                     await pendingQueue.release(entry, processorIdForReplay);
                     activeEntry = null;
+                    recordCounter("replay.outcome", {
+                      result: "released",
+                      "convex.table": entry.table,
+                    });
                   }
                   log.warn(
                     "sync: remote push failed, stopping queue processing",
@@ -3032,6 +3059,7 @@ function createEngine(config: EngineConfig): EngineInstance {
       cameOnlineAfterOfflinePeriod = false;
     }
     isOnline = true;
+    recordCounter("connectivity.transition", { state: "online" });
 
     runDetached(() => runSyncCycle(), "[sync] handleOnline:");
   }
@@ -3042,6 +3070,7 @@ function createEngine(config: EngineConfig): EngineInstance {
       cameOnlineAfterOfflinePeriod = true;
     }
     isOnline = false;
+    recordCounter("connectivity.transition", { state: "offline" });
     abortController?.abort();
     abortController = null;
     stopRemoteSubscriptions();
@@ -3309,6 +3338,7 @@ function createEngine(config: EngineConfig): EngineInstance {
 
       log.info("sync: stopped");
       stopProcessorHeartbeat();
+      unregisterPendingDepth();
 
       abortController?.abort();
       abortController = null;

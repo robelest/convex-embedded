@@ -1,12 +1,15 @@
 import {
+  metrics,
   trace,
   SpanStatusCode,
+  type Attributes,
+  type Meter,
   type Span,
   type SpanOptions,
-  type Attributes,
 } from "@opentelemetry/api";
 
 export const TRACER_NAME = "convex-embedded";
+export const METER_NAME = "convex-embedded";
 
 let probeLogged = false;
 
@@ -20,6 +23,10 @@ export function getTracer() {
     );
   }
   return tracer;
+}
+
+export function getMeter(): Meter {
+  return metrics.getMeter(METER_NAME);
 }
 
 export async function withSpan<T>(

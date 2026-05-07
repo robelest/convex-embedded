@@ -1,4 +1,6 @@
 import { createLogger } from "@/shared/logger";
+import { recordCounter } from "@/tracing/metrics";
+import { withSpan } from "@/tracing/spans";
 
 import { nextFireMs, type CronSchedule } from "./cron";
 
@@ -103,14 +105,40 @@ export class CronRunner {
     const firedAtMs = this.now();
     this.lastFireMs.set(job.name, firedAtMs);
     this.timers.delete(job.name);
-    try {
-      await this.runFunction(job.type, job.functionName, job.args);
-    } catch (error) {
-      log.error(
-        `cron "${job.name}" handler ${job.functionName} threw`,
-        error,
-      );
-    }
+    await withSpan(
+      "convex-embedded.cron.fire",
+      async (span) => {
+        span.setAttributes({
+          "convex.cron.name": job.name,
+          "convex.cron.function": job.functionName,
+          "convex.cron.type": job.type,
+        });
+        try {
+          await this.runFunction(job.type, job.functionName, job.args);
+          span.addEvent("cron.completed", {
+            "convex.cron.name": job.name,
+          });
+          recordCounter("cron.fire", {
+            "convex.cron.name": job.name,
+            result: "ok",
+          });
+        } catch (error) {
+          log.error(
+            `cron "${job.name}" handler ${job.functionName} threw`,
+            error,
+          );
+          span.addEvent("cron.failed", {
+            "convex.cron.name": job.name,
+            "convex.error.message":
+              error instanceof Error ? error.message : String(error),
+          });
+          recordCounter("cron.fire", {
+            "convex.cron.name": job.name,
+            result: "error",
+          });
+        }
+      },
+    );
     this.scheduleNext(job);
   }
 

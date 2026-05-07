@@ -1,6 +1,7 @@
 import type { ModuleLoader } from "@/kernel/modules";
 import { createLogger } from "@/shared/logger";
 import { getRouteMode, type RouteMode } from "@/shared/route";
+import { recordCounter } from "@/tracing/metrics";
 
 import type { CronSchedule } from "./cron";
 import type {
@@ -75,8 +76,16 @@ async function materializeCronJob(
     log.debug(
       `cron "${identifier}" target "${raw.name}" is remoteOnly; skipping local schedule`,
     );
+    recordCounter("cron.discovery", {
+      result: "skipped_remote_only",
+      "convex.cron.name": identifier,
+    });
     return null;
   }
+  recordCounter("cron.discovery", {
+    result: "registered",
+    "convex.cron.name": identifier,
+  });
   return {
     name: identifier,
     functionName: raw.name,

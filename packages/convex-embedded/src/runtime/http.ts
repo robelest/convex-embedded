@@ -2,6 +2,8 @@ import type { ModuleLoader } from "@/kernel/modules";
 import type { UdfExecutor } from "@/kernel/udf";
 import { createLogger } from "@/shared/logger";
 import { isRemoteOnly } from "@/shared/route";
+import { recordCounter } from "@/tracing/metrics";
+import { withSpan } from "@/tracing/spans";
 
 const log = createLogger("http");
 
@@ -71,60 +73,86 @@ export async function createHttpDispatcher(
     return NO_ROUTES_DISPATCHER;
   }
 
-  const dispatch = async (request: Request): Promise<Response> => {
-    const url = new URL(request.url);
-    const method = request.method.toUpperCase();
-    if (
-      !ROUTABLE_HTTP_METHODS.includes(method as RoutableMethod) &&
-      method !== "HEAD"
-    ) {
-      return new Response(`Method Not Allowed: ${method}`, {
-        status: 405,
-        headers: { "content-type": "text/plain" },
+  const dispatch = (request: Request): Promise<Response> =>
+    withSpan("convex-embedded.http.dispatch", async (span) => {
+      const url = new URL(request.url);
+      const method = request.method.toUpperCase();
+      span.setAttributes({
+        "http.method": method,
+        "http.path": url.pathname,
       });
-    }
-    const match = router.lookup!(
-      url.pathname,
-      method as RoutableMethod | "HEAD",
-    );
-    if (!match) {
-      return new Response("Not Found", {
-        status: 404,
-        headers: { "content-type": "text/plain" },
-      });
-    }
-    const [action, routedMethod, routedPath] = match;
-    if (isRemoteOnly(action)) {
-      log.debug(
-        `dispatch ${method} ${url.pathname} matched remoteOnly handler ${routedPath}; returning 404`,
-      );
-      return new Response("Not Found", {
-        status: 404,
-        headers: { "content-type": "text/plain" },
-      });
-    }
-    log.debug(
-      `dispatch ${method} ${url.pathname} -> ${routedMethod} ${routedPath}`,
-    );
-    try {
-      const response = await executor.executeHttpAction(action, request);
-      if (method === "HEAD") {
-        return new Response(null, {
-          status: response.status,
-          statusText: response.statusText,
-          headers: response.headers,
+      if (
+        !ROUTABLE_HTTP_METHODS.includes(method as RoutableMethod) &&
+        method !== "HEAD"
+      ) {
+        recordCounter("http.dispatch", { result: "method_not_allowed" });
+        span.addEvent("http.method_not_allowed", { "http.method": method });
+        return new Response(`Method Not Allowed: ${method}`, {
+          status: 405,
+          headers: { "content-type": "text/plain" },
         });
       }
-      return response;
-    } catch (error) {
-      log.error(`http handler ${routedMethod} ${routedPath} threw`, error);
-      const message = error instanceof Error ? error.message : String(error);
-      return new Response(message, {
-        status: 500,
-        headers: { "content-type": "text/plain" },
+      const match = router.lookup!(
+        url.pathname,
+        method as RoutableMethod | "HEAD",
+      );
+      if (!match) {
+        recordCounter("http.dispatch", { result: "not_found" });
+        span.addEvent("http.not_found");
+        return new Response("Not Found", {
+          status: 404,
+          headers: { "content-type": "text/plain" },
+        });
+      }
+      const [action, routedMethod, routedPath] = match;
+      span.setAttributes({
+        "http.route.method": routedMethod,
+        "http.route.path": routedPath,
       });
-    }
-  };
+      if (isRemoteOnly(action)) {
+        log.debug(
+          `dispatch ${method} ${url.pathname} matched remoteOnly handler ${routedPath}; returning 404`,
+        );
+        recordCounter("http.dispatch", { result: "remote_only" });
+        span.addEvent("http.skipped_remote_only", {
+          "http.route.path": routedPath,
+        });
+        return new Response("Not Found", {
+          status: 404,
+          headers: { "content-type": "text/plain" },
+        });
+      }
+      log.debug(
+        `dispatch ${method} ${url.pathname} -> ${routedMethod} ${routedPath}`,
+      );
+      try {
+        const response = await executor.executeHttpAction(action, request);
+        span.setAttribute("http.status_code", response.status);
+        recordCounter("http.dispatch", {
+          result: "ok",
+          "http.status_code": response.status,
+        });
+        if (method === "HEAD") {
+          return new Response(null, {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers,
+          });
+        }
+        return response;
+      } catch (error) {
+        log.error(`http handler ${routedMethod} ${routedPath} threw`, error);
+        const message = error instanceof Error ? error.message : String(error);
+        recordCounter("http.dispatch", { result: "error" });
+        span.addEvent("http.handler_threw", {
+          "convex.error.message": message,
+        });
+        return new Response(message, {
+          status: 500,
+          headers: { "content-type": "text/plain" },
+        });
+      }
+    });
 
   return {
     dispatch,

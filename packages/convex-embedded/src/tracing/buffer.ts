@@ -17,10 +17,29 @@ export interface BufferedSpan {
   events: Array<{ name: string; timeMs: number; attributes?: Record<string, unknown> }>;
 }
 
+export interface BufferedMetricPoint {
+  /** Metric name (e.g. `convex.embedded.replay.success`). */
+  name: string;
+  /** Metric kind. */
+  kind: "counter" | "gauge" | "histogram";
+  /** Numeric value at this collection cycle. */
+  value: number;
+  /** Attribute set for this point. */
+  attributes: Record<string, unknown>;
+  /** Timestamp of the latest observation in ms. */
+  timeMs: number;
+}
+
 export interface BufferingTracingHandle {
   getSpans(): BufferedSpan[];
   clearSpans(): void;
   subscribe(callback: () => void): () => void;
+  /**
+   * Force a metrics collection cycle and return every captured point. When
+   * no metrics provider is installed (legacy tracing-only handle) this
+   * returns an empty array.
+   */
+  getMetrics(): Promise<BufferedMetricPoint[]>;
   close(): Promise<void>;
 }
 

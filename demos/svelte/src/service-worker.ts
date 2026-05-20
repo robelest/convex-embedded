@@ -66,9 +66,9 @@ self.addEventListener("fetch", (event) => {
 
   async function respond() {
     const cache = await caches.open(CACHE);
+    const cacheKey = ASSETS.includes(url.pathname) ? url.pathname : request;
     const cached =
-      (await cache.match(request)) ??
-      (isSameOrigin ? await cache.match(url.pathname) : undefined);
+      (await cache.match(cacheKey)) ?? (await cache.match(request));
 
     if (isSameOrigin && ASSETS.includes(url.pathname) && cached) {
       return cached;
@@ -77,10 +77,7 @@ self.addEventListener("fetch", (event) => {
     try {
       const response = await fetch(request);
       if (response instanceof Response && response.ok) {
-        await cache.put(
-          isSameOrigin ? url.pathname : request,
-          response.clone(),
-        );
+        await cache.put(cacheKey, response.clone());
       }
       return response;
     } catch (error) {

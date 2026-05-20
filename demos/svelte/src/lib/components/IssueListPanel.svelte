@@ -6,7 +6,7 @@
 	import IssueDetailPanel from "./IssueDetailPanel.svelte";
 	import ProjectWorkbenchPanel from "./ProjectWorkbenchPanel.svelte";
 
-  let { project, permissions, members, currentUserId, workspaceGroupId, client } = $props<{
+  let { project, permissions, members, currentUserId, groupId, client } = $props<{
 		project: {
 			_id: string;
 			name: string;
@@ -28,18 +28,26 @@
     };
     members: Array<{ userId: string; name: string }>;
     currentUserId: string;
-    workspaceGroupId: string;
+    groupId: string;
     client: ConvexClient;
   }>();
 
   const issuesQuery = useQuery(
-      api.issues.forProject,
+      api.issues.allForProject,
     () => ({
       projectId: project._id,
     }),
   );
 
-  const issues = $derived(issuesQuery.data?.issues ?? []);
+  const issues = $derived(issuesQuery.data ?? []);
+  const issuesLoading = $derived(issuesQuery.data === undefined && !issuesQuery.error);
+  const issuesErrorMessage = $derived(
+    issuesQuery.error instanceof Error
+      ? issuesQuery.error.message
+      : issuesQuery.error
+        ? String(issuesQuery.error)
+        : null,
+  );
 
   // Status ordering and labels
   const statusOrder = ["in_progress", "todo", "backlog", "done", "cancelled"] as const;
@@ -80,6 +88,10 @@
   // Group by status, sort by priority within each group
   type IssueType = (typeof issues)[number];
   type StatusGroup = { status: string; label: string; issues: IssueType[] };
+
+  function issueLabels(issue: IssueType): string[] {
+    return Array.isArray(issue.labels) ? issue.labels : [];
+  }
 
 	const groupedIssues = $derived.by(() => {
 		const groups: StatusGroup[] = [];
@@ -173,7 +185,11 @@
 	<ProjectWorkbenchPanel {project} {client} canEditProject={permissions.canManageProjects} />
 
 	<!-- Issue list grouped by status -->
-  {#if issues.length === 0}
+  {#if issuesErrorMessage}
+    <p class="error-banner">{issuesErrorMessage}</p>
+  {:else if issuesLoading}
+    <p class="muted">Loading issues...</p>
+  {:else if issues.length === 0}
     <p class="muted">No issues yet.</p>
   {:else}
     <div class="flex flex-col border border-gray-300 bg-white">
@@ -206,7 +222,7 @@
             {/if}
 
             <!-- Labels -->
-			{#each issue.labels.slice(0, 2) as label (label)}
+			{#each issueLabels(issue).slice(0, 2) as label (label)}
               <span class="chip chip--grant shrink-0">{label}</span>
             {/each}
 
@@ -224,7 +240,7 @@
                 {permissions}
                 {members}
                 {currentUserId}
-                {workspaceGroupId}
+                {groupId}
                 {client}
                 onclose={() => { expandedIssueId = null; }}
               />

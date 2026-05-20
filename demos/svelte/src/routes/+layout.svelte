@@ -14,7 +14,7 @@
 	import type { UserIdentity } from "@robelest/convex-embedded/auth";
 	import type { LayoutData } from "./$types";
 	import { convex } from "$convex/_generated/embedded";
-	import schema from "$convex/schema";
+	import * as schemaModule from "$convex/schema";
 
 	let { children, data }: { children: Snippet; data: LayoutData } =
 		$props();
@@ -33,7 +33,7 @@
 	function createSsrBootstrappedClient() {
 		return createConvexClient({
 			convex,
-			schema,
+			schema: schemaModule,
 			name: "convex-embedded-svelte-demo",
 			prefetch: data.embedded,
 			auth: {

@@ -3,18 +3,23 @@ import {
   createEmbeddedPrefetch,
   emptyEmbeddedPrefetch,
 } from "@robelest/convex-embedded/client";
-import type { FunctionReturnType } from "convex/server";
 
 import type { LayoutServerLoad } from "./$types";
 
-type WorkspaceResult = FunctionReturnType<typeof api.workspace.get>;
+function readConvexUrl(): string | undefined {
+  return (
+    (import.meta.env.CONVEX_URL as string | undefined) ??
+    (process.env.CONVEX_URL as string | undefined) ??
+    (process.env.EXPO_PUBLIC_CONVEX_URL as string | undefined) ??
+    (process.env.VITE_CONVEX_URL as string | undefined)
+  );
+}
 
 export const load: LayoutServerLoad = async ({ locals }) => {
-  const convexUrl = import.meta.env.CONVEX_URL as string | undefined;
+  const convexUrl = readConvexUrl();
   const authToken = locals.authToken ?? null;
-  const authIdentityKey = locals.authIdentityKey ?? null;
+  const authIdentityKey = locals.authIdentityKey ?? "user_alice";
 
-  let workspace: WorkspaceResult | null = null;
   let projects: Array<Record<string, unknown>> = [];
   let embedded = emptyEmbeddedPrefetch(authIdentityKey);
 
@@ -27,15 +32,8 @@ export const load: LayoutServerLoad = async ({ locals }) => {
         tables: {
           projects: api.projects.bind,
         },
-        queries: {
-          workspace: {
-            query: api.workspace.get,
-            args: {},
-          },
-        },
       });
       embedded = result.embedded;
-      workspace = result.results.workspace;
       projects = result.snapshots.projects ?? [];
     } catch (error) {
       console.warn("[svelte-demo] failed to prefetch SSR data", error);
@@ -46,7 +44,6 @@ export const load: LayoutServerLoad = async ({ locals }) => {
     convexUrl: convexUrl ?? null,
     embedded,
     prefetch: {
-      workspace,
       projects,
     },
     auth: {

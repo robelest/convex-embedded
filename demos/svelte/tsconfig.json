@@ -10,59 +10,7 @@
     "skipLibCheck": true,
     "sourceMap": true,
     "strict": true,
-    "moduleResolution": "bundler",
-    "paths": {
-      "@/*": ["../../packages/convex-embedded/src/*"],
-      "$convex": ["../../convex"],
-      "$convex/*": ["../../convex/*"],
-      "$lib": ["./src/lib"],
-      "$lib/*": ["./src/lib/*"],
-      "@robelest/convex-embedded": [
-        "../../packages/convex-embedded/src/index.ts"
-      ],
-      "@robelest/convex-embedded/browser": [
-        "../../packages/convex-embedded/src/browser/index.ts"
-      ],
-      "@robelest/convex-embedded/auth": [
-        "../../packages/convex-embedded/src/auth/index.ts"
-      ],
-      "@robelest/convex-embedded/react": [
-        "../../packages/convex-embedded/src/react.ts"
-      ],
-      "@robelest/convex-embedded/expo": [
-        "../../packages/convex-embedded/src/expo/index.ts"
-      ],
-      "@robelest/convex-embedded/server": [
-        "../../packages/convex-embedded/src/server/index.ts"
-      ],
-      "@robelest/convex-embedded/server/table": [
-        "../../packages/convex-embedded/src/server/table.ts"
-      ],
-      "@robelest/convex-embedded/server/fields": [
-        "../../packages/convex-embedded/src/server/fields.ts"
-      ],
-      "@robelest/convex-embedded/server/schema": [
-        "../../packages/convex-embedded/src/server/schema.ts"
-      ],
-      "@robelest/convex-embedded/client": [
-        "../../packages/convex-embedded/src/client/index.ts"
-      ],
-      "@robelest/convex-embedded/crdt": [
-        "../../packages/convex-embedded/src/crdt/index.ts"
-      ],
-      "@robelest/convex-embedded/convex.config": [
-        "../../packages/convex-embedded/src/component/convex.config.ts"
-      ],
-      "@robelest/convex-embedded/test": [
-        "../../packages/convex-embedded/src/test.ts"
-      ],
-      "@robelest/convex-embedded/tracing/browser": [
-        "../../packages/convex-embedded/src/tracing/browser.ts"
-      ],
-      "@robelest/convex-embedded/tracing/node": [
-        "../../packages/convex-embedded/src/tracing/node.ts"
-      ]
-    }
+    "moduleResolution": "bundler"
   }
   // Path aliases are handled by https://svelte.dev/docs/kit/configuration#alias
   // except $lib which is handled by https://svelte.dev/docs/kit/configuration#files

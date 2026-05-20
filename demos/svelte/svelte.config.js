@@ -9,6 +9,9 @@ const config = {
   kit: {
     adapter: adapter(),
     alias: {
+      "$convex/_generated/embedded": path.resolve(
+        "./src/lib/generated/embedded.ts",
+      ),
       $convex: path.resolve("./../../convex"),
     },
     typescript: {

@@ -1,5 +1,6 @@
 import path from "path";
 
+import { convexEmbedded } from "@robelest/convex-embedded/vite";
 import { sveltekit } from "@sveltejs/kit/vite";
 import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "vite-plus";
@@ -14,7 +15,14 @@ const embeddedSrc = path.resolve(
 );
 
 export default defineConfig(({ command }) => ({
-  plugins: [tailwindcss(), sveltekit()],
+  plugins: [
+    convexEmbedded({
+      convexDir: "../../convex",
+      out: "src/lib/generated/embedded.ts",
+    }),
+    tailwindcss(),
+    sveltekit(),
+  ],
   envDir: "../..",
   envPrefix: ["VITE_", "CONVEX_"],
   build: {

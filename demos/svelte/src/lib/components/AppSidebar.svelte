@@ -6,18 +6,14 @@
   import X from "phosphor-svelte/lib/X";
 
   let {
-    workspaces,
-    selectedWorkspace,
     projects,
     teams,
     permissions,
     activeTab = $bindable("issues"),
     selectedProjectSlug = $bindable(null),
     client,
-    workspaceGroupId,
+    groupId,
   } = $props<{
-    workspaces: Array<{ groupId: string; name: string }>;
-    selectedWorkspace: { groupId: string; name: string };
 		projects: Array<{
 		  _id: string;
 		  name: string;
@@ -38,12 +34,11 @@
     activeTab: "issues" | "settings";
     selectedProjectSlug: string | null;
     client: ConvexClient;
-    workspaceGroupId: string;
+    groupId: string;
   }>();
 
   let mobileOpen = $state(false);
 
-  // New project form
   let showNewProject = $state(false);
   let newProjectTeamId = $state<string | null>(null);
   let newProjectName = $state("");
@@ -63,7 +58,7 @@
 	});
 
 	const hasTeams = $derived(allTeamGroups.length > 0);
-	const workspaceProjects = $derived(
+	const ungroupedProjects = $derived(
 		projects.filter((project: (typeof projects)[number]) => !project.teamGroupId),
 	);
 
@@ -90,10 +85,6 @@
 			);
 	});
 
-  function switchWorkspace(id: string) {
-    window.location.search = `?workspace=${id}`;
-  }
-
   function selectProject(slug: string) {
     selectedProjectSlug = slug;
     activeTab = "issues";
@@ -118,7 +109,6 @@
     newProjectIdentifier = "";
     try {
 		await client.mutation(api.projects.create, {
-        workspaceId: workspaceGroupId,
         ...(newProjectTeamId ? { teamGroupId: newProjectTeamId } : {}),
         name,
         identifier,
@@ -153,7 +143,7 @@
   >
     <List size={20} />
   </button>
-  <span class="font-label text-[0.75rem] font-semibold text-gray-700 truncate">{selectedWorkspace.name}</span>
+  <span class="font-label text-[0.75rem] font-semibold text-gray-700 truncate">convex-embedded</span>
 </header>
 
 <!-- Mobile: slide-out sheet -->
@@ -195,18 +185,6 @@
 </aside>
 
 {#snippet sidebarContent()}
-  <div class="px-3 mt-1">
-    <select
-      class="select select--compact w-full"
-      value={selectedWorkspace.groupId}
-      onchange={(e) => switchWorkspace(e.currentTarget.value)}
-    >
-		{#each workspaces as ws (ws.groupId)}
-        <option value={ws.groupId}>{ws.name}</option>
-      {/each}
-    </select>
-  </div>
-
   <nav class="mt-3 pt-3 border-t border-gray-300 flex flex-col gap-0.5 flex-1 overflow-y-auto">
     <div class="flex items-center justify-between px-3 mb-1">
       <p class="font-label text-[0.6rem] font-semibold uppercase tracking-[0.1em] text-gray-400 m-0">Projects</p>
@@ -242,7 +220,7 @@
       </form>
     {/if}
 
-		{#each workspaceProjects as project (project._id)}
+		{#each ungroupedProjects as project (project._id)}
       <button
         class="block w-full py-[0.3rem] px-3 border-0 border-l-2 border-l-transparent bg-transparent font-label text-[0.75rem] font-medium text-left text-gray-700 cursor-pointer hover:text-accent-600 hover:bg-gray-100 {selectedProjectSlug === project.slug && activeTab === 'issues' ? 'border-l-accent-500 !text-accent-600 font-semibold bg-gray-100' : ''}"
         onclick={() => selectProject(project.slug)}

@@ -16,8 +16,7 @@
     "bench:reactivity": "vp test bench tests/benchmarks/reactivity.bench.ts",
     "bench:component-storage": "vp test bench tests/benchmarks/component-storage.bench.ts",
     "build": "vp run cache:build",
-    "build:embedded": "vp exec convex codegen --component-dir ./packages/convex-embedded/src/component && vp run --filter @robelest/convex-embedded build && vp exec convex-embedded",
-    "codegen:embedded": "vp exec convex-embedded",
+    "build:embedded": "vp exec convex codegen --component-dir ./packages/convex-embedded/src/component && vp run --filter @robelest/convex-embedded build",
     "build:demo": "vp run --filter demo-svelte build",
     "publish:embedded": "vp pm publish --filter @robelest/convex-embedded --access public",
     "typecheck": "vp run --filter @robelest/convex-embedded typecheck",
@@ -31,7 +30,7 @@
     "deploy:demo": "vp exec convex deploy --cmd 'vp run build:demo' --cmd-url-env-var-name CONVEX_URL && vp run --filter demo-svelte deploy",
     "dev:convex": "vp exec convex dev",
     "dev:svelte": "vp run --filter demo-svelte dev",
-    "test:live": "vp test --run tests/live",
+    "test:live": "RUN_CONVEX_E2E=1 vp test --run tests/e2e/convex",
     "prepare": "vp config"
   },
   "dependencies": {

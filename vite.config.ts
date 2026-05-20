@@ -12,6 +12,7 @@ const embeddedSrc = path.resolve(
 );
 const testsRoot = path.resolve(import.meta.dirname, "tests");
 const convexApp = path.resolve(import.meta.dirname, "convex");
+const convexPackage = path.resolve(import.meta.dirname, "node_modules/convex");
 
 export default defineConfig({
   staged: {
@@ -173,6 +174,7 @@ export default defineConfig({
       "@robelest/convex-embedded/crdt": path.join(embeddedSrc, "crdt/index.ts"),
       "@robelest/convex-embedded/test": path.join(embeddedSrc, "test.ts"),
       "@convex": convexApp,
+      convex: convexPackage,
     },
   },
   test: {

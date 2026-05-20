@@ -12,12 +12,13 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { installInMemoryTracing } from "@robelest/convex-embedded";
+import type { ConvexModuleRegistry } from "@robelest/convex-embedded";
+import { createConvexClient } from "@robelest/convex-embedded/node";
+
 import { api } from "../convex/_generated/api";
 import schema from "../convex/schema";
 import { DEMO_WORKSPACE_ID } from "../convex/workspace";
-import { installInMemoryTracing } from "@robelest/convex-embedded";
-import { createConvexClient } from "@robelest/convex-embedded/node";
-import type { ConvexModuleRegistry } from "@robelest/convex-embedded";
 
 const CONVEX_URL =
   process.env.CONVEX_URL ?? "https://academic-pigeon-835.convex.cloud";
@@ -158,7 +159,10 @@ function formatVal(v: unknown): string {
   return String(v);
 }
 
-function waitFor(predicate: () => boolean, timeoutMs: number): Promise<boolean> {
+function waitFor(
+  predicate: () => boolean,
+  timeoutMs: number,
+): Promise<boolean> {
   return new Promise((resolve) => {
     if (predicate()) {
       resolve(true);
@@ -291,7 +295,9 @@ async function main() {
     console.log(
       `[activate] forProject subscriptions registered for ${issueSubs.size} projects`,
     );
-    console.log(`[activate] sleeping ${args.waitMs}ms for issue scopes to resolve...`);
+    console.log(
+      `[activate] sleeping ${args.waitMs}ms for issue scopes to resolve...`,
+    );
     await new Promise((resolve) => setTimeout(resolve, args.waitMs));
 
     snapshot(projects, issuesByProject, errorsByProject);

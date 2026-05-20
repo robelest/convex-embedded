@@ -161,6 +161,9 @@ class CachePipeline {
       connectivity?.onOnline?.(() => {
         this.openDeferredSubscriptions();
       }) ?? null;
+    // Pin live subscriptions so the cache eviction loop can't drop the
+    // value backing an active `useQuery`.
+    config.cache.setIsPinned((argsKey) => this.active.has(argsKey));
   }
 
   dispose(): void {

@@ -18,44 +18,46 @@ export function initYjsDoc(
   const fields = doc.getMap("fields");
   const shape = schemaDef.getShape();
 
-  for (const [key, fieldDef] of Object.entries(shape)) {
-    const crdtType = getCrdtType(fieldDef);
-    if (crdtType === null) continue;
-    if (crdtType === CrdtType.Omitted) continue;
+  doc.transact(() => {
+    for (const [key, fieldDef] of Object.entries(shape)) {
+      const crdtType = getCrdtType(fieldDef);
+      if (crdtType === null) continue;
+      if (crdtType === CrdtType.Omitted) continue;
 
-    const value = row[key];
+      const value = row[key];
 
-    if (crdtType === CrdtType.Prose) {
-      if (options?.skipProse) continue;
-      const seeded = proseContentToYDoc(normalizeProseContent(value), key);
-      Y.applyUpdateV2(doc, Y.encodeStateAsUpdateV2(seeded));
-      seeded.destroy();
-    } else if (crdtType === CrdtType.Register) {
-      const registerMap = new Y.Map<{ value: unknown; timestamp: number }>();
-      registerMap.set("_init", { value, timestamp: seq });
-      fields.set(key, registerMap);
-    } else if (crdtType === CrdtType.Counter) {
-      const counterArr = new Y.Array<{
-        client: string;
-        delta: number;
-        timestamp: number;
-      }>();
-      if (typeof value === "number" && value !== 0) {
-        counterArr.push([{ client: "_init", delta: value, timestamp: seq }]);
-      }
-      fields.set(key, counterArr);
-    } else if (crdtType === CrdtType.Set) {
-      const setMap = new Y.Map<{ addedBy: string; addedAt: number }>();
-      if (Array.isArray(value)) {
-        for (const item of value) {
-          const serialized =
-            typeof item === "string" ? item : JSON.stringify(item);
-          setMap.set(serialized, { addedBy: "_init", addedAt: seq });
+      if (crdtType === CrdtType.Prose) {
+        if (options?.skipProse) continue;
+        const seeded = proseContentToYDoc(normalizeProseContent(value), key);
+        Y.applyUpdateV2(doc, Y.encodeStateAsUpdateV2(seeded));
+        seeded.destroy();
+      } else if (crdtType === CrdtType.Register) {
+        const registerMap = new Y.Map<{ value: unknown; timestamp: number }>();
+        registerMap.set("_init", { value, timestamp: seq });
+        fields.set(key, registerMap);
+      } else if (crdtType === CrdtType.Counter) {
+        const counterArr = new Y.Array<{
+          client: string;
+          delta: number;
+          timestamp: number;
+        }>();
+        if (typeof value === "number" && value !== 0) {
+          counterArr.push([{ client: "_init", delta: value, timestamp: seq }]);
         }
+        fields.set(key, counterArr);
+      } else if (crdtType === CrdtType.Set) {
+        const setMap = new Y.Map<{ addedBy: string; addedAt: number }>();
+        if (Array.isArray(value)) {
+          for (const item of value) {
+            const serialized =
+              typeof item === "string" ? item : JSON.stringify(item);
+            setMap.set(serialized, { addedBy: "_init", addedAt: seq });
+          }
+        }
+        fields.set(key, setMap);
       }
-      fields.set(key, setMap);
     }
-  }
+  }, "init");
 
   return doc;
 }
@@ -186,17 +188,72 @@ export function materializeYjsDoc(
   return result;
 }
 
+const MATERIALIZE_CACHE_MAX = 100;
+
+/**
+ * Bounded LRU keyed by a cheap hash of the update bytes plus the docId.
+ * Y.Doc reconstruction is O(updates), so the same row materialized by
+ * multiple subscribers benefits from a shared decoded copy. Map iteration
+ * order is insertion order, so re-setting on hit moves the entry to the
+ * tail — that's how we approximate LRU with one Map.
+ */
+const materializeCache = new Map<string, Record<string, unknown>>();
+
+function hashUpdateBytes(bytes: Uint8Array): string {
+  const length = bytes.byteLength;
+  if (length === 0) return "0:";
+  let head = "";
+  const headLen = Math.min(16, length);
+  for (let i = 0; i < headLen; i += 1) {
+    const byte = bytes[i] ?? 0;
+    head += (byte < 16 ? "0" : "") + byte.toString(16);
+  }
+  let tail = "";
+  if (length > 16) {
+    const tailStart = Math.max(headLen, length - 8);
+    for (let i = tailStart; i < length; i += 1) {
+      const byte = bytes[i] ?? 0;
+      tail += (byte < 16 ? "0" : "") + byte.toString(16);
+    }
+  }
+  return `${length}:${head}:${tail}`;
+}
+
 export function materializeDocumentFromUpdate(input: {
   schemaDef: Definition;
   docId: string;
   docCreationTime: number;
   update: ArrayBuffer;
 }): Record<string, unknown> {
+  const bytes = new Uint8Array(input.update);
+  const cacheKey = `${input.docId}|${input.docCreationTime}|${hashUpdateBytes(bytes)}`;
+  const cached = materializeCache.get(cacheKey);
+  if (cached !== undefined) {
+    // Re-set to mark recently used. Return a shallow copy so callers that
+    // mutate the result don't poison the cache.
+    materializeCache.delete(cacheKey);
+    materializeCache.set(cacheKey, cached);
+    return { ...cached };
+  }
+
   const doc = new Y.Doc();
-  Y.applyUpdateV2(doc, new Uint8Array(input.update));
+  Y.applyUpdateV2(doc, bytes);
   const materialized = materializeYjsDoc(input.schemaDef, doc);
   materialized._id = input.docId;
   materialized._creationTime = input.docCreationTime;
   doc.destroy();
-  return materialized;
+
+  if (materializeCache.size >= MATERIALIZE_CACHE_MAX) {
+    const oldest = materializeCache.keys().next().value;
+    if (oldest !== undefined) {
+      materializeCache.delete(oldest);
+    }
+  }
+  materializeCache.set(cacheKey, materialized);
+  return { ...materialized };
+}
+
+/** Test helper / shutdown hook. Drops every memoized materialization. */
+export function clearMaterializeCache(): void {
+  materializeCache.clear();
 }

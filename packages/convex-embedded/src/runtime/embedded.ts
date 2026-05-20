@@ -461,6 +461,7 @@ export class EmbeddedRuntime {
         clearTimeout(timerId);
       }
       this._activeTimers.clear();
+      this._scheduledRecovery.clear();
       this.sessions.clear();
       this.protocolQueries.clear();
       this.subscriptions.clear();

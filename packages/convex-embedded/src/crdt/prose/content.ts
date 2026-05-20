@@ -45,9 +45,7 @@ export function normalizeProseContent(value: unknown): ProseContent {
 }
 
 export function cloneProseContent(value: unknown): ProseContent {
-  return JSON.parse(
-    JSON.stringify(normalizeProseContent(value)),
-  ) as ProseContent;
+  return structuredClone(normalizeProseContent(value));
 }
 
 function nodeText(node: unknown): string {

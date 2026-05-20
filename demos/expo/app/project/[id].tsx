@@ -1,6 +1,6 @@
 import { api } from "$convex/_generated/api";
 import type { Id } from "$convex/_generated/dataModel";
-import { Stack, useLocalSearchParams } from "expo-router";
+import { useLocalSearchParams } from "expo-router";
 import React from "react";
 import {
   Pressable,
@@ -11,8 +11,8 @@ import {
   View,
 } from "react-native";
 
+import { Sheet } from "@/src/components/Sheet";
 import { useEmbeddedClient } from "@/src/convex-client";
-import { useOverlayRegistration } from "@/src/overlay-guard";
 import { colors } from "@/src/theme";
 import { useProjects } from "@/src/use-projects";
 
@@ -30,8 +30,6 @@ export default function ProjectWorkbenchScreen() {
     Array<{ role: "user" | "assistant"; content: string }>
   >([]);
   const [isAskingAssistant, setIsAskingAssistant] = React.useState(false);
-
-  useOverlayRegistration(`project:${id}`);
 
   const handleAskAssistant = React.useCallback(async () => {
     const message = assistantDraft.trim();
@@ -62,16 +60,20 @@ export default function ProjectWorkbenchScreen() {
   }, [assistantDraft, project, client]);
 
   if (!project) {
-    return <View style={styles.loading} />;
+    return (
+      <Sheet detents={[0.7, 1.0]} initialDetent={0.7}>
+        <View style={styles.loading} />
+      </Sheet>
+    );
   }
 
   return (
-    <ScrollView
-      style={styles.scroll}
-      contentInsetAdjustmentBehavior="automatic"
-      contentContainerStyle={styles.content}
-    >
-      <Stack.Screen options={{ title: project.identifier }} />
+    <Sheet detents={[0.7, 1.0]} initialDetent={0.7}>
+      <ScrollView
+        style={styles.scroll}
+        contentInsetAdjustmentBehavior="automatic"
+        contentContainerStyle={styles.content}
+      >
       <View style={styles.headerCard}>
         <Text selectable style={styles.identifier}>
           {project.identifier}
@@ -231,7 +233,8 @@ export default function ProjectWorkbenchScreen() {
           </View>
         </View>
       )}
-    </ScrollView>
+      </ScrollView>
+    </Sheet>
   );
 }
 

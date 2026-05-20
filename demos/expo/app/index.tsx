@@ -1,12 +1,11 @@
 import { api } from "$convex/_generated/api";
+import type { Id } from "$convex/_generated/dataModel";
 import { usePaginatedQuery } from "convex/react";
 import * as Haptics from "expo-haptics";
-import { router } from "expo-router";
 import React from "react";
 import {
   ActivityIndicator,
   FlatList,
-  InteractionManager,
   Modal,
   Pressable,
   StyleSheet,
@@ -15,12 +14,13 @@ import {
   View,
 } from "react-native";
 
+import { IssueDetail } from "@/src/components/IssueDetail";
 import { IssueRow } from "@/src/components/IssueRow";
+import { Sheet } from "@/src/components/Sheet";
 import { useEmbeddedClient } from "@/src/convex-client";
-import { useOverlayGuard } from "@/src/overlay-guard";
 import { useProjectSelection } from "@/src/project-selection";
 import { colors } from "@/src/theme";
-import { markUiClick } from "@/src/ui-timing";
+import { clearUiMark, endUiMark, markUiClick } from "@/src/ui-timing";
 import { type Project, useProjects } from "@/src/use-projects";
 
 const Separator = () => <View style={styles.separator} />;
@@ -30,17 +30,12 @@ export default function IssuesScreen() {
   const client = useEmbeddedClient();
   const projects = useProjects();
   const { selectedProjectId, setSelectedProjectId } = useProjectSelection();
-  const { requestOverlay } = useOverlayGuard();
-  const [readyForSync, setReadyForSync] = React.useState(false);
   const [createVisible, setCreateVisible] = React.useState(false);
   const [createTitle, setCreateTitle] = React.useState("");
-
-  React.useLayoutEffect(() => {
-    const task = InteractionManager.runAfterInteractions(() => {
-      setReadyForSync(true);
-    });
-    return () => task.cancel();
-  }, []);
+  const [pickerOpen, setPickerOpen] = React.useState(false);
+  const [openIssueId, setOpenIssueId] = React.useState<Id<"issues"> | null>(
+    null,
+  );
 
   React.useLayoutEffect(() => {
     if (!selectedProjectId && projects.length > 0) {
@@ -62,9 +57,7 @@ export default function IssuesScreen() {
     loadMore: loadMoreIssues,
   } = usePaginatedQuery(
     api.issues.forProject,
-    readyForSync && selectedProject
-      ? { projectId: selectedProject._id }
-      : "skip",
+    selectedProject ? { projectId: selectedProject._id } : "skip",
     { initialNumItems: PAGE_SIZE },
   );
 
@@ -80,12 +73,23 @@ export default function IssuesScreen() {
     (id: string) => {
       markUiClick("issue.open", { id });
       void Haptics.selectionAsync();
-      requestOverlay(`issue:${id}`, () => {
-        router.push(`/issue/${id}`);
+      // Warm the SDK's runtime watcher before the sheet mounts.
+      // The subscription kicks off UDF evaluation immediately; by the time
+      // IssueDetail's useQuery subscribes a few ms later, it joins the same
+      // active entry and the cache hit is sub-frame.
+      const watch = client.watchQuery(api.issues.detail, {
+        issueId: id as Id<"issues">,
       });
+      const unsub = watch.onUpdate(() => {});
+      setTimeout(unsub, 3000);
+      setOpenIssueId(id as Id<"issues">);
     },
-    [requestOverlay],
+    [client],
   );
+
+  const handleDismissIssue = React.useCallback(() => {
+    setOpenIssueId(null);
+  }, []);
 
   const renderItem = React.useCallback(
     ({ item }: { item: IssueItem }) => (
@@ -97,15 +101,20 @@ export default function IssuesScreen() {
   const keyExtractor = React.useCallback((item: IssueItem) => item._id, []);
 
   const handleOpenProjects = React.useCallback(() => {
+    if (pickerOpen) return;
     markUiClick("projects.open");
     void Haptics.selectionAsync();
-    requestOverlay("project-picker", () => {
-      router.push({
-        pathname: "/project-picker",
-        params: selectedProjectId ? { project: selectedProjectId } : {},
-      });
-    });
-  }, [requestOverlay, selectedProjectId]);
+    setPickerOpen(true);
+  }, [pickerOpen]);
+
+  const handlePickProject = React.useCallback(
+    (projectId: string) => {
+      void Haptics.selectionAsync();
+      setSelectedProjectId(projectId);
+      setPickerOpen(false);
+    },
+    [setSelectedProjectId],
+  );
 
   const handleSubmitIssue = React.useCallback(() => {
     if (!selectedProject) return;
@@ -120,20 +129,10 @@ export default function IssuesScreen() {
         title,
       })
       .then((issueId) => {
-        requestOverlay(`issue:${issueId}`, () => {
-          router.push(`/issue/${issueId}`);
-        });
+        setOpenIssueId(issueId as Id<"issues">);
       })
       .catch(console.error);
-  }, [client, createTitle, requestOverlay, selectedProject]);
-
-  if (!readyForSync) {
-    return (
-      <View style={styles.loading}>
-        <ActivityIndicator color={colors.accent[500]} />
-      </View>
-    );
-  }
+  }, [client, selectedProject, createTitle]);
 
   return (
     <View style={styles.root}>
@@ -201,6 +200,38 @@ export default function IssuesScreen() {
       )}
 
       <Modal
+        transparent
+        visible={pickerOpen}
+        animationType="none"
+        statusBarTranslucent
+        onRequestClose={() => setPickerOpen(false)}
+      >
+        {pickerOpen && (
+          <ProjectPickerOverlay
+            projects={projects}
+            selectedProjectId={selectedProjectId}
+            onPick={handlePickProject}
+            onDismiss={() => setPickerOpen(false)}
+          />
+        )}
+      </Modal>
+
+      <Modal
+        transparent
+        visible={openIssueId !== null}
+        animationType="none"
+        statusBarTranslucent
+        onRequestClose={handleDismissIssue}
+      >
+        {openIssueId !== null && (
+          <IssueDetail
+            issueId={openIssueId}
+            onDismiss={handleDismissIssue}
+          />
+        )}
+      </Modal>
+
+      <Modal
         animationType="fade"
         onRequestClose={() => setCreateVisible(false)}
         transparent
@@ -246,14 +277,128 @@ export default function IssuesScreen() {
   );
 }
 
+function ProjectPickerOverlay({
+  projects,
+  selectedProjectId,
+  onPick,
+  onDismiss,
+}: {
+  projects: Project[];
+  selectedProjectId: string | null;
+  onPick: (id: string) => void;
+  onDismiss: () => void;
+}) {
+  endUiMark("projects.open", "mount");
+  endUiMark(
+    "projects.open",
+    projects.length > 0 ? "render-with-data" : "render-no-data",
+  );
+
+  React.useLayoutEffect(() => {
+    endUiMark("projects.open", "committed");
+    clearUiMark("projects.open");
+  }, []);
+
+  return (
+    <View style={StyleSheet.absoluteFill} pointerEvents="box-none">
+      <Sheet detents={[0.85, 1.0]} initialDetent={0.85} onDismiss={onDismiss}>
+        <ProjectPickerList
+          projects={projects}
+          selectedProjectId={selectedProjectId}
+          onPick={onPick}
+        />
+      </Sheet>
+    </View>
+  );
+}
+
+const PROJECT_ROW_HEIGHT = 64;
+
+function ProjectPickerList({
+  projects,
+  selectedProjectId,
+  onPick,
+}: {
+  projects: Project[];
+  selectedProjectId: string | null;
+  onPick: (id: string) => void;
+}) {
+  const renderItem = React.useCallback(
+    ({ item }: { item: Project }) => (
+      <ProjectRow
+        project={item}
+        active={item._id === selectedProjectId}
+        onPress={onPick}
+      />
+    ),
+    [selectedProjectId, onPick],
+  );
+
+  const keyExtractor = React.useCallback((item: Project) => item._id, []);
+
+  const getItemLayout = React.useCallback(
+    (_: ArrayLike<Project> | null | undefined, index: number) => ({
+      length: PROJECT_ROW_HEIGHT,
+      offset: PROJECT_ROW_HEIGHT * index,
+      index,
+    }),
+    [],
+  );
+
+  return (
+    <FlatList
+      data={projects}
+      keyExtractor={keyExtractor}
+      renderItem={renderItem}
+      getItemLayout={getItemLayout}
+      initialNumToRender={10}
+      maxToRenderPerBatch={6}
+      windowSize={5}
+      removeClippedSubviews
+      contentContainerStyle={pickerStyles.content}
+      style={pickerStyles.scroll}
+    />
+  );
+}
+
+const ProjectRow = React.memo(
+  function ProjectRow({
+    project,
+    active,
+    onPress,
+  }: {
+    project: Project;
+    active: boolean;
+    onPress: (id: string) => void;
+  }) {
+    const handlePress = React.useCallback(
+      () => onPress(project._id),
+      [onPress, project._id],
+    );
+    return (
+      <Pressable
+        onPressIn={handlePress}
+        style={[pickerStyles.row, active && pickerStyles.rowActive]}
+      >
+        <Text style={pickerStyles.identifier}>{project.identifier}</Text>
+        <Text numberOfLines={1} style={pickerStyles.name}>
+          {project.name}
+        </Text>
+        <Text style={pickerStyles.count}>{project.openIssueCount}</Text>
+      </Pressable>
+    );
+  },
+  (prev, next) =>
+    prev.project._id === next.project._id &&
+    prev.project.identifier === next.project.identifier &&
+    prev.project.name === next.project.name &&
+    prev.project.openIssueCount === next.project.openIssueCount &&
+    prev.active === next.active &&
+    prev.onPress === next.onPress,
+);
+
 const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: colors.warm[50] },
-  loading: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: colors.warm[50],
-  },
   content: {
     paddingHorizontal: 12,
     paddingBottom: 112,
@@ -393,5 +538,44 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     letterSpacing: 0.8,
     textTransform: "uppercase",
+  },
+});
+
+const pickerStyles = StyleSheet.create({
+  scroll: { flex: 1, backgroundColor: colors.warm[50] },
+  content: { paddingHorizontal: 16, paddingTop: 8, paddingBottom: 28 },
+  row: {
+    flexDirection: "row",
+    alignItems: "center",
+    height: PROJECT_ROW_HEIGHT,
+    paddingHorizontal: 14,
+    backgroundColor: colors.white,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.warm[200],
+  },
+  rowActive: { backgroundColor: "#fbf1eb" },
+  identifier: {
+    fontSize: 10,
+    letterSpacing: 1.2,
+    textTransform: "uppercase",
+    color: colors.warm[400],
+    fontWeight: "700",
+    width: 52,
+  },
+  name: {
+    flex: 1,
+    marginLeft: 10,
+    fontSize: 16,
+    color: colors.warm[900],
+    fontWeight: "500",
+  },
+  count: {
+    marginLeft: 12,
+    minWidth: 28,
+    textAlign: "right",
+    fontSize: 12,
+    color: colors.accent[500],
+    fontVariant: ["tabular-nums"],
+    fontWeight: "700",
   },
 });

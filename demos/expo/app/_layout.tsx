@@ -3,10 +3,10 @@ import { ConvexProvider } from "convex/react";
 import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import React from "react";
-import { ActivityIndicator, InteractionManager, View } from "react-native";
+import { GestureHandlerRootView } from "react-native-gesture-handler";
+import { SafeAreaProvider } from "react-native-safe-area-context";
 
 import { EmbeddedClientProvider, getClient } from "@/src/convex-client";
-import { OverlayGuardProvider } from "@/src/overlay-guard";
 import { ProjectSelectionProvider } from "@/src/project-selection";
 
 import "react-native-reanimated";
@@ -24,74 +24,39 @@ const WarmTheme = {
   },
 };
 
+const TRANSPARENT_SHEET_OPTIONS = {
+  presentation: "transparentModal",
+  animation: "none",
+  contentStyle: { backgroundColor: "transparent" },
+} as const;
+
 export default function RootLayout() {
-  const [client, setClient] = React.useState<ReturnType<
-    typeof getClient
-  > | null>(null);
-
-  React.useLayoutEffect(() => {
-    const task = InteractionManager.runAfterInteractions(() => {
-      setClient(getClient());
-    });
-    return () => task.cancel();
-  }, []);
-
-  if (!client) {
-    return (
-      <ThemeProvider value={WarmTheme}>
-        <View
-          style={{
-            flex: 1,
-            backgroundColor: WarmTheme.colors.background,
-            alignItems: "center",
-            justifyContent: "center",
-          }}
-        >
-          <ActivityIndicator color={WarmTheme.colors.primary} />
-          <StatusBar style="dark" />
-        </View>
-      </ThemeProvider>
-    );
-  }
+  const [client] = React.useState(() => getClient());
 
   return (
-    <ConvexProvider client={client}>
-      <EmbeddedClientProvider client={client}>
-        <ThemeProvider value={WarmTheme}>
-          <ProjectSelectionProvider>
-            <OverlayGuardProvider>
-              <Stack screenOptions={{ headerShown: false }}>
-                <Stack.Screen name="index" />
-                <Stack.Screen
-                  name="project-picker"
-                  options={{
-                    presentation: "formSheet",
-                    sheetGrabberVisible: true,
-                    sheetAllowedDetents: [0.85, 1.0],
-                  }}
-                />
-                <Stack.Screen
-                  name="project/[id]"
-                  options={{
-                    presentation: "formSheet",
-                    sheetGrabberVisible: true,
-                    sheetAllowedDetents: [0.7, 1.0],
-                  }}
-                />
-                <Stack.Screen
-                  name="issue/[id]"
-                  options={{
-                    presentation: "formSheet",
-                    sheetGrabberVisible: true,
-                    sheetAllowedDetents: [0.85, 1.0],
-                  }}
-                />
-              </Stack>
-            </OverlayGuardProvider>
-          </ProjectSelectionProvider>
-          <StatusBar style="dark" />
-        </ThemeProvider>
-      </EmbeddedClientProvider>
-    </ConvexProvider>
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <SafeAreaProvider>
+        <ConvexProvider client={client}>
+          <EmbeddedClientProvider client={client}>
+            <ThemeProvider value={WarmTheme}>
+              <ProjectSelectionProvider>
+                <Stack screenOptions={{ headerShown: false }}>
+                  <Stack.Screen name="index" />
+                  <Stack.Screen
+                    name="project/[id]"
+                    options={TRANSPARENT_SHEET_OPTIONS}
+                  />
+                  <Stack.Screen
+                    name="issue/[id]"
+                    options={TRANSPARENT_SHEET_OPTIONS}
+                  />
+                </Stack>
+              </ProjectSelectionProvider>
+              <StatusBar style="dark" />
+            </ThemeProvider>
+          </EmbeddedClientProvider>
+        </ConvexProvider>
+      </SafeAreaProvider>
+    </GestureHandlerRootView>
   );
 }

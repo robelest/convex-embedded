@@ -14,12 +14,12 @@ import {
 import { useEmbeddedClient } from "@/src/convex-client";
 import { useOverlayRegistration } from "@/src/overlay-guard";
 import { colors } from "@/src/theme";
-import { useWorkspaceData } from "@/src/use-workspace-data";
+import { useProjects } from "@/src/use-projects";
 
 export default function ProjectWorkbenchScreen() {
   const client = useEmbeddedClient();
   const { id, tab } = useLocalSearchParams<{ id: string; tab?: string }>();
-  const { projects } = useWorkspaceData();
+  const projects = useProjects();
   const project = projects.find((item) => item._id === id) ?? null;
   const [activeTab, setActiveTab] = React.useState<
     "overview" | "notes" | "assistant"

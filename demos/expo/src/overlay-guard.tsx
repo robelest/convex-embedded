@@ -64,7 +64,7 @@ export function useOverlayGuard() {
 export function useOverlayRegistration(key: string) {
   const { markMounted, clear } = useOverlayGuard();
 
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     markMounted(key);
     return () => clear(key);
   }, [clear, key, markMounted]);

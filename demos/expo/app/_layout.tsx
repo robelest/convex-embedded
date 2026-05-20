@@ -29,7 +29,7 @@ export default function RootLayout() {
     typeof getClient
   > | null>(null);
 
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     const task = InteractionManager.runAfterInteractions(() => {
       setClient(getClient());
     });
@@ -67,7 +67,7 @@ export default function RootLayout() {
                   options={{
                     presentation: "formSheet",
                     sheetGrabberVisible: true,
-                    sheetAllowedDetents: [0.5, 0.9],
+                    sheetAllowedDetents: [0.85, 1.0],
                   }}
                 />
                 <Stack.Screen

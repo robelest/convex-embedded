@@ -1,5 +1,5 @@
 import * as Haptics from "expo-haptics";
-import { Stack, router, useLocalSearchParams } from "expo-router";
+import { router, useLocalSearchParams } from "expo-router";
 import React from "react";
 import { Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 
@@ -7,23 +7,72 @@ import { useOverlayRegistration } from "@/src/overlay-guard";
 import { useProjectSelection } from "@/src/project-selection";
 import { colors } from "@/src/theme";
 import { clearUiMark, endUiMark } from "@/src/ui-timing";
-import {
-  type WorkspaceProject,
-  useWorkspaceData,
-} from "@/src/use-workspace-data";
+import { type Project, useProjects } from "@/src/use-projects";
+
+const EMPTY: Project[] = [];
+
+function useDeferredProjects(): Project[] {
+  const projects = useProjects();
+  const storeRef = React.useRef({
+    value: EMPTY as Project[],
+    delivered: false,
+    listeners: new Set<() => void>(),
+  });
+  const store = storeRef.current;
+
+  React.useLayoutEffect(() => {
+    if (projects.length === 0) return;
+
+    const emit = () => {
+      store.delivered = true;
+      store.value = projects;
+      for (const listener of store.listeners) listener();
+    };
+
+    if (!store.delivered) {
+      const id = setTimeout(emit, 0);
+      return () => clearTimeout(id);
+    }
+
+    emit();
+  }, [projects, store]);
+
+  return React.useSyncExternalStore(
+    React.useCallback(
+      (cb: () => void) => {
+        store.listeners.add(cb);
+        return () => {
+          store.listeners.delete(cb);
+        };
+      },
+      [store],
+    ),
+    React.useCallback(() => store.value, [store]),
+  );
+}
 
 export default function ProjectPickerScreen() {
   const params = useLocalSearchParams<{ project?: string }>();
-  const { projects } = useWorkspaceData();
+  const projects = useDeferredProjects();
   const { setSelectedProjectId } = useProjectSelection();
 
   useOverlayRegistration("project-picker");
 
-  React.useEffect(() => {
+  endUiMark("projects.open", "mount");
+  endUiMark(
+    "projects.open",
+    projects.length > 0 ? "render-with-data" : "render-no-data",
+  );
+
+  React.useLayoutEffect(() => {
     if (projects.length === 0) return;
-    endUiMark("projects.open", "ready");
+    endUiMark("projects.open", "committed");
     clearUiMark("projects.open");
   }, [projects.length]);
+
+  if (projects.length === 0) {
+    return <View style={styles.scroll} />;
+  }
 
   return (
     <ScrollView
@@ -31,15 +80,13 @@ export default function ProjectPickerScreen() {
       contentContainerStyle={styles.content}
       style={styles.scroll}
     >
-      <Stack.Screen options={{ title: "Projects" }} />
-
       <View style={styles.listCard}>
-        {projects.map((project: WorkspaceProject) => {
+        {projects.map((project: Project) => {
           const active = project._id === params.project;
           return (
             <Pressable
               key={project._id}
-              onPress={() => {
+              onPressIn={() => {
                 void Haptics.selectionAsync();
                 setSelectedProjectId(project._id);
                 router.dismiss();

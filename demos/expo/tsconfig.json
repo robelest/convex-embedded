@@ -4,6 +4,7 @@
     "strict": true,
     "paths": {
       "@/*": ["./*"],
+      "$convex/_generated/embedded": ["./src/generated/embedded.ts"],
       "$convex/*": ["../../convex/*"]
     }
   },

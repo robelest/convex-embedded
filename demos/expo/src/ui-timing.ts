@@ -1,8 +1,7 @@
-import { useEffect, useRef } from "react";
+import { useLayoutEffect, useRef } from "react";
 import { InteractionManager } from "react-native";
 
-const now = (): number =>
-  globalThis.performance?.now?.() ?? Date.now();
+const now = (): number => globalThis.performance?.now?.() ?? Date.now();
 
 interface PendingMark {
   startedAt: number;
@@ -16,7 +15,12 @@ function fmt(ms: number): string {
   return ms < 1 ? `${ms.toFixed(2)}ms` : `${ms.toFixed(1)}ms`;
 }
 
-function emit(stage: string, label: string, ms: number, details?: Record<string, unknown>): void {
+function emit(
+  stage: string,
+  label: string,
+  ms: number,
+  details?: Record<string, unknown>,
+): void {
   const detailStr = details
     ? " " +
       Object.entries(details)
@@ -26,7 +30,10 @@ function emit(stage: string, label: string, ms: number, details?: Record<string,
   console.log(`[ui-timing] ${stage} "${label}" ${fmt(ms)}${detailStr}`);
 }
 
-export function markUiClick(label: string, details?: Record<string, unknown>): void {
+export function markUiClick(
+  label: string,
+  details?: Record<string, unknown>,
+): void {
   const existing = marks.get(label);
   if (existing && !existing.reported) {
     emit("aborted", label, now() - existing.startedAt, existing.details);
@@ -88,7 +95,7 @@ export function useTimeUiUpdate<T>(label: string, value: T): void {
       emit("render", label, renderMs);
     }
   }
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (previous.current && previous.current.value === value) return;
     const isFirst = previous.current === null;
     previous.current = { value, reportedCommit: true };

@@ -29,7 +29,7 @@ function IssueRowImpl({
   return (
     <Pressable
       style={({ pressed }) => [styles.row, pressed && styles.pressed]}
-      onPress={handlePress}
+      onPressIn={handlePress}
     >
       <StatusDot status={issue.status} />
       <Text style={styles.identifier}>{issue.identifier}</Text>

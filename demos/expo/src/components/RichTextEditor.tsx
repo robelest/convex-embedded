@@ -5,7 +5,7 @@ import {
   useEditorContent,
 } from "@10play/tentap-editor";
 import { prose } from "@robelest/convex-embedded/crdt";
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   Animated,
   StyleSheet,
@@ -142,7 +142,7 @@ export default function RichTextEditor({
   });
   const editorState = useBridgeState(editor);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!editorState.isReady) {
       return;
     }
@@ -154,7 +154,7 @@ export default function RichTextEditor({
     return () => clearTimeout(timeout);
   }, [editorState.isReady]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!showPreview) {
       return;
     }
@@ -166,7 +166,7 @@ export default function RichTextEditor({
     return () => clearTimeout(fallback);
   }, [showPreview]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (showPreview) {
       previewOpacity.setValue(1);
       return;
@@ -179,7 +179,7 @@ export default function RichTextEditor({
     }).start();
   }, [previewOpacity, showPreview]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!editorState.isReady) {
       return;
     }
@@ -189,7 +189,7 @@ export default function RichTextEditor({
     editor.setPlaceholder(placeholder);
   }, [editable, editor, editorState.isReady, placeholder]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!editorState.isReady) {
       return;
     }
@@ -197,7 +197,7 @@ export default function RichTextEditor({
     editor.setEditable(editable);
   }, [editable, editor, editorState.isReady]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!editorState.isReady) {
       return;
     }
@@ -205,7 +205,7 @@ export default function RichTextEditor({
     editor.setPlaceholder(placeholder);
   }, [editor, editorState.isReady, placeholder]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (
       !editorState.isReady ||
       serializedContent === lastAppliedContent.current
@@ -217,7 +217,7 @@ export default function RichTextEditor({
     editor.setContent(normalizedContent);
   }, [editor, editorState.isReady, normalizedContent, serializedContent]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!editorContent || Array.isArray(editorContent)) {
       return;
     }
@@ -231,7 +231,7 @@ export default function RichTextEditor({
     void onChange?.(editorContent as RichTextContent);
   }, [editorContent, onChange]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     return () => {
       if (hidePreviewTimeout.current) {
         clearTimeout(hidePreviewTimeout.current);

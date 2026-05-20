@@ -1,12 +1,18 @@
 import { convex } from "$convex/_generated/embedded";
-import schema, { comments, issues, projects } from "$convex/schema";
+import * as schema from "$convex/schema";
+import type { UserIdentity } from "@robelest/convex-embedded/auth";
 import { createConvexClient } from "@robelest/convex-embedded/expo";
 import type { ConvexReactClient } from "convex/react";
 import React from "react";
 
 const CONVEX_URL =
-  process.env.EXPO_PUBLIC_CONVEX_URL ??
-  "https://academic-pigeon-835.convex.cloud";
+  process.env.EXPO_PUBLIC_CONVEX_URL ?? process.env.CONVEX_URL;
+
+const DEMO_IDENTITY: UserIdentity = {
+  issuer: "embedded-expo-demo",
+  subject: "user_alice",
+  tokenIdentifier: "user_alice",
+};
 
 type EmbeddedClient = ConvexReactClient;
 
@@ -19,7 +25,8 @@ export function getClient(): EmbeddedClient {
     convex,
     schema,
     name: "convex-embedded-expo-demo",
-    remote: { url: CONVEX_URL },
+    auth: { getUserIdentity: async () => DEMO_IDENTITY },
+    ...(CONVEX_URL ? { remote: { url: CONVEX_URL } } : {}),
   });
   return clientSingleton;
 }

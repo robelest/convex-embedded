@@ -23,12 +23,12 @@ import { useOverlayRegistration } from "@/src/overlay-guard";
 import { useProjectSelection } from "@/src/project-selection";
 import { colors } from "@/src/theme";
 import {
-  clearUiMark,
   endUiMark,
   markUiClick,
   useTimeUiUpdate,
 } from "@/src/ui-timing";
-import { useWorkspaceData } from "@/src/use-workspace-data";
+import { members } from "$convex/access";
+import { useProjects } from "@/src/use-projects";
 
 export default function IssueDetail() {
   const client = useEmbeddedClient();
@@ -43,27 +43,31 @@ export default function IssueDetail() {
 
   useOverlayRegistration(`issue:${id}`);
 
-  React.useEffect(() => {
+  React.useLayoutEffect(() => {
     const task = InteractionManager.runAfterInteractions(() => {
       setReadyForComments(true);
     });
     return () => task.cancel();
   }, []);
 
-  const { workspace, projects } = useWorkspaceData();
+  const projects = useProjects();
   const { selectedProjectId } = useProjectSelection();
-  const selectedProject =
-    projects.find((project) => project._id === selectedProjectId) ?? null;
-  const members = workspace?.selectedWorkspace?.members ?? [];
   const issue = useQuery(
     api.issues.detail,
     typeof id === "string" ? { issueId: id as Id<"issues"> } : "skip",
   );
-  React.useEffect(() => {
+  const selectedProject =
+    projects.find((project) => project._id === selectedProjectId) ??
+    projects.find((project) => project._id === issue?.projectId) ??
+    null;
+  React.useLayoutEffect(() => {
+    endUiMark("issue.open", "sheet-mounted");
+  }, []);
+  React.useLayoutEffect(() => {
     if (!issue) return;
-    endUiMark("issue.open", "ready");
-    clearUiMark("issue.open");
+    endUiMark("issue.open", "data-ready");
   }, [issue]);
+  useTimeUiUpdate("issue.open", issue?._id ?? null);
   useTimeUiUpdate("issue.status", issue?.status ?? null);
   useTimeUiUpdate("issue.priority", issue?.priority ?? null);
   useTimeUiUpdate("issue.title", issue?.title ?? null);
@@ -160,7 +164,7 @@ export default function IssueDetail() {
     router.back();
   }, [client, confirmDelete, issue, router]);
 
-  if (!workspace || !selectedProject || !issue) {
+  if (!issue) {
     return (
       <View style={styles.loading}>
         <ActivityIndicator color={colors.accent[500]} />

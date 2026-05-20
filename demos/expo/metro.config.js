@@ -16,6 +16,9 @@ config.resolver.nodeModulesPaths = [
 ];
 
 module.exports = withConvexEmbeddedExpoMetro(config, {
+  projectRoot: path.resolve(__dirname, "../.."),
+  convexDir: "convex",
+  out: "demos/expo/src/generated/embedded.ts",
   aliases: {
     "@robelest/convex-embedded/expo": path.resolve(
       __dirname,
@@ -27,7 +30,7 @@ module.exports = withConvexEmbeddedExpoMetro(config, {
     ),
     "$convex/_generated/embedded": path.resolve(
       __dirname,
-      "../../convex/_generated/embedded.ts",
+      "src/generated/embedded.ts",
     ),
     "$convex/projects": path.resolve(__dirname, "../../convex/projects.ts"),
     "$convex/issues": path.resolve(__dirname, "../../convex/issues.ts"),

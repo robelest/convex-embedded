@@ -80,7 +80,10 @@ export function stripRemoteOnlyExports(input: StripInput): StripResult {
   for (const stmt of sourceFile.statements) {
     const exportName = remoteOnlyExportName(stmt, remoteOnlyNames);
     if (exportName !== null) {
-      removedRanges.push({ start: stmt.getStart(sourceFile), end: stmt.getEnd() });
+      removedRanges.push({
+        start: stmt.getStart(sourceFile),
+        end: stmt.getEnd(),
+      });
       removedExports.push(exportName);
       explicitlyRemovedStmts.add(stmt);
     }
@@ -155,9 +158,7 @@ interface RemoteOnlyNames {
   namespaced: Set<string>;
 }
 
-function findRemoteOnlyLocalNames(
-  sourceFile: ts.SourceFile,
-): RemoteOnlyNames {
+function findRemoteOnlyLocalNames(sourceFile: ts.SourceFile): RemoteOnlyNames {
   const named = new Set<string>();
   const namespaced = new Set<string>();
   for (const stmt of sourceFile.statements) {
@@ -226,7 +227,8 @@ function isRemoteOnlyCall(
 }
 
 function hasExportModifier(stmt: ts.Statement): boolean {
-  const modifiers = (stmt as { modifiers?: readonly ts.ModifierLike[] }).modifiers;
+  const modifiers = (stmt as { modifiers?: readonly ts.ModifierLike[] })
+    .modifiers;
   if (!modifiers) return false;
   return modifiers.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
 }
@@ -378,10 +380,7 @@ function visitIdentifiers(
 
 function hasAnyExport(sourceFile: ts.SourceFile): boolean {
   for (const stmt of sourceFile.statements) {
-    if (
-      ts.isExportDeclaration(stmt) ||
-      ts.isExportAssignment(stmt)
-    ) {
+    if (ts.isExportDeclaration(stmt) || ts.isExportAssignment(stmt)) {
       return true;
     }
     if (

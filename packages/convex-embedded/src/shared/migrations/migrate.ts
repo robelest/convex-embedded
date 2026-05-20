@@ -1,6 +1,6 @@
 import type { Validator } from "convex/values";
 
-import type { SchemaOp } from "@/storage/adapter";
+import { createLogger } from "@/shared/logger";
 import type {
   MigrationContext,
   MigrationDb,
@@ -10,18 +10,17 @@ import type {
   MigrationSystem,
   MigrationSystemTable,
 } from "@/shared/migrations/types";
-import { createLogger } from "@/shared/logger";
 import type { Definition } from "@/shared/schema";
 import type {
   MigrationErrorHandler,
   RecoveryAction,
   RecoveryContext,
 } from "@/shared/types";
+import type { SchemaOp } from "@/storage/adapter";
 
 const log = createLogger("migration");
 
 export const VERSION_TABLE = "_resolve_schema_versions";
-export const STEP_TABLE = "_resolve_schema_steps";
 
 export interface SystemIndexRange {
   fieldPath: string;
@@ -39,10 +38,7 @@ export interface MigrationRuntimeAdapter {
   systemDelete(id: string): Promise<void>;
 
   tableList(table: string): Promise<Array<Record<string, unknown>>>;
-  tableGet(
-    table: string,
-    id: string,
-  ): Promise<Record<string, unknown> | null>;
+  tableGet(table: string, id: string): Promise<Record<string, unknown> | null>;
   tableInsert(table: string, doc: Record<string, unknown>): Promise<string>;
   tablePatch(
     table: string,
@@ -201,7 +197,6 @@ export async function runMigrations(
     try {
       await runMigrationStep(adapter, table, schema, v, migrationFn, logger);
       await setStoredVersion(adapter, table, v);
-      await cleanupCompletedSteps(adapter, table, v);
       logger.info(`v${v} completed`);
     } catch (err) {
       logger.error(`v${v} migration failed`, err);
@@ -270,17 +265,8 @@ async function runMigrationStep(
       ]);
     },
     dropIndex: async (name) => {
-      await adapter.applySchemaOps(table, [
-        { type: "dropIndex", name },
-      ]);
+      await adapter.applySchemaOps(table, [{ type: "dropIndex", name }]);
     },
-  };
-
-  const step: MigrationContext["step"] = async <T>(
-    name: string,
-    fn: () => Promise<T>,
-  ): Promise<T> => {
-    return runStep(adapter, table, version, name, fn, logger);
   };
 
   const ctx: MigrationContext = {
@@ -289,60 +275,9 @@ async function runMigrationStep(
     schema: schemaCtx,
     system,
     log: logger,
-    step,
   };
 
   await migrationFn(ctx);
-}
-
-async function runStep<T>(
-  adapter: MigrationRuntimeAdapter,
-  table: string,
-  version: number,
-  name: string,
-  fn: () => Promise<T>,
-  logger: MigrationLogger,
-): Promise<T> {
-  const existing = await adapter.systemReadByIndex({
-    table: STEP_TABLE,
-    indexName: "by_table_version_step",
-    range: [
-      { fieldPath: "table", value: table },
-      { fieldPath: "version", value: version },
-      { fieldPath: "stepName", value: name },
-    ],
-  });
-
-  if (existing.length > 0) {
-    logger.info(`step "${name}" already completed; skipping`);
-    return undefined as T;
-  }
-
-  const result = await fn();
-  await adapter.systemInsert(STEP_TABLE, {
-    table,
-    version,
-    stepName: name,
-  });
-  return result;
-}
-
-async function cleanupCompletedSteps(
-  adapter: MigrationRuntimeAdapter,
-  table: string,
-  version: number,
-): Promise<void> {
-  const rows = await adapter.systemReadByIndex({
-    table: STEP_TABLE,
-    indexName: "by_table_version_step",
-    range: [
-      { fieldPath: "table", value: table },
-      { fieldPath: "version", value: version },
-    ],
-  });
-  for (const row of rows) {
-    await adapter.systemDelete(row._id as string);
-  }
 }
 
 async function getStoredVersion(
@@ -411,5 +346,4 @@ async function handleRecovery(
 export const migration = {
   run: runMigrations,
   VERSION_TABLE,
-  STEP_TABLE,
 };

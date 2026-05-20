@@ -30,4 +30,5 @@ export interface MigrationCoordinatorOptions {
   storeManifests: readonly StoreMigrationManifest[];
   tableDefinitions: ReadonlyMap<string, Definition>;
   replayMetadata: ReadonlyMap<string, PendingReplayMeta>;
+  withMigrationLock?: <T>(fn: () => Promise<T>) => Promise<T>;
 }

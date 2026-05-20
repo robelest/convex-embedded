@@ -233,6 +233,7 @@ export interface UdfExecutorOptions {
    */
   activeTimers?: Set<ReturnType<typeof setTimeout>>;
   storageSurface?: StorageSurface | null;
+  runWithTransactionLock?: <T>(fn: () => Promise<T>) => Promise<T>;
 }
 
 interface ExecutionContext {
@@ -278,6 +279,7 @@ export class UdfExecutor {
     getIdentity,
     activeTimers,
     storageSurface,
+    runWithTransactionLock,
   }: UdfExecutorOptions) {
     this._db = db;
     this._crypto = crypto;
@@ -302,6 +304,7 @@ export class UdfExecutor {
           getStorageSurface: () => this._storageSurface,
           activeTimers: this._activeTimers,
           onDependency: (dependency) => this._pushDependency(dependency),
+          runWithTransactionLock,
         },
       ),
       jsSyscall: createJsSyscall(this._db, this._crypto, {

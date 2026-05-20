@@ -69,10 +69,7 @@ export {
   type VectorSearchArgs,
 } from "@/storage";
 
-export type {
-  SqliteDriver,
-  SqliteStatement,
-} from "@/storage/sqlite/driver";
+export type { SqliteDriver, SqliteStatement } from "@/storage/sqlite/driver";
 
 export { SubscriptionManager } from "@/sync/subscriptions";
 
@@ -103,6 +100,8 @@ export {
   type ConvexEmbeddedCollectionOptions,
   type ConvexEmbeddedCollectionMutationRefs,
 } from "@/client/optimistic";
+
+export { localOnly, remoteOnly, storageUploadUrl } from "@/server/markers";
 
 export { withSpan, withSpanSync, getTracer } from "@/tracing/spans";
 export { installInMemoryTracing } from "@/tracing/memory";

@@ -42,29 +42,3 @@ export function getEmbeddedClientEntry(
 export function deleteEmbeddedClientEntry(client: ConvexClient): void {
   getEmbeddedClientEntriesStore().delete(client);
 }
-
-export function extractEmbeddedTableDefinitions(
-  schemaExport: unknown,
-): Map<string, Definition> {
-  const definitions = new Map<string, Definition>();
-  if (!schemaExport || typeof schemaExport !== "object") {
-    return definitions;
-  }
-
-  const tables = (schemaExport as { tables?: Record<string, unknown> }).tables;
-  if (!tables || typeof tables !== "object") {
-    return definitions;
-  }
-
-  for (const [tableName, tableDef] of Object.entries(tables)) {
-    const schemaDef =
-      tableDef && typeof tableDef === "object"
-        ? (tableDef as { schema?: Definition }).schema
-        : undefined;
-    if (schemaDef) {
-      definitions.set(tableName, schemaDef);
-    }
-  }
-
-  return definitions;
-}

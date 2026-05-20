@@ -77,6 +77,7 @@ const NO_ROUTES_DISPATCHER: HttpDispatcher = {
 export async function createHttpDispatcher(
   moduleLoader: ModuleLoader,
   executor: UdfExecutor,
+  runExclusive: <T>(fn: () => Promise<T>) => Promise<T> = (fn) => fn(),
 ): Promise<HttpDispatcher> {
   let mod: unknown;
   try {
@@ -152,7 +153,9 @@ export async function createHttpDispatcher(
         `dispatch ${method} ${url.pathname} -> ${routedMethod} ${routedPath}`,
       );
       try {
-        const response = await executor.executeHttpAction(action, request);
+        const response = await runExclusive(() =>
+          executor.executeHttpAction(action, request),
+        );
         span.setAttribute("http.status_code", response.status);
         recordCounter("http.dispatch", {
           result: "ok",

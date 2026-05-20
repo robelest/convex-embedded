@@ -26,12 +26,6 @@ import { SYSTEM_FUNCTIONS } from "@/kernel/system";
 import type { SystemFunctionDef } from "@/kernel/system";
 import { TransactionManager } from "@/kernel/transaction";
 import { UdfExecutor } from "@/kernel/udf";
-import type { StorageAdapter } from "@/storage/adapter";
-import { isQueryable } from "@/storage/adapter";
-import {
-  buildUserTableSpecs,
-  type InternalTableSpec,
-} from "@/storage/sqlite/factory";
 import {
   blobShaBase64,
   createAmbientCryptoProvider,
@@ -43,6 +37,7 @@ import { parseSchema } from "@/runtime/db/schema";
 import type { ParsedSchema, SchemaExport } from "@/runtime/db/schema";
 import type { QueryDependency } from "@/runtime/db/types";
 import type { DocumentId, StoredDocument } from "@/runtime/db/types";
+import { createHttpDispatcher, type HttpDispatcher } from "@/runtime/http";
 import {
   createNoopWriteBroadcast,
   type WriteBroadcast,
@@ -59,20 +54,25 @@ import type { EmbeddedTransport } from "@/runtime/transport";
 import { discoverCronJobs } from "@/scheduler/cron/discover";
 import { CronRunner } from "@/scheduler/cron/runner";
 import { SchedulerExecutor } from "@/scheduler/executor";
-import {
-  createHttpDispatcher,
-  type HttpDispatcher,
-} from "@/runtime/http";
 import { canonicalizeMappedCreateTable } from "@/shared/canonicalize";
 import { structuralEqual } from "@/shared/equals";
 import { createLogger, setLoggerDebug } from "@/shared/logger";
 import { matchTag } from "@/shared/match";
 import { nowMs } from "@/shared/perf";
 import { componentRouteTargetLabel } from "@/shared/route";
-import type { Definition } from "@/shared/schema";
+import {
+  extractConvexSchemaExport,
+  extractEmbeddedTableDefinitions,
+  type Definition,
+} from "@/shared/schema";
 import { stableValueKey } from "@/shared/valuekey";
+import type { StorageAdapter } from "@/storage/adapter";
+import { isQueryable } from "@/storage/adapter";
+import {
+  buildUserTableSpecs,
+  type InternalTableSpec,
+} from "@/storage/sqlite/factory";
 import { SyncProtocolHandler } from "@/sync/protocol";
-import { withSpan } from "@/tracing/spans";
 import type {
   ClientMessage,
   ProtocolChange,
@@ -81,6 +81,7 @@ import type {
 } from "@/sync/protocol";
 import { SessionManager } from "@/sync/session";
 import { SubscriptionManager } from "@/sync/subscriptions";
+import { withSpan } from "@/tracing/spans";
 import { runDetached } from "@/utils/detached";
 import { DisposableScope } from "@/utils/scope";
 
@@ -236,11 +237,13 @@ interface RuntimeInput {
  * a remote document has actually changed relative to the local copy.
  * Returns `true` when all user-facing fields are identical.
  */
-function docsEqual(a: StoredDocument, b: Record<string, unknown>): boolean {
-  const skipKeys = new Set(["_id", "_creationTime", "__identityKey"]);
+const DOCS_EQUAL_SKIP_KEYS = new Set(["_id", "_creationTime", "__identityKey"]);
 
-  const aKeys = Object.keys(a).filter((k) => !skipKeys.has(k));
-  const bKeys = Object.keys(b).filter((k) => !skipKeys.has(k));
+function docsEqual(a: StoredDocument, b: Record<string, unknown>): boolean {
+  if (a === b) return true;
+
+  const aKeys = Object.keys(a).filter((k) => !DOCS_EQUAL_SKIP_KEYS.has(k));
+  const bKeys = Object.keys(b).filter((k) => !DOCS_EQUAL_SKIP_KEYS.has(k));
 
   if (aKeys.length !== bKeys.length) return false;
 
@@ -259,8 +262,8 @@ function docsEqual(a: StoredDocument, b: Record<string, unknown>): boolean {
 export interface EmbeddedRuntimeOptions {
   /** Generated Convex input containing modules and manifest metadata. */
   convex: ConvexInput;
-  /** Optional Convex schema definition (typically the default export from `convex/schema.ts`). */
-  schema?: SchemaExport;
+  /** Optional Convex schema definition or `convex/schema.ts` module namespace. */
+  schema?: unknown;
   /**
    * Optional remote-backed prefetch data used to seed the embedded database.
    *
@@ -287,23 +290,10 @@ function extractPrefetchSchemaVersions(
   schemaExport: EmbeddedRuntimeOptions["schema"],
 ): Map<string, number> {
   const versions = new Map<string, number>();
-  if (!schemaExport || typeof schemaExport !== "object") {
-    return versions;
-  }
-
-  const tables = (schemaExport as { tables?: Record<string, unknown> }).tables;
-  if (!tables || typeof tables !== "object") {
-    return versions;
-  }
-
-  for (const [tableName, tableDef] of Object.entries(tables)) {
-    const schemaDef =
-      tableDef && typeof tableDef === "object"
-        ? (tableDef as { schema?: { version?: unknown } }).schema
-        : undefined;
-    if (typeof schemaDef?.version === "number") {
-      versions.set(tableName, schemaDef.version);
-    }
+  for (const [tableName, schemaDef] of extractEmbeddedTableDefinitions(
+    schemaExport,
+  )) {
+    versions.set(tableName, schemaDef.version);
   }
 
   return versions;
@@ -313,28 +303,12 @@ function extractOmittedFieldsByTable(
   schemaExport: EmbeddedRuntimeOptions["schema"],
 ): Map<string, ReadonlySet<string>> {
   const result = new Map<string, ReadonlySet<string>>();
-  if (!schemaExport || typeof schemaExport !== "object") {
-    return result;
-  }
-
-  const tables = (schemaExport as { tables?: Record<string, unknown> }).tables;
-  if (!tables || typeof tables !== "object") {
-    return result;
-  }
-
-  for (const [tableName, tableDef] of Object.entries(tables)) {
-    if (!tableDef || typeof tableDef !== "object") continue;
-    const schemaDef = (
-      tableDef as { schema?: { getOmittedFields?: () => string[] } }
-    ).schema;
-    if (
-      schemaDef &&
-      typeof schemaDef.getOmittedFields === "function"
-    ) {
-      const omitted = schemaDef.getOmittedFields();
-      if (omitted.length > 0) {
-        result.set(tableName, new Set(omitted));
-      }
+  for (const [tableName, schemaDef] of extractEmbeddedTableDefinitions(
+    schemaExport,
+  )) {
+    const omitted = schemaDef.getOmittedFields();
+    if (omitted.length > 0) {
+      result.set(tableName, new Set(omitted));
     }
   }
 
@@ -398,6 +372,7 @@ export class EmbeddedRuntime {
   private _storageAdapter: StorageAdapter | null;
   private _transports: EmbeddedTransport[] = [];
   private _storageHydrated: Promise<void>;
+  private _crossTabSyncChain: Promise<void> = Promise.resolve();
   private _shutdown = false;
   private readonly _scope = new DisposableScope();
 
@@ -467,10 +442,11 @@ export class EmbeddedRuntime {
     }
 
     this.writeFanout.onNotification((tablesWritten) => {
-      runDetached(
-        () => this._handleCrossTabSync(tablesWritten),
-        "[convex-embedded] cross-tab sync:",
-      );
+      this._crossTabSyncChain = this._crossTabSyncChain
+        .then(() => this._handleCrossTabSync(tablesWritten))
+        .catch((err) =>
+          console.error("[convex-embedded] cross-tab sync:", err),
+        );
     });
 
     this._scope.addFinalizer(() => {
@@ -492,12 +468,10 @@ export class EmbeddedRuntime {
       this._tableWriteListeners.clear();
       this.writeFanout.close();
     });
-    this._scope.addFinalizer(() => {
+    this._scope.addFinalizer(async () => {
+      await this.db.waitForPersistence();
       if (this._storageAdapter?.close) {
-        runDetached(
-          () => Promise.resolve(this._storageAdapter?.close?.()),
-          "[convex-embedded] storage close failed:",
-        );
+        await Promise.resolve(this._storageAdapter.close());
       }
     });
 
@@ -1075,7 +1049,7 @@ export class EmbeddedRuntime {
           }
           return (current as Record<string, unknown>)[segment];
         }, doc);
-      return actual === expected;
+      return structuralEqual(actual, expected);
     });
   }
 
@@ -1246,25 +1220,22 @@ export class EmbeddedRuntime {
   }
 
   async pushLocalQueryUpdates(commit: DatabaseCommitResult): Promise<void> {
-    return withSpan(
-      "convex-embedded.pushLocalQueryUpdates",
-      async (span) => {
-        if (commit.tablesWritten.size === 0) {
-          span.setAttributes({ "convex.commit.tables_written": 0 });
-          return;
-        }
-        span.setAttributes({
-          "convex.commit.tables_written": commit.tablesWritten.size,
-        });
+    return withSpan("convex-embedded.pushLocalQueryUpdates", async (span) => {
+      if (commit.tablesWritten.size === 0) {
+        span.setAttributes({ "convex.commit.tables_written": 0 });
+        return;
+      }
+      span.setAttributes({
+        "convex.commit.tables_written": commit.tablesWritten.size,
+      });
 
-        const changes = this._commitToQueryUpdates(commit.invalidation);
-        span.setAttributes({ "convex.commit.changes": changes.length });
-        if (changes.length === 0) return;
+      const changes = this._commitToQueryUpdates(commit.invalidation);
+      span.setAttributes({ "convex.commit.changes": changes.length });
+      if (changes.length === 0) return;
 
-        const updates = await this.syncProtocol.reEvaluateQueries(changes);
-        await this._pushProtocolUpdates(updates);
-      },
-    );
+      const updates = await this.syncProtocol.reEvaluateQueries(changes);
+      await this._pushProtocolUpdates(updates);
+    });
   }
 
   private async _notifyCrossTabAfterStorage(
@@ -1409,6 +1380,7 @@ export class EmbeddedRuntime {
         `[convex-embedded] ingestDocuments("${table}") failed:`,
         err,
       );
+      throw err;
     }
   }
 
@@ -1436,7 +1408,9 @@ export class EmbeddedRuntime {
           .filter(([, spec]) => spec.notNull === true)
           .map(([name]) => name)
       : [];
-    const knownFields = tableSpec ? new Set(Object.keys(tableSpec.fields)) : null;
+    const knownFields = tableSpec
+      ? new Set(Object.keys(tableSpec.fields))
+      : null;
 
     const docHasRequired = (doc: Record<string, unknown>): boolean => {
       if (requiredFields.length === 0) return true;
@@ -1460,7 +1434,9 @@ export class EmbeddedRuntime {
     };
 
     const diffStart = nowMs();
-    const merged: Array<Record<string, unknown> & { _id: string; _creationTime: number }> = [];
+    const merged: Array<
+      Record<string, unknown> & { _id: string; _creationTime: number }
+    > = [];
     let skippedPartial = 0;
     for (const doc of candidates) {
       const existing = this.db.get(
@@ -1472,7 +1448,9 @@ export class EmbeddedRuntime {
           ? (existing._creationTime as number)
           : null;
       const docCreationTime =
-        typeof doc._creationTime === "number" ? (doc._creationTime as number) : null;
+        typeof doc._creationTime === "number"
+          ? (doc._creationTime as number)
+          : null;
 
       if (existing === null) {
         if (!docHasRequired(doc)) {
@@ -1482,13 +1460,19 @@ export class EmbeddedRuntime {
         const stripped = stripUnknownFields(doc);
         if (docCreationTime !== null) {
           merged.push(
-            stripped as Record<string, unknown> & { _id: string; _creationTime: number },
+            stripped as Record<string, unknown> & {
+              _id: string;
+              _creationTime: number;
+            },
           );
         } else {
           merged.push({
             ...stripped,
             _creationTime: 0,
-          } as Record<string, unknown> & { _id: string; _creationTime: number });
+          } as Record<string, unknown> & {
+            _id: string;
+            _creationTime: number;
+          });
         }
         continue;
       }
@@ -1803,16 +1787,19 @@ export class EmbeddedRuntime {
   }
 
   async refreshLocalQueryWatches(): Promise<void> {
-    return withSpan("convex-embedded.refreshLocalQueryWatches", async (span) => {
-      const queryCount =
-        this._localQueryWatches.values().length +
-        this._localPaginatedQueryWatches.values().length;
-      span.setAttributes({ "convex.watches.count": queryCount });
-      await Promise.all([
-        this._localQueryWatches.refreshAll(),
-        this._localPaginatedQueryWatches.refreshAll(),
-      ]);
-    });
+    return withSpan(
+      "convex-embedded.refreshLocalQueryWatches",
+      async (span) => {
+        const queryCount =
+          this._localQueryWatches.values().length +
+          this._localPaginatedQueryWatches.values().length;
+        span.setAttributes({ "convex.watches.count": queryCount });
+        await Promise.all([
+          this._localQueryWatches.refreshAll(),
+          this._localPaginatedQueryWatches.refreshAll(),
+        ]);
+      },
+    );
   }
 
   /**
@@ -2357,15 +2344,13 @@ export class EmbeddedRuntime {
       this._httpDispatcher = await createHttpDispatcher(
         this.moduleLoader,
         this.executor,
+        (fn) => this._runWithTransactionLock(fn),
       );
       runtimeLog.debug(
         `http dispatcher initialized (hasRoutes=${this._httpDispatcher.hasRoutes()})`,
       );
     } catch (err) {
-      console.error(
-        "[convex-embedded] http dispatcher init failed:",
-        err,
-      );
+      console.error("[convex-embedded] http dispatcher init failed:", err);
     }
   }
 
@@ -2457,16 +2442,18 @@ export class EmbeddedRuntime {
             return;
           }
 
-          db.startTransaction();
-          try {
-            db.patch("_scheduled_functions", jobId as DocumentId, {
-              state: { kind: "inProgress" },
-            });
-            await db.commitAsync();
-          } catch (error) {
-            db.rollbackWrites();
-            throw error;
-          }
+          await this._runWithTransactionLock(async () => {
+            db.startTransaction();
+            try {
+              db.patch("_scheduled_functions", jobId as DocumentId, {
+                state: { kind: "inProgress" },
+              });
+              this.onMutationCommit(await db.commitAsync());
+            } catch (error) {
+              db.rollbackWrites();
+              throw error;
+            }
+          });
 
           let finalState: string;
           try {
@@ -2496,19 +2483,21 @@ export class EmbeddedRuntime {
             finalState === "failed" ||
             (finishedJob !== null && finishedState?.kind === "inProgress")
           ) {
-            db.startTransaction();
-            try {
-              db.patch("_scheduled_functions", jobId as DocumentId, {
-                state: { kind: finalState },
-                ...(finalState === "failed"
-                  ? { completedTime: Date.now() }
-                  : {}),
-              });
-              await db.commitAsync();
-            } catch (error) {
-              db.rollbackWrites();
-              throw error;
-            }
+            await this._runWithTransactionLock(async () => {
+              db.startTransaction();
+              try {
+                db.patch("_scheduled_functions", jobId as DocumentId, {
+                  state: { kind: finalState },
+                  ...(finalState === "failed"
+                    ? { completedTime: Date.now() }
+                    : {}),
+                });
+                this.onMutationCommit(await db.commitAsync());
+              } catch (error) {
+                db.rollbackWrites();
+                throw error;
+              }
+            });
           }
         }, `[convex-embedded] recovered scheduled function ${udfPath}:`);
       },
@@ -2643,7 +2632,10 @@ export class EmbeddedRuntime {
 
   private _buildRuntimeState(input: RuntimeInput): RuntimeState {
     const { runtime, options } = input;
-    const schema = options.schema ? parseSchema(options.schema) : null;
+    const schemaExport = extractConvexSchemaExport(options.schema);
+    const schema = schemaExport
+      ? parseSchema(schemaExport as SchemaExport)
+      : null;
 
     const storageAdapter = options.storage ?? null;
     const verifyTokenHook = options.verifyToken ?? null;
@@ -2685,6 +2677,7 @@ export class EmbeddedRuntime {
       ) => runtime._runUdf(type, path, args, context),
       getIdentity: () => runtime.auth.getUserIdentity(),
       activeTimers: runtime._activeTimers,
+      runWithTransactionLock: (fn) => runtime._runWithTransactionLock(fn),
     });
     const syncProtocol = new SyncProtocolHandler({
       executor: runtime._buildProtocolExecutor(),

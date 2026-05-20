@@ -17,5 +17,6 @@ export async function createNodeSqlClient(
   const { default: Database } = await import("better-sqlite3");
   const db = new Database(filename);
   db.pragma("journal_mode = WAL");
+  db.pragma("busy_timeout = 5000");
   return { db, close: () => db.close() };
 }

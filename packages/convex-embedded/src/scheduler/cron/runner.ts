@@ -100,8 +100,7 @@ export class CronRunner {
     this.runFunction = options.runFunction;
     this.now = options.now ?? (() => Date.now());
     this.setTimeout =
-      options.setTimeoutFn ??
-      ((fn, delay) => globalThis.setTimeout(fn, delay));
+      options.setTimeoutFn ?? ((fn, delay) => globalThis.setTimeout(fn, delay));
     this.clearTimeout =
       options.clearTimeoutFn ??
       ((handle) =>
@@ -136,7 +135,11 @@ export class CronRunner {
   private scheduleNext(job: CronJobDefinition): void {
     if (this.shuttingDown) return;
     const now = this.now();
-    const fireAtMs = nextFireMs(job.schedule, now, this.lastFireMs.get(job.name));
+    const fireAtMs = nextFireMs(
+      job.schedule,
+      now,
+      this.lastFireMs.get(job.name),
+    );
     const delayMs = Math.max(0, fireAtMs - now);
     const existing = this.timers.get(job.name);
     if (existing !== undefined) {
@@ -156,40 +159,37 @@ export class CronRunner {
     const firedAtMs = this.now();
     this.lastFireMs.set(job.name, firedAtMs);
     this.timers.delete(job.name);
-    await withSpan(
-      "convex-embedded.cron.fire",
-      async (span) => {
-        span.setAttributes({
+    await withSpan("convex-embedded.cron.fire", async (span) => {
+      span.setAttributes({
+        "convex.cron.name": job.name,
+        "convex.cron.function": job.functionName,
+        "convex.cron.type": job.type,
+      });
+      try {
+        await this.runFunction(job.type, job.functionName, job.args);
+        span.addEvent("cron.completed", {
           "convex.cron.name": job.name,
-          "convex.cron.function": job.functionName,
-          "convex.cron.type": job.type,
         });
-        try {
-          await this.runFunction(job.type, job.functionName, job.args);
-          span.addEvent("cron.completed", {
-            "convex.cron.name": job.name,
-          });
-          recordCounter("cron.fire", {
-            "convex.cron.name": job.name,
-            result: "ok",
-          });
-        } catch (error) {
-          log.error(
-            `cron "${job.name}" handler ${job.functionName} threw`,
-            error,
-          );
-          span.addEvent("cron.failed", {
-            "convex.cron.name": job.name,
-            "convex.error.message":
-              error instanceof Error ? error.message : String(error),
-          });
-          recordCounter("cron.fire", {
-            "convex.cron.name": job.name,
-            result: "error",
-          });
-        }
-      },
-    );
+        recordCounter("cron.fire", {
+          "convex.cron.name": job.name,
+          result: "ok",
+        });
+      } catch (error) {
+        log.error(
+          `cron "${job.name}" handler ${job.functionName} threw`,
+          error,
+        );
+        span.addEvent("cron.failed", {
+          "convex.cron.name": job.name,
+          "convex.error.message":
+            error instanceof Error ? error.message : String(error),
+        });
+        recordCounter("cron.fire", {
+          "convex.cron.name": job.name,
+          result: "error",
+        });
+      }
+    });
     this.scheduleNext(job);
   }
 

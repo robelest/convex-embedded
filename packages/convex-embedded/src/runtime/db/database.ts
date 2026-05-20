@@ -48,6 +48,7 @@ import { sourceTableName } from "@/runtime/db/sql";
  * ID format: UUIDs generated via `crypto.randomUUID()`.
  * A separate `_idTableMap` maps each UUID to its table name.
  */
+import { structuralEqual } from "@/shared/equals";
 import type { GenericDocument } from "@/runtime/db/types";
 import type {
   DocumentId,
@@ -190,12 +191,6 @@ const SYSTEM_INDEX_DEFINITIONS: Record<
       fields: ["table", "_creationTime", "_id"],
     },
   ],
-  _resolve_schema_steps: [
-    {
-      indexName: "by_table_version_step",
-      fields: ["table", "version", "stepName", "_creationTime", "_id"],
-    },
-  ],
   _resolve_store_versions: [
     {
       indexName: "by_store_scope_and_identity",
@@ -246,10 +241,10 @@ function formatValueForError(value: unknown): string {
 
 export class Database {
   /** Committed documents keyed by `DocumentId`. */
-  private _documents: Record<DocumentId, StoredDocument> = {};
+  private _documents = new Map<DocumentId, StoredDocument>();
 
   /** Blob storage keyed by `_storage` document ID. */
-  private _blobStorage: Record<DocumentId, Blob> = {};
+  private _blobStorage = new Map<DocumentId, Blob>();
 
   /** Committed document IDs grouped by table for faster per-table iteration. */
   private _tableDocuments: Map<string, Set<string>> = new Map();
@@ -440,108 +435,105 @@ export class Database {
    */
   async hydrate(options?: { tables?: string[] }): Promise<void> {
     if (this._storage === null) return;
-    return withSpan(
-      "convex-embedded.db.hydrate",
-      async (span) => {
-        const started = globalThis.performance?.now?.() ?? Date.now();
+    return withSpan("convex-embedded.db.hydrate", async (span) => {
+      const started = globalThis.performance?.now?.() ?? Date.now();
 
-        const tableNames = options?.tables;
-        const scopedHydration = tableNames !== undefined;
-        span.setAttributes({
-          "convex.db.hydrate.scoped": scopedHydration,
-          "convex.db.hydrate.scope": scopedHydration
-            ? tableNames.join(",")
-            : "all",
-        });
-        if (!scopedHydration || tableNames.includes("_storage")) {
-          this._resetBlobState();
-        }
-        const { documents, meta } = await withSpan(
-          "convex-embedded.db.hydrate.fetch",
-          () =>
-            this._store.load(
-              scopedHydration ? { tables: tableNames } : undefined,
-            ),
-        );
-        const fetched = globalThis.performance?.now?.() ?? Date.now();
-        span.setAttributes({
-          "convex.db.hydrate.docs": documents.length,
-          "convex.db.hydrate.fetch_ms": +(fetched - started).toFixed(1),
-        });
+      const tableNames = options?.tables;
+      const scopedHydration = tableNames !== undefined;
+      span.setAttributes({
+        "convex.db.hydrate.scoped": scopedHydration,
+        "convex.db.hydrate.scope": scopedHydration
+          ? tableNames.join(",")
+          : "all",
+      });
+      if (!scopedHydration || tableNames.includes("_storage")) {
+        this._resetBlobState();
+      }
+      const { documents, meta } = await withSpan(
+        "convex-embedded.db.hydrate.fetch",
+        () =>
+          this._store.load(
+            scopedHydration ? { tables: tableNames } : undefined,
+          ),
+      );
+      const fetched = globalThis.performance?.now?.() ?? Date.now();
+      span.setAttributes({
+        "convex.db.hydrate.docs": documents.length,
+        "convex.db.hydrate.fetch_ms": +(fetched - started).toFixed(1),
+      });
 
-        withSpanSync("convex-embedded.db.hydrate.populate", () => {
-          if (scopedHydration) {
-            for (const tableName of tableNames) {
-              this._clearCommittedTable(tableName);
-              this._hydrationAttemptedTables.add(tableName);
-            }
-          } else {
-            this._documents = {};
-            this._idTableMap.clear();
-            this._tableDocuments.clear();
-            this._fullyHydrated = true;
+      withSpanSync("convex-embedded.db.hydrate.populate", () => {
+        if (scopedHydration) {
+          for (const tableName of tableNames) {
+            this._clearCommittedTable(tableName);
+            this._hydrationAttemptedTables.add(tableName);
           }
-
-          for (const { doc, tableName } of documents) {
-            if (tableName) {
-              this._idTableMap.set(doc._id as string, tableName);
-            }
-            this._documents[doc._id] = doc;
-            if (tableName) {
-              this._addCommittedIdToTable(tableName, doc._id as string);
-            }
-          }
-        });
-
-        await withSpan("convex-embedded.db.hydrate.rebuildIndexes", async () => {
-          if (scopedHydration) {
-            for (const tableName of tableNames) {
-              withSpanSync(
-                "convex-embedded.db.rebuildTableIndexes",
-                () => this._rebuildTableIndexes(tableName),
-                { attributes: { "convex.table": tableName } },
-              );
-              withSpanSync(
-                "convex-embedded.db.rebuildTableSearchIndexes",
-                () => this._rebuildTableSearchIndexes(tableName),
-                { attributes: { "convex.table": tableName } },
-              );
-              withSpanSync(
-                "convex-embedded.db.rebuildTableVectorIndexes",
-                () => this._rebuildTableVectorIndexes(tableName),
-                { attributes: { "convex.table": tableName } },
-              );
-              this._resolveTableHydration(tableName);
-            }
-          } else {
-            withSpanSync("convex-embedded.db.rebuildAllIndexes", () =>
-              this._rebuildAllIndexes(),
-            );
-            withSpanSync("convex-embedded.db.rebuildAllSearchIndexes", () =>
-              this._rebuildAllSearchIndexes(),
-            );
-            withSpanSync("convex-embedded.db.rebuildAllVectorIndexes", () =>
-              this._rebuildAllVectorIndexes(),
-            );
-            this._resolveAllTableHydrations();
-          }
-        });
-
-        if (meta !== null) {
-          this._timestamp = meta.timestamp;
-          this._lastCreationTime = meta.lastCreationTime;
+        } else {
+          this._documents.clear();
+          this._idTableMap.clear();
+          this._tableDocuments.clear();
+          this._fullyHydrated = true;
         }
 
-        const ended = globalThis.performance?.now?.() ?? Date.now();
-        span.setAttributes({
-          "convex.db.hydrate.total_ms": +(ended - started).toFixed(1),
-          "convex.db.hydrate.rebuild_ms": +(ended - fetched).toFixed(1),
-        });
-        log.info(
-          `hydrate: docs=${documents.length}, scope=${tableNames?.length ? tableNames.join(",") : "all"}, blobs=lazy, fetch=${(fetched - started).toFixed(1)}ms total=${(ended - started).toFixed(1)}ms`,
-        );
-      },
-    );
+        for (const { doc, tableName } of documents) {
+          if (tableName) {
+            this._idTableMap.set(doc._id as string, tableName);
+          }
+          this._documents.set(doc._id, doc);
+          if (tableName) {
+            this._addCommittedIdToTable(tableName, doc._id as string);
+          }
+        }
+      });
+
+      await withSpan("convex-embedded.db.hydrate.rebuildIndexes", async () => {
+        if (scopedHydration) {
+          for (const tableName of tableNames) {
+            withSpanSync(
+              "convex-embedded.db.rebuildTableIndexes",
+              () => this._rebuildTableIndexes(tableName),
+              { attributes: { "convex.table": tableName } },
+            );
+            withSpanSync(
+              "convex-embedded.db.rebuildTableSearchIndexes",
+              () => this._rebuildTableSearchIndexes(tableName),
+              { attributes: { "convex.table": tableName } },
+            );
+            withSpanSync(
+              "convex-embedded.db.rebuildTableVectorIndexes",
+              () => this._rebuildTableVectorIndexes(tableName),
+              { attributes: { "convex.table": tableName } },
+            );
+            this._resolveTableHydration(tableName);
+          }
+        } else {
+          withSpanSync("convex-embedded.db.rebuildAllIndexes", () =>
+            this._rebuildAllIndexes(),
+          );
+          withSpanSync("convex-embedded.db.rebuildAllSearchIndexes", () =>
+            this._rebuildAllSearchIndexes(),
+          );
+          withSpanSync("convex-embedded.db.rebuildAllVectorIndexes", () =>
+            this._rebuildAllVectorIndexes(),
+          );
+          this._resolveAllTableHydrations();
+        }
+      });
+
+      if (meta !== null) {
+        this._timestamp = meta.timestamp;
+        this._lastCreationTime = meta.lastCreationTime;
+      }
+
+      const ended = globalThis.performance?.now?.() ?? Date.now();
+      span.setAttributes({
+        "convex.db.hydrate.total_ms": +(ended - started).toFixed(1),
+        "convex.db.hydrate.rebuild_ms": +(ended - fetched).toFixed(1),
+      });
+      log.info(
+        `hydrate: docs=${documents.length}, scope=${tableNames?.length ? tableNames.join(",") : "all"}, blobs=lazy, fetch=${(fetched - started).toFixed(1)}ms total=${(ended - started).toFixed(1)}ms`,
+      );
+    });
   }
 
   isTableHydrationAttempted(tableName: string): boolean {
@@ -602,20 +594,38 @@ export class Database {
     const { docs, meta } = await this._store.refreshTable({ tableName });
 
     if (docs !== null) {
-      for (const id of this._tableDocuments.get(tableName) ?? []) {
-        delete this._documents[id as DocumentId];
+      const oldIds = this._tableDocuments.get(tableName);
+      let changed = !oldIds || oldIds.size !== docs.length;
+      if (!changed) {
+        for (const doc of docs) {
+          if (!oldIds!.has(doc._id as string)) {
+            changed = true;
+            break;
+          }
+          if (!structuralEqual(this._documents.get(doc._id), doc)) {
+            changed = true;
+            break;
+          }
+        }
+      }
+
+      for (const id of oldIds ?? []) {
+        this._documents.delete(id as DocumentId);
         this._idTableMap.delete(id);
       }
       this._tableDocuments.set(tableName, new Set());
 
       for (const doc of docs) {
-        this._documents[doc._id] = doc;
+        this._documents.set(doc._id, doc);
         this._idTableMap.set(doc._id as string, tableName);
         this._addCommittedIdToTable(tableName, doc._id as string);
       }
-      this._rebuildTableIndexes(tableName);
-      this._rebuildTableSearchIndexes(tableName);
-      this._rebuildTableVectorIndexes(tableName);
+
+      if (changed) {
+        this._rebuildTableIndexes(tableName);
+        this._rebuildTableSearchIndexes(tableName);
+        this._rebuildTableVectorIndexes(tableName);
+      }
     }
 
     if (meta !== null) {
@@ -1179,7 +1189,7 @@ export class Database {
 
   migrateAnonymousDataToIdentity(identityKey: string): Set<string> {
     const tablesWritten = new Set<string>();
-    for (const [id, doc] of Object.entries(this._documents)) {
+    for (const [id, doc] of this._documents) {
       const tableName = this._idTableMap.get(id);
       if (!tableName || !this._isIdentityScopedTable(tableName)) {
         continue;
@@ -1216,7 +1226,7 @@ export class Database {
   }
 
   async storeFile(storageId: DocumentId, blob: Blob): Promise<void> {
-    this._blobStorage[storageId] = blob;
+    this._blobStorage.set(storageId, blob);
 
     if (this._storage) {
       await this._storage.putBlob(storageId as string, blob);
@@ -1224,7 +1234,7 @@ export class Database {
   }
 
   deleteBlob(storageId: string): void {
-    delete this._blobStorage[storageId as DocumentId];
+    this._blobStorage.delete(storageId as DocumentId);
 
     if (this._storage) {
       this._storage.deleteBlob(storageId).catch((error) => {
@@ -1237,7 +1247,7 @@ export class Database {
     if (this.get("_storage", storageId) === null) {
       return null;
     }
-    return this._blobStorage[storageId] ?? null;
+    return this._blobStorage.get(storageId) ?? null;
   }
 
   async loadFile(storageId: DocumentId): Promise<Blob | null> {
@@ -1245,7 +1255,7 @@ export class Database {
       return null;
     }
 
-    const cached = this._blobStorage[storageId] ?? null;
+    const cached = this._blobStorage.get(storageId) ?? null;
     if (cached !== null) {
       return cached;
     }
@@ -1256,7 +1266,7 @@ export class Database {
 
     const blob = await this._storage.getBlob(storageId as string);
     if (blob !== null) {
-      this._blobStorage[storageId] = blob;
+      this._blobStorage.set(storageId, blob);
     }
     return blob;
   }
@@ -1477,13 +1487,13 @@ export class Database {
       this._rebuildTableIndexes(tableName);
       const rebuiltIds = this._indexDocuments.get(indexKey) ?? [];
       return rebuiltIds
-        .map((id) => this._documents[id as DocumentId])
+        .map((id) => this._documents.get(id as DocumentId))
         .filter((doc): doc is StoredDocument => doc !== undefined)
         .map((doc) => this._stripIdentityScope(doc as IdentityScopedDocument));
     }
 
     return uniqueIds
-      .map((id) => this._documents[id as DocumentId])
+      .map((id) => this._documents.get(id as DocumentId))
       .filter((doc): doc is StoredDocument => doc !== undefined)
       .map((doc) => this._stripIdentityScope(doc as IdentityScopedDocument));
   }
@@ -1752,7 +1762,7 @@ export class Database {
         const tableName = this._idTableMap.get(id) ?? "";
         const shouldMaterialize = true;
         const before =
-          (this._documents[docId] as IdentityScopedDocument | undefined) ??
+          (this._documents.get(docId) as IdentityScopedDocument | undefined) ??
           null;
 
         if (write === null) {
@@ -1827,7 +1837,7 @@ export class Database {
     for (const change of changes) {
       const { tableName, id, after, shouldMaterialize } = change;
       if (after === null) {
-        delete this._documents[id];
+        this._documents.delete(id);
         if (tableName) {
           this._removeCommittedIdFromTable(tableName, id);
         }
@@ -1836,12 +1846,12 @@ export class Database {
       }
 
       if (shouldMaterialize) {
-        this._documents[id] = after;
+        this._documents.set(id, after);
         if (tableName) {
           this._addCommittedIdToTable(tableName, id);
         }
       } else {
-        delete this._documents[id];
+        this._documents.delete(id);
         if (tableName) {
           this._removeCommittedIdFromTable(tableName, id);
         }
@@ -1891,7 +1901,7 @@ export class Database {
   ): void {
     if (!this._hasPendingWritesForTable(tableName)) {
       for (const id of this._tableDocuments.get(tableName) ?? []) {
-        const document = this._documents[id as DocumentId] as
+        const document = this._documents.get(id as DocumentId) as
           | IdentityScopedDocument
           | undefined;
         const visible =
@@ -1936,7 +1946,7 @@ export class Database {
       if (seen.has(id)) {
         continue;
       }
-      const document = this._documents[id as DocumentId] as
+      const document = this._documents.get(id as DocumentId) as
         | IdentityScopedDocument
         | undefined;
       const visible =
@@ -1964,7 +1974,7 @@ export class Database {
 
     if (!hasPendingWrite) {
       document =
-        (this._documents[id] as IdentityScopedDocument | undefined) ?? null;
+        (this._documents.get(id) as IdentityScopedDocument | undefined) ?? null;
     }
 
     return document;
@@ -2001,6 +2011,9 @@ export class Database {
   private _stripIdentityScope(
     document: IdentityScopedDocument,
   ): StoredDocument {
+    if (!(IDENTITY_SCOPE_FIELD in document)) {
+      return document as StoredDocument;
+    }
     const { [IDENTITY_SCOPE_FIELD]: _identityKey, ...rest } = document;
     return rest as StoredDocument;
   }
@@ -2107,7 +2120,7 @@ export class Database {
       (doc as IdentityScopedDocument)[IDENTITY_SCOPE_FIELD] === undefined
         ? this._withIdentityScope(tableName, doc)
         : (doc as IdentityScopedDocument);
-    this._documents[doc._id as DocumentId] = scoped;
+    this._documents.set(doc._id as DocumentId, scoped);
     this._addCommittedIdToTable(tableName, doc._id);
   }
 
@@ -2133,7 +2146,7 @@ export class Database {
 
   private _clearCommittedTable(tableName: string): void {
     for (const id of this._tableDocuments.get(tableName) ?? []) {
-      delete this._documents[id as DocumentId];
+      this._documents.delete(id as DocumentId);
       this._idTableMap.delete(id);
     }
     this._tableDocuments.set(tableName, new Set());
@@ -2145,7 +2158,7 @@ export class Database {
   ): void {
     this._clearCommittedTable(tableName);
     for (const doc of docs) {
-      this._documents[doc._id] = this._withIdentityScope(tableName, doc);
+      this._documents.set(doc._id, this._withIdentityScope(tableName, doc));
       this._idTableMap.set(doc._id as string, tableName);
       this._addCommittedIdToTable(tableName, doc._id as string);
     }
@@ -2155,7 +2168,7 @@ export class Database {
   }
 
   private _resetBlobState(): void {
-    this._blobStorage = {};
+    this._blobStorage.clear();
   }
 
   private _readOptimizedSource(
@@ -2653,7 +2666,7 @@ export class Database {
         if (pendingState.shadowedIds.has(id)) {
           continue;
         }
-        const raw = this._documents[id as DocumentId] as
+        const raw = this._documents.get(id as DocumentId) as
           | IdentityScopedDocument
           | undefined;
         const visible =
@@ -2743,11 +2756,13 @@ export class Database {
     let pendingIndex = 0;
 
     const compareBounds = (doc: StoredDocument): boolean => {
-      if (lower !== null && this._compareDocToBound(doc, fields, lower) < 0) {
-        return false;
+      if (lower !== null) {
+        const cmp = this._compareDocToBound(doc, fields, lower);
+        if (lower.inclusive ? cmp < 0 : cmp <= 0) return false;
       }
-      if (upper !== null && this._compareDocToBound(doc, fields, upper) >= 0) {
-        return false;
+      if (upper !== null) {
+        const cmp = this._compareDocToBound(doc, fields, upper);
+        if (upper.inclusive ? cmp > 0 : cmp >= 0) return false;
       }
       return true;
     };
@@ -2758,7 +2773,7 @@ export class Database {
         if (pendingState.shadowedIds.has(id)) {
           continue;
         }
-        const raw = this._documents[id as DocumentId] as
+        const raw = this._documents.get(id as DocumentId) as
           | IdentityScopedDocument
           | undefined;
         const visible =
@@ -2936,7 +2951,7 @@ export class Database {
         if (shadowedIds.has(id)) {
           continue;
         }
-        const raw = this._documents[id as DocumentId] as
+        const raw = this._documents.get(id as DocumentId) as
           | IdentityScopedDocument
           | undefined;
         const visible =
@@ -3087,7 +3102,7 @@ export class Database {
     const ids: string[] = [];
     const docs = this._documents;
     for (const id of this._tableDocuments.get(tableName) ?? []) {
-      if (docs[id as DocumentId] !== undefined) {
+      if (docs.get(id as DocumentId) !== undefined) {
         ids.push(id);
       }
     }
@@ -3099,11 +3114,13 @@ export class Database {
       }
 
       const keyed: Array<{ id: string; keys: Array<Value | undefined> }> =
-        new Array(ids.length);
+        Array.from({ length: ids.length });
       for (let i = 0; i < ids.length; i++) {
         const id = ids[i]!;
-        const doc = docs[id as DocumentId]!;
-        const keys: Array<Value | undefined> = new Array(fields.length);
+        const doc = docs.get(id as DocumentId)!;
+        const keys: Array<Value | undefined> = Array.from({
+          length: fields.length,
+        });
         for (let f = 0; f < fields.length; f++) {
           keys[f] = evaluateFieldPath(fields[f]!, doc) as Value | undefined;
         }
@@ -3121,7 +3138,7 @@ export class Database {
         return 0;
       });
 
-      const sortedIds = new Array<string>(keyed.length);
+      const sortedIds: string[] = Array.from({ length: keyed.length });
       for (let i = 0; i < keyed.length; i++) {
         sortedIds[i] = keyed[i]!.id;
       }
@@ -3143,7 +3160,7 @@ export class Database {
     const rawDocs = [...(this._tableDocuments.get(tableName) ?? [])]
       .map(
         (id) =>
-          this._documents[id as DocumentId] as
+          this._documents.get(id as DocumentId) as
             | IdentityScopedDocument
             | undefined,
       )
@@ -3181,7 +3198,7 @@ export class Database {
     const rawDocs = [...(this._tableDocuments.get(tableName) ?? [])]
       .map(
         (id) =>
-          this._documents[id as DocumentId] as
+          this._documents.get(id as DocumentId) as
             | IdentityScopedDocument
             | undefined,
       )
@@ -3267,17 +3284,20 @@ export class Database {
         continue;
       }
 
+      const idsToRemove = new Set<string>();
       for (const change of changes) {
         if (change.before !== null) {
-          const id = change.id as string;
-          for (
-            let position = ids.indexOf(id);
-            position !== -1;
-            position = ids.indexOf(id)
-          ) {
-            ids.splice(position, 1);
+          idsToRemove.add(change.id as string);
+        }
+      }
+      if (idsToRemove.size > 0) {
+        let write = 0;
+        for (let read = 0; read < ids.length; read++) {
+          if (!idsToRemove.has(ids[read]!)) {
+            ids[write++] = ids[read]!;
           }
         }
+        ids.length = write;
       }
 
       for (const change of changes) {
@@ -3397,7 +3417,7 @@ export class Database {
 
     while (low < high) {
       const mid = (low + high) >> 1;
-      const current = this._documents[ids[mid] as DocumentId];
+      const current = this._documents.get(ids[mid] as DocumentId);
       if (current === undefined) {
         ids.splice(mid, 1);
         high = ids.length;

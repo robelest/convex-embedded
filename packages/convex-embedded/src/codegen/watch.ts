@@ -1,7 +1,11 @@
 import { watch } from "node:fs";
 import path from "node:path";
 
-import { runCodegen, type RunCodegenInput, type RunCodegenResult } from "./codegen";
+import {
+  runCodegen,
+  type RunCodegenInput,
+  type RunCodegenResult,
+} from "./index";
 
 /**
  * Input to {@link watchCodegen}. Extends {@link RunCodegenInput} with
@@ -46,28 +50,24 @@ export async function watchCodegen(
   await runOnce();
 
   let pending: ReturnType<typeof setTimeout> | null = null;
-  const watcher = watch(
-    convexRoot,
-    { recursive: true },
-    (_event, filename) => {
-      if (!filename) return;
-      const absolute = path.resolve(convexRoot, filename.toString());
-      // Ignore self-writes to _generated/ to avoid infinite loops.
-      if (
-        absolute === outFile ||
-        absolute.startsWith(generatedRoot + path.sep) ||
-        absolute === generatedRoot
-      ) {
-        return;
-      }
-      if (!/\.(ts|tsx|mts|cts)$/.test(absolute)) return;
-      if (pending !== null) clearTimeout(pending);
-      pending = setTimeout(() => {
-        pending = null;
-        void runOnce();
-      }, debounceMs);
-    },
-  );
+  const watcher = watch(convexRoot, { recursive: true }, (_event, filename) => {
+    if (!filename) return;
+    const absolute = path.resolve(convexRoot, filename.toString());
+    // Ignore self-writes to _generated/ to avoid infinite loops.
+    if (
+      absolute === outFile ||
+      absolute.startsWith(generatedRoot + path.sep) ||
+      absolute === generatedRoot
+    ) {
+      return;
+    }
+    if (!/\.(ts|tsx|mts|cts)$/.test(absolute)) return;
+    if (pending !== null) clearTimeout(pending);
+    pending = setTimeout(() => {
+      pending = null;
+      void runOnce();
+    }, debounceMs);
+  });
 
   return {
     close: () => {

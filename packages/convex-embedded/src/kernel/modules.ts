@@ -199,7 +199,10 @@ export class ModuleLoader {
     }
 
     log.debug("loading:", path);
-    const loading = loader();
+    const loading = loader().catch((err) => {
+      this.loadedModules.delete(path);
+      throw err;
+    });
     this.loadedModules.set(path, loading);
     return loading;
   }

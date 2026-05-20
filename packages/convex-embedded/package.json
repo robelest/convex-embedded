@@ -13,7 +13,6 @@
     "yjs"
   ],
   "license": "MIT",
-  "bin": "./dist/cli.js",
   "files": [
     "dist",
     "!dist/**/*.map",
@@ -24,6 +23,7 @@
     "src/auth",
     "src/client/index.ts",
     "src/client/prefetch.ts",
+    "src/codegen",
     "src/component",
     "src/crdt",
     "src/expo/metro.cjs",
@@ -93,6 +93,26 @@
       "types": "./dist/vite.d.ts",
       "import": "./dist/vite.js",
       "default": "./dist/vite.js"
+    },
+    "./unplugin": {
+      "types": "./dist/unplugin.d.ts",
+      "import": "./dist/unplugin.js",
+      "default": "./dist/unplugin.js"
+    },
+    "./next": {
+      "types": "./dist/next.d.ts",
+      "import": "./dist/next.js",
+      "default": "./dist/next.js"
+    },
+    "./nitro": {
+      "types": "./dist/nitro.d.ts",
+      "import": "./dist/nitro.js",
+      "default": "./dist/nitro.js"
+    },
+    "./codegen": {
+      "types": "./dist/codegen.d.ts",
+      "import": "./dist/codegen.js",
+      "default": "./dist/codegen.js"
     },
     "./server": {
       "@convex-dev/component-source": "./src/server/index.ts",
@@ -164,9 +184,9 @@
     "@opentelemetry/sdk-trace-node": "catalog:",
     "@opentelemetry/sdk-trace-web": "catalog:",
     "@opentelemetry/semantic-conventions": "catalog:",
-    "clerc": "^0.20.0",
     "convex-helpers": "^0.1.0",
     "react-native-get-random-values": "^1.11.0",
+    "unplugin": "^2.3.10",
     "wa-sqlite": "github:rhashimoto/wa-sqlite",
     "yjs": "^13.6.0"
   },
@@ -182,7 +202,7 @@
   "peerDependencies": {
     "@op-engineering/op-sqlite": ">=15",
     "@tanstack/db": ">=0.0.1",
-    "convex": "^1.34.1",
+    "convex": "^1.37.0",
     "expo": ">=54",
     "expo-file-system": ">=19",
     "expo-network": ">=8",

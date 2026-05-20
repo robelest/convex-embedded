@@ -7,11 +7,11 @@
  * @packageDocumentation
  */
 
+import { SpanStatusCode } from "@opentelemetry/api";
 import type {
   ReadableSpan,
   SpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
-import { SpanStatusCode } from "@opentelemetry/api";
 
 /**
  * A snapshot of a finished span captured by {@link BufferingSpanProcessor}.
@@ -40,7 +40,11 @@ export interface BufferedSpan {
    * state-transition signals like `lease.acquired`, `replay.failed`,
    * `cron.skipped_remote_only`.
    */
-  events: Array<{ name: string; timeMs: number; attributes?: Record<string, unknown> }>;
+  events: Array<{
+    name: string;
+    timeMs: number;
+    attributes?: Record<string, unknown>;
+  }>;
 }
 
 /**
@@ -109,7 +113,9 @@ export class BufferingSpanProcessor implements SpanProcessor {
   onEnd(span: ReadableSpan): void {
     if (this._spans.length === 0) {
       // eslint-disable-next-line no-console
-      console.log(`[tracing] BufferingSpanProcessor.onEnd first span: ${span.name}`);
+      console.log(
+        `[tracing] BufferingSpanProcessor.onEnd first span: ${span.name}`,
+      );
     }
     const ctx = span.spanContext();
     const startMs = hrTimeToMs(span.startTime);
@@ -133,9 +139,7 @@ export class BufferingSpanProcessor implements SpanProcessor {
       events: span.events.map((event) => ({
         name: event.name,
         timeMs: hrTimeToMs(event.time),
-        attributes: event.attributes
-          ? { ...event.attributes }
-          : undefined,
+        attributes: event.attributes ? { ...event.attributes } : undefined,
       })),
     };
     this._spans.push(buffered);

@@ -11,13 +11,13 @@
 import type { ConvexClient } from "convex/browser";
 import * as Y from "yjs";
 
-import { IdMap } from "@/client/ids";
-import { PendingQueue } from "@/client/pending/queue";
+import { IdMap, extractSchemaIdFields } from "@/client/ids";
+import { MAX_REPLAY_RETRIES, PendingQueue } from "@/client/pending/queue";
+import type { PendingEntry } from "@/client/pending/queue";
 import {
   PendingUploadQueue,
   type PendingUploadEntry,
 } from "@/client/pending/uploads";
-import type { PendingEntry } from "@/client/pending/queue";
 import { materializeYjsDoc } from "@/client/schema";
 import type { EngineResolveInput } from "@/client/services/engine";
 import { SystemPaths } from "@/kernel/system";
@@ -30,17 +30,17 @@ import { createLogger } from "@/shared/logger";
 import { matchTag } from "@/shared/match";
 import { getFunctionName, makeFunctionReference } from "@/shared/refs";
 import { getCrdtType, type Definition } from "@/shared/schema";
-import { initYjsDoc } from "@/shared/yjs";
 import type {
   EngineStatus,
   ResolveDocumentResponse,
   ResolveProgress,
   ResolveResponse,
 } from "@/shared/types";
-import { runDetached } from "@/utils/detached";
-import { retryWithBackoff } from "@/utils/retry";
+import { initYjsDoc } from "@/shared/yjs";
 import { recordCounter, registerGauge } from "@/tracing/metrics";
 import { withSpan } from "@/tracing/spans";
+import { runDetached } from "@/utils/detached";
+import { retryWithBackoff } from "@/utils/retry";
 
 const log = createLogger("resolve");
 
@@ -114,6 +114,7 @@ interface ActiveScope {
   tableName: string;
   scopeArgs: Record<string, unknown>;
   unsub?: () => void;
+  pendingActivation?: Promise<void>;
 }
 
 function toErrorMessage(error: unknown): string {
@@ -125,6 +126,15 @@ function toErrorMessage(error: unknown): string {
   } catch {
     return "unknown error";
   }
+}
+
+function isUnsupportedDocIdsResolveError(error: unknown): boolean {
+  const message = toErrorMessage(error).toLowerCase();
+  return (
+    message.includes("extra field") &&
+    message.includes("docids") &&
+    message.includes("validator")
+  );
 }
 
 function createRemoteUpdateHandler(input: {
@@ -453,6 +463,7 @@ function registerRemoteSubscription(input: {
     signalSeq: number;
     runHandler: () => void;
   }) => void;
+  onPartialResponse?: () => void;
 }) {
   const remoteClient = input.resolveServices.remoteClient;
   const baseHandler = createRemoteUpdateHandler({
@@ -473,6 +484,8 @@ function registerRemoteSubscription(input: {
     const res = response as {
       documents?: Array<{ document?: unknown }>;
       collectionSeq?: number;
+      isDone?: boolean;
+      mode?: string;
     };
     const signalSeq =
       typeof res?.collectionSeq === "number" ? res.collectionSeq : -1;
@@ -481,6 +494,11 @@ function registerRemoteSubscription(input: {
       input.consumeExpectedSelfCausedSignal?.(input.tableName, signalSeq) ===
       true
     ) {
+      return;
+    }
+
+    if (res?.mode === "full" && res?.isDone === false) {
+      input.onPartialResponse?.();
       return;
     }
 
@@ -641,10 +659,10 @@ export interface EngineConfig {
    */
   getIdentityKey?: () => string | null;
 
-  /** Optional platform connectivity adapter. */
+  uploadFetch?: typeof globalThis.fetch;
+
   connectivity?: ConnectivityAdapter;
 
-  /** Stable processor id used for replay ownership claims. */
   processorId?: string;
 
   /** Replay lease duration in ms for pending entry claims. */
@@ -672,7 +690,6 @@ type StartLifecycleRoute =
 
 type LocalYjsEntry = {
   localDoc: Record<string, unknown>;
-  yjsDoc: Y.Doc;
 };
 
 type ResolveDocument = {
@@ -684,7 +701,9 @@ type ResolveDocument = {
 type ResolveArgs = {
   collectionSeq: number | null;
   documents: Array<ResolveDocument>;
+  docIds?: string[];
   scopeArgs?: Record<string, unknown>;
+  fullCursor?: string | null;
 };
 
 type ResolveResultRow = ResolveDocumentResponse;
@@ -712,6 +731,11 @@ type StorageDependency = {
   localStorageId: string;
   metadata: Record<string, unknown>;
   blob: Blob;
+};
+
+type MissingReference = {
+  tableName: string;
+  id: string;
 };
 
 function normalizeResolveResponse(
@@ -1091,6 +1115,145 @@ function hasResolvableReferences(
   return true;
 }
 
+function collectMissingReferences(
+  value: unknown,
+  field: unknown,
+  hasDocumentId: (id: string) => boolean,
+  getAliases: (id: string) => Set<string>,
+  missing: Map<string, Set<string>>,
+): void {
+  const unwrapped = unwrapSchemaField(field);
+  if (value === null || value === undefined) {
+    return;
+  }
+  if (typeof unwrapped !== "object" || unwrapped === null) {
+    return;
+  }
+
+  const validator = unwrapped as Record<string, unknown> & { kind?: string };
+  if (validator.kind === "id") {
+    const tableName = validator.tableName;
+    if (
+      typeof value === "string" &&
+      typeof tableName === "string" &&
+      !hasDocumentId(value) &&
+      !Array.from(getAliases(value)).some((alias) => hasDocumentId(alias))
+    ) {
+      const ids = missing.get(tableName) ?? new Set<string>();
+      ids.add(value);
+      missing.set(tableName, ids);
+    }
+    return;
+  }
+  if (validator.kind === "array") {
+    if (Array.isArray(value)) {
+      for (const entry of value) {
+        collectMissingReferences(
+          entry,
+          validator.element,
+          hasDocumentId,
+          getAliases,
+          missing,
+        );
+      }
+    }
+    return;
+  }
+  if (validator.kind === "record") {
+    if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+      for (const entry of Object.values(value)) {
+        collectMissingReferences(
+          entry,
+          validator.value,
+          hasDocumentId,
+          getAliases,
+          missing,
+        );
+      }
+    }
+    return;
+  }
+  if (validator.kind === "object") {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      return;
+    }
+    const fields = validator.fields as Record<string, unknown> | undefined;
+    if (!fields) {
+      return;
+    }
+    for (const [key, nestedField] of Object.entries(fields)) {
+      collectMissingReferences(
+        (value as Record<string, unknown>)[key],
+        nestedField,
+        hasDocumentId,
+        getAliases,
+        missing,
+      );
+    }
+    return;
+  }
+  if (validator.kind === "union") {
+    const members = validator.members;
+    if (Array.isArray(members)) {
+      if (
+        members.some((member) =>
+          hasResolvableReferences(value, member, hasDocumentId, getAliases),
+        )
+      ) {
+        return;
+      }
+      for (const member of members) {
+        collectMissingReferences(
+          value,
+          member,
+          hasDocumentId,
+          getAliases,
+          missing,
+        );
+      }
+    }
+    return;
+  }
+  if (validator.kind === "optional") {
+    collectMissingReferences(
+      value,
+      validator.field,
+      hasDocumentId,
+      getAliases,
+      missing,
+    );
+  }
+}
+
+function getMissingReferences(input: {
+  docs: Array<Record<string, unknown>>;
+  schema?: Definition;
+  hasDocumentId: (id: string) => boolean;
+  getAliases?: (id: string) => Set<string>;
+}): MissingReference[] {
+  if (!input.schema) {
+    return [];
+  }
+
+  const missing = new Map<string, Set<string>>();
+  const getAliases = input.getAliases ?? (() => new Set<string>());
+  for (const doc of input.docs) {
+    for (const [fieldName, field] of Object.entries(input.schema.getShape())) {
+      collectMissingReferences(
+        doc[fieldName],
+        field,
+        input.hasDocumentId,
+        getAliases,
+        missing,
+      );
+    }
+  }
+
+  return Array.from(missing.entries()).flatMap(([tableName, ids]) =>
+    Array.from(ids).map((id) => ({ tableName, id })),
+  );
+}
+
 function filterDocumentsWithResolvableReferences(input: {
   docs: Array<Record<string, unknown>>;
   schema?: Definition;
@@ -1133,9 +1296,7 @@ function getConnectivityAdapter(
 }
 
 function toArrayBuffer(data: Uint8Array): ArrayBuffer {
-  const buf = new ArrayBuffer(data.byteLength);
-  new Uint8Array(buf).set(data);
-  return buf;
+  return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
 }
 
 const UUID_PATTERN =
@@ -1194,6 +1355,7 @@ async function uploadBlobToRemote(input: {
   uploadUrlRef: unknown;
   blob: Blob;
   contentType?: string;
+  uploadFetch?: typeof globalThis.fetch;
 }): Promise<string> {
   const uploadUrl = (await (input.remoteClient as any).mutation(
     input.uploadUrlRef,
@@ -1211,7 +1373,8 @@ async function uploadBlobToRemote(input: {
     headers["content-type"] = input.contentType;
   }
 
-  const response = await fetch(uploadUrl, {
+  const doFetch = input.uploadFetch ?? globalThis.fetch;
+  const response = await doFetch(uploadUrl, {
     method: "POST",
     body: input.blob,
     headers,
@@ -1261,11 +1424,13 @@ function prepareResolveInput(
       }
 
       const yjsDoc = initYjsDoc(schemaDef, doc, 0, { skipProse: true });
-      acc.localYjsMap.set(docId, { localDoc: doc, yjsDoc });
+      const vector = toArrayBuffer(Y.encodeStateVector(yjsDoc));
+      yjsDoc.destroy();
+      acc.localYjsMap.set(docId, { localDoc: doc });
       acc.resolveDocuments.push({
         docId,
         lastSeq: metadata.documentSeqById.get(docId) ?? null,
-        vector: toArrayBuffer(Y.encodeStateVector(yjsDoc)),
+        vector,
       });
       return acc;
     },
@@ -1377,27 +1542,30 @@ function mergeResolveResult(input: {
       }
 
       if (diff) {
-        Y.applyUpdateV2(entry.yjsDoc, new Uint8Array(diff));
+        const yjsDoc = initYjsDoc(input.schemaDef, entry.localDoc, 0, {
+          skipProse: true,
+        });
+        Y.applyUpdateV2(yjsDoc, new Uint8Array(diff));
         acc.diffCount += 1;
-      } else {
-        mergedDocsById.set(
-          docId,
-          input.translateRemoteDocument(entry.localDoc),
+        const merged = mergeCrdtFieldsWithPlain(
+          input.schemaDef,
+          entry.localDoc,
+          yjsDoc,
         );
+        yjsDoc.destroy();
+        merged._id = entry.localDoc._id;
+        merged._creationTime = entry.localDoc._creationTime;
+        mergedDocsById.set(docId, input.translateRemoteDocument(merged));
         if (typeof seq === "number") {
           acc.metadataEntries.push({ docId, seq });
         }
         return acc;
       }
 
-      const merged = mergeCrdtFieldsWithPlain(
-        input.schemaDef,
-        entry.localDoc,
-        entry.yjsDoc,
+      mergedDocsById.set(
+        docId,
+        input.translateRemoteDocument(entry.localDoc),
       );
-      merged._id = entry.localDoc._id;
-      merged._creationTime = entry.localDoc._creationTime;
-      mergedDocsById.set(docId, input.translateRemoteDocument(merged));
       if (typeof seq === "number") {
         acc.metadataEntries.push({ docId, seq });
       }
@@ -1446,7 +1614,12 @@ function getQueueEntryRoute(input: {
     return { _tag: "Stop" };
   }
 
-  const localResult = JSON.parse(input.entry.localResult);
+  let localResult: unknown;
+  try {
+    localResult = JSON.parse(input.entry.localResult);
+  } catch {
+    return { _tag: "Skip" };
+  }
   const remoteId =
     typeof localResult === "string" ? input.getRemoteId(localResult) : null;
   return input.entry.ref.endsWith(":create") &&
@@ -1472,6 +1645,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     processorId,
     leaseMs = 30_000,
     getReplayPayloadVersion,
+    uploadFetch,
   } = config;
 
   const localClient = embedded.client;
@@ -1580,14 +1754,21 @@ function createEngine(config: EngineConfig): EngineInstance {
   let status: EngineStatus = { status: "idle" };
   const listeners = new Set<ChangeListener>();
   let started = false;
+  let scopeActivationEpoch = 0;
   let abortController: AbortController | null = null;
 
+  const schemaIdFields = extractSchemaIdFields(
+    Object.values(tables)
+      .filter((t) => t.schema !== undefined)
+      .map((t) => t.schema.shape),
+  );
   const idMap = new IdMap(
     localClient,
     executeLocalQuery,
     executeLocalMutationWithoutEffects,
     getIdentityKey,
     (id) => embedded.hasLocalDocumentId?.(id) ?? false,
+    schemaIdFields,
   );
   const pendingQueue = new PendingQueue(
     localClient,
@@ -1642,7 +1823,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     dirtyCrdtRows.delete(`${tableName}:${docId}`);
   }
 
-  let queueProcessingPromise: Promise<void> | null = null;
+  let queueProcessingPromise: Promise<Set<string>> | null = null;
   let queueProcessingRequestedWhileActive = false;
   let syncCyclePromise: Promise<void> | null = null;
   let activeEntry: PendingEntry | null = null;
@@ -1859,11 +2040,9 @@ function createEngine(config: EngineConfig): EngineInstance {
       tableName,
       getAliases: (id) => idMap.getAliases(id),
     });
-    const { accepted, skipped } = filterDocumentsWithResolvableReferences({
+    const { accepted, skipped } = await filterAfterHydratingReferences({
       docs: projected,
-      schema: tables[tableName]?.schema,
-      hasDocumentId: (id) => embedded.hasLocalDocumentId?.(id) ?? false,
-      getAliases: (id) => idMap.getAliases(id),
+      tableName,
     });
     try {
       if (accepted.length > 0) {
@@ -2004,7 +2183,8 @@ function createEngine(config: EngineConfig): EngineInstance {
 
     runDetached(async () => {
       await processUploadQueue();
-      await processQueue();
+      const deadLettered = await processQueue();
+      await rollbackDeadLetteredTables(deadLettered);
 
       if (pendingQueue.isEmpty) {
         for (const state of tableRemoteSyncStateMap.values()) {
@@ -2125,6 +2305,7 @@ function createEngine(config: EngineConfig): EngineInstance {
               typeof dependency.metadata.contentType === "string"
                 ? dependency.metadata.contentType
                 : dependency.blob.type || undefined,
+            uploadFetch,
           }),
         );
       } finally {
@@ -2196,6 +2377,7 @@ function createEngine(config: EngineConfig): EngineInstance {
               uploadUrlRef: uploadRef,
               blob,
               contentType: entry.contentType,
+              uploadFetch,
             }),
           );
         } finally {
@@ -2210,7 +2392,9 @@ function createEngine(config: EngineConfig): EngineInstance {
         );
         try {
           await pendingUploadQueue.release(entry, processorIdForReplay);
-        } catch {}
+        } catch (releaseErr) {
+          log.warn("sync: failed to release upload queue entry", releaseErr);
+        }
         return;
       }
     }
@@ -2227,7 +2411,7 @@ function createEngine(config: EngineConfig): EngineInstance {
    *
    * On failure, the entry stays in the queue for retry on next cycle.
    */
-  async function processQueue(signal?: AbortSignal): Promise<void> {
+  async function processQueue(signal?: AbortSignal): Promise<Set<string>> {
     if (queueProcessingPromise) {
       queueProcessingRequestedWhileActive = true;
       return queueProcessingPromise;
@@ -2235,7 +2419,9 @@ function createEngine(config: EngineConfig): EngineInstance {
     if (pendingQueue.isEmpty) {
       await pendingQueue.hydrate();
     }
-    if (pendingQueue.isEmpty) return;
+    if (pendingQueue.isEmpty) return new Set();
+
+    const deadLetteredTables = new Set<string>();
 
     log.info(`sync: processing ${pendingQueue.length} queued mutation(s)`);
 
@@ -2415,17 +2601,32 @@ function createEngine(config: EngineConfig): EngineInstance {
                       "convex.table": entry.table,
                     });
                   } else {
-                    await pendingQueue.release(entry, processorIdForReplay);
-                    activeEntry = null;
-                    recordCounter("replay.outcome", {
-                      result: "released",
-                      "convex.table": entry.table,
-                    });
+                    entry.retryCount = (entry.retryCount ?? 0) + 1;
+                    if (entry.retryCount >= MAX_REPLAY_RETRIES) {
+                      log.error(
+                        `sync: mutation exceeded max retries (${MAX_REPLAY_RETRIES}), dead-lettering (table: ${entry.table}, ref: ${entry.ref})`,
+                        err,
+                      );
+                      await pendingQueue.remove(entry, processorIdForReplay);
+                      deadLetteredTables.add(entry.table);
+                      activeEntry = null;
+                      recordCounter("replay.outcome", {
+                        result: "dead_letter",
+                        "convex.table": entry.table,
+                      });
+                    } else {
+                      log.warn(
+                        `sync: remote push failed (attempt ${entry.retryCount}/${MAX_REPLAY_RETRIES}), releasing (table: ${entry.table})`,
+                        err,
+                      );
+                      await pendingQueue.release(entry, processorIdForReplay);
+                      activeEntry = null;
+                      recordCounter("replay.outcome", {
+                        result: "released",
+                        "convex.table": entry.table,
+                      });
+                    }
                   }
-                  log.warn(
-                    "sync: remote push failed, stopping queue processing",
-                    err,
-                  );
                   shouldContinue = false;
                 }
               }
@@ -2447,20 +2648,55 @@ function createEngine(config: EngineConfig): EngineInstance {
             `sync: continuing queue processing after concurrent enqueue (remaining: ${pendingQueue.length})`,
           );
         }
-      } catch {}
+      } catch (err) {
+        if (!(err instanceof DOMException && err.name === "AbortError")) {
+          log.error("sync: unhandled error in queue processing loop", err);
+        }
+      }
+      return deadLetteredTables;
     })().finally(() => {
       queueProcessingPromise = null;
     });
 
-    await queueProcessingPromise;
+    const result = await queueProcessingPromise;
 
     if (pendingQueue.isEmpty) {
       log.info("sync: queue fully processed");
     }
+    return result ?? new Set();
+  }
+
+  async function rollbackDeadLetteredTables(
+    tablesToRollback: Set<string>,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (tablesToRollback.size === 0) return;
+    log.info(
+      `sync: rolling back dead-lettered tables: ${[...tablesToRollback].join(", ")}`,
+    );
+    for (const tableName of tablesToRollback) {
+      if (signal?.aborted) break;
+      const tableConfig = tables[tableName];
+      if (!tableConfig) continue;
+      try {
+        await resolveTable(tableName, tableConfig, signal);
+      } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") break;
+        log.error(
+          `sync: rollback resolve failed for table "${tableName}"`,
+          err,
+        );
+      }
+    }
   }
 
   function runSyncCycle(options?: { forceResolve?: boolean }): Promise<void> {
-    if (syncCyclePromise) return syncCyclePromise;
+    if (syncCyclePromise) {
+      if (options?.forceResolve) {
+        return syncCyclePromise.then(() => runSyncCycle(options));
+      }
+      return syncCyclePromise;
+    }
 
     abortController?.abort();
     abortController = new AbortController();
@@ -2469,7 +2705,8 @@ function createEngine(config: EngineConfig): EngineInstance {
     syncCyclePromise = (async () => {
       try {
         await processUploadQueue(signal);
-        await processQueue(signal);
+        const deadLettered = await processQueue(signal);
+        await rollbackDeadLetteredTables(deadLettered, signal);
 
         const route = getSyncCycleRoute({
           aborted: signal.aborted,
@@ -2537,9 +2774,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     );
   }
 
-  async function resolveDirtyCrdtRowsImpl(
-    signal?: AbortSignal,
-  ): Promise<void> {
+  async function resolveDirtyCrdtRowsImpl(signal?: AbortSignal): Promise<void> {
     if (dirtyCrdtRows.size === 0) {
       return;
     }
@@ -2699,13 +2934,11 @@ function createEngine(config: EngineConfig): EngineInstance {
         stripOmittedFields(schemaDef, [document])[0] ?? document,
     });
 
-    const { accepted: resolvableDocs } =
-      filterDocumentsWithResolvableReferences({
-        docs: mergedDocs,
-        schema: tableConfig.schema,
-        hasDocumentId: (id) => embedded.hasLocalDocumentId?.(id) ?? false,
-        getAliases: (id) => idMap.getAliases(id),
-      });
+    const { accepted: resolvableDocs } = await filterAfterHydratingReferences({
+      docs: mergedDocs,
+      tableName,
+      signal,
+    });
 
     await ingestMergedDocs({
       ingestDocuments,
@@ -2736,9 +2969,7 @@ function createEngine(config: EngineConfig): EngineInstance {
   }
 
   async function resolveAll(signal?: AbortSignal): Promise<void> {
-    return withSpan("convex-embedded.resolveAll", () =>
-      resolveAllImpl(signal),
-    );
+    return withSpan("convex-embedded.resolveAll", () => resolveAllImpl(signal));
   }
 
   async function resolveAllImpl(signal?: AbortSignal): Promise<void> {
@@ -2768,7 +2999,7 @@ function createEngine(config: EngineConfig): EngineInstance {
         if (signal?.aborted) {
           throw new DOMException("Aborted", "AbortError");
         }
-        await resolveTableFx(tableName, tables[tableName]!, signal);
+        await resolveTable(tableName, tables[tableName]!, signal);
         progress.completed++;
         emit({ status: "resolving", progress: { ...progress } });
         await yieldToEventLoop();
@@ -2777,7 +3008,7 @@ function createEngine(config: EngineConfig): EngineInstance {
         if (signal?.aborted) {
           throw new DOMException("Aborted", "AbortError");
         }
-        await resolveTableFx(
+        await resolveTable(
           entry.tableName,
           tables[entry.tableName]!,
           signal,
@@ -2802,16 +3033,15 @@ function createEngine(config: EngineConfig): EngineInstance {
     }
   }
 
-  async function resolveTableFx(
+  async function resolveTable(
     tableName: string,
     tableConfig: TableConfig,
     signal?: AbortSignal,
     scopeArgs?: Record<string, unknown>,
   ): Promise<void> {
     return withSpan(
-      "convex-embedded.resolveTableFx",
-      () =>
-        resolveTableFxImpl(tableName, tableConfig, signal, scopeArgs),
+      "convex-embedded.resolveTable",
+      () => resolveTablePaginated(tableName, tableConfig, signal, scopeArgs),
       {
         attributes: {
           "convex.table": tableName,
@@ -2823,7 +3053,200 @@ function createEngine(config: EngineConfig): EngineInstance {
     );
   }
 
-  async function resolveTableFxImpl(
+  async function hydrateMissingReferences(input: {
+    docs: Array<Record<string, unknown>>;
+    tableName: string;
+    signal?: AbortSignal;
+    visited: Set<string>;
+  }): Promise<void> {
+    const missing = getMissingReferences({
+      docs: input.docs,
+      schema: tables[input.tableName]?.schema,
+      hasDocumentId: (id) => embedded.hasLocalDocumentId?.(id) ?? false,
+      getAliases: (id) => idMap.getAliases(id),
+    });
+    if (missing.length === 0) {
+      return;
+    }
+
+    const byTable = new Map<string, Set<string>>();
+    for (const ref of missing) {
+      if (!(ref.tableName in tables)) {
+        continue;
+      }
+      const ids = byTable.get(ref.tableName) ?? new Set<string>();
+      ids.add(ref.id);
+      byTable.set(ref.tableName, ids);
+    }
+
+    for (const [tableName, ids] of byTable) {
+      await hydrateDocumentsById({
+        tableName,
+        ids: Array.from(ids),
+        signal: input.signal,
+        visited: input.visited,
+      });
+    }
+  }
+
+  async function filterAfterHydratingReferences(input: {
+    docs: Array<Record<string, unknown>>;
+    tableName: string;
+    signal?: AbortSignal;
+    visited?: Set<string>;
+  }): Promise<{
+    accepted: Array<Record<string, unknown>>;
+    skipped: Array<Record<string, unknown>>;
+  }> {
+    const visited = input.visited ?? new Set<string>();
+    let result = filterDocumentsWithResolvableReferences({
+      docs: input.docs,
+      schema: tables[input.tableName]?.schema,
+      hasDocumentId: (id) => embedded.hasLocalDocumentId?.(id) ?? false,
+      getAliases: (id) => idMap.getAliases(id),
+    });
+    if (result.skipped.length === 0) {
+      return result;
+    }
+
+    try {
+      await hydrateMissingReferences({
+        docs: result.skipped,
+        tableName: input.tableName,
+        signal: input.signal,
+        visited,
+      });
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") {
+        throw error;
+      }
+      log.warn(
+        `sync: reference hydration failed for "${input.tableName}":`,
+        error,
+      );
+      return result;
+    }
+
+    result = filterDocumentsWithResolvableReferences({
+      docs: input.docs,
+      schema: tables[input.tableName]?.schema,
+      hasDocumentId: (id) => embedded.hasLocalDocumentId?.(id) ?? false,
+      getAliases: (id) => idMap.getAliases(id),
+    });
+    return result;
+  }
+
+  async function hydrateDocumentsById(input: {
+    tableName: string;
+    ids: string[];
+    signal?: AbortSignal;
+    visited: Set<string>;
+  }): Promise<void> {
+    const tableConfig = tables[input.tableName];
+    if (!tableConfig) {
+      return;
+    }
+    const ids = Array.from(new Set(input.ids)).filter((id) => {
+      if (embedded.hasLocalDocumentId?.(id) ?? false) {
+        return false;
+      }
+      const key = `${input.tableName}:${id}`;
+      if (input.visited.has(key)) {
+        return false;
+      }
+      input.visited.add(key);
+      return true;
+    });
+    if (ids.length === 0) {
+      return;
+    }
+    if (input.signal?.aborted) {
+      throw new DOMException("Aborted", "AbortError");
+    }
+
+    const localDocs = (await getDocumentsForTable(input.tableName)).filter(
+      (doc) => typeof doc._id === "string" && ids.includes(String(doc._id)),
+    );
+    const metadata = await readResolveMetadata(
+      input.tableName,
+      tableConfig,
+      ids,
+    );
+    const { schemaDef, localYjsMap, resolveDocuments } = prepareResolveInput(
+      tableConfig.schema,
+      localDocs,
+      metadata,
+    );
+
+    let rawResolveResult: ResolveResponse | Array<ResolveResultRow>;
+    try {
+      rawResolveResult = (await (remoteClient as any).query(
+        tableConfig.resolve,
+        {
+          collectionSeq: null,
+          documents: resolveDocuments,
+          docIds: ids,
+        } satisfies ResolveArgs,
+      )) as ResolveResponse | Array<ResolveResultRow>;
+    } catch (error) {
+      if (!isUnsupportedDocIdsResolveError(error)) {
+        throw error;
+      }
+      log.warn(
+        `sync: remote resolve for "${input.tableName}" does not support exact doc hydration; falling back to full table resolve`,
+      );
+      await resolveTable(input.tableName, tableConfig, input.signal);
+      return;
+    }
+    const resolveResult = normalizeResolveResponse(rawResolveResult, null);
+    const { deletedDocIds, mergedDocs, metadataEntries } = mergeResolveResult({
+      localDocs,
+      localYjsMap,
+      resolveResult,
+      schemaDef,
+      tableName: input.tableName,
+      translateRemoteDocument: (document) =>
+        stripOmittedFields(schemaDef, [document])[0] ?? document,
+    });
+
+    const { accepted, skipped } = await filterAfterHydratingReferences({
+      docs: mergedDocs,
+      tableName: input.tableName,
+      signal: input.signal,
+      visited: input.visited,
+    });
+    if (accepted.length > 0) {
+      await ingestMergedDocs({
+        ingestDocuments,
+        mergedDocs: accepted,
+        tableName: input.tableName,
+      });
+    }
+
+    const acceptedDocIds = new Set(
+      accepted.flatMap((doc) =>
+        typeof doc._id === "string" ? [String(doc._id)] : [],
+      ),
+    );
+    await persistResolveMetadata({
+      tableConfig,
+      tableName: input.tableName,
+      resolveResult,
+      metadataEntries: metadataEntries.filter((entry) =>
+        acceptedDocIds.has(entry.docId),
+      ),
+      deletedDocIds,
+      clearCollection: false,
+    });
+
+    if (skipped.length > 0) {
+      log.warn(
+        `sync: could not hydrate ${skipped.length} "${input.tableName}" referenced doc(s) due to unresolved references`,
+      );
+    }
+  }
+
+  async function resolveTablePaginated(
     tableName: string,
     tableConfig: TableConfig,
     signal?: AbortSignal,
@@ -2870,6 +3293,12 @@ function createEngine(config: EngineConfig): EngineInstance {
       metadata,
     );
 
+    const isNewScope =
+      scopeArgs &&
+      Object.keys(scopeArgs).length > 0 &&
+      scopedLocalDocs.length === 0;
+    const effectiveCollectionSeq = isNewScope ? null : metadata.collectionSeq;
+
     log.debug(
       `sync: resolving "${tableName}" with ${resolveDocuments.length} local doc(s)`,
     );
@@ -2884,7 +3313,7 @@ function createEngine(config: EngineConfig): EngineInstance {
         attempts++;
         try {
           return (remoteClient as any).query(tableConfig.resolve, {
-            collectionSeq: metadata.collectionSeq,
+            collectionSeq: effectiveCollectionSeq,
             documents: resolveDocuments,
             ...(scopeArgs && Object.keys(scopeArgs).length > 0
               ? { scopeArgs }
@@ -2903,7 +3332,7 @@ function createEngine(config: EngineConfig): EngineInstance {
           throw err;
         }
       });
-      return normalizeResolveResponse(rawResolveResult, metadata.collectionSeq);
+      return normalizeResolveResponse(rawResolveResult, effectiveCollectionSeq);
     };
 
     const firstResolveResult = await fetchResolvePage();
@@ -2946,11 +3375,10 @@ function createEngine(config: EngineConfig): EngineInstance {
           stripOmittedFields(schemaDef, [document])[0] ?? document,
       });
     const { accepted: resolvableDocs, skipped: unresolvedDocs } =
-      filterDocumentsWithResolvableReferences({
+      await filterAfterHydratingReferences({
         docs: mergedDocs,
-        schema: tableConfig.schema,
-        hasDocumentId: (id) => embedded.hasLocalDocumentId?.(id) ?? false,
-        getAliases: (id) => idMap.getAliases(id),
+        tableName,
+        signal,
       });
     if (unresolvedDocs.length > 0) {
       await runSpan({
@@ -3030,10 +3458,9 @@ function createEngine(config: EngineConfig): EngineInstance {
       }
       const scopeArgs: Record<string, unknown> = {};
       const key = makeScopeKey(tableName, scopeArgs);
-      const entry = activeScopes.get(key) ?? { tableName, scopeArgs };
-      entry.tableName = tableName;
-      entry.scopeArgs = scopeArgs;
-      activeScopes.set(key, entry);
+      if (!activeScopes.has(key)) {
+        activeScopes.set(key, { tableName, scopeArgs });
+      }
     }
 
     const orderedScopes = Array.from(activeScopes.entries()).sort(
@@ -3069,6 +3496,18 @@ function createEngine(config: EngineConfig): EngineInstance {
         scopeArgs: entry.scopeArgs,
         consumeExpectedSelfCausedSignal,
         scheduleTableCoalesce,
+        onPartialResponse: () => {
+          runDetached(
+            () =>
+              resolveTable(
+                entry.tableName,
+                tableConfig,
+                undefined,
+                entry.scopeArgs,
+              ),
+            `[sync] paginated resolve for "${entry.tableName}":`,
+          );
+        },
       });
       void yieldToEventLoop();
     }
@@ -3082,18 +3521,27 @@ function createEngine(config: EngineConfig): EngineInstance {
   function stopRemoteSubscriptions(): void {
     if (activeScopes.size === 0) return;
 
-    for (const entry of activeScopes.values()) {
+    scopeActivationEpoch++;
+
+    for (const [key, entry] of activeScopes) {
       try {
         entry.unsub?.();
-      } catch {}
+      } catch (err) {
+        log.warn("sync: error during remote unsubscribe", err);
+      }
       entry.unsub = undefined;
+      entry.pendingActivation = undefined;
+      const isScoped = Object.keys(entry.scopeArgs).length > 0;
+      if (isScoped) {
+        activeScopes.delete(key);
+      }
     }
 
     log.info("sync: unsubscribed from remote tables");
   }
 
-  async function yieldToEventLoop(): Promise<void> {
-    return;
+  function yieldToEventLoop(): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, 0));
   }
 
   async function activateScope(
@@ -3110,13 +3558,15 @@ function createEngine(config: EngineConfig): EngineInstance {
     if (existing?.unsub) {
       return;
     }
+    if (existing?.pendingActivation) {
+      await existing.pendingActivation;
+      return;
+    }
     const entry: ActiveScope = existing ?? {
       tableName,
       scopeArgs: normalizedScope,
     };
-    entry.tableName = tableName;
-    entry.scopeArgs = normalizedScope;
-    activeScopes.set(key, entry);
+    if (!existing) activeScopes.set(key, entry);
     if (!isOnline || !started || !pendingQueue.isEmpty) {
       return;
     }
@@ -3126,29 +3576,58 @@ function createEngine(config: EngineConfig): EngineInstance {
       return;
     }
 
-    await resolveTableFx(
-      tableName,
-      tableConfig,
-      abortController?.signal ?? undefined,
-      normalizedScope,
-    );
-    await yieldToEventLoop();
+    const epochAtStart = scopeActivationEpoch;
 
-    registerRemoteSubscription({
-      getPendingEntries: () => pendingQueue.entries(),
-      getAliases: (id) => idMap.getAliases(id),
-      bufferRemoteSnapshot,
-      translateRemoteSnapshotToLocal: (docs) => docs,
-      onUnsubscribe: (unsub) => {
-        entry.unsub = unsub;
-      },
-      resolveServices,
-      tableConfig,
-      tableName,
-      scopeArgs: normalizedScope,
-      consumeExpectedSelfCausedSignal,
-      scheduleTableCoalesce,
-    });
+    const activation = (async () => {
+      await resolveTable(
+        tableName,
+        tableConfig,
+        abortController?.signal ?? undefined,
+        normalizedScope,
+      );
+      await yieldToEventLoop();
+
+      if (scopeActivationEpoch !== epochAtStart || !started) {
+        return;
+      }
+
+      registerRemoteSubscription({
+        getPendingEntries: () => pendingQueue.entries(),
+        getAliases: (id) => idMap.getAliases(id),
+        bufferRemoteSnapshot,
+        translateRemoteSnapshotToLocal: (docs) => docs,
+        onUnsubscribe: (unsub) => {
+          entry.unsub = unsub;
+        },
+        resolveServices,
+        tableConfig,
+        tableName,
+        scopeArgs: normalizedScope,
+        consumeExpectedSelfCausedSignal,
+        scheduleTableCoalesce,
+        onPartialResponse: () => {
+          runDetached(
+            () =>
+              resolveTable(
+                tableName,
+                tableConfig,
+                undefined,
+                normalizedScope,
+              ),
+            `[sync] paginated resolve for scoped "${tableName}":`,
+          );
+        },
+      });
+    })();
+
+    entry.pendingActivation = activation;
+    try {
+      await activation;
+    } finally {
+      if (entry.pendingActivation === activation) {
+        entry.pendingActivation = undefined;
+      }
+    }
   }
 
   function handleOnline() {
@@ -3286,6 +3765,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     resolveResult: ResolveResponse;
     metadataEntries: Array<{ docId: string; seq: number }>;
     deletedDocIds: string[];
+    clearCollection?: boolean;
   }): Promise<void> {
     const schemaVersion = input.tableConfig.schema.version;
     const identityKey = getCurrentIdentityKey();
@@ -3311,7 +3791,10 @@ function createEngine(config: EngineConfig): EngineInstance {
       );
     }
 
-    if (input.resolveResult.mode === "full") {
+    if (
+      input.resolveResult.mode === "full" &&
+      input.clearCollection !== false
+    ) {
       operations.push(
         runLocalSystemMutation(SystemPaths.documentMetadataClearCollection, {
           collection: input.tableName,
@@ -3366,7 +3849,9 @@ function createEngine(config: EngineConfig): EngineInstance {
   async function heartbeatProcessorSafe(): Promise<void> {
     try {
       await heartbeatProcessor();
-    } catch {}
+    } catch (err) {
+      log.debug("sync: processor heartbeat failed", err);
+    }
   }
 
   function startProcessorHeartbeat(): void {
@@ -3465,8 +3950,8 @@ function createEngine(config: EngineConfig): EngineInstance {
       onOnline = null;
       onOffline = null;
 
-      listeners.clear();
       emit({ status: "idle" });
+      listeners.clear();
     },
 
     on(event: "change", listener: ChangeListener): () => void {
@@ -3492,8 +3977,7 @@ function createEngine(config: EngineConfig): EngineInstance {
       const refName = getFunctionName(ref as any);
       const localArgs = idMap.translateRemoteIdsToLocal(args);
 
-      const __mutStart =
-        globalThis.performance?.now?.() ?? Date.now();
+      const __mutStart = globalThis.performance?.now?.() ?? Date.now();
       let localResult: unknown = undefined;
       let localFailed = false;
       try {
@@ -3509,17 +3993,13 @@ function createEngine(config: EngineConfig): EngineInstance {
         );
       }
 
-      const __localDone =
-        globalThis.performance?.now?.() ?? Date.now();
+      const __localDone = globalThis.performance?.now?.() ?? Date.now();
       log.debug(
         `engine.mutation local-done t+${(__localDone - __mutStart).toFixed(1)}ms ref=${refName}`,
       );
 
       if (localFailed) {
-        const remoteResult = await (remoteClient as any).mutation(
-          ref,
-          args,
-        );
+        const remoteResult = await (remoteClient as any).mutation(ref, args);
         return remoteResult;
       }
 
@@ -3540,41 +4020,36 @@ function createEngine(config: EngineConfig): EngineInstance {
         // race their pending-pushes through the runtime's transaction lock
         // (which already serialises commits), preserving ordering.
         const replayPayloadVersion = getReplayPayloadVersion?.(refName) ?? 1;
-        runDetached(async () => {
-          const __pushStart =
-            globalThis.performance?.now?.() ?? Date.now();
-          await pendingQueue.push(
-            ref,
-            args,
-            localResult,
-            table,
-            replayPayloadVersion,
-          );
-          const __pushDone =
-            globalThis.performance?.now?.() ?? Date.now();
-          log.debug(
-            `engine.mutation queue.push push=${(__pushDone - __pushStart).toFixed(1)}ms ref=${refName}`,
-          );
-          if (!isOnline && crdtFieldsByTable.has(table)) {
-            const docId =
-              typeof localResult === "string"
-                ? localResult
-                : (localArgs?.id as string | undefined) ??
-                  (localArgs?._id as string | undefined);
-            if (docId) {
-              markCrdtRowDirty(table, docId);
-            }
+        const __pushStart = globalThis.performance?.now?.() ?? Date.now();
+        await pendingQueue.push(
+          ref,
+          args,
+          localResult,
+          table,
+          replayPayloadVersion,
+        );
+        const __pushDone = globalThis.performance?.now?.() ?? Date.now();
+        log.debug(
+          `engine.mutation queue.push push=${(__pushDone - __pushStart).toFixed(1)}ms ref=${refName}`,
+        );
+        if (!isOnline && crdtFieldsByTable.has(table)) {
+          const docId =
+            typeof localResult === "string"
+              ? localResult
+              : ((localArgs?.id as string | undefined) ??
+                (localArgs?._id as string | undefined));
+          if (docId) {
+            markCrdtRowDirty(table, docId);
           }
-          if (isOnline) {
-            ensureReplayProcessing();
-          } else {
-            log.debug("sync: offline — mutation queued for later push");
-          }
-        }, "[sync] pendingQueue.push:");
+        }
+        if (isOnline) {
+          ensureReplayProcessing();
+        } else {
+          log.debug("sync: offline — mutation queued for later push");
+        }
       }
 
-      const __chainDone =
-        globalThis.performance?.now?.() ?? Date.now();
+      const __chainDone = globalThis.performance?.now?.() ?? Date.now();
       log.debug(
         `engine.mutation chain-done t+${(__chainDone - __mutStart).toFixed(1)}ms ref=${refName}`,
       );

@@ -2,6 +2,8 @@ import type { ConvexClient } from "convex/browser";
 import { ConvexError } from "convex/values";
 
 import type { CachedEntry, EmbeddedQueryCache } from "@/client/cache";
+import { effectToTransitions } from "@/client/optimistic/apply";
+import { deriveOptimisticEffect } from "@/client/optimistic/derive";
 import {
   assertRemotePlanOnline,
   type MutationPlan,
@@ -17,14 +19,8 @@ import { structuralEqual } from "@/shared/equals";
 import { createLogger } from "@/shared/logger";
 import { nowMs } from "@/shared/perf";
 import { stableValueKey } from "@/shared/valuekey";
-import {
-  createDefaultWorkScheduler,
-  type WorkScheduler,
-} from "@/shared/work";
+import { createDefaultWorkScheduler, type WorkScheduler } from "@/shared/work";
 import { withSpanSync } from "@/tracing/spans";
-
-import { effectToTransitions } from "@/client/optimistic/apply";
-import { deriveOptimisticEffect } from "@/client/optimistic/derive";
 
 const log = createLogger("cache");
 
@@ -165,6 +161,15 @@ class CachePipeline {
       connectivity?.onOnline?.(() => {
         this.openDeferredSubscriptions();
       }) ?? null;
+  }
+
+  dispose(): void {
+    this.removeOnlineListener?.();
+    for (const entry of this.active.values()) {
+      entry.remoteUnsubscribe?.();
+      entry.localUnsubscribe?.();
+    }
+    this.active.clear();
   }
 
   private openDeferredSubscriptions(): void {
@@ -385,104 +390,88 @@ class CachePipeline {
 
     const handleLocal = () => {
       if (!this.active.has(entry.argsKey)) return;
-      withSpanSync(
-        "convex-embedded.cache.localUpdate",
-        (span) => {
-          const startedAt = nowMs();
-          let result: unknown;
-          let usedRemoteFallback = false;
-          try {
-            result = watch.localQueryResult();
-          } catch (error) {
-            log.debug(
-              `local-watch eval threw for ${entry.refName}: ${(error as Error).message}`,
-            );
-            if (entry.lastRemoteValue === undefined) {
-              span.setAttributes({ "convex.cache.skip": "throw" });
-              return;
-            }
-            result = entry.lastRemoteValue;
-            usedRemoteFallback = true;
-          }
-          if (result === undefined) {
-            if (entry.lastRemoteValue === undefined) {
-              span.setAttributes({ "convex.cache.skip": "undefined" });
-              return;
-            }
-            result = entry.lastRemoteValue;
-            usedRemoteFallback = true;
-          }
-          if (
-            !usedRemoteFallback &&
-            entry.lastRemoteValue !== undefined &&
-            Array.isArray(result) &&
-            Array.isArray(entry.lastRemoteValue) &&
-            result.length < entry.lastRemoteValue.length
-          ) {
-            log.debug(
-              `local-watch ${entry.refName} smaller than remote (${result.length} < ${entry.lastRemoteValue.length}); preferring remote`,
-            );
-            result = entry.lastRemoteValue;
-            usedRemoteFallback = true;
-          }
-          const equalStart = nowMs();
-          const valueChanged =
-            !entry.hasValue || !structuralEqual(entry.currentValue, result);
-          const equalMs = nowMs() - equalStart;
-          if (!valueChanged) {
-            span.setAttributes({
-              "convex.cache.skip": "unchanged",
-              "convex.cache.eval_ms": +(nowMs() - startedAt).toFixed(2),
-            });
-            log.debug(
-              `local-watch ${entry.refName} unchanged read_ms=${(equalStart - startedAt).toFixed(1)} equal_ms=${equalMs.toFixed(1)}`,
-            );
-            return;
-          }
-          if (
-            entry.hasValue &&
-            entry.optimisticAppliedAtMs > 0 &&
-            nowMs() - entry.optimisticAppliedAtMs < OPTIMISTIC_PROTECTION_MS
-          ) {
-            span.setAttributes({
-              "convex.cache.skip": "optimistic-window",
-              "convex.cache.eval_ms": +(nowMs() - startedAt).toFixed(2),
-            });
-            log.debug(
-              `local-watch ${entry.refName} skipped (optimistic-window ${(nowMs() - entry.optimisticAppliedAtMs).toFixed(1)}ms ago)`,
-            );
-            return;
-          }
+      withSpanSync("convex-embedded.cache.localUpdate", (span) => {
+        const startedAt = nowMs();
+        let result: unknown;
+        let usedRemoteFallback = false;
+        try {
+          result = watch.localQueryResult();
+        } catch (error) {
           log.debug(
-            `local-watch ${entry.refName} result.length=${Array.isArray(result) ? result.length : "non-array"} fallback=${usedRemoteFallback} read_ms=${(equalStart - startedAt).toFixed(1)} equal_ms=${equalMs.toFixed(1)}`,
+            `local-watch eval threw for ${entry.refName}: ${(error as Error).message}`,
           );
-          const previous = this.config.cache.get(entry.refName, entry.args);
-          const nextEntry: CachedEntry = {
-            value: result,
-            receivedAtMs: Date.now(),
-            ts: previous?.ts,
-            paginationCursor: previous?.paginationCursor,
-            paginationIsDone: previous?.paginationIsDone,
-          };
-          const changed = this.config.cache.set(
-            entry.refName,
-            entry.args,
-            nextEntry,
-          );
-          entry.currentValue = result;
-          entry.hasValue = true;
-          if (changed) {
-            void this.persistEntry(entry, nextEntry);
+          if (entry.lastRemoteValue === undefined) {
+            span.setAttributes({ "convex.cache.skip": "throw" });
+            return;
           }
+          result = entry.lastRemoteValue;
+          usedRemoteFallback = true;
+        }
+        if (result === undefined) {
+          if (entry.lastRemoteValue === undefined) {
+            span.setAttributes({ "convex.cache.skip": "undefined" });
+            return;
+          }
+          result = entry.lastRemoteValue;
+          usedRemoteFallback = true;
+        }
+        const equalStart = nowMs();
+        const valueChanged =
+          !entry.hasValue || !structuralEqual(entry.currentValue, result);
+        const equalMs = nowMs() - equalStart;
+        if (!valueChanged) {
           span.setAttributes({
-            "convex.cache.ref": entry.refName,
-            "convex.cache.value_changed": true,
+            "convex.cache.skip": "unchanged",
             "convex.cache.eval_ms": +(nowMs() - startedAt).toFixed(2),
-            "convex.cache.fallback": usedRemoteFallback,
           });
-          this.notifyListeners(entry);
-        },
-      );
+          log.debug(
+            `local-watch ${entry.refName} unchanged read_ms=${(equalStart - startedAt).toFixed(1)} equal_ms=${equalMs.toFixed(1)}`,
+          );
+          return;
+        }
+        if (
+          entry.hasValue &&
+          entry.optimisticAppliedAtMs > 0 &&
+          nowMs() - entry.optimisticAppliedAtMs < OPTIMISTIC_PROTECTION_MS
+        ) {
+          span.setAttributes({
+            "convex.cache.skip": "optimistic-window",
+            "convex.cache.eval_ms": +(nowMs() - startedAt).toFixed(2),
+          });
+          log.debug(
+            `local-watch ${entry.refName} skipped (optimistic-window ${(nowMs() - entry.optimisticAppliedAtMs).toFixed(1)}ms ago)`,
+          );
+          return;
+        }
+        log.debug(
+          `local-watch ${entry.refName} result.length=${Array.isArray(result) ? result.length : "non-array"} fallback=${usedRemoteFallback} read_ms=${(equalStart - startedAt).toFixed(1)} equal_ms=${equalMs.toFixed(1)}`,
+        );
+        const previous = this.config.cache.get(entry.refName, entry.args);
+        const nextEntry: CachedEntry = {
+          value: result,
+          receivedAtMs: Date.now(),
+          ts: previous?.ts,
+          paginationCursor: previous?.paginationCursor,
+          paginationIsDone: previous?.paginationIsDone,
+        };
+        const changed = this.config.cache.set(
+          entry.refName,
+          entry.args,
+          nextEntry,
+        );
+        entry.currentValue = result;
+        entry.hasValue = true;
+        if (changed) {
+          void this.persistEntry(entry, nextEntry);
+        }
+        span.setAttributes({
+          "convex.cache.ref": entry.refName,
+          "convex.cache.value_changed": true,
+          "convex.cache.eval_ms": +(nowMs() - startedAt).toFixed(2),
+          "convex.cache.fallback": usedRemoteFallback,
+        });
+        this.notifyListeners(entry);
+      });
     };
 
     let unsubscribe: (() => void) | null = null;
@@ -500,7 +489,6 @@ class CachePipeline {
     entry.localHandle = handleLocal;
     handleLocal();
   }
-
 
   private async loadFromStorage(entry: ActiveSubscription): Promise<void> {
     const storage = this.config.getCacheStorage();
@@ -522,9 +510,7 @@ class CachePipeline {
       ts: row.ts ?? undefined,
       paginationCursor: row.paginationCursor ?? undefined,
       paginationIsDone:
-        row.paginationIsDone === null
-          ? undefined
-          : row.paginationIsDone === 1,
+        row.paginationIsDone === null ? undefined : row.paginationIsDone === 1,
     };
     this.config.cache.set(entry.refName, entry.args, cacheEntry);
     entry.currentValue = value;
@@ -653,7 +639,11 @@ class CachePipeline {
     if (docs.length === 0) return;
 
     let changed: Array<Record<string, unknown>> = docs;
-    if (previousValue !== undefined && Array.isArray(value) && Array.isArray(previousValue)) {
+    if (
+      previousValue !== undefined &&
+      Array.isArray(value) &&
+      Array.isArray(previousValue)
+    ) {
       const previousById = new Map<string, unknown>();
       for (const item of previousValue) {
         if (isPlainObject(item) && typeof item._id === "string") {
@@ -718,26 +708,23 @@ class CachePipeline {
     log.debug(
       `notify ${entry.refName} listeners=${entry.listeners.size} ts=${nowMs().toFixed(1)}`,
     );
-    withSpanSync(
-      "convex-embedded.cache.notifyListeners",
-      (span) => {
-        const startedAt = nowMs();
-        let count = 0;
-        for (const listener of entry.listeners) {
-          try {
-            listener(entry.currentValue);
-            count += 1;
-          } catch {
-            /* listener error */
-          }
+    withSpanSync("convex-embedded.cache.notifyListeners", (span) => {
+      const startedAt = nowMs();
+      let count = 0;
+      for (const listener of entry.listeners) {
+        try {
+          listener(entry.currentValue);
+          count += 1;
+        } catch {
+          /* listener error */
         }
-        span.setAttributes({
-          "convex.cache.ref": entry.refName,
-          "convex.cache.listeners": count,
-          "convex.cache.notify_ms": +(nowMs() - startedAt).toFixed(2),
-        });
-      },
-    );
+      }
+      span.setAttributes({
+        "convex.cache.ref": entry.refName,
+        "convex.cache.listeners": count,
+        "convex.cache.notify_ms": +(nowMs() - startedAt).toFixed(2),
+      });
+    });
   }
 }
 
@@ -773,7 +760,7 @@ function createCacheOnUpdate(input: {
             "Second argument to onUpdate onError is reserved for later use",
           );
         } else {
-          void Promise.reject(normalized);
+          log.error("unhandled subscription error", normalized);
         }
       }
     };
@@ -786,7 +773,7 @@ function createCacheOnUpdate(input: {
           "Second argument to onUpdate onError is reserved for later use",
         );
       } else {
-        void Promise.reject(normalized);
+        log.error("unhandled subscription error", normalized);
       }
     };
 
@@ -822,14 +809,15 @@ function createCachePaginatedOnUpdate(input: {
     onError?: (error: Error, meta?: unknown) => unknown,
   ) => {
     const refName = input.getRefName(ref);
+    const paginationArgs = args.paginationOpts;
 
     const baseArgs: Record<string, unknown> = {
-      ...(args ?? {}),
+      ...args,
       paginationOpts: {
         cursor: null,
         numItems: options.initialNumItems,
-        ...(isPlainObject((args ?? {}).paginationOpts)
-          ? ((args ?? {}).paginationOpts as Record<string, unknown>)
+        ...(isPlainObject(paginationArgs)
+          ? (paginationArgs as Record<string, unknown>)
           : {}),
       },
     };
@@ -852,7 +840,7 @@ function createCachePaginatedOnUpdate(input: {
             "Second argument to onUpdate onError is reserved for later use",
           );
         } else {
-          void Promise.reject(normalized);
+          log.error("unhandled subscription error", normalized);
         }
       }
     };
@@ -865,7 +853,7 @@ function createCachePaginatedOnUpdate(input: {
           "Second argument to onUpdate onError is reserved for later use",
         );
       } else {
-        void Promise.reject(normalized);
+        log.error("unhandled subscription error", normalized);
       }
     };
 
@@ -929,7 +917,7 @@ function createRuntimeLocalOnUpdate(input: {
             "Second argument to onUpdate onError is reserved for later use",
           );
         } else {
-          void Promise.reject(normalized);
+          log.error("unhandled subscription error", normalized);
         }
       }
     };
@@ -955,6 +943,9 @@ function createRuntimeLocalPaginatedOnUpdate(input: {
     readArgs?: Record<string, unknown>,
   ) => Promise<void>;
   translateLocalArgsToRuntime?: (
+    args: Record<string, unknown>,
+  ) => Record<string, unknown>;
+  translateClientArgsToRemote?: (
     args: Record<string, unknown>,
   ) => Record<string, unknown>;
   translateLocalResultToClient?: <T>(value: T) => T;
@@ -993,7 +984,7 @@ function createRuntimeLocalPaginatedOnUpdate(input: {
             "Second argument to onUpdate onError is reserved for later use",
           );
         } else {
-          void Promise.reject(normalized);
+          log.error("unhandled subscription error", normalized);
         }
       }
     };
@@ -1176,7 +1167,7 @@ export function patchRoutedConvexClient(input: {
   cache?: EmbeddedQueryCache | null;
   getCacheStorage?: () => QueryCacheStorage | null;
   knownTables?: ReadonlySet<string>;
-}) {
+}): { dispose: () => void } {
   patchBaseClientLocalQueryAccess({
     client: input.client,
     runtime: input.runtime,
@@ -1305,6 +1296,48 @@ export function patchRoutedConvexClient(input: {
     }
   };
 
+  const translateRemoteArgs = (args: unknown): unknown => {
+    if (!isPlainObject(args)) return args;
+    return input.translateClientArgsToRemote?.(args) ?? args;
+  };
+
+  const createRemoteCaller =
+    (method: "mutation" | "query" | "action") =>
+    (...args: any[]): Promise<any> => {
+      if (!remoteClient) {
+        return Promise.reject(
+          new ConvexError({
+            code: "REMOTE_CLIENT_UNAVAILABLE",
+            message:
+              `[convex-embedded] Remote ${method} execution was requested, but no remote client is configured. ` +
+              "Add ClientOptions.remote or remove remoteOnly().",
+            kind: method,
+          }),
+        );
+      }
+      const remoteArgs = [...args];
+      remoteArgs[1] = translateRemoteArgs(remoteArgs[1] ?? {});
+      return (remoteClient as any)[method](...remoteArgs);
+    };
+
+  const remoteOnUpdate = remoteClient
+    ? (...args: any[]): any => {
+        const remoteArgs = [...args];
+        remoteArgs[1] = translateRemoteArgs(remoteArgs[1] ?? {});
+        return (remoteClient as any).onUpdate(...remoteArgs);
+      }
+    : () => createNoopUnsubscribe();
+
+  const remotePaginatedOnUpdate = remoteClient
+    ? (...args: any[]): any => {
+        const remoteArgs = [...args];
+        remoteArgs[1] = translateRemoteArgs(remoteArgs[1] ?? {});
+        return (remoteClient as any).onPaginatedUpdate_experimental(
+          ...remoteArgs,
+        );
+      }
+    : () => createNoopUnsubscribe();
+
   const createSubscriptionFactory = (
     localSubscribe: (...args: any[]) => any,
     remoteSubscribe: (...args: any[]) => any,
@@ -1363,7 +1396,10 @@ export function patchRoutedConvexClient(input: {
         const refName = input.getRefName(ref);
         const explicit = lookupExplicitOptimistic(ref);
         const updates = explicit
-          ? explicit({ getQuery: pipeline.getCurrentValue.bind(pipeline) }, argsObj)
+          ? explicit(
+              { getQuery: pipeline.getCurrentValue.bind(pipeline) },
+              argsObj,
+            )
           : (() => {
               const effect = deriveOptimisticEffect({
                 refName,
@@ -1410,7 +1446,7 @@ export function patchRoutedConvexClient(input: {
             kind: "mutation",
           });
         }
-        return await (remoteClient as any).mutation(...args);
+        return await createRemoteCaller("mutation")(...args);
       } catch (error) {
         throw input.asError(error);
       }
@@ -1452,7 +1488,7 @@ export function patchRoutedConvexClient(input: {
             kind: "query",
           });
         }
-        return await (remoteClient as any).query(...args);
+        return await createRemoteCaller("query")(...args);
       } catch (error) {
         throw input.asError(error);
       }
@@ -1494,7 +1530,7 @@ export function patchRoutedConvexClient(input: {
             kind: "action",
           });
         }
-        return await (remoteClient as any).action(...args);
+        return await createRemoteCaller("action")(...args);
       } catch (error) {
         throw input.asError(error);
       }
@@ -1503,9 +1539,7 @@ export function patchRoutedConvexClient(input: {
 
   (input.client as any).onUpdate = createSubscriptionFactory(
     localOnUpdate,
-    remoteClient
-      ? (remoteClient as any).onUpdate.bind(remoteClient)
-      : () => createNoopUnsubscribe(),
+    remoteOnUpdate,
     3,
   );
 
@@ -1581,12 +1615,12 @@ export function patchRoutedConvexClient(input: {
     (input.client as any).onPaginatedUpdate_experimental =
       createSubscriptionFactory(
         localPaginatedOnUpdate,
-        remoteClient
-          ? (remoteClient as any).onPaginatedUpdate_experimental.bind(
-              remoteClient,
-            )
-          : () => createNoopUnsubscribe(),
+        remotePaginatedOnUpdate,
         4,
       );
   }
+
+  return {
+    dispose: () => pipeline?.dispose(),
+  };
 }

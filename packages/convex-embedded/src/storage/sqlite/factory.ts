@@ -167,11 +167,8 @@ function documentIdentityKey(doc: StoredDocument): string | null {
 }
 
 function decodeBlob(value: unknown): Blob {
-  if (value instanceof Uint8Array) {
-    return new Blob([Uint8Array.from(value)]);
-  }
-  if (value instanceof ArrayBuffer) {
-    return new Blob([new Uint8Array(value)]);
+  if (value instanceof Uint8Array || value instanceof ArrayBuffer) {
+    return new Blob([value]);
   }
   if (typeof Buffer !== "undefined" && value instanceof Buffer) {
     return new Blob([value]);
@@ -491,21 +488,6 @@ const INTERNAL_TABLE_SPECS: Record<string, InternalTableSpec> = {
       { name: "by_table", columns: ["table_name", "creation_time", "id"] },
     ],
   },
-  _resolve_schema_steps: {
-    physicalTableName: "internal__resolve_schema_steps",
-    fields: {
-      table: { column: "table_name", sqlType: "TEXT", notNull: true },
-      version: { column: "version", sqlType: "INTEGER", notNull: true },
-      stepName: { column: "step_name", sqlType: "TEXT", notNull: true },
-    },
-    indexes: [
-      {
-        name: "by_table_version_step",
-        columns: ["table_name", "version", "step_name", "creation_time", "id"],
-        unique: true,
-      },
-    ],
-  },
   _resolve_store_versions: {
     physicalTableName: "internal__resolve_store_versions",
     fields: {
@@ -647,7 +629,8 @@ function internalFieldExpression(
   if (fieldPath === "__identityKey") {
     return "identity_key";
   }
-  return `json_extract(data, '$.${fieldPath.split(".").join(".")}')`;
+  const escaped = fieldPath.split(".").join(".").replace(/'/g, "''");
+  return `json_extract(data, '$.${escaped}')`;
 }
 
 function internalOrderByClause(
@@ -833,19 +816,6 @@ function getRowDecoder(spec: InternalTableSpec): RowDecoder {
   return decoder;
 }
 
-function decodeInternalRow(
-  target: TableStorageTarget,
-  row: Record<string, unknown>,
-): StoredDocument {
-  if (!target.internalSpec) {
-    return {
-      _id: String(row.id),
-      _creationTime: Number(row.creation_time ?? 0),
-    } as StoredDocument;
-  }
-  return getRowDecoder(target.internalSpec)(row);
-}
-
 function buildStoredDocumentSelectSql(
   target: TableStorageTarget,
   fromClause: string = target.fromClause,
@@ -866,7 +836,7 @@ function decodeStoredRows(
 ): StoredDocument[] {
   if (target.internalSpec) {
     const decoder = getRowDecoder(target.internalSpec);
-    const out: StoredDocument[] = new Array(rows.length);
+    const out: StoredDocument[] = Array.from({ length: rows.length });
     for (let i = 0; i < rows.length; i++) {
       out[i] = decoder(rows[i]!);
     }
@@ -1432,20 +1402,15 @@ function pushedQuerySql(
 async function ensureSqliteSchema(driver: SqliteDriver): Promise<void> {
   await driver.execute("PRAGMA journal_mode = WAL");
 
-  for (const statement of BASE_SCHEMA_STATEMENTS) {
-    await driver.execute(statement);
-  }
-  for (const statement of ROUTING_SCHEMA_STATEMENTS) {
-    await driver.execute(statement);
-  }
-  for (const statement of SEARCH_VECTOR_SCHEMA_STATEMENTS) {
-    await driver.execute(statement);
-  }
-
-  await driver.execute(
-    `INSERT OR REPLACE INTO ${SQLITE_ADAPTER_META_TABLE} (id, schema_version) VALUES (1, ?)`,
-    [SQLITE_ADAPTER_SCHEMA_VERSION],
-  );
+  const ddl: Array<{ sql: string; params?: readonly unknown[] }> = [];
+  for (const sql of BASE_SCHEMA_STATEMENTS) ddl.push({ sql });
+  for (const sql of ROUTING_SCHEMA_STATEMENTS) ddl.push({ sql });
+  for (const sql of SEARCH_VECTOR_SCHEMA_STATEMENTS) ddl.push({ sql });
+  ddl.push({
+    sql: `INSERT OR REPLACE INTO ${SQLITE_ADAPTER_META_TABLE} (id, schema_version) VALUES (1, ?)`,
+    params: [SQLITE_ADAPTER_SCHEMA_VERSION],
+  });
+  await driver.executeBatch(ddl);
 }
 
 async function listTableRoutes(driver: SqliteDriver): Promise<TableRouteRow[]> {

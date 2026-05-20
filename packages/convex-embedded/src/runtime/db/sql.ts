@@ -8,7 +8,8 @@ export function sourceTableName(source: Source): string {
 }
 
 export function toJsonPath(fieldPath: string): string {
-  return `$.${fieldPath.split(".").join(".")}`;
+  const escaped = fieldPath.split(".").join(".").replace(/'/g, "''");
+  return `$.${escaped}`;
 }
 
 export function fieldExpression(fieldPath: string): string {

@@ -2,7 +2,10 @@ import "react-native-get-random-values";
 import { createExpoConnectivityAdapter } from "@/expo/connectivity";
 import { createExpoCryptoProvider } from "@/expo/crypto";
 import { openOpSqliteStorage } from "@/expo/sqlite";
-import { createExpoStorageSurface } from "@/expo/storage";
+import {
+  createExpoStorageSurface,
+  createExpoUploadFetch,
+} from "@/expo/storage";
 import { createExpoWorkScheduler } from "@/expo/work";
 import type { EmbeddedPlatformAdapter } from "@/runtime/platform";
 
@@ -41,6 +44,7 @@ export function createExpoPlatformAdapter(
         directory: options.filesDirectory,
       });
     },
+    uploadFetch: createExpoUploadFetch(),
     connectivity,
     processorIdentity: {
       getProcessorId({ name }) {

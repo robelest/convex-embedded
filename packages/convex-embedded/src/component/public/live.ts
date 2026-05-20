@@ -148,14 +148,22 @@ export const recordDelete = mutation({
       await ctx.db.delete(current._id);
     }
 
-    const tailEntries = await ctx.db
-      .query("deltaTail")
-      .withIndex("by_collection_doc_seq", (q: any) =>
-        q.eq("collection", args.collection).eq("docId", args.docId),
-      )
-      .collect();
-    for (const entry of tailEntries) {
-      await ctx.db.delete(entry._id);
+    let deletedDeltaEntries = 0;
+    let tailCursor: string | null = null;
+    let tailDone = false;
+    while (!tailDone) {
+      const tailPage = await ctx.db
+        .query("deltaTail")
+        .withIndex("by_collection_doc_seq", (q: any) =>
+          q.eq("collection", args.collection).eq("docId", args.docId),
+        )
+        .paginate({ cursor: tailCursor, numItems: 100 });
+      for (const entry of tailPage.page) {
+        await ctx.db.delete(entry._id);
+        deletedDeltaEntries++;
+      }
+      tailDone = tailPage.isDone;
+      tailCursor = tailPage.continueCursor;
     }
 
     const collectionSeq = await bumpCollectionSeq(ctx, args.collection, {
@@ -173,7 +181,7 @@ export const recordDelete = mutation({
       collectionSeq,
       collectionTailDeleted: collectionTailResult.deleted,
       deletedLiveState: current !== null,
-      deletedDeltaCount: tailEntries.length,
+      deletedDeltaCount: deletedDeltaEntries,
     };
   },
 });
@@ -215,49 +223,57 @@ export const getLiveStates = query({
   ),
   handler: async (ctx: QueryCtx, args) => {
     if (args.docIds === undefined) {
-      const states = await ctx.db
-        .query("liveStates")
-        .withIndex("by_collection_doc", (q: any) =>
-          q.eq("collection", args.collection),
-        )
-        .collect();
-
-      return states.map((state: any) => ({
-        docId: state.docId,
-        update: state.update,
-        seq: state.seq,
-        docCreationTime: state.docCreationTime,
-      }));
+      const results: Array<{
+        docId: string;
+        update: ArrayBuffer;
+        seq: number;
+        docCreationTime?: number;
+      }> = [];
+      let cursor: string | null = null;
+      let isDone = false;
+      while (!isDone) {
+        const page = await ctx.db
+          .query("liveStates")
+          .withIndex("by_collection_doc", (q: any) =>
+            q.eq("collection", args.collection),
+          )
+          .paginate({ cursor, numItems: 100 });
+        for (const state of page.page) {
+          results.push({
+            docId: (state as any).docId,
+            update: (state as any).update,
+            seq: (state as any).seq,
+            docCreationTime: (state as any).docCreationTime,
+          });
+        }
+        isDone = page.isDone;
+        cursor = page.continueCursor;
+      }
+      return results;
     }
 
     if (args.docIds.length === 0) {
       return [];
     }
 
-    const results: Array<{
-      docId: string;
-      update: ArrayBuffer;
-      seq: number;
-      docCreationTime?: number;
-    } | null> = [];
-    for (const docId of args.docIds) {
-      const state = await ctx.db
-        .query("liveStates")
-        .withIndex("by_collection_doc", (q) =>
-          q.eq("collection", args.collection).eq("docId", docId),
-        )
-        .unique();
-      results.push(
-        state
+    const results = await Promise.all(
+      args.docIds.map(async (docId) => {
+        const state = await ctx.db
+          .query("liveStates")
+          .withIndex("by_collection_doc", (q) =>
+            q.eq("collection", args.collection).eq("docId", docId),
+          )
+          .unique();
+        return state
           ? {
               docId,
               update: state.update,
               seq: state.seq,
               docCreationTime: state.docCreationTime,
             }
-          : null,
-      );
-    }
+          : null;
+      }),
+    );
     return results;
   },
 });

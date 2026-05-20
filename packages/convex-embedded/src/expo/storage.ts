@@ -28,15 +28,9 @@ type CachedFileEntry = {
 
 const uploadSurfaces = new Map<string, ExpoStorageSurface>();
 
-let originalFetch: typeof globalThis.fetch | null = null;
-
-function ensureFetchInterceptor(): void {
-  if (originalFetch !== null || typeof globalThis.fetch !== "function") {
-    return;
-  }
-
-  originalFetch = globalThis.fetch.bind(globalThis);
-  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+export function createExpoUploadFetch(): typeof globalThis.fetch {
+  const nativeFetch = globalThis.fetch.bind(globalThis);
+  return ((input: RequestInfo | URL, init?: RequestInit) => {
     const requestUrl =
       typeof input === "string"
         ? input
@@ -45,36 +39,30 @@ function ensureFetchInterceptor(): void {
           : input.url;
 
     if (!requestUrl.includes(UPLOAD_PATH_PREFIX)) {
-      return await originalFetch!(input, init);
+      return nativeFetch(input, init);
     }
 
     const request = new Request(input, init);
     const url = new URL(request.url, "http://convex-embedded.local");
     if (!url.pathname.startsWith(UPLOAD_PATH_PREFIX)) {
-      return await originalFetch!(input, init);
+      return nativeFetch(input, init);
     }
 
     const token = url.pathname.slice(UPLOAD_PATH_PREFIX.length);
     const surface = uploadSurfaces.get(token);
     if (!surface) {
-      return new Response(
-        JSON.stringify({ error: "Upload URL is invalid or expired." }),
-        {
-          status: 404,
-          headers: { "Content-Type": "application/json" },
-        },
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({ error: "Upload URL is invalid or expired." }),
+          {
+            status: 404,
+            headers: { "Content-Type": "application/json" },
+          },
+        ),
       );
     }
-    return await surface.handleUpload(token, request);
+    return surface.handleUpload(token, request);
   }) as typeof globalThis.fetch;
-}
-
-function maybeRestoreFetch(): void {
-  if (uploadSurfaces.size > 0 || originalFetch === null) {
-    return;
-  }
-  globalThis.fetch = originalFetch;
-  originalFetch = null;
 }
 
 function uploadUrlForToken(token: string): string {
@@ -149,7 +137,6 @@ export function createExpoStorageSurface(
             uploadSurfaces.delete(token);
           }
         }
-        maybeRestoreFetch();
       },
     };
   }
@@ -172,7 +159,6 @@ export function createExpoStorageSurface(
     }
   };
 
-  ensureFetchInterceptor();
   void ensureStorageDirectory();
 
   return {
@@ -229,7 +215,6 @@ export function createExpoStorageSurface(
         void deleteFileIfPresent(fileForStorageId(storageId));
       }
       cachedFiles.clear();
-      maybeRestoreFetch();
       log.info("closed expo storage surface");
     },
   };

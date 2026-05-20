@@ -1,5 +1,5 @@
 /**
- * Build-time helpers consumed by the codegen CLI to produce the
+ * Build-time helpers consumed by framework adapters to produce the
  * embedded module registry. The runtime side reads the resulting
  * `manifest.remote` field from the generated file at startup; nothing
  * here is meant for direct app consumption.
@@ -63,6 +63,42 @@ export function toImportPath(fromFile: string, targetFile: string): string {
     path.relative(path.dirname(fromFile), targetFile),
   ).replace(/\.[^.]+$/, "");
   return relative.startsWith(".") ? relative : `./${relative}`;
+}
+
+function objectKey(value: string): string {
+  return /^[$A-Z_a-z][$\w]*$/.test(value) ? value : JSON.stringify(value);
+}
+
+function renderRouteModes(
+  routeModes: GeneratedRemoteManifest["routeModes"],
+): string {
+  const entries = Object.entries(routeModes);
+  if (entries.length === 0) return "{}";
+  return `{
+${entries
+  .map(([key, value]) => `        ${objectKey(key)}: ${JSON.stringify(value)},`)
+  .join("\n")}
+      }`;
+}
+
+function renderTables(tables: GeneratedRemoteManifest["tables"]): string {
+  const entries = Object.entries(tables);
+  if (entries.length === 0) return "{}";
+  return `{
+${entries
+  .map(([tableName, table]) => {
+    const schemaModule = table.schemaModule
+      ? `\n          schemaModule: ${JSON.stringify(table.schemaModule)},`
+      : "";
+    const schemaExport = table.schemaExport
+      ? `\n          schemaExport: ${JSON.stringify(table.schemaExport)},`
+      : "";
+    return `        ${objectKey(tableName)}: {
+          resolve: ${JSON.stringify(table.resolve)},${schemaModule}${schemaExport}
+        },`;
+  })
+  .join("\n")}
+      }`;
 }
 
 /** @internal — codegen-internal module-id resolution helper. */
@@ -234,24 +270,17 @@ export function renderGeneratedFile(input: {
     .map((entry) => {
       const originalFile =
         typeof entry === "string" ? entry : entry.originalFile;
-      const importFile =
-        typeof entry === "string" ? entry : entry.importFile;
+      const importFile = typeof entry === "string" ? entry : entry.importFile;
       const moduleId = toModuleId(input.convexDir, originalFile);
       const importPath = toImportPath(input.outFile, importFile);
-      return `    ${JSON.stringify(moduleId)}: () => import(${JSON.stringify(importPath)}),`;
+      return `    ${objectKey(moduleId)}: () => import(${JSON.stringify(importPath)}),`;
     })
     .join("\n");
 
-  const routeModes = JSON.stringify(input.manifest.routeModes, null, 2).replace(
-    /^/gm,
-    "      ",
-  );
-  const tables = JSON.stringify(input.manifest.tables, null, 2).replace(
-    /^/gm,
-    "      ",
-  );
+  const routeModes = renderRouteModes(input.manifest.routeModes);
+  const tables = renderTables(input.manifest.tables);
   const uploadUrl = input.manifest.uploadUrl
-    ? `,\n      uploadUrl: ${JSON.stringify(input.manifest.uploadUrl)}`
+    ? `\n      uploadUrl: ${JSON.stringify(input.manifest.uploadUrl)},`
     : "";
 
   return `import type { ConvexInput } from "@robelest/convex-embedded";
@@ -262,10 +291,10 @@ ${imports}
   },
   manifest: {
     remote: {
-      routeModes: ${routeModes.trimStart()},
-      tables: ${tables.trimStart()}${uploadUrl}
-    }
-  }
+      routeModes: ${routeModes},
+      tables: ${tables},${uploadUrl}
+    },
+  },
 };
 `;
 }

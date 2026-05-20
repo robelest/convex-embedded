@@ -13,9 +13,7 @@ export const DEFAULT_KEEP_COLLECTION_TAIL_COUNT = 256;
 const EMPTY_YJS_V2_UPDATE = [0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
 
 export function toArrayBuffer(data: Uint8Array): ArrayBuffer {
-  const buffer = new ArrayBuffer(data.byteLength);
-  new Uint8Array(buffer).set(data);
-  return buffer;
+  return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
 }
 
 export function isEmptyUpdate(update: Uint8Array): boolean {
@@ -28,24 +26,6 @@ export function isEmptyUpdate(update: Uint8Array): boolean {
 
 type ReaderCtx = Pick<QueryCtx, "db"> | Pick<MutationCtx, "db">;
 
-async function iterateOrderedQuery<T>(query: {
-  [Symbol.asyncIterator]?: () => AsyncIterator<T>;
-  collect?: () => Promise<T[]>;
-}): Promise<T[]> {
-  if (typeof query[Symbol.asyncIterator] === "function") {
-    const results: T[] = [];
-    for await (const entry of query as AsyncIterable<T>) {
-      results.push(entry);
-    }
-    return results;
-  }
-  if (typeof query.collect === "function") {
-    return query.collect();
-  }
-  throw new Error(
-    "[convex-embedded] expected query to support iteration or collect().",
-  );
-}
 
 export async function getLatestLiveState(
   ctx: ReaderCtx,
@@ -117,24 +97,30 @@ export async function trimCollectionTail(
   collection: string,
   keepCollectionTailCount: number,
 ) {
-  const entries = await iterateOrderedQuery(
-    ctx.db
-      .query("collectionTail")
-      .withIndex("by_collection_seq", (q) => q.eq("collection", collection))
-      .order("desc"),
-  );
-  let kept = 0;
+  const limit = Math.max(keepCollectionTailCount, 0);
+  const kept = await ctx.db
+    .query("collectionTail")
+    .withIndex("by_collection_seq", (q) => q.eq("collection", collection))
+    .order("desc")
+    .take(limit);
+  const lastKept = kept[kept.length - 1];
+
   let deleted = 0;
-  for (const [index, entry] of entries.entries()) {
-    if (index < Math.max(keepCollectionTailCount, 0)) {
-      kept += 1;
-      continue;
+  if (lastKept !== undefined) {
+    const toDelete = await ctx.db
+      .query("collectionTail")
+      .withIndex("by_collection_seq", (q) =>
+        q.eq("collection", collection).lt("seq", lastKept.seq),
+      )
+      .collect();
+    for (const entry of toDelete) {
+      await ctx.db.delete(entry._id);
+      deleted += 1;
     }
-    await ctx.db.delete(entry._id);
-    deleted += 1;
   }
+
   return {
-    kept,
+    kept: kept.length,
     deleted,
   };
 }
@@ -146,29 +132,42 @@ export async function trimDeltaTail(
   keepTailCount: number,
   tailByteLimit: number,
 ) {
-  const entries = await iterateOrderedQuery(
-    ctx.db
-      .query("deltaTail")
-      .withIndex("by_collection_doc_seq", (q) =>
-        q.eq("collection", collection).eq("docId", docId),
-      )
-      .order("desc"),
-  );
+  const candidates = await ctx.db
+    .query("deltaTail")
+    .withIndex("by_collection_doc_seq", (q) =>
+      q.eq("collection", collection).eq("docId", docId),
+    )
+    .order("desc")
+    .take(keepTailCount);
+
   let retainedBytes = 0;
   let kept = 0;
-  let deleted = 0;
-  for (const [index, entry] of entries.entries()) {
+  let cutoffSeq: number | null = null;
+  for (const entry of candidates) {
     const nextBytes = retainedBytes + Number(entry.byteLength ?? 0);
-    const withinCount = index < keepTailCount;
-    const withinBytes = nextBytes <= tailByteLimit;
-
-    if (withinCount && withinBytes) {
-      retainedBytes = nextBytes;
-      kept += 1;
-      continue;
+    if (nextBytes > tailByteLimit) {
+      cutoffSeq = entry.seq;
+      break;
     }
-    await ctx.db.delete(entry._id);
-    deleted += 1;
+    retainedBytes = nextBytes;
+    kept += 1;
+    cutoffSeq = entry.seq;
+  }
+
+  let deleted = 0;
+  if (cutoffSeq !== null) {
+    const byteBudgetExceeded = kept < candidates.length;
+    const toDelete = await ctx.db
+      .query("deltaTail")
+      .withIndex("by_collection_doc_seq", (q) =>
+        q.eq("collection", collection).eq("docId", docId)
+          [byteBudgetExceeded ? "lte" : "lt"]("seq", cutoffSeq!),
+      )
+      .collect();
+    for (const entry of toDelete) {
+      await ctx.db.delete(entry._id);
+      deleted += 1;
+    }
   }
 
   return {

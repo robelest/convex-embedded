@@ -1,5 +1,5 @@
 import type { QueryDependency } from "@/runtime/db/types";
-import { stableValueKey } from "@/shared/valuekey";
+import { structuralEqual } from "@/shared/equals";
 import type { ProtocolChange } from "@/sync/protocol";
 import type { SubscriptionManager } from "@/sync/subscriptions";
 
@@ -37,37 +37,44 @@ export interface RuntimeQueryObserver<TMeta> {
 
 export type TableVersionGetter = (tableName: string) => number;
 
-function errorKey(error: Error | null): string | null {
-  return error === null ? null : `${error.name}:${error.message}`;
+let globalStateVersion = 0;
+
+function bumpIfChanged<TMeta>(observer: RuntimeQueryObserver<TMeta>): void {
+  const ext = observer as RuntimeQueryObserver<TMeta> & {
+    _prevValue?: unknown;
+    _prevError?: Error | null;
+    _prevHasValue?: boolean;
+    _stateVersion?: number;
+  };
+
+  const valueChanged =
+    ext._prevHasValue !== observer.hasValue ||
+    ext._prevError !== observer.currentError ||
+    !structuralEqual(ext._prevValue, observer.currentValue);
+
+  if (valueChanged) {
+    ext._prevValue = observer.currentValue;
+    ext._prevError = observer.currentError;
+    ext._prevHasValue = observer.hasValue;
+    ext._stateVersion = ++globalStateVersion;
+  }
 }
 
 function stateChanged<TMeta>(observer: RuntimeQueryObserver<TMeta>): boolean {
-  const previous = observer as RuntimeQueryObserver<TMeta> & {
-    _previousHasValue?: boolean;
-    _previousValueKey?: string | null;
-    _previousErrorKey?: string | null;
-    _previousLogsKey?: string | null;
+  const ext = observer as RuntimeQueryObserver<TMeta> & {
+    _stateVersion?: number;
+    _notifiedVersion?: number;
   };
 
-  const nextValueKey = observer.hasValue
-    ? stableValueKey(observer.currentValue)
-    : null;
-  const nextErrorKey = errorKey(observer.currentError);
-  const nextLogsKey = observer.currentLogs
-    ? JSON.stringify(observer.currentLogs)
-    : null;
-  const changed =
-    previous._previousHasValue !== observer.hasValue ||
-    previous._previousValueKey !== nextValueKey ||
-    previous._previousErrorKey !== nextErrorKey ||
-    previous._previousLogsKey !== nextLogsKey;
+  bumpIfChanged(observer);
 
-  previous._previousHasValue = observer.hasValue;
-  previous._previousValueKey = nextValueKey;
-  previous._previousErrorKey = nextErrorKey;
-  previous._previousLogsKey = nextLogsKey;
-
-  return changed;
+  const version = ext._stateVersion ?? 0;
+  const notified = ext._notifiedVersion ?? -1;
+  if (version !== notified) {
+    ext._notifiedVersion = version;
+    return true;
+  }
+  return false;
 }
 
 export class RuntimeQueryObserverRegistry<TMeta> {
@@ -168,6 +175,12 @@ export class RuntimeQueryObserverRegistry<TMeta> {
     observer.pendingDelete = false;
     return () => {
       observer.listeners.delete(callback);
+      if (observer.listeners.size === 0) {
+        observer.pendingDelete = true;
+        const entry = this._entries.get(token);
+        entry?.unsubscribe();
+        this._entries.delete(token);
+      }
     };
   }
 
@@ -208,11 +221,14 @@ export class RuntimeQueryObserverRegistry<TMeta> {
     observer.evaluation = (async () => {
       do {
         observer.needsReevaluation = false;
+        if (observer.pendingDelete) return;
         try {
           const evaluation = await observer.evaluate();
+          if (observer.pendingDelete) return;
           this.syncState(observer, evaluation, { notify: false });
           this._captureDepVersions(observer);
         } catch (error) {
+          if (observer.pendingDelete) return;
           observer.currentValue = undefined;
           observer.currentError =
             error instanceof Error ? error : new Error(String(error));
@@ -234,6 +250,7 @@ export class RuntimeQueryObserverRegistry<TMeta> {
           });
         }
 
+        if (observer.pendingDelete) return;
         if (stateChanged(observer)) {
           for (const listener of Array.from(observer.listeners)) {
             listener();
@@ -242,7 +259,7 @@ export class RuntimeQueryObserverRegistry<TMeta> {
       } while (observer.needsReevaluation);
     })().finally(() => {
       observer.evaluation = null;
-      if (observer.needsReevaluation) {
+      if (!observer.pendingDelete && observer.needsReevaluation) {
         void this.refresh(observer);
       }
     });

@@ -393,10 +393,10 @@ function evaluateComparisonFilter(
   return matchTag(node, "_tag", {
     Eq: () => compareValues(left, right) === 0,
     Neq: () => compareValues(left, right) !== 0,
-    Gt: () => left! > right!,
-    Gte: () => left! >= right!,
-    Lt: () => left! < right!,
-    Lte: () => left! <= right!,
+    Gt: () => compareValues(left, right) > 0,
+    Gte: () => compareValues(left, right) >= 0,
+    Lt: () => compareValues(left, right) < 0,
+    Lte: () => compareValues(left, right) <= 0,
   });
 }
 
@@ -408,14 +408,14 @@ export function evaluateNormalizedFilter(
     Eq: (current) => evaluateComparisonFilter(document, current),
     Neq: (current) => evaluateComparisonFilter(document, current),
     And: (current) =>
-      current.children.every((child) =>
-        evaluateNormalizedFilter(document, child),
+      current.children.every(
+        (child) => evaluateNormalizedFilter(document, child) === true,
       ),
     Or: (current) =>
-      current.children.some((child) =>
-        evaluateNormalizedFilter(document, child),
+      current.children.some(
+        (child) => evaluateNormalizedFilter(document, child) === true,
       ),
-    Not: (current) => !evaluateNormalizedFilter(document, current.child),
+    Not: (current) => evaluateNormalizedFilter(document, current.child) !== true,
     Gt: (current) => evaluateComparisonFilter(document, current),
     Gte: (current) => evaluateComparisonFilter(document, current),
     Lt: (current) => evaluateComparisonFilter(document, current),
@@ -666,6 +666,10 @@ export class QueryEngine {
 
     this.queryCleanup(queryId);
 
+    if (cursor !== null && !isInPage && page.length === 0) {
+      return this.paginate({ query, cursor: null, pageSize });
+    }
+
     return { page, isDone, continueCursor };
   }
 
@@ -713,6 +717,11 @@ export class QueryEngine {
     }
 
     this.queryCleanup(queryId);
+
+    if (cursor !== null && !isInPage && page.length === 0) {
+      return this.paginateAsync({ query, cursor: null, pageSize });
+    }
+
     return { page, isDone, continueCursor };
   }
 

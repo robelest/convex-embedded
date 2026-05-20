@@ -128,7 +128,10 @@ export function createQueryCacheStorage(
   };
 
   const pendingUpserts = new Map<string, SqliteCacheRow>();
-  const pendingDeletes = new Map<string, { refName: string; argsHash: string }>();
+  const pendingDeletes = new Map<
+    string,
+    { refName: string; argsHash: string }
+  >();
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
   let flushPromise: Promise<void> | null = null;
 

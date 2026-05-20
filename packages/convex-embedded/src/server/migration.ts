@@ -15,7 +15,6 @@ export {
   type MigrationLogger,
   type MigrationSchema,
   type MigrationStep,
-  type MigrationStepFn,
   type MigrationSystem,
   type MigrationSystemTable,
   type MigrationsMap,

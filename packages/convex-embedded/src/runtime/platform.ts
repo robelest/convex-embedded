@@ -1,8 +1,8 @@
-import type { StorageAdapter } from "@/storage/adapter";
 import type { EmbeddedCryptoProvider } from "@/runtime/crypto";
-import type { WorkScheduler } from "@/shared/work";
 import type { EmbeddedRuntime } from "@/runtime/embedded";
 import type { StorageSurface } from "@/runtime/storage";
+import type { WorkScheduler } from "@/shared/work";
+import type { StorageAdapter } from "@/storage/adapter";
 
 export type SessionEvent = { type: "authChanged" };
 
@@ -91,7 +91,14 @@ export interface EmbeddedPlatformAdapter {
     name: string;
     crypto: EmbeddedCryptoProvider;
   }): (StorageSurface & { close(): void }) | null;
+  uploadFetch?: typeof globalThis.fetch;
   connectivity?: ConnectivityAdapter;
   processorIdentity?: ProcessorIdentity;
   workScheduler?: WorkScheduler;
+  createMigrationLock?: (input: {
+    name: string;
+  }) => <T>(fn: () => Promise<T>) => Promise<T>;
+  createLeaderLock?: (input: {
+    name: string;
+  }) => <T>(fn: () => Promise<T>) => Promise<T>;
 }

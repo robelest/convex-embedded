@@ -8,7 +8,7 @@ import {
   toModuleId,
   type GeneratedRemoteManifest,
   type RegistryEntry,
-} from "@/cli/manifest";
+} from "@/codegen/manifest";
 
 import { stripRemoteOnlyExports, type StripResult } from "./strip";
 
@@ -25,6 +25,12 @@ export interface RunCodegenInput {
   /** Working directory to resolve paths against. Defaults to `process.cwd()`. */
   cwd?: string;
 }
+
+/** Preferred programmatic name for embedded registry generation. */
+export type GenerateEmbeddedRegistryInput = RunCodegenInput;
+
+/** Result returned by {@link generateEmbeddedRegistry}. */
+export type GenerateEmbeddedRegistryResult = RunCodegenResult;
 
 /**
  * Result of one {@link runCodegen} pass.
@@ -113,7 +119,11 @@ export async function runCodegen(
     const relativeToConvex = path.relative(convexRoot, filePath);
     const companionPath = path.join(strippedDir, relativeToConvex);
     await mkdir(path.dirname(companionPath), { recursive: true });
-    await writeFile(companionPath, prependGeneratedFileBanner(stripped), "utf8");
+    await writeFile(
+      companionPath,
+      prependGeneratedFileBanner(stripped),
+      "utf8",
+    );
     strippedFiles.push({ original: filePath, companion: companionPath });
   }
 
@@ -147,6 +157,8 @@ export async function runCodegen(
     companionFiles: strippedFiles.map((s) => s.companion),
   };
 }
+
+export const generateEmbeddedRegistry = runCodegen;
 
 function prependGeneratedFileBanner(stripped: StripResult): string {
   const removed = stripped.removedExports.length;

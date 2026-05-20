@@ -28,6 +28,7 @@ export interface ResolveInput {
   readonly convex: ConvexInput;
   readonly getIdentityKeyForSync: () => string | null;
   readonly getReplayPayloadVersion?: (refName: string) => number;
+  readonly uploadFetch?: typeof globalThis.fetch;
   readonly connectivity?: ConnectivityAdapter;
   readonly processorId?: string;
 }

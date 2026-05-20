@@ -652,13 +652,7 @@ async function readPendingUploadById(
 const pendingUploadPush: SystemFunctionDef = {
   type: "mutation",
   handler: (db, args) => {
-    const {
-      localStorageId,
-      sha256,
-      size,
-      contentType,
-      identityKey,
-    } = args as {
+    const { localStorageId, sha256, size, contentType, identityKey } = args as {
       localStorageId: string;
       sha256: string;
       size: number;

@@ -140,6 +140,7 @@ function createSharedFieldState<T>(input: {
         input.ref.table,
         input.ref.id,
       );
+      if (disposed) return;
       const next = input.read(document);
       if (
         !structuralEqual(next.value, state.currentValue) ||

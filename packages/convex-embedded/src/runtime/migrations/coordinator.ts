@@ -1,4 +1,3 @@
-import type { SchemaOp } from "@/storage/adapter";
 import type { EmbeddedRuntime } from "@/runtime/embedded";
 import { migratePendingEntries } from "@/runtime/migrations/pending";
 import type { MigrationCoordinatorOptions } from "@/runtime/migrations/types";
@@ -11,6 +10,7 @@ import {
   type MigrationRuntimeAdapter,
   type SystemIndexRange,
 } from "@/shared/migrations/migrate";
+import type { SchemaOp } from "@/storage/adapter";
 
 async function readPendingEntriesByIdentity(
   runtime: EmbeddedRuntime,
@@ -93,9 +93,11 @@ function createMigrationAdapter(
     tableList: (table) => runtime.db.listDocumentsAsync(table),
     tableGet: async (table, id) => {
       const docs = await runtime.db.listDocumentsAsync(table);
-      return (docs as Array<Record<string, unknown>>).find(
-        (doc) => doc._id === id,
-      ) ?? null;
+      return (
+        (docs as Array<Record<string, unknown>>).find(
+          (doc) => doc._id === id,
+        ) ?? null
+      );
     },
     tableInsert: (table, doc) =>
       txWrite(async () => runtime.db.insert(table, doc) as unknown as string),
@@ -113,9 +115,9 @@ function createMigrationAdapter(
       }),
 
     applySchemaOps: async (table: string, ops: readonly SchemaOp[]) => {
-      const storage = runtime.getStorage() as unknown as
-        | { applySchemaOps?: (t: string, o: readonly SchemaOp[]) => Promise<void> }
-        | null;
+      const storage = runtime.getStorage() as unknown as {
+        applySchemaOps?: (t: string, o: readonly SchemaOp[]) => Promise<void>;
+      } | null;
       if (!storage || typeof storage.applySchemaOps !== "function") return;
       await storage.applySchemaOps(table, ops);
     },
@@ -126,37 +128,45 @@ export async function runLocalMigrations(
   runtime: EmbeddedRuntime,
   options: MigrationCoordinatorOptions,
 ): Promise<void> {
-  const adapter = createMigrationAdapter(runtime);
+  const body = async () => {
+    const adapter = createMigrationAdapter(runtime);
 
-  for (const manifest of options.storeManifests) {
-    await runStoreManifest(runtime, options.identityKey, manifest);
-  }
+    for (const manifest of options.storeManifests) {
+      await runStoreManifest(runtime, options.identityKey, manifest);
+    }
 
-  await migratePendingEntries(
-    {
-      transaction: async <T>(work: () => Promise<T> | T): Promise<T> => {
-        runtime.db.startTransaction();
-        try {
-          const result = await work();
-          await runtime.db.commitAsync();
-          return result;
-        } catch (error) {
-          runtime.db.rollbackWrites();
-          throw error;
-        }
+    await migratePendingEntries(
+      {
+        transaction: async <T>(work: () => Promise<T> | T): Promise<T> => {
+          runtime.db.startTransaction();
+          try {
+            const result = await work();
+            await runtime.db.commitAsync();
+            return result;
+          } catch (error) {
+            runtime.db.rollbackWrites();
+            throw error;
+          }
+        },
+        list: async (identityKey) =>
+          readPendingEntriesByIdentity(runtime, identityKey),
+        patch: async (id, fields) => {
+          runtime.db.patch("_resolve_pending", id as never, fields);
+        },
       },
-      list: async (identityKey) =>
-        readPendingEntriesByIdentity(runtime, identityKey),
-      patch: async (id, fields) => {
-        runtime.db.patch("_resolve_pending", id as never, fields);
-      },
-    },
-    options.identityKey,
-    options.replayMetadata,
-  );
+      options.identityKey,
+      options.replayMetadata,
+    );
 
-  for (const [table, schema] of options.tableDefinitions) {
-    await runMigrations({ table, schema, adapter });
+    for (const [table, schema] of options.tableDefinitions) {
+      await runMigrations({ table, schema, adapter });
+    }
+  };
+
+  if (options.withMigrationLock) {
+    await options.withMigrationLock(body);
+  } else {
+    await body();
   }
 }
 

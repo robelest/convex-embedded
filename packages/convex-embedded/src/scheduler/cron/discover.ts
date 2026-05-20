@@ -3,11 +3,8 @@ import { createLogger } from "@/shared/logger";
 import { getRouteMode, type RouteMode } from "@/shared/route";
 import { recordCounter } from "@/tracing/metrics";
 
+import type { CronFunctionType, CronJobDefinition } from "./runner";
 import type { CronSchedule } from "./schedule";
-import type {
-  CronFunctionType,
-  CronJobDefinition,
-} from "./runner";
 
 const log = createLogger("cron-discover");
 
@@ -46,9 +43,14 @@ export async function discoverCronJobs(
   } catch {
     return [];
   }
-  const candidate = (cronsModule as { default?: unknown }).default ?? cronsModule;
+  const candidate =
+    (cronsModule as { default?: unknown }).default ?? cronsModule;
   const shape = candidate as CronsShape;
-  if (shape.isCrons !== true || typeof shape.crons !== "object" || shape.crons === null) {
+  if (
+    shape.isCrons !== true ||
+    typeof shape.crons !== "object" ||
+    shape.crons === null
+  ) {
     return [];
   }
 
@@ -132,10 +134,7 @@ function parseSchedule(raw: unknown): CronSchedule | null {
       }
       return null;
     case "daily":
-      if (
-        typeof r.hourUTC === "number" &&
-        typeof r.minuteUTC === "number"
-      ) {
+      if (typeof r.hourUTC === "number" && typeof r.minuteUTC === "number") {
         return { type: "daily", hourUTC: r.hourUTC, minuteUTC: r.minuteUTC };
       }
       return null;

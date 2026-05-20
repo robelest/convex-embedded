@@ -7,7 +7,9 @@ export class PubSub<T> {
     for (const fn of this.subs) {
       try {
         fn(value);
-      } catch {}
+      } catch (err) {
+        console.warn("[convex-embedded] pubsub listener error", err);
+      }
     }
   }
 

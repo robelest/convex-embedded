@@ -25,6 +25,7 @@ export interface LoadCoordinatorInput {
   replayMetadata: Map<string, PendingReplayMeta>;
   loadReplayMetadata: () => Promise<Map<string, PendingReplayMeta>>;
   storeManifests: StoreMigrationManifest[];
+  withMigrationLock?: <T>(fn: () => Promise<T>) => Promise<T>;
   onIdentityError: (error: unknown) => void;
   onLoadError: (error: unknown) => void;
   onRefreshError: (
@@ -49,11 +50,13 @@ export async function attachPlatformStorage(input: {
     async (span) => {
       const started = now();
 
-      const storage = await withSpan("convex-embedded.platform.openStorage", () =>
-        input.platform.openStorage({
-          name: input.name,
-          runtime: input.runtime,
-        }),
+      const storage = await withSpan(
+        "convex-embedded.platform.openStorage",
+        () =>
+          input.platform.openStorage({
+            name: input.name,
+            runtime: input.runtime,
+          }),
       );
 
       if (storage) {
@@ -67,11 +70,9 @@ export async function attachPlatformStorage(input: {
         await withSpan("convex-embedded.db.hydrate", () =>
           input.runtime.db.hydrate(),
         );
-        const hasPersistedRows =
-          prefetchTableNames.length > 0 &&
-          prefetchTableNames.some((tableName) =>
-            input.runtime.db.hasDocumentsForTable(tableName),
-          );
+        const hasPersistedRows = prefetchTableNames.some((tableName) =>
+          input.runtime.db.hasDocumentsForTable(tableName),
+        );
         if (input.prefetch && !hasPersistedRows) {
           await withSpan("convex-embedded.ingestPrefetchUngated", () =>
             input.runtime.ingestPrefetchUngated(input.prefetch!),
@@ -188,6 +189,7 @@ export class LoadCoordinator {
           tableDefinitions: this.input.tableDefinitions,
           replayMetadata: this.input.replayMetadata,
           storeManifests: this.input.storeManifests,
+          withMigrationLock: this.input.withMigrationLock,
         }),
       );
 

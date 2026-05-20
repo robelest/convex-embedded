@@ -133,11 +133,7 @@ function nextHourly(nowMs: number, minuteUTC: number): number {
   return target > nowMs ? target : target + 3_600_000;
 }
 
-function nextDaily(
-  nowMs: number,
-  hourUTC: number,
-  minuteUTC: number,
-): number {
+function nextDaily(nowMs: number, hourUTC: number, minuteUTC: number): number {
   const d = new Date(nowMs);
   const target = Date.UTC(
     d.getUTCFullYear(),

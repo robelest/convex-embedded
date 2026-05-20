@@ -60,6 +60,7 @@ export class IdMap {
   private _mutationFn: LocalMutationExecutorFn | null;
   private _getIdentityKey: (() => string | null) | null;
   private _hasLocalDocumentId: LocalDocumentPresenceFn | null;
+  private _schemaIdFields: Set<string>;
 
   constructor(
     localClient: ConvexClient,
@@ -67,12 +68,14 @@ export class IdMap {
     mutationFn?: LocalMutationExecutorFn,
     getIdentityKey?: () => string | null,
     hasLocalDocumentId?: LocalDocumentPresenceFn,
+    schemaIdFields?: Set<string>,
   ) {
     this._localClient = localClient;
     this._queryFn = queryFn ?? null;
     this._mutationFn = mutationFn ?? null;
     this._getIdentityKey = getIdentityKey ?? null;
     this._hasLocalDocumentId = hasLocalDocumentId ?? null;
+    this._schemaIdFields = schemaIdFields ?? new Set();
   }
 
   /**
@@ -284,9 +287,10 @@ export class IdMap {
   }
 
   private _shouldTranslateKey(key: string): boolean {
-    return (
-      key === "_id" || key === "id" || key.endsWith("Id") || key.endsWith("Ids")
-    );
+    if (key === "_id" || key === "id" || key.endsWith("Id") || key.endsWith("Ids")) {
+      return true;
+    }
+    return this._schemaIdFields.has(key);
   }
 
   private _translateValue(
@@ -299,9 +303,13 @@ export class IdMap {
     }
 
     if (Array.isArray(value)) {
-      return value.map((item) =>
-        this._translateValue(item, mapString, allowStringRewrite),
-      );
+      let changed = false;
+      const translated = value.map((item) => {
+        const result = this._translateValue(item, mapString, allowStringRewrite);
+        if (result !== item) changed = true;
+        return result;
+      });
+      return changed ? translated : value;
     }
 
     if (
@@ -312,19 +320,49 @@ export class IdMap {
       return value;
     }
 
-    return Object.fromEntries(
-      Object.entries(value).map(([key, entryValue]) => [
-        key,
-        this._translateValue(
-          entryValue,
-          mapString,
-          this._shouldTranslateKey(key),
-        ),
-      ]),
-    );
+    const entries = Object.entries(value);
+    let changed = false;
+    const translated = entries.map(([key, entryValue]) => {
+      const result = this._translateValue(
+        entryValue,
+        mapString,
+        this._shouldTranslateKey(key),
+      );
+      if (result !== entryValue) changed = true;
+      return [key, result] as const;
+    });
+    return changed ? Object.fromEntries(translated) : value;
   }
 
   private _isOpaqueValue(value: unknown): boolean {
     return value instanceof ArrayBuffer || value instanceof Uint8Array;
   }
+}
+
+function validatorContainsId(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const v = value as Record<string, unknown>;
+  if (v.kind === "id" || v.type === "id") return true;
+  if (v.kind === "union" || v.type === "union") {
+    const members = (v.members ?? v.value) as unknown[] | undefined;
+    return Array.isArray(members) && members.some(validatorContainsId);
+  }
+  if (v.kind === "array" || v.type === "array") {
+    return validatorContainsId(v.value);
+  }
+  return false;
+}
+
+export function extractSchemaIdFields(
+  shapes: Iterable<Record<string, unknown>>,
+): Set<string> {
+  const fields = new Set<string>();
+  for (const shape of shapes) {
+    for (const [name, value] of Object.entries(shape)) {
+      if (validatorContainsId(value)) {
+        fields.add(name);
+      }
+    }
+  }
+  return fields;
 }

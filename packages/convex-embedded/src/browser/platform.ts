@@ -1,6 +1,9 @@
 import { BrowserSessionBroadcast } from "@/browser/session";
 import { openBrowserStorage } from "@/browser/sqlite/adapter";
-import { createBrowserStorageSurface } from "@/browser/storage";
+import {
+  createBrowserStorageSurface,
+  createBrowserUploadFetch,
+} from "@/browser/storage";
 import { createBrowserWorkScheduler } from "@/browser/work";
 import { BrowserWriteBroadcast } from "@/browser/write";
 import { createAmbientCryptoProvider } from "@/runtime/crypto";
@@ -11,6 +14,10 @@ import {
 import { createLogger } from "@/shared/logger";
 
 const log = createLogger("browser");
+
+function hasWebLocks(): boolean {
+  return typeof navigator !== "undefined" && navigator.locks != null;
+}
 
 const SQLITE_FILE_SUFFIXES = ["", "-journal", "-wal"] as const;
 
@@ -134,10 +141,25 @@ export function createBrowserPlatformAdapter(): EmbeddedPlatformAdapter {
     createStorageSurface({ runtime, crypto }) {
       return createBrowserStorageSurface(runtime, crypto);
     },
+    uploadFetch: createBrowserUploadFetch(),
     connectivity: createAmbientConnectivityAdapter(),
     processorIdentity: {
       getProcessorId: createProcessorId,
     },
     workScheduler: createBrowserWorkScheduler(),
+    createMigrationLock: hasWebLocks()
+      ? ({ name }) => {
+          const lockName = `convex-embedded:${name}:migrations`;
+          return <T>(fn: () => Promise<T>): Promise<T> =>
+            navigator.locks.request(lockName, () => fn());
+        }
+      : undefined,
+    createLeaderLock: hasWebLocks()
+      ? ({ name }) => {
+          const lockName = `convex-embedded:${name}:leader`;
+          return <T>(fn: () => Promise<T>): Promise<T> =>
+            navigator.locks.request(lockName, () => fn());
+        }
+      : undefined,
   };
 }

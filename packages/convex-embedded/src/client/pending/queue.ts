@@ -54,7 +54,11 @@ export interface PendingEntry {
   blockedReason?: "reauthRequired" | "authorizationDenied" | "scopeChanged";
   /** True when this entry was loaded from storage during hydrate. */
   hydrated?: boolean;
+  /** Number of times remote replay has been attempted and failed. */
+  retryCount?: number;
 }
+
+export const MAX_REPLAY_RETRIES = 5;
 
 export class PendingQueueStorageError extends Error {
   readonly entry: PendingEntry;
@@ -206,10 +210,7 @@ export class PendingQueue {
         hydrated: false,
       };
       this._entries.push(ephemeralEntry);
-      storageError = new PendingQueueStorageError(
-        ephemeralEntry,
-        err as Error,
-      );
+      storageError = new PendingQueueStorageError(ephemeralEntry, err as Error);
       throw storageError;
     }
   }
@@ -486,6 +487,9 @@ export class PendingQueue {
     }
 
     const matchingEntries = this._entries.filter((entry) => {
+      if (entry.state === "processing") {
+        return false;
+      }
       if (entry.table !== candidate.table) {
         return false;
       }
@@ -502,14 +506,16 @@ export class PendingQueue {
       return null;
     }
 
-    return Promise.all(matchingEntries.map((entry) => this.remove(entry))).then(
-      () => {
+    return Promise.all(matchingEntries.map((entry) => this.remove(entry)))
+      .then(() => {
         log.debug(
           `pending-queue: collapsed transient create/delete pair (table: ${candidate.table}, queue size: ${this._entries.length})`,
           { localResult },
         );
-      },
-    );
+      })
+      .catch((err) => {
+        log.warn("pending-queue: error during transient collapse cleanup", err);
+      });
   }
 
   private _extractEntryLogicalId(entry: PendingEntry): string | null {

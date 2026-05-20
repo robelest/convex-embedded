@@ -1,4 +1,3 @@
-import { Platform } from "react-native";
 import {
   ANDROID_DATABASE_PATH,
   IOS_LIBRARY_PATH,
@@ -6,12 +5,10 @@ import {
   type DB,
   type Scalar,
 } from "@op-engineering/op-sqlite";
+import { Platform } from "react-native";
 
 import { logSlow, nowMs } from "@/shared/perf";
-import {
-  createDefaultWorkScheduler,
-  type WorkScheduler,
-} from "@/shared/work";
+import { createDefaultWorkScheduler, type WorkScheduler } from "@/shared/work";
 import { SqliteAdapter } from "@/storage/sqlite/adapter";
 import type { InternalTableSpec } from "@/storage/sqlite/factory";
 import { withSpan } from "@/tracing/spans";
@@ -51,7 +48,7 @@ export async function openOpSqliteStorage(
   const scheduler = options.workScheduler ?? createDefaultWorkScheduler();
 
   await database.execute("PRAGMA journal_mode = WAL");
-  await database.execute("PRAGMA synchronous = OFF");
+  await database.execute("PRAGMA synchronous = NORMAL");
   await database.execute("PRAGMA temp_store = MEMORY");
   await database.execute("PRAGMA busy_timeout = 5000");
   await database.execute("PRAGMA cache_size = -32000");
@@ -81,10 +78,10 @@ export async function openOpSqliteStorage(
     details?: Record<string, unknown>,
   ): Promise<T> => {
     const queuedAt = nowMs();
-    const op = queue.catch(() => undefined).then(async () =>
-      withSpan(
-        `convex-embedded.sqlite.${label}`,
-        async (span) => {
+    const op = queue
+      .catch(() => undefined)
+      .then(async () =>
+        withSpan(`convex-embedded.sqlite.${label}`, async (span) => {
           const queueWaitMs = nowMs() - queuedAt;
           span.setAttributes({
             "convex.sqlite.queue_wait_ms": +queueWaitMs.toFixed(1),
@@ -107,16 +104,17 @@ export async function openOpSqliteStorage(
             });
             logSlow(`sqlite.${label}`, startedAt, details);
           }
-        },
-      ),
-    );
+        }),
+      );
     queue = op.catch(() => undefined);
     return op;
   };
 
   return new SqliteAdapter(
     {
-      query: async <T extends Record<string, unknown> = Record<string, unknown>>(
+      query: async <
+        T extends Record<string, unknown> = Record<string, unknown>,
+      >(
         sql: string,
         params?: readonly unknown[],
       ): Promise<T[]> => {

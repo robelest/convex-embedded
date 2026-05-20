@@ -73,7 +73,6 @@ export type {
   MigrationRuntimeAdapter,
   MigrationSchema,
   MigrationStep,
-  MigrationStepFn,
   MigrationSystem,
   MigrationSystemTable,
   MigrationsMap,

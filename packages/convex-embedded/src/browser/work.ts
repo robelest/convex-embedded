@@ -31,9 +31,7 @@ export function createBrowserWorkScheduler(): WorkScheduler {
 
   return {
     post(priority: WorkPriority, work: () => void) {
-      void native
-        .postTask(work, { priority })
-        .catch(() => undefined);
+      void native.postTask(work, { priority }).catch(() => undefined);
     },
     yield(): Promise<void> {
       lastYieldMs = performance.now();

@@ -14,6 +14,7 @@ import { defineTable, mutationGeneric, queryGeneric } from "convex/server";
 import type { PropertyValidators, Validator } from "convex/values";
 import { v } from "convex/values";
 
+import type { MigrationsMap } from "@/shared/migrations/types";
 import type { FieldRef } from "@/shared/types";
 
 import {
@@ -22,7 +23,6 @@ import {
   type FieldKindForDescriptor,
   type FieldValueForDescriptor,
 } from "./core.js";
-import type { MigrationsMap } from "@/shared/migrations/types";
 import { extractValidator } from "./fields.js";
 import {
   PENDING_REPLAY_META,
@@ -202,6 +202,7 @@ export interface RuntimeHooks {
         vector: ArrayBuffer;
         lastSeq: number | null;
       }>;
+      docIds?: string[];
       scopeArgs?: Record<string, unknown>;
       fullCursor?: string | null;
     },
@@ -372,6 +373,7 @@ export function embeddedTable<
           lastSeq: v.union(v.number(), v.null()),
         }),
       ),
+      docIds: v.optional(v.array(v.string())),
       scopeArgs: v.optional(v.any()),
       fullCursor: v.optional(v.union(v.string(), v.null())),
     },
@@ -399,6 +401,7 @@ export function embeddedTable<
           vector: ArrayBuffer;
           lastSeq: number | null;
         }>;
+        docIds?: string[];
         scopeArgs?: Record<string, unknown>;
         fullCursor?: string | null;
       },

@@ -41,6 +41,17 @@ export function structuralEqual(left: unknown, right: unknown): boolean {
     return arrayBufferEqual(left, right);
   }
 
+  if (ArrayBuffer.isView(left) && ArrayBuffer.isView(right)) {
+    if (left.constructor !== right.constructor) return false;
+    const l = new Uint8Array(left.buffer, left.byteOffset, left.byteLength);
+    const r = new Uint8Array(right.buffer, right.byteOffset, right.byteLength);
+    if (l.length !== r.length) return false;
+    for (let i = 0; i < l.length; i++) {
+      if (l[i] !== r[i]) return false;
+    }
+    return true;
+  }
+
   if (Array.isArray(left) && Array.isArray(right)) {
     if (left.length !== right.length) {
       return false;

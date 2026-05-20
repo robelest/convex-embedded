@@ -32,10 +32,7 @@ function applyPatchToDoc(
   return { ...doc, ...patch };
 }
 
-function transformValue(
-  value: unknown,
-  effect: EffectDescriptor,
-): unknown | undefined {
+function transformValue(value: unknown, effect: EffectDescriptor): unknown {
   if (effect.kind === "patch" || effect.kind === "delete") {
     return transformForExistingId(value, effect);
   }
@@ -45,8 +42,12 @@ function transformValue(
 
 function transformForExistingId(
   value: unknown,
-  effect: { kind: "patch" | "delete"; id: string; patch?: Record<string, unknown> },
-): unknown | undefined {
+  effect: {
+    kind: "patch" | "delete";
+    id: string;
+    patch?: Record<string, unknown>;
+  },
+): unknown {
   // Single document
   const id = getId(value);
   if (id !== null) {
@@ -68,7 +69,8 @@ function transformForExistingId(
         if (effect.kind === "delete") {
           continue;
         }
-        const patch = (effect as { patch?: Record<string, unknown> }).patch ?? {};
+        const patch =
+          (effect as { patch?: Record<string, unknown> }).patch ?? {};
         nextPage.push(applyPatchToDoc(item as PlainObject, patch));
       } else {
         nextPage.push(item);
@@ -87,7 +89,8 @@ function transformForExistingId(
       if (itemId === effect.id) {
         touched = true;
         if (effect.kind === "delete") continue;
-        const patch = (effect as { patch?: Record<string, unknown> }).patch ?? {};
+        const patch =
+          (effect as { patch?: Record<string, unknown> }).patch ?? {};
         next.push(applyPatchToDoc(item as PlainObject, patch));
       } else {
         next.push(item);
@@ -112,14 +115,16 @@ export function effectToTransitions(
 ): OptimisticTransitionUpdate[] {
   const updates: OptimisticTransitionUpdate[] = [];
 
-  for (const record of cache.entries()) {
+  const targeted = cache.entriesByTable(effect.table);
+  const source = targeted.length > 0 ? targeted : cache.entries();
+
+  for (const record of source) {
     const tablesRead = cache.getTablesRead(record.refName, record.args);
     if (tablesRead && tablesRead.size > 0 && !tablesRead.has(effect.table)) {
       continue;
     }
     const next = transformValue(record.entry.value, effect);
     if (next === undefined) continue;
-    if (next === null) continue;
     updates.push({
       refName: record.refName,
       args: record.args,

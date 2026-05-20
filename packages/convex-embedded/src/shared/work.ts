@@ -77,12 +77,15 @@ const macrotask: (work: () => void) => void =
 
 const idle: (work: () => void) => void =
   typeof globalThis !== "undefined" &&
-  typeof (globalThis as { requestIdleCallback?: unknown }).requestIdleCallback ===
-    "function"
+  typeof (globalThis as { requestIdleCallback?: unknown })
+    .requestIdleCallback === "function"
     ? (work) => {
         (
           globalThis as {
-            requestIdleCallback: (cb: () => void, opts?: { timeout: number }) => void;
+            requestIdleCallback: (
+              cb: () => void,
+              opts?: { timeout: number },
+            ) => void;
           }
         ).requestIdleCallback(work, { timeout: 100 });
       }
@@ -123,14 +126,16 @@ export function createDefaultWorkScheduler(): WorkScheduler {
     },
     yield(): Promise<void> {
       lastYieldMs =
-        typeof performance !== "undefined" && typeof performance.now === "function"
+        typeof performance !== "undefined" &&
+        typeof performance.now === "function"
           ? performance.now()
           : Date.now();
       return new Promise((resolve) => macrotask(resolve));
     },
     shouldYield(): boolean {
       const now =
-        typeof performance !== "undefined" && typeof performance.now === "function"
+        typeof performance !== "undefined" &&
+        typeof performance.now === "function"
           ? performance.now()
           : Date.now();
       if (now - lastYieldMs >= FRAME_BUDGET_MS) {
@@ -140,4 +145,3 @@ export function createDefaultWorkScheduler(): WorkScheduler {
     },
   };
 }
-

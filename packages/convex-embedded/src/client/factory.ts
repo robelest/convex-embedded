@@ -23,7 +23,6 @@ import {
 import { EmbeddedQueryCache } from "@/client/cache";
 import {
   deleteEmbeddedClientEntry,
-  extractEmbeddedTableDefinitions,
   registerEmbeddedClientEntry,
 } from "@/client/entry";
 import { ID_MAP_STORE_MIGRATIONS } from "@/client/ids";
@@ -50,8 +49,8 @@ import type { EmbeddedPlatformAdapter } from "@/runtime/platform";
 import type { QueryCacheStorage } from "@/runtime/sqlite/cache";
 import { SCHEDULED_FUNCTIONS_STORE_MIGRATIONS } from "@/scheduler/executor";
 import { createLogger } from "@/shared/logger";
+import { extractEmbeddedTableDefinitions } from "@/shared/schema";
 import type { PendingReplayMeta } from "@/shared/symbols";
-import { SqliteAdapter } from "@/storage/sqlite/adapter";
 import { PubSub } from "@/utils/pubsub";
 import { DisposableScope } from "@/utils/scope";
 
@@ -136,8 +135,11 @@ function createResolveAttachment(input: {
   cache: EmbeddedQueryCache;
   getCacheStorage: () => QueryCacheStorage | null;
   knownTables: ReadonlySet<string>;
+  uploadFetch?: typeof globalThis.fetch;
+  leaderLock?: <T>(fn: () => Promise<T>) => Promise<T>;
 }): ResolveAttachment {
-  const { runtime, connectivity, processorId } = input.platformConfig;
+  const { runtime, platform, connectivity, processorId } =
+    input.platformConfig;
 
   return attachResolve({
     client: input.client,
@@ -152,6 +154,8 @@ function createResolveAttachment(input: {
     cache: input.cache,
     getCacheStorage: input.getCacheStorage,
     knownTables: input.knownTables,
+    uploadFetch: input.uploadFetch,
+    leaderLock: input.leaderLock,
   });
 }
 
@@ -275,6 +279,7 @@ export function createEmbeddedClient(input: {
       PENDING_STORE_MIGRATIONS,
       PENDING_UPLOADS_STORE_MIGRATIONS,
     ],
+    withMigrationLock: platform.createMigrationLock?.({ name: dbName }),
     onIdentityError: (error) => {
       log.warn(
         "[factory] initialize identity failed, falling back to null",
@@ -308,10 +313,7 @@ export function createEmbeddedClient(input: {
       installedStorageSurface = storageSurface;
     })
     .catch((error) => {
-      log.error(
-        "storage surface install skipped after storage failure",
-        error,
-      );
+      log.error("storage surface install skipped after storage failure", error);
     });
 
   const transport = runtime.createTransport(load.ready);
@@ -365,6 +367,8 @@ export function createEmbeddedClient(input: {
         cache: queryCache,
         getCacheStorage: () => queryCacheStorage,
         knownTables: new Set(tableDefinitions.keys()),
+        uploadFetch: platform.uploadFetch,
+        leaderLock: platform.createLeaderLock?.({ name: dbName }),
       })
     : null;
 
@@ -373,12 +377,14 @@ export function createEmbeddedClient(input: {
       try {
         await resolveAttachment.close();
         deleteResolveEntry(client);
-      } catch {}
+      } catch (err) {
+        log.warn("error during resolve teardown", err);
+      }
     });
   }
 
   if (!options.remote) {
-    patchRoutedConvexClient({
+    const patchHandle = patchRoutedConvexClient({
       client,
       runtime,
       getRefName: getFunctionRefName,
@@ -398,6 +404,7 @@ export function createEmbeddedClient(input: {
       getCacheStorage: () => queryCacheStorage,
       knownTables: new Set(tableDefinitions.keys()),
     });
+    rootScope.addFinalizer(() => patchHandle.dispose());
   }
 
   authEntry.getPendingCount = () => resolveAttachment?.getPendingCount?.() ?? 0;
@@ -425,9 +432,11 @@ export function createEmbeddedClient(input: {
   rootScope.addFinalizer(() => unsubscribeSessionFanout());
 
   if (platform.workScheduler) {
-    const setWorkScheduler = (client as unknown as {
-      setWorkScheduler?: (s: unknown) => void;
-    }).setWorkScheduler;
+    const setWorkScheduler = (
+      client as unknown as {
+        setWorkScheduler?: (s: unknown) => void;
+      }
+    ).setWorkScheduler;
     if (typeof setWorkScheduler === "function") {
       setWorkScheduler.call(client, platform.workScheduler);
     }

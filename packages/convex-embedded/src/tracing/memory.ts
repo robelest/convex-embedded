@@ -1,5 +1,5 @@
 import { metrics, trace } from "@opentelemetry/api";
-import { Resource } from "@opentelemetry/resources";
+import type { Resource } from "@opentelemetry/resources";
 import {
   AggregationTemporality,
   DataPointType,
@@ -114,7 +114,7 @@ function collectExportedMetrics(
             name: metric.descriptor.name,
             kind,
             value: typeof rawValue === "number" ? rawValue : 0,
-            attributes: { ...(point.attributes ?? {}) },
+            attributes: { ...point.attributes },
             timeMs: hrTimeToMs(point.endTime),
           });
         }

@@ -107,6 +107,10 @@ export async function openBrowserSqlClient(options: {
     rejectAllPending(error);
   });
 
+  worker.addEventListener("messageerror", () => {
+    rejectAllPending(new Error("Worker message deserialization failed"));
+  });
+
   const request = <K extends WorkerMethod>(
     method: K,
     payload: WorkerRequestMap[K],

@@ -55,18 +55,12 @@ export interface MigrationLogger {
   error(message: string, ...rest: unknown[]): void;
 }
 
-export type MigrationStepFn = <T>(
-  name: string,
-  fn: () => Promise<T>,
-) => Promise<T>;
-
 export interface MigrationContext {
   table: string;
   db: MigrationDb;
   schema: MigrationSchema;
   system: MigrationSystem;
   log: MigrationLogger;
-  step: MigrationStepFn;
 }
 
 export type MigrationStep = (ctx: MigrationContext) => Promise<void> | void;

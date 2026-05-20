@@ -4,11 +4,11 @@ import * as WaSqlite from "wa-sqlite";
 import SQLiteESMFactory from "wa-sqlite/dist/wa-sqlite.mjs";
 import { OPFSCoopSyncVFS } from "wa-sqlite/src/examples/OPFSCoopSyncVFS.js";
 
-import { createSqliteStorage } from "@/storage/sqlite/factory";
 import type { StoredDocument } from "@/runtime/db/types";
 import { createLogger } from "@/shared/logger";
 import type { SqlStorageAdapter } from "@/storage/adapter";
 import type { StoredDocumentWithTable } from "@/storage/adapter";
+import { createSqliteStorage } from "@/storage/sqlite/factory";
 
 import type {
   BlobPayload,
@@ -33,7 +33,9 @@ async function resetWorkerState() {
     if (sqlite3 !== null && db !== null) {
       await Promise.resolve(sqlite3.close(db));
     }
-  } catch {}
+  } catch (err) {
+    console.warn("[convex-embedded] error closing sqlite during reset", err);
+  }
   sqlite3 = null;
   db = null;
   sqliteModule = null;
@@ -167,26 +169,13 @@ async function handleInit(name: string) {
         },
         execute,
         executeBatch: async (statements) => {
-          await execute("BEGIN");
-          try {
-            for (const statement of statements) {
-              await execute(
-                statement.sql,
-                statement.params as unknown[] | undefined,
-              );
-            }
-            await execute("COMMIT");
-          } catch (error) {
-            try {
-              await execute("ROLLBACK");
-            } catch {}
-            throw error;
-          }
+          await runBatch(statements);
         },
       },
     });
     await execute("PRAGMA temp_store = MEMORY");
     await execute("PRAGMA cache_size = -8000");
+    await execute("PRAGMA busy_timeout = 5000");
     const ended = globalThis.performance?.now?.() ?? Date.now();
     log.debug(
       `init: wasm=${(moduleReady - started).toFixed(1)}ms vfs=${(vfsReady - moduleReady).toFixed(1)}ms open=${(openReady - vfsReady).toFixed(1)}ms schema=${(ended - openReady).toFixed(1)}ms total=${(ended - started).toFixed(1)}ms`,
@@ -213,22 +202,28 @@ async function handleExecute(input: {
   return null;
 }
 
-async function handleExecuteBatch(input: {
-  statements: Array<{ sql: string; params?: unknown[] }>;
-}): Promise<null> {
+async function runBatch(
+  statements: ReadonlyArray<{ sql: string; params?: unknown[] }>,
+): Promise<void> {
   await execute("BEGIN");
   try {
-    for (const statement of input.statements) {
+    for (const statement of statements) {
       await execute(statement.sql, statement.params);
     }
     await execute("COMMIT");
-    return null;
   } catch (error) {
     try {
       await execute("ROLLBACK");
     } catch {}
     throw error;
   }
+}
+
+async function handleExecuteBatch(input: {
+  statements: Array<{ sql: string; params?: unknown[] }>;
+}): Promise<null> {
+  await runBatch(input.statements);
+  return null;
 }
 
 async function handleListDocuments(

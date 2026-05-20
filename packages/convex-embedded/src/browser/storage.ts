@@ -21,16 +21,9 @@ type ObjectUrlEntry = {
 
 const uploadSurfaces = new Map<string, BrowserStorageSurface>();
 
-let originalFetch: typeof globalThis.fetch | null = null;
-
-function ensureFetchInterceptor(): void {
-  if (originalFetch !== null || typeof globalThis.fetch !== "function") {
-    return;
-  }
-
-  log.info("installing browser fetch interceptor for local uploads");
-  originalFetch = globalThis.fetch.bind(globalThis);
-  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+export function createBrowserUploadFetch(): typeof globalThis.fetch {
+  const nativeFetch = globalThis.fetch.bind(globalThis);
+  return ((input: RequestInfo | URL, init?: RequestInit) => {
     const requestUrl =
       typeof input === "string"
         ? input
@@ -39,13 +32,13 @@ function ensureFetchInterceptor(): void {
           : input.url;
 
     if (!requestUrl.includes(UPLOAD_PATH_PREFIX)) {
-      return await originalFetch!(input, init);
+      return nativeFetch(input, init);
     }
 
     const request = new Request(input, init);
     const url = new URL(request.url, globalThis.location?.origin);
     if (!url.pathname.startsWith(UPLOAD_PATH_PREFIX)) {
-      return await originalFetch!(input, init);
+      return nativeFetch(input, init);
     }
 
     const token = url.pathname.slice(UPLOAD_PATH_PREFIX.length);
@@ -53,16 +46,18 @@ function ensureFetchInterceptor(): void {
     const surface = uploadSurfaces.get(token);
     if (surface === undefined) {
       log.warn(`upload token ${token} was missing or expired`);
-      return new Response(
-        JSON.stringify({ error: "Upload URL is invalid or expired." }),
-        {
-          status: 404,
-          headers: { "Content-Type": "application/json" },
-        },
+      return Promise.resolve(
+        new Response(
+          JSON.stringify({ error: "Upload URL is invalid or expired." }),
+          {
+            status: 404,
+            headers: { "Content-Type": "application/json" },
+          },
+        ),
       );
     }
 
-    return await surface.handleUpload(token, request);
+    return surface.handleUpload(token, request);
   }) as typeof globalThis.fetch;
 }
 
@@ -71,24 +66,12 @@ function uploadUrlForToken(token: string): string {
   return new URL(`${UPLOAD_PATH_PREFIX}${token}`, origin).toString();
 }
 
-function maybeRestoreFetch(): void {
-  if (uploadSurfaces.size > 0 || originalFetch === null) {
-    return;
-  }
-
-  log.info("restoring original fetch after upload surface cleanup");
-  globalThis.fetch = originalFetch;
-  originalFetch = null;
-}
-
 export function createBrowserStorageSurface(
   runtime: EmbeddedRuntime,
   crypto: EmbeddedCryptoProvider = runtime.crypto ??
     createAmbientCryptoProvider(),
 ): BrowserStorageSurface {
   const objectUrls = new Map<string, ObjectUrlEntry>();
-
-  ensureFetchInterceptor();
 
   return {
     async getUrl(storageId: string): Promise<string | null> {
@@ -123,6 +106,7 @@ export function createBrowserStorageSurface(
     async generateUploadUrl(): Promise<string> {
       const token = crypto.randomUUID();
       uploadSurfaces.set(token, this);
+      setTimeout(() => uploadSurfaces.delete(token), 5 * 60_000);
       const url = uploadUrlForToken(token);
       log.info(`generated local upload URL for token ${token}`);
       return url;
@@ -185,7 +169,6 @@ export function createBrowserStorageSurface(
         URL.revokeObjectURL(url);
       }
       objectUrls.clear();
-      maybeRestoreFetch();
     },
   };
 }

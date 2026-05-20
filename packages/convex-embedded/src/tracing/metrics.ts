@@ -96,10 +96,7 @@ function ensureGaugeProvider(): void {
  *
  * @public
  */
-export function registerGauge(
-  name: string,
-  read: () => number,
-): () => void {
+export function registerGauge(name: string, read: () => number): () => void {
   ensureGaugeProvider();
   gaugeRegistrations.set(name, read);
   return () => {

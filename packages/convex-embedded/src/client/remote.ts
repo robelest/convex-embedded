@@ -171,6 +171,17 @@ type RemoteGlobal = typeof globalThis & {
   [RESOLVE_ENTRIES]?: WeakMap<ConvexClient, ResolveEntry>;
 };
 
+async function closeRemoteClientSafely(
+  remoteClient: ConvexClient,
+): Promise<void> {
+  await Promise.race([
+    Promise.resolve(remoteClient.close()),
+    new Promise<void>((resolve) => {
+      setTimeout(resolve, 1_000);
+    }),
+  ]);
+}
+
 function getResolveEntriesStore() {
   const globalState = globalThis as RemoteGlobal;
   globalState[RESOLVE_ENTRIES] ??= new WeakMap<ConvexClient, ResolveEntry>();
@@ -368,6 +379,7 @@ async function discoverAndStart(input: ResolveInput): Promise<void> {
     convex,
     getIdentityKeyForSync,
     getReplayPayloadVersion,
+    uploadFetch,
     connectivity,
     processorId,
   } = input;
@@ -409,6 +421,7 @@ async function discoverAndStart(input: ResolveInput): Promise<void> {
           retryDelayMs: resolveOpts.retryDelayMs,
           getIdentityKey: getIdentityKeyForSync,
           getReplayPayloadVersion,
+          uploadFetch,
           connectivity,
           processorId,
         });
@@ -464,11 +477,13 @@ export function attachResolve(input: {
   convex: ConvexInput;
   getIdentityKeyForSync: () => string | null;
   getReplayPayloadVersion?: (refName: string) => number;
+  uploadFetch?: typeof globalThis.fetch;
   connectivity?: ConnectivityAdapter;
   processorId?: string;
   cache?: EmbeddedQueryCache;
   getCacheStorage?: () => QueryCacheStorage | null;
   knownTables?: ReadonlySet<string>;
+  leaderLock?: <T>(fn: () => Promise<T>) => Promise<T>;
 }): ResolveAttachment {
   const {
     client,
@@ -506,8 +521,10 @@ export function attachResolve(input: {
 
   entry.scope.addFinalizer(async () => {
     try {
-      await Promise.resolve(remoteClient.close());
-    } catch {}
+      await closeRemoteClientSafely(remoteClient);
+    } catch (err) {
+      console.warn("[convex-embedded] error during remote client teardown", err);
+    }
   });
   entry.scope.addFinalizer(() => {
     entry.stateHub.shutdown();
@@ -520,7 +537,7 @@ export function attachResolve(input: {
     runtime.setUploadQueueEnabled(false);
   });
 
-  patchRoutedConvexClient({
+  const patchHandle = patchRoutedConvexClient({
     client,
     runtime,
     remoteClient,
@@ -539,7 +556,9 @@ export function attachResolve(input: {
       if (!tableName) return;
       const filtered = readArgs
         ? Object.fromEntries(
-            Object.entries(readArgs).filter(([key]) => key !== "paginationOpts"),
+            Object.entries(readArgs).filter(
+              ([key]) => key !== "paginationOpts",
+            ),
           )
         : undefined;
       const scopeArgs =
@@ -553,6 +572,8 @@ export function attachResolve(input: {
       executeLocalMutation(entry, runtime, ref, args, enqueueForReplay),
     translateLocalArgsToRuntime: (args) =>
       entry.engine?.idMap?.translateClientIdsToRuntime(args) ?? args,
+    translateClientArgsToRemote: (args) =>
+      entry.engine?.idMap?.translateLocalIdsToRemote(args) ?? args,
     translateLocalResultToClient: (value) =>
       entry.engine?.idMap?.translateResult(value) ?? value,
     waitUntilReady: (run) => deferUntilDiscovery(entry, run),
@@ -562,10 +583,11 @@ export function attachResolve(input: {
     getCacheStorage: input.getCacheStorage,
     knownTables: input.knownTables,
   });
+  entry.scope.addFinalizer(() => patchHandle.dispose());
 
   getResolveEntriesStore().set(client, entry);
 
-  const discovery = discoverAndStart({
+  const discoverInput = {
     entry,
     authEntry,
     embedded,
@@ -574,13 +596,31 @@ export function attachResolve(input: {
     convex,
     getIdentityKeyForSync,
     getReplayPayloadVersion,
+    uploadFetch: input.uploadFetch,
     connectivity: input.connectivity,
     processorId: input.processorId,
-  }).finally(() => {
-    entry.discoveryReady = true;
+  };
+
+  const leaderLock = input.leaderLock;
+  const entryClosedPromise = new Promise<void>((resolve) => {
+    entry.scope.addFinalizer(() => resolve());
   });
-  void discovery.catch(() => {});
-  entry.discovery = discovery;
+
+  if (leaderLock) {
+    entry.discovery = Promise.resolve();
+    void leaderLock(async () => {
+      if (entry.closed) return;
+      await discoverAndStart(discoverInput);
+      entry.discoveryReady = true;
+      await entryClosedPromise;
+    }).catch(() => {});
+  } else {
+    const discovery = discoverAndStart(discoverInput).then(() => {
+      entry.discoveryReady = true;
+    });
+    void discovery.catch(() => {});
+    entry.discovery = discovery;
+  }
 
   return {
     forwardSetAuth: (...args) => {

@@ -66,7 +66,11 @@ export function encodeDocumentState(
   seq: number = 0,
 ): Uint8Array {
   const doc = initYjsDoc(schemaDef, row, seq);
-  return Y.encodeStateAsUpdateV2(doc);
+  try {
+    return Y.encodeStateAsUpdateV2(doc);
+  } finally {
+    doc.destroy();
+  }
 }
 
 export function computeDiff(

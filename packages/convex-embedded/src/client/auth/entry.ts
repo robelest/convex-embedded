@@ -88,9 +88,7 @@ export function getAuthSnapshot(state: AuthState): AuthSnapshot {
 
 export function notifyAuthListeners(entry: AuthEntry, state: AuthState): void {
   entry.state = state;
-  try {
-    entry.stateHub.publish(state);
-  } catch {}
+  entry.stateHub.publish(state);
 }
 
 export function toAuthenticatedState(

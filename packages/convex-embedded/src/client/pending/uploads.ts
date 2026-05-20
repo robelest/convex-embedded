@@ -75,7 +75,8 @@ export class PendingUploadQueue {
     const identityKey = this._getIdentityKey?.() ?? null;
     try {
       const rows = await this._runQuery(SYS_GET_ALL, { identityKey });
-      this._entries = (rows as PendingUploadEntry[]).map((row) => ({
+      const entries = Array.isArray(rows) ? (rows as PendingUploadEntry[]) : [];
+      this._entries = entries.map((row) => ({
         ...row,
         hydrated: true,
       }));

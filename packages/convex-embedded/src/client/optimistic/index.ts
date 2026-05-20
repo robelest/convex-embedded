@@ -41,7 +41,7 @@ interface MutationContext<TItem extends object> {
 
 type MutationHandler<TItem extends object> = (
   ctx: MutationContext<TItem>,
-) => Promise<unknown> | unknown;
+) => unknown;
 
 export interface ConvexEmbeddedCollectionMutationRefs {
   insert?: FunctionReference<"mutation">;
@@ -91,7 +91,9 @@ interface ClientWithMutation {
 
 const RESERVED_DOC_FIELDS = new Set(["_id", "_creationTime"]);
 
-function stripReservedFields<T extends object>(doc: T): Record<string, unknown> {
+function stripReservedFields<T extends object>(
+  doc: T,
+): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(doc)) {
     if (RESERVED_DOC_FIELDS.has(key)) continue;

@@ -35,7 +35,11 @@ export default defineConfig([
   {
     entry: {
       "node/index": "src/node/index.ts",
-      cli: "src/cli.ts",
+      codegen: "src/codegen/index.ts",
+      next: "src/next.ts",
+      nitro: "src/nitro.ts",
+      unplugin: "src/unplugin.ts",
+      vite: "src/vite.ts",
     },
     format: "esm",
     outDir: "dist",

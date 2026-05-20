@@ -229,8 +229,11 @@ export function createAsyncSyscall(
      */
     activeTimers?: Set<ReturnType<typeof setTimeout>>;
     onDependency?: (dependency: QueryDependency) => void;
+    runWithTransactionLock?: <T>(fn: () => Promise<T>) => Promise<T>;
   },
 ): (op: string, jsonArgs: string) => Promise<string> {
+  const runLocked =
+    options?.runWithTransactionLock ?? (<T>(fn: () => Promise<T>) => fn());
   const resolveTableForWrite = async (
     database: Database,
     table: string | undefined,
@@ -289,28 +292,34 @@ export function createAsyncSyscall(
 
         void (async () => {
           try {
-            db.startTransaction();
-            try {
-              const job = db.get("_scheduled_functions", jobId);
-              const jobState = job?.state as { kind: string } | null;
-              if (job === null || jobState?.kind === "canceled") {
-                db.rollbackWrites();
-                return;
-              }
-              if (jobState?.kind !== "pending") {
-                db.rollbackWrites();
-                throw new Error(
-                  `\`convex-embedded\` invariant error: Unexpected scheduled function state when starting it: ${jobState?.kind}`,
-                );
-              }
+            const shouldRun = await runLocked(async () => {
+              db.startTransaction();
+              try {
+                const job = db.get("_scheduled_functions", jobId);
+                const jobState = job?.state as { kind: string } | null;
+                if (job === null || jobState?.kind === "canceled") {
+                  db.rollbackWrites();
+                  return false;
+                }
+                if (jobState?.kind !== "pending") {
+                  db.rollbackWrites();
+                  throw new Error(
+                    `\`convex-embedded\` invariant error: Unexpected scheduled function state when starting it: ${jobState?.kind}`,
+                  );
+                }
 
-              db.patch("_scheduled_functions", jobId, {
-                state: { kind: "inProgress" },
-              });
-              await db.commitAsync();
-            } catch (error) {
-              db.rollbackWrites();
-              throw error;
+                db.patch("_scheduled_functions", jobId, {
+                  state: { kind: "inProgress" },
+                });
+                await db.commitAsync();
+                return true;
+              } catch (error) {
+                db.rollbackWrites();
+                throw error;
+              }
+            });
+            if (!shouldRun) {
+              return;
             }
 
             let finalState: string;
@@ -325,31 +334,33 @@ export function createAsyncSyscall(
               finalState = "failed";
             }
 
-            db.startTransaction();
-            try {
-              const finishedJob = db.get("_scheduled_functions", jobId);
-              const finishedState = finishedJob?.state as {
-                kind: string;
-              } | null;
+            await runLocked(async () => {
+              db.startTransaction();
+              try {
+                const finishedJob = db.get("_scheduled_functions", jobId);
+                const finishedState = finishedJob?.state as {
+                  kind: string;
+                } | null;
 
-              if (
-                finalState === "failed" ||
-                (finishedJob !== null && finishedState?.kind === "inProgress")
-              ) {
-                db.patch("_scheduled_functions", jobId, {
-                  state: { kind: finalState },
-                  ...(finalState === "failed"
-                    ? { completedTime: Date.now() }
-                    : {}),
-                });
-                await db.commitAsync();
-              } else {
+                if (
+                  finalState === "failed" ||
+                  (finishedJob !== null && finishedState?.kind === "inProgress")
+                ) {
+                  db.patch("_scheduled_functions", jobId, {
+                    state: { kind: finalState },
+                    ...(finalState === "failed"
+                      ? { completedTime: Date.now() }
+                      : {}),
+                  });
+                  await db.commitAsync();
+                } else {
+                  db.rollbackWrites();
+                }
+              } catch (error) {
                 db.rollbackWrites();
+                throw error;
               }
-            } catch (error) {
-              db.rollbackWrites();
-              throw error;
-            }
+            });
 
             const dbExt = db as unknown as Record<string, unknown>;
             if (typeof dbExt.jobFinished === "function") {
@@ -540,8 +551,7 @@ export function createAsyncSyscall(
       }
       throw new ConvexError({
         code: "NESTED_UDF_TYPE_UNSUPPORTED",
-        message:
-          `[convex-embedded] Local execution does not support nested udf type "${udfType}".`,
+        message: `[convex-embedded] Local execution does not support nested udf type "${udfType}".`,
         udfType,
       });
     },

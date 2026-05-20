@@ -119,7 +119,9 @@ export function subscribeAuthState(
   return entry.stateHub.subscribe((state) => {
     try {
       callback(state);
-    } catch {}
+    } catch (err) {
+      console.warn("[convex-embedded] auth state callback error", err);
+    }
   });
 }
 

@@ -372,6 +372,7 @@ export class EmbeddedRuntime {
   private _storageAdapter: StorageAdapter | null;
   private _transports: EmbeddedTransport[] = [];
   private _storageHydrated: Promise<void>;
+  private _storageHydratedComplete = false;
   private _crossTabSyncChain: Promise<void> = Promise.resolve();
   private _shutdown = false;
   private readonly _scope = new DisposableScope();
@@ -492,6 +493,8 @@ export class EmbeddedRuntime {
       } catch (err) {
         console.error("[convex-embedded] hydration failed:", err);
         throw err;
+      } finally {
+        this._storageHydratedComplete = true;
       }
     })();
   }
@@ -674,9 +677,14 @@ export class EmbeddedRuntime {
   /** Chain an additional readiness promise into the hydration gate. */
   extendStorageReady(ready: Promise<void>): void {
     const prior = this._storageHydrated;
+    this._storageHydratedComplete = false;
     this._storageHydrated = (async () => {
-      await prior;
-      await ready;
+      try {
+        await prior;
+        await ready;
+      } finally {
+        this._storageHydratedComplete = true;
+      }
     })();
   }
 
@@ -1706,11 +1714,11 @@ export class EmbeddedRuntime {
         const unsubscribe = this._localQueryWatches.subscribe(token, callback);
         const current = this._localQueryWatches.get(token) ?? observer;
         if (current.hasValue) {
-          setTimeout(() => {
+          queueMicrotask(() => {
             if (current.listeners.has(callback)) {
               callback();
             }
-          }, 0);
+          });
         }
 
         return unsubscribe;
@@ -1763,11 +1771,11 @@ export class EmbeddedRuntime {
         );
         const current = this._localPaginatedQueryWatches.get(token) ?? observer;
         if (current.hasValue) {
-          setTimeout(() => {
+          queueMicrotask(() => {
             if (current.listeners.has(callback)) {
               callback();
             }
-          }, 0);
+          });
         }
 
         return unsubscribe;
@@ -1812,7 +1820,9 @@ export class EmbeddedRuntime {
    * @internal
    */
   async executeLocal(request: LocalExecutionRequest): Promise<unknown> {
-    await this._storageHydrated;
+    if (!this._storageHydratedComplete) {
+      await this._storageHydrated;
+    }
 
     return this._executeLocalResolved(request);
   }
@@ -1820,7 +1830,9 @@ export class EmbeddedRuntime {
   private async _executeLocalResolved(
     request: LocalExecutionRequest,
   ): Promise<unknown> {
-    await this._storageHydrated;
+    if (!this._storageHydratedComplete) {
+      await this._storageHydrated;
+    }
     return matchTag(request, "kind", {
       query: async (current) => {
         const path = resolveFunctionPath({ name: current.path });
@@ -2000,12 +2012,14 @@ export class EmbeddedRuntime {
   private async _awaitTableHydrationFor(pathName: string): Promise<void> {
     const cached = this._queryTablesReadCache.get(pathName);
     if (cached === undefined) {
+      if (this._storageHydratedComplete) return;
       await this._storageHydrated;
       return;
     }
     if (cached.size === 0) {
       return;
     }
+    if (this._storageHydratedComplete) return;
     await Promise.all(
       Array.from(cached, (tableName) => this.db.tableHydrated(tableName)),
     );

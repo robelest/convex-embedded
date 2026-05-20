@@ -1160,6 +1160,9 @@ export function patchRoutedConvexClient(input: {
   translateLocalArgsToRuntime?: (
     args: Record<string, unknown>,
   ) => Record<string, unknown>;
+  translateClientArgsToRemote?: (
+    args: Record<string, unknown>,
+  ) => Record<string, unknown>;
   translateLocalResultToClient?: <T>(value: T) => T;
   waitUntilReady?: WaitUntilReady;
   isReady?: () => boolean;

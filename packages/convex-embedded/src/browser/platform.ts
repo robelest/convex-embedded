@@ -151,14 +151,14 @@ export function createBrowserPlatformAdapter(): EmbeddedPlatformAdapter {
       ? ({ name }) => {
           const lockName = `convex-embedded:${name}:migrations`;
           return <T>(fn: () => Promise<T>): Promise<T> =>
-            navigator.locks.request(lockName, () => fn());
+            navigator.locks.request(lockName, () => fn()) as Promise<T>;
         }
       : undefined,
     createLeaderLock: hasWebLocks()
       ? ({ name }) => {
           const lockName = `convex-embedded:${name}:leader`;
           return <T>(fn: () => Promise<T>): Promise<T> =>
-            navigator.locks.request(lockName, () => fn());
+            navigator.locks.request(lockName, () => fn()) as Promise<T>;
         }
       : undefined,
   };

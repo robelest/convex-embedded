@@ -30,7 +30,10 @@ import {
 const log = createLogger("server-runtime");
 
 function toArrayBuffer(data: Uint8Array): ArrayBuffer {
-  return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+  return data.buffer.slice(
+    data.byteOffset,
+    data.byteOffset + data.byteLength,
+  ) as ArrayBuffer;
 }
 
 function pickCrdtFields(
@@ -213,7 +216,11 @@ export function bindTableRuntime(
       let cursor: string | null = null;
       let isDone = false;
       while (!isDone) {
-        const page = await ctx.db
+        const page: {
+          page: unknown[];
+          isDone: boolean;
+          continueCursor: string;
+        } = await ctx.db
           .query(tableName)
           .withIndex(match.indexName, (q: any) => {
             let chain = q;

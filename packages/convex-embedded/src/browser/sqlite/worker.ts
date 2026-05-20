@@ -169,7 +169,12 @@ async function handleInit(name: string) {
         },
         execute,
         executeBatch: async (statements) => {
-          await runBatch(statements);
+          await runBatch(
+            statements.map((s) => ({
+              sql: s.sql,
+              params: s.params ? [...s.params] : undefined,
+            })),
+          );
         },
       },
     });

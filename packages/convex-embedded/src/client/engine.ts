@@ -1296,7 +1296,10 @@ function getConnectivityAdapter(
 }
 
 function toArrayBuffer(data: Uint8Array): ArrayBuffer {
-  return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+  return data.buffer.slice(
+    data.byteOffset,
+    data.byteOffset + data.byteLength,
+  ) as ArrayBuffer;
 }
 
 const UUID_PATTERN =
@@ -1618,7 +1621,7 @@ function getQueueEntryRoute(input: {
   try {
     localResult = JSON.parse(input.entry.localResult);
   } catch {
-    return { _tag: "Skip" };
+    return { _tag: "Stop" };
   }
   const remoteId =
     typeof localResult === "string" ? input.getRemoteId(localResult) : null;

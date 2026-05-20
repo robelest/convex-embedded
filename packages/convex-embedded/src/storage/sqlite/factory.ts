@@ -167,11 +167,14 @@ function documentIdentityKey(doc: StoredDocument): string | null {
 }
 
 function decodeBlob(value: unknown): Blob {
-  if (value instanceof Uint8Array || value instanceof ArrayBuffer) {
+  if (value instanceof Uint8Array) {
+    return new Blob([new Uint8Array(value)]);
+  }
+  if (value instanceof ArrayBuffer) {
     return new Blob([value]);
   }
   if (typeof Buffer !== "undefined" && value instanceof Buffer) {
-    return new Blob([value]);
+    return new Blob([new Uint8Array(value)]);
   }
   throw new Error("[convex-embedded] sqlite blob row was not binary data.");
 }

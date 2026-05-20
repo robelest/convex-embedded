@@ -570,12 +570,12 @@ export function attachResolve(input: {
     },
     executeLocalMutation: (ref, args, enqueueForReplay) =>
       executeLocalMutation(entry, runtime, ref, args, enqueueForReplay),
-    translateLocalArgsToRuntime: (args) =>
+    translateLocalArgsToRuntime: (args: Record<string, unknown>) =>
       entry.engine?.idMap?.translateClientIdsToRuntime(args) ?? args,
-    translateClientArgsToRemote: (args) =>
+    translateClientArgsToRemote: (args: Record<string, unknown>) =>
       entry.engine?.idMap?.translateLocalIdsToRemote(args) ?? args,
-    translateLocalResultToClient: (value) =>
-      entry.engine?.idMap?.translateResult(value) ?? value,
+    translateLocalResultToClient: <T>(value: T): T =>
+      (entry.engine?.idMap?.translateResult(value) ?? value) as T,
     waitUntilReady: (run) => deferUntilDiscovery(entry, run),
     isReady: () => entry.discoveryReady,
     connectivity: input.connectivity,

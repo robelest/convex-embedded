@@ -46,7 +46,10 @@ import {
   PENDING_UPLOADS_STORE_MIGRATIONS,
 } from "@/runtime/migrations/pending";
 import type { EmbeddedPlatformAdapter } from "@/runtime/platform";
+import { createQueryCacheStorage } from "@/runtime/sqlite/cache";
 import type { QueryCacheStorage } from "@/runtime/sqlite/cache";
+import type { SqliteDriver } from "@/storage/sqlite/driver";
+import type { StorageAdapter } from "@/storage/adapter";
 import { SCHEDULED_FUNCTIONS_STORE_MIGRATIONS } from "@/scheduler/executor";
 import { createLogger } from "@/shared/logger";
 import { extractEmbeddedTableDefinitions } from "@/shared/schema";
@@ -55,6 +58,27 @@ import { PubSub } from "@/utils/pubsub";
 import { DisposableScope } from "@/utils/scope";
 
 const log = createLogger("setup");
+
+/**
+ * Pull the raw SQLite driver out of a storage adapter when one is present.
+ *
+ * The embedded `SqliteAdapter` exposes `getDriver()` so callers can reuse
+ * the same SQLite connection for sibling persistence concerns (here: the
+ * disk-backed query result cache). Non-SQLite adapters omit the method and
+ * we fall back to a memory-only cache.
+ */
+function trySqliteDriverFor(
+  adapter: StorageAdapter | null,
+): SqliteDriver | null {
+  if (!adapter) return null;
+  const getDriver = (adapter as { getDriver?: () => SqliteDriver }).getDriver;
+  if (typeof getDriver !== "function") return null;
+  try {
+    return getDriver.call(adapter);
+  } catch {
+    return null;
+  }
+}
 
 interface PlatformConfig {
   readonly runtime: EmbeddedRuntime;
@@ -307,10 +331,20 @@ export function createEmbeddedClient(input: {
     runtime.extendStorageReady(load.storageReady);
   }
 
+  let queryCacheStorage: QueryCacheStorage | null = null;
+
   void load.storageReady
     .then(() => {
       const storageSurface = installStorageSurface(platformConfig);
       installedStorageSurface = storageSurface;
+      // Reuse the embedded storage adapter's SQLite driver to back the
+      // persistent query-result cache. Adapters that don't expose a driver
+      // (in-memory test doubles, future remote-only modes) just leave the
+      // cache disk-less — the in-memory EmbeddedQueryCache still applies.
+      const driver = trySqliteDriverFor(runtime.getStorage());
+      if (driver) {
+        queryCacheStorage = createQueryCacheStorage(driver);
+      }
     })
     .catch((error) => {
       log.error("storage surface install skipped after storage failure", error);
@@ -325,7 +359,6 @@ export function createEmbeddedClient(input: {
   });
 
   const queryCache = new EmbeddedQueryCache();
-  const queryCacheStorage: QueryCacheStorage | null = null;
 
   registerEmbeddedClientEntry(client, {
     runtime,

@@ -478,6 +478,7 @@ export class EmbeddedRuntime {
 
     const hasInitialStorage = options.storage != null;
     const db = this.db;
+    const moduleLoader = this.moduleLoader;
 
     this._storageHydrated = (async () => {
       try {
@@ -490,6 +491,12 @@ export class EmbeddedRuntime {
         }
         await this._startCronRunner();
         await this._initializeHttpDispatcher();
+        // Preload user modules so the first user-triggered query / mutation
+        // doesn't pay the dynamic-import cost on its critical path. Runs
+        // concurrently with the cron / http startup above where it would
+        // overlap, but is sequenced last here so failures don't mask
+        // hydration errors.
+        await moduleLoader.preloadAll();
       } catch (err) {
         console.error("[convex-embedded] hydration failed:", err);
         throw err;

@@ -206,6 +206,28 @@ export class ModuleLoader {
     this.loadedModules.set(path, loading);
     return loading;
   }
+
+  /**
+   * Eagerly load every user module in the registry. Generated modules
+   * (`_generated/*`) are skipped — they're internal routing/codegen
+   * scaffolding, not UDF carriers.
+   *
+   * Intended for warm-start: call once after storage hydration so the first
+   * `_resolveFunc` for any user query / mutation / action hits the module
+   * cache instead of paying a dynamic-import on the user's critical path.
+   *
+   * Individual load failures don't reject the whole batch — each module is
+   * settled independently and errors are surfaced through `load()` when the
+   * function is actually invoked.
+   */
+  async preloadAll(): Promise<void> {
+    const paths = Object.keys(this.modules).filter(
+      (key) => !isGeneratedModuleId(key),
+    );
+    await Promise.allSettled(
+      paths.map((path) => this.load(path).catch(() => undefined)),
+    );
+  }
 }
 
 function normalizeModuleKey(key: string): string {

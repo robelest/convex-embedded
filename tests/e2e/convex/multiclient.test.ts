@@ -1,19 +1,21 @@
 import { afterEach, describe, expect, it } from "@tests/testkit";
 
-import { api } from "../../convex/_generated/api";
-import type { Id } from "../../convex/_generated/dataModel";
-import { DEMO_WORKSPACE_ID } from "../../convex/workspace";
+import { api } from "../../../convex/_generated/api";
+import type { Id } from "../../../convex/_generated/dataModel";
+import { DEMO_WORKSPACE_ID } from "../../../convex/workspace";
 import {
   createLiveClient,
+  describeLiveClientState,
   pollUntil,
   type TestConnectivityController,
   waitForMappedRemoteId,
   uniqueSuffix,
   waitForResolved,
-} from "../helpers/live";
+} from "./harness";
 
 const CONVEX_URL = process.env.CONVEX_URL;
-const maybeDescribe = CONVEX_URL ? describe : describe.skip;
+const maybeDescribe =
+  CONVEX_URL && process.env.RUN_CONVEX_E2E === "1" ? describe : describe.skip;
 
 type LiveClient = Awaited<ReturnType<typeof createLiveClient>>["client"] & {
   close(): Promise<void>;
@@ -46,18 +48,28 @@ async function waitForIssueProjection(
   client: LiveClient,
   projectId: Id<"projects">,
   issueId: Id<"issues">,
+  expected?: { title?: string; status?: string; priority?: string },
 ) {
   return await pollUntil({
+    description: `issue ${issueId} projection${expected ? ` matches ${JSON.stringify(expected)}` : " exists"}`,
     read: async () =>
-      (await client.query(api.issues.forProject, { projectId })) as {
-        issues: Array<{
-          _id: Id<"issues">;
-          title: string;
-          status: string;
-          priority: string;
-        }>;
-      },
-    accept: (result) => result.issues.some((issue) => issue._id === issueId),
+      (await client.query(api.issues.allForProject, { projectId })) as Array<{
+        _id: Id<"issues">;
+        title: string;
+        status: string;
+        priority: string;
+      }>,
+    accept: (issues) =>
+      issues.some(
+        (issue) =>
+          issue._id === issueId &&
+          (expected?.title === undefined || issue.title === expected.title) &&
+          (expected?.status === undefined ||
+            issue.status === expected.status) &&
+          (expected?.priority === undefined ||
+            issue.priority === expected.priority),
+      ),
+    diagnostics: () => describeLiveClientState(client),
     timeoutMs: 40_000,
     intervalMs: 250,
   });
@@ -69,6 +81,7 @@ async function waitForCommentsBodies(
   expectedBodies: string[],
 ) {
   return await pollUntil({
+    description: `comments for ${issueId} include ${expectedBodies.length} bodies`,
     read: async () =>
       (await client.query(api.comments.forIssue, { issueId })) as Array<{
         body: string;
@@ -77,6 +90,7 @@ async function waitForCommentsBodies(
       const bodies = new Set(comments.map((comment) => comment.body));
       return expectedBodies.every((body) => bodies.has(body));
     },
+    diagnostics: () => describeLiveClientState(client),
     timeoutMs: 40_000,
     intervalMs: 250,
   });
@@ -193,22 +207,37 @@ maybeDescribe("live multi-client merge", () => {
         clientAEntry.client as LiveClient,
         projectId,
         issueId,
+        {
+          title: `Merged title ${suffix}`,
+          status: "in_progress",
+          priority: "high",
+        },
       ),
       waitForIssueProjection(
         clientBEntry.client as LiveClient,
         projectId,
         issueId,
+        {
+          title: `Merged title ${suffix}`,
+          status: "in_progress",
+          priority: "high",
+        },
       ),
       waitForIssueProjection(
         clientCEntry.client as LiveClient,
         projectId,
         issueId,
+        {
+          title: `Merged title ${suffix}`,
+          status: "in_progress",
+          priority: "high",
+        },
       ),
     ]);
 
-    const issueA = issuesA.issues.find((issue) => issue._id === issueId)!;
-    const issueB = issuesB.issues.find((issue) => issue._id === issueId)!;
-    const issueC = issuesC.issues.find((issue) => issue._id === issueId)!;
+    const issueA = issuesA.find((issue) => issue._id === issueId)!;
+    const issueB = issuesB.find((issue) => issue._id === issueId)!;
+    const issueC = issuesC.find((issue) => issue._id === issueId)!;
 
     expect(issueA).toMatchObject({
       title: `Merged title ${suffix}`,

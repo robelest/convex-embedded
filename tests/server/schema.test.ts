@@ -84,7 +84,7 @@ describe("CRDT field constructors", () => {
 describe("define()", () => {
   it("creates a Definition with version and shape", () => {
     const def = define({
-            shape: {
+      shape: {
         title: register(v.string()),
         body: prose(),
       },
@@ -97,7 +97,7 @@ describe("define()", () => {
 
   it("getShape() returns current shape for current version", () => {
     const def = define({
-            shape: { title: register(v.string()) },
+      shape: { title: register(v.string()) },
     });
 
     const shape = def.getShape();
@@ -122,7 +122,7 @@ describe("define()", () => {
 
   it("getCrdtFields() returns only CRDT fields", () => {
     const def = define({
-            shape: {
+      shape: {
         title: register(v.string()),
         body: prose(),
         count: counter(),
@@ -140,7 +140,7 @@ describe("define()", () => {
 
   it("getOmittedFields() returns omitted field names", () => {
     const def = define({
-            shape: {
+      shape: {
         title: register(v.string()),
         secret: omit(v.string()),
         hidden: omit(v.number()),
@@ -155,7 +155,7 @@ describe("define()", () => {
 
   it("defaults are stored", () => {
     const def = define({
-            shape: { title: register(v.string()) },
+      shape: { title: register(v.string()) },
       defaults: { title: "untitled" },
     });
 
@@ -170,7 +170,7 @@ describe("define()", () => {
 describe("initYjsDoc()", () => {
   it("creates a Y.Doc with a fields map", () => {
     const def = define({
-            shape: {
+      shape: {
         title: register(v.string()),
       },
     });
@@ -182,7 +182,7 @@ describe("initYjsDoc()", () => {
 
   it("initializes a register field as Y.Map with value", () => {
     const def = define({
-            shape: { title: register(v.string()) },
+      shape: { title: register(v.string()) },
     });
 
     const doc = initYjsDoc(def, { title: "Test" });
@@ -196,7 +196,7 @@ describe("initYjsDoc()", () => {
 
   it("initializes a prose field as XmlFragment", () => {
     const def = define({
-            shape: { body: prose() },
+      shape: { body: prose() },
     });
 
     const doc = initYjsDoc(def, { body: "Hello world" });
@@ -206,7 +206,7 @@ describe("initYjsDoc()", () => {
 
   it("initializes a counter field as Y.Array", () => {
     const def = define({
-            shape: { votes: counter() },
+      shape: { votes: counter() },
     });
 
     const doc = initYjsDoc(def, { votes: 5 });
@@ -220,7 +220,7 @@ describe("initYjsDoc()", () => {
 
   it("initializes a counter with 0 as empty Y.Array", () => {
     const def = define({
-            shape: { votes: counter() },
+      shape: { votes: counter() },
     });
 
     const doc = initYjsDoc(def, { votes: 0 });
@@ -232,7 +232,7 @@ describe("initYjsDoc()", () => {
 
   it("initializes a set field as Y.Map", () => {
     const def = define({
-            shape: { tags: set(v.string()) },
+      shape: { tags: set(v.string()) },
     });
 
     const doc = initYjsDoc(def, { tags: ["a", "b", "c"] });
@@ -247,7 +247,7 @@ describe("initYjsDoc()", () => {
 
   it("skips omitted fields", () => {
     const def = define({
-            shape: {
+      shape: {
         title: register(v.string()),
         secret: omit(v.string()),
       },
@@ -262,7 +262,7 @@ describe("initYjsDoc()", () => {
 
   it("skips _id and _creationTime", () => {
     const def = define({
-            shape: { title: register(v.string()) },
+      shape: { title: register(v.string()) },
     });
 
     const doc = initYjsDoc(def, {
@@ -295,7 +295,7 @@ describe("initYjsDoc()", () => {
 describe("encodeDocumentState()", () => {
   it("encodes a document as a Uint8Array", () => {
     const def = define({
-            shape: { title: register(v.string()) },
+      shape: { title: register(v.string()) },
     });
 
     const update = encodeDocumentState(def, { title: "Hello" });
@@ -307,7 +307,7 @@ describe("encodeDocumentState()", () => {
 describe("computeDiff()", () => {
   it("returns a diff between server and client states", () => {
     const def = define({
-            shape: { title: register(v.string()) },
+      shape: { title: register(v.string()) },
     });
 
     // Server has a document
@@ -344,7 +344,7 @@ describe("computeDiff()", () => {
 describe("mergeUpdate()", () => {
   it("merges two updates into a combined state", () => {
     const def = define({
-            shape: { title: register(v.string()) },
+      shape: { title: register(v.string()) },
     });
 
     const update1 = encodeDocumentState(def, { title: "First" });

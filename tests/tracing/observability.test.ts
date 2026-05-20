@@ -1,18 +1,9 @@
 import { EmbeddedRuntime } from "@embedded/runtime/embedded";
 import { remoteOnly } from "@embedded/server/markers";
-import { recordCounter, registerGauge } from "@embedded/tracing/metrics";
 import { installInMemoryTracing } from "@embedded/tracing/memory";
-import {
-  afterEach,
-  beforeEach,
-  describe,
-  expect,
-  it,
-} from "@tests/testkit";
-import {
-  httpActionGeneric,
-  httpRouter,
-} from "convex/server";
+import { recordCounter, registerGauge } from "@embedded/tracing/metrics";
+import { afterEach, beforeEach, describe, expect, it } from "@tests/testkit";
+import { httpActionGeneric, httpRouter } from "convex/server";
 
 describe("tracing/observability", () => {
   let handle: ReturnType<typeof installInMemoryTracing>;
@@ -51,9 +42,7 @@ describe("tracing/observability", () => {
     const stateGauges = points.filter(
       (p) => p.name === "convex.embedded.runtime.state",
     );
-    const ours = stateGauges.find(
-      (p) => p.attributes.state === "test.depth",
-    );
+    const ours = stateGauges.find((p) => p.attributes.state === "test.depth");
     expect(ours?.value).toBe(7);
     expect(ours?.kind).toBe("gauge");
 
@@ -69,10 +58,7 @@ describe("tracing/observability", () => {
         }),
     );
     const blockedRemote = remoteOnly(
-      httpActionGeneric(
-        async () =>
-          new Response("nope", { status: 200 }),
-      ),
+      httpActionGeneric(async () => new Response("nope", { status: 200 })),
     );
     const http = httpRouter();
     http.route({ path: "/api/hello", method: "GET", handler: local });

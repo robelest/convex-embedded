@@ -6,11 +6,8 @@ import { DEMO_WORKSPACE_ID } from "../../convex/workspace";
 import { getEmbeddedClientEntry } from "../../packages/convex-embedded/src/client/entry";
 import { createConvexClient } from "../../packages/convex-embedded/src/node/index";
 import { openNodeStorage } from "../../packages/convex-embedded/src/node/sqlite/adapter";
-import {
-  createLiveModules,
-  temporaryDatabasePath,
-  uniqueSuffix,
-} from "../helpers/live";
+import { createAppModules } from "../helpers/convex";
+import { temporaryDatabasePath, uniqueSuffix } from "../helpers/storage";
 
 const clientsToClose: Array<{ close(): Promise<void> }> = [];
 
@@ -26,7 +23,7 @@ describe("node platform storage", () => {
     const databasePath = temporaryDatabasePath(name);
 
     const firstClient = createConvexClient({
-      convex: { modules: createLiveModules() },
+      convex: { modules: createAppModules() },
       schema,
       name,
       databasePath,
@@ -52,14 +49,14 @@ describe("node platform storage", () => {
     clientsToClose.length = 0;
 
     const secondClient = createConvexClient({
-      convex: { modules: createLiveModules() },
+      convex: { modules: createAppModules() },
       schema,
       name,
       databasePath,
     });
     clientsToClose.push(secondClient as { close(): Promise<void> });
 
-    const issues = (await secondClient.query(api.issues.forProjectAll, {
+    const issues = (await secondClient.query(api.issues.allForProject, {
       projectId,
     })) as Array<{ _id: string; title: string }>;
 
@@ -79,7 +76,7 @@ describe("node platform storage", () => {
     const projectCount = 100;
 
     const firstClient = createConvexClient({
-      convex: { modules: createLiveModules() },
+      convex: { modules: createAppModules() },
       schema,
       name,
       databasePath,
@@ -99,7 +96,7 @@ describe("node platform storage", () => {
     clientsToClose.length = 0;
 
     const secondClient = createConvexClient({
-      convex: { modules: createLiveModules() },
+      convex: { modules: createAppModules() },
       schema,
       name,
       databasePath,
@@ -121,9 +118,9 @@ describe("node platform storage", () => {
       filename: databasePath,
       userTableSpecs,
     });
-    const persistedProjects = (await storage.getDocuments(
-      "projects",
-    )) as Array<Record<string, unknown>>;
+    const persistedProjects = (await storage.getDocuments("projects")) as Array<
+      Record<string, unknown>
+    >;
     await storage.close();
     expect(
       hydratedProjects
@@ -164,7 +161,7 @@ describe("node platform storage", () => {
     const databasePath = temporaryDatabasePath(name);
 
     const client = createConvexClient({
-      convex: { modules: createLiveModules() },
+      convex: { modules: createAppModules() },
       schema,
       name,
       databasePath,

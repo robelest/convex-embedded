@@ -1,21 +1,23 @@
 import { afterEach, describe, expect, it } from "@tests/testkit";
 
-import { api } from "../../convex/_generated/api";
-import type { Id } from "../../convex/_generated/dataModel";
-import { DEMO_WORKSPACE_ID } from "../../convex/workspace";
+import { api } from "../../../convex/_generated/api";
+import type { Id } from "../../../convex/_generated/dataModel";
+import { DEMO_WORKSPACE_ID } from "../../../convex/workspace";
 import {
   createDirectRemoteClient,
   createLiveClient,
+  describeLiveClientState,
   pollUntil,
   waitForMappedRemoteId,
   type TestConnectivityController,
   uniqueSuffix,
   waitForOffline,
   waitForResolved,
-} from "../helpers/live";
+} from "./harness";
 
 const CONVEX_URL = process.env.CONVEX_URL;
-const maybeDescribe = CONVEX_URL ? describe : describe.skip;
+const maybeDescribe =
+  CONVEX_URL && process.env.RUN_CONVEX_E2E === "1" ? describe : describe.skip;
 
 type ClosableClient = Awaited<ReturnType<typeof createLiveClient>>["client"] & {
   close(): Promise<void>;
@@ -52,11 +54,13 @@ async function waitForCommentsCount(
   expectedCount: number,
 ) {
   return await pollUntil({
+    description: `comments for issue ${issueId} reach ${expectedCount}`,
     read: async () =>
       (await client.query(api.comments.forIssue, { issueId })) as Array<{
         body: string;
       }>,
     accept: (comments) => comments.length >= expectedCount,
+    diagnostics: () => describeLiveClientState(client),
     timeoutMs: 40_000,
     intervalMs: 250,
   });
@@ -70,23 +74,23 @@ async function waitForIssueState(input: {
   priority: string;
 }) {
   return await pollUntil({
+    description: `issue ${input.issueId} reaches ${input.status}/${input.priority}`,
     read: async () =>
-      (await input.client.query(api.issues.forProject, {
+      (await input.client.query(api.issues.allForProject, {
         projectId: input.projectId,
-      })) as {
-        issues: Array<{
-          _id: string;
-          status: string;
-          priority: string;
-        }>;
-      },
-    accept: (result) =>
-      result.issues.some(
+      })) as Array<{
+        _id: string;
+        status: string;
+        priority: string;
+      }>,
+    accept: (issues) =>
+      issues.some(
         (issue) =>
           issue._id === input.issueId &&
           issue.status === input.status &&
           issue.priority === input.priority,
       ),
+    diagnostics: () => describeLiveClientState(input.client),
     timeoutMs: 40_000,
     intervalMs: 250,
   });
@@ -130,11 +134,13 @@ maybeDescribe("live reconnect durability", () => {
 
     await waitForResolved(clientBEntry.client);
     await pollUntil({
+      description: `client A sees created issue ${issueId}`,
       read: async () =>
-        (await clientAEntry.client.query(api.issues.forProject, {
+        (await clientAEntry.client.query(api.issues.allForProject, {
           projectId,
-        })) as { issues: Array<{ _id: string }> },
-      accept: (result) => result.issues.some((issue) => issue._id === issueId),
+        })) as Array<{ _id: string }>,
+      accept: (issues) => issues.some((issue) => issue._id === issueId),
+      diagnostics: () => describeLiveClientState(clientAEntry.client),
       timeoutMs: 40_000,
       intervalMs: 250,
     });
@@ -247,29 +253,29 @@ maybeDescribe("live reconnect durability", () => {
 
     await waitForResolved(clientBEntry.client);
     await pollUntil({
+      description: `client A can query comments for issue ${issueId}`,
       read: async () =>
         (await clientAEntry.client.query(api.comments.forIssue, {
           issueId,
         })) as Array<{ _id: string }>,
       accept: () => true,
+      diagnostics: () => describeLiveClientState(clientAEntry.client),
       timeoutMs: 40_000,
       intervalMs: 250,
     });
     const canonicalIssueId = await pollUntil({
+      description: `client A sees issue titled Issue ${suffix}`,
       read: async () =>
-        (await clientAEntry.client.query(api.issues.forProject, {
+        (await clientAEntry.client.query(api.issues.allForProject, {
           projectId,
-        })) as {
-          issues: Array<{ _id: Id<"issues">; title: string }>;
-        },
-      accept: (result) =>
-        result.issues.some(
-          (candidate) => candidate.title === `Issue ${suffix}`,
-        ),
+        })) as Array<{ _id: Id<"issues">; title: string }>,
+      accept: (issues) =>
+        issues.some((candidate) => candidate.title === `Issue ${suffix}`),
+      diagnostics: () => describeLiveClientState(clientAEntry.client),
       timeoutMs: 40_000,
       intervalMs: 250,
     }).then((result) => {
-      const found = result.issues.find(
+      const found = result.find(
         (candidate) => candidate.title === `Issue ${suffix}`,
       );
       if (!found) {

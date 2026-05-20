@@ -34,15 +34,13 @@ const throwingAction = httpActionGeneric(async () => {
   throw new Error("intentional handler explosion");
 });
 
-const profileAction = httpActionGeneric(
-  async (_ctx, request: Request) => {
-    const path = new URL(request.url).pathname;
-    return new Response(`profile:${path}`, {
-      status: 200,
-      headers: { "content-type": "text/plain" },
-    });
-  },
-);
+const profileAction = httpActionGeneric(async (_ctx, request: Request) => {
+  const path = new URL(request.url).pathname;
+  return new Response(`profile:${path}`, {
+    status: 200,
+    headers: { "content-type": "text/plain" },
+  });
+});
 
 function makeRouterModule() {
   const http = httpRouter();
@@ -138,13 +136,11 @@ describe("EmbeddedRuntime.dispatchHttpRequest", () => {
 describe("EmbeddedRuntime.dispatchHttpRequest with remoteOnly handlers", () => {
   it("returns 404 for routes whose handler is wrapped in remoteOnly()", async () => {
     const localHello = httpActionGeneric(
-      async () =>
-        new Response("local-hello", { status: 200 }),
+      async () => new Response("local-hello", { status: 200 }),
     );
     const stripeWebhook = remoteOnly(
       httpActionGeneric(
-        async () =>
-          new Response("should never run locally", { status: 200 }),
+        async () => new Response("should never run locally", { status: 200 }),
       ),
     );
 

@@ -1,6 +1,6 @@
+import type { CachedEntry } from "@resolve/client/cache";
 import { effectToTransitionsForEntries } from "@resolve/client/optimistic/apply";
 import { deriveOptimisticEffect } from "@resolve/client/optimistic/derive";
-import type { CachedEntry } from "@resolve/client/cache";
 import { describe, expect, it } from "@tests/testkit";
 
 function entry(value: unknown): CachedEntry {
@@ -103,7 +103,12 @@ describe("effectToTransitionsForEntries", () => {
       },
     ];
     const updates = effectToTransitionsForEntries(
-      { kind: "patch", table: "issues", id: "doc_a", patch: { status: "done" } },
+      {
+        kind: "patch",
+        table: "issues",
+        id: "doc_a",
+        patch: { status: "done" },
+      },
       entries,
     );
     expect(updates).toHaveLength(1);
@@ -119,7 +124,12 @@ describe("effectToTransitionsForEntries", () => {
       },
     ];
     const updates = effectToTransitionsForEntries(
-      { kind: "patch", table: "issues", id: "doc_a", patch: { status: "done" } },
+      {
+        kind: "patch",
+        table: "issues",
+        id: "doc_a",
+        patch: { status: "done" },
+      },
       entries,
     );
     expect(updates).toEqual([]);
@@ -141,11 +151,18 @@ describe("effectToTransitionsForEntries", () => {
       },
     ];
     const updates = effectToTransitionsForEntries(
-      { kind: "patch", table: "issues", id: "doc_b", patch: { status: "done" } },
+      {
+        kind: "patch",
+        table: "issues",
+        id: "doc_b",
+        patch: { status: "done" },
+      },
       entries,
     );
     expect(updates).toHaveLength(1);
-    const value = updates[0]?.value as { page: Array<{ _id: string; status: string }> };
+    const value = updates[0]?.value as {
+      page: Array<{ _id: string; status: string }>;
+    };
     expect(value.page[0]?.status).toBe("todo");
     expect(value.page[1]?.status).toBe("done");
   });
@@ -162,7 +179,12 @@ describe("effectToTransitionsForEntries", () => {
       },
     ];
     const updates = effectToTransitionsForEntries(
-      { kind: "patch", table: "comments", id: "doc_b", patch: { body: "edited" } },
+      {
+        kind: "patch",
+        table: "comments",
+        id: "doc_b",
+        patch: { body: "edited" },
+      },
       entries,
     );
     expect(updates).toHaveLength(1);

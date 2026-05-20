@@ -77,10 +77,6 @@ describe("migration constants", () => {
   it("VERSION_TABLE is _resolve_schema_versions", () => {
     expect(migration.VERSION_TABLE).toBe("_resolve_schema_versions");
   });
-
-  it("STEP_TABLE is _resolve_schema_steps", () => {
-    expect(migration.STEP_TABLE).toBe("_resolve_schema_steps");
-  });
 });
 
 describe("embeddedTable migrations option", () => {
@@ -88,7 +84,9 @@ describe("embeddedTable migrations option", () => {
     const tasks = embeddedTable("tasks_v1", {
       title: register(v.string()),
     });
-    expect((tasks as unknown as { schema: { version: number } }).schema.version).toBe(1);
+    expect(
+      (tasks as unknown as { schema: { version: number } }).schema.version,
+    ).toBe(1);
   });
 
   it("derives version from max migration key", () => {
@@ -104,7 +102,9 @@ describe("embeddedTable migrations option", () => {
         },
       },
     );
-    expect((tasks as unknown as { schema: { version: number } }).schema.version).toBe(3);
+    expect(
+      (tasks as unknown as { schema: { version: number } }).schema.version,
+    ).toBe(3);
   });
 });
 
@@ -235,77 +235,6 @@ describe("runMigrations", () => {
         },
       ],
     });
-  });
-
-  it("ctx.step skips already-completed steps on retry", async () => {
-    const adapter = createInMemoryAdapter();
-    adapter.rows["_resolve_schema_versions"] = [
-      { _id: "v1", _creationTime: 0, table: "tasks", version: 1 },
-    ];
-    adapter.rows["_resolve_schema_steps"] = [
-      {
-        _id: "s1",
-        _creationTime: 0,
-        table: "tasks",
-        version: 2,
-        stepName: "backfill",
-      },
-    ];
-
-    const stepFn = vi.fn(async () => undefined);
-    const tasks = embeddedTable(
-      "tasks_step_resume",
-      { title: register(v.string()) },
-      {
-        migrations: {
-          2: async (ctx) => {
-            await ctx.step("backfill", stepFn);
-          },
-        },
-      },
-    );
-
-    await runMigrations({
-      table: "tasks",
-      schema: (tasks as unknown as { schema: any }).schema,
-      adapter,
-    });
-
-    expect(stepFn).not.toHaveBeenCalled();
-    expect(adapter.rows["_resolve_schema_versions"]?.[0]?.version).toBe(2);
-    expect(adapter.rows["_resolve_schema_steps"] ?? []).toHaveLength(0);
-  });
-
-  it("ctx.step records checkpoint after running and cleans up after version", async () => {
-    const adapter = createInMemoryAdapter();
-    adapter.rows["_resolve_schema_versions"] = [
-      { _id: "v1", _creationTime: 0, table: "tasks", version: 1 },
-    ];
-
-    let ranAt = 0;
-    const tasks = embeddedTable(
-      "tasks_step_record",
-      { title: register(v.string()) },
-      {
-        migrations: {
-          2: async (ctx) => {
-            await ctx.step("backfill", async () => {
-              ranAt += 1;
-            });
-          },
-        },
-      },
-    );
-
-    await runMigrations({
-      table: "tasks",
-      schema: (tasks as unknown as { schema: any }).schema,
-      adapter,
-    });
-
-    expect(ranAt).toBe(1);
-    expect(adapter.rows["_resolve_schema_versions"]?.[0]?.version).toBe(2);
-    expect(adapter.rows["_resolve_schema_steps"] ?? []).toHaveLength(0);
   });
 
   it("throws when stored version exceeds target", async () => {
@@ -457,61 +386,6 @@ describe("runMigrations", () => {
 
     expect(customHandler).toHaveBeenCalledTimes(1);
     expect(adapter.rows["_resolve_schema_versions"]?.[0]?.version).toBe(1);
-  });
-
-  it("resumes a multi-step migration after mid-step crash", async () => {
-    const adapter = createInMemoryAdapter();
-    adapter.rows["_resolve_schema_versions"] = [
-      { _id: "v1", _creationTime: 0, table: "tasks", version: 1 },
-    ];
-
-    const stepOne = vi.fn(async () => undefined);
-    const stepTwo = vi.fn(async () => undefined);
-    let shouldThrowMidStep = true;
-
-    const buildTable = () =>
-      embeddedTable(
-        "tasks_step_resume_after_crash",
-        { title: register(v.string()) },
-        {
-          migrations: {
-            2: async (ctx) => {
-              await ctx.step("backfill-priority", stepOne);
-              if (shouldThrowMidStep) {
-                throw new Error("crash between steps");
-              }
-              await ctx.step("backfill-tags", stepTwo);
-            },
-          },
-        },
-      );
-
-    await expect(
-      runMigrations({
-        table: "tasks",
-        schema: (buildTable() as unknown as { schema: any }).schema,
-        adapter,
-      }),
-    ).rejects.toThrow("crash between steps");
-
-    expect(stepOne).toHaveBeenCalledTimes(1);
-    expect(stepTwo).not.toHaveBeenCalled();
-    expect(adapter.rows["_resolve_schema_versions"]?.[0]?.version).toBe(1);
-    const checkpointRows = adapter.rows["_resolve_schema_steps"] ?? [];
-    expect(checkpointRows).toHaveLength(1);
-    expect(checkpointRows[0]?.stepName).toBe("backfill-priority");
-
-    shouldThrowMidStep = false;
-    await runMigrations({
-      table: "tasks",
-      schema: (buildTable() as unknown as { schema: any }).schema,
-      adapter,
-    });
-
-    expect(stepOne).toHaveBeenCalledTimes(1);
-    expect(stepTwo).toHaveBeenCalledTimes(1);
-    expect(adapter.rows["_resolve_schema_versions"]?.[0]?.version).toBe(2);
-    expect(adapter.rows["_resolve_schema_steps"] ?? []).toHaveLength(0);
   });
 
   it("cleans up duplicate version rows on advance", async () => {

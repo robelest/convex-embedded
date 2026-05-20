@@ -13,7 +13,7 @@
     "test:embedded": "vp exec vitest --run embedded",
     "test:resolve": "vp exec vitest --run resolve",
     "test:integration": "vp exec vitest --run integration",
-    "test:live": "vp exec vitest --run tests/live"
+    "test:live": "RUN_CONVEX_E2E=1 vp exec vitest --run tests/e2e/convex"
   },
   "devDependencies": {
     "@edge-runtime/vm": "^5.0.0",

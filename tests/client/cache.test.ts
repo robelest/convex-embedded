@@ -2,7 +2,10 @@ import { EmbeddedQueryCache } from "@resolve/client/cache";
 import type { CachedEntry } from "@resolve/client/cache";
 import { describe, expect, it } from "@tests/testkit";
 
-function makeEntry(value: unknown, overrides: Partial<CachedEntry> = {}): CachedEntry {
+function makeEntry(
+  value: unknown,
+  overrides: Partial<CachedEntry> = {},
+): CachedEntry {
   return {
     value,
     receivedAtMs: 0,
@@ -52,7 +55,9 @@ describe("EmbeddedQueryCache", () => {
     expect(cache.get("queries:list", { b: 2, a: 1 })).toEqual(makeEntry("v"));
     expect(cache.get("queries:list", { a: 1, b: 2 })).toEqual(makeEntry("v"));
 
-    expect(cache.set("queries:list", { b: 2, a: 1 }, makeEntry("v"))).toBe(false);
+    expect(cache.set("queries:list", { b: 2, a: 1 }, makeEntry("v"))).toBe(
+      false,
+    );
     expect(cache.size()).toBe(1);
   });
 
@@ -85,9 +90,9 @@ describe("EmbeddedQueryCache", () => {
   it("set returns true when value differs", () => {
     const cache = new EmbeddedQueryCache();
     cache.set("queries:list", { user: "u1" }, makeEntry([1, 2]));
-    expect(cache.set("queries:list", { user: "u1" }, makeEntry([1, 2, 3]))).toBe(
-      true,
-    );
+    expect(
+      cache.set("queries:list", { user: "u1" }, makeEntry([1, 2, 3])),
+    ).toBe(true);
     expect(cache.get("queries:list", { user: "u1" })?.value).toEqual([1, 2, 3]);
   });
 
@@ -179,7 +184,11 @@ describe("EmbeddedQueryCache", () => {
   it("applyTransition is atomic: writes all entries before returning", () => {
     const cache = new EmbeddedQueryCache();
 
-    const updates: Array<{ refName: string; args: unknown; entry: CachedEntry }> = [];
+    const updates: Array<{
+      refName: string;
+      args: unknown;
+      entry: CachedEntry;
+    }> = [];
     for (let i = 0; i < 50; i += 1) {
       updates.push({
         refName: `queries:item`,

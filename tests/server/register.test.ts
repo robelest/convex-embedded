@@ -568,13 +568,22 @@ describe("resolve handler", () => {
     fields.set("title", titleMap);
     const serverUpdate = Y.encodeStateAsUpdateV2(serverDoc);
 
-    const runQuery = vi.fn().mockImplementation((ref: any) => {
+    const runQuery = vi.fn().mockImplementation((ref: any, args: any) => {
       if (ref._name === "getCollectionChanges") {
         return Promise.resolve({
           mode: "incremental",
           collectionSeq: 1,
           changes: [{ docId: "doc1", kind: "upsert" }],
         });
+      }
+      if (ref._name === "getLiveStates" && Array.isArray(args.docIds)) {
+        return Promise.resolve(
+          args.docIds.map((docId: string) => ({
+            docId,
+            update: serverUpdate.buffer,
+            seq: 1,
+          })),
+        );
       }
       if (ref._name === "getLiveState") {
         return Promise.resolve({ update: serverUpdate.buffer, seq: 1 });
@@ -730,7 +739,19 @@ describe("resolve handler", () => {
             expect(indexName).toBe("by_projectId");
             chain(eqChain);
             expect(eqChain.eq).toHaveBeenCalledWith("projectId", "p1");
-            return { collect: indexedCollect };
+            return {
+              collect: indexedCollect,
+              paginate: vi.fn(async (opts: any) => {
+                const all = await indexedCollect();
+                const start = opts.cursor ? parseInt(opts.cursor, 10) : 0;
+                const end = start + (opts.numItems ?? all.length);
+                return {
+                  page: all.slice(start, end),
+                  isDone: end >= all.length,
+                  continueCursor: end < all.length ? String(end) : null,
+                };
+              }),
+            };
           }),
         })),
         get: vi.fn().mockImplementation((docId: string) => {
@@ -814,12 +835,24 @@ describe("resolve handler", () => {
         return Promise.resolve(null);
       }),
       db: {
-        query: vi.fn((table: string) => ({
+        query: vi.fn((_table: string) => ({
           withIndex: vi.fn((indexName: string, chain: any) => {
             expect(indexName).toBe("by_owner");
             chain(eqChain);
             expect(eqChain.eq).toHaveBeenCalledWith("owner", "alice");
-            return { collect: indexedCollect };
+            return {
+              collect: indexedCollect,
+              paginate: vi.fn(async (opts: any) => {
+                const all = await indexedCollect();
+                const start = opts.cursor ? parseInt(opts.cursor, 10) : 0;
+                const end = start + (opts.numItems ?? all.length);
+                return {
+                  page: all.slice(start, end),
+                  isDone: end >= all.length,
+                  continueCursor: end < all.length ? String(end) : null,
+                };
+              }),
+            };
           }),
         })),
         get: vi.fn().mockImplementation((docId: string) => {
@@ -903,7 +936,19 @@ describe("resolve handler", () => {
         query: vi.fn(() => ({
           withIndex: vi.fn((_indexName: string, chain: any) => {
             chain(eqChain);
-            return { collect: indexedCollect };
+            return {
+              collect: indexedCollect,
+              paginate: vi.fn(async (opts: any) => {
+                const all = await indexedCollect();
+                const start = opts.cursor ? parseInt(opts.cursor, 10) : 0;
+                const end = start + (opts.numItems ?? all.length);
+                return {
+                  page: all.slice(start, end),
+                  isDone: end >= all.length,
+                  continueCursor: end < all.length ? String(end) : null,
+                };
+              }),
+            };
           }),
         })),
         get: vi.fn().mockImplementation((docId: string) => {
@@ -950,13 +995,22 @@ describe("resolve handler", () => {
     bindRuntime(tasks, component);
 
     const ctx = {
-      runQuery: vi.fn().mockImplementation((ref: any) => {
+      runQuery: vi.fn().mockImplementation((ref: any, args: any) => {
         if (ref._name === "getCollectionChanges") {
           return Promise.resolve({
             mode: "incremental",
             collectionSeq: 2,
             changes: [{ docId: "doc1", kind: "upsert" }],
           });
+        }
+        if (ref._name === "getLiveStates" && Array.isArray(args?.docIds)) {
+          return Promise.resolve(
+            args.docIds.map((docId: string) => ({
+              docId,
+              update: new ArrayBuffer(0),
+              seq: 2,
+            })),
+          );
         }
         if (ref._name === "getLiveState") {
           return Promise.resolve({ update: new ArrayBuffer(0), seq: 2 });
@@ -1023,13 +1077,22 @@ describe("resolve handler", () => {
     const fullUpdate = Y.encodeStateAsUpdateV2(doc);
     const stateVector = Y.encodeStateVector(doc);
 
-    const runQuery = vi.fn().mockImplementation((ref: any) => {
+    const runQuery = vi.fn().mockImplementation((ref: any, args: any) => {
       if (ref._name === "getCollectionChanges") {
         return Promise.resolve({
           mode: "incremental",
           collectionSeq: 1,
           changes: [{ docId: "doc1", kind: "upsert" }],
         });
+      }
+      if (ref._name === "getLiveStates" && Array.isArray(args?.docIds)) {
+        return Promise.resolve(
+          args.docIds.map((docId: string) => ({
+            docId,
+            update: fullUpdate.buffer,
+            seq: 1,
+          })),
+        );
       }
       if (ref._name === "getLiveState") {
         return Promise.resolve({ update: fullUpdate.buffer, seq: 1 });
@@ -1057,13 +1120,18 @@ describe("resolve handler", () => {
     });
     bindRuntime(tasks, component);
 
-    const runQuery = vi.fn().mockImplementation((ref: any) => {
+    const runQuery = vi.fn().mockImplementation((ref: any, args: any) => {
       if (ref._name === "getCollectionChanges") {
         return Promise.resolve({
           mode: "incremental",
           collectionSeq: 1,
           changes: [{ docId: "missing", kind: "upsert" }],
         });
+      }
+      if (ref._name === "getLiveStates" && Array.isArray(args?.docIds)) {
+        return Promise.resolve(
+          args.docIds.map(() => null),
+        );
       }
       if (ref._name === "getLiveState") {
         return Promise.resolve(null);

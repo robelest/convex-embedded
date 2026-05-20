@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, it } from "@tests/testkit";
 
-import { api } from "../../convex/_generated/api";
-import { DEMO_WORKSPACE_ID } from "../../convex/workspace";
-import { getEmbeddedClientEntry } from "../../packages/convex-embedded/src/client/entry";
-import { SystemPaths } from "../../packages/convex-embedded/src/index";
+import { api } from "../../../convex/_generated/api";
+import { DEMO_WORKSPACE_ID } from "../../../convex/workspace";
+import { getEmbeddedClientEntry } from "../../../packages/convex-embedded/src/client/entry";
+import { SystemPaths } from "../../../packages/convex-embedded/src/index";
 import {
   createLiveClient,
+  describeLiveClientState,
   pollUntil,
   temporaryDatabasePath,
   type TestConnectivityController,
@@ -13,10 +14,11 @@ import {
   uniqueSuffix,
   waitForOffline,
   waitForResolved,
-} from "../helpers/live";
+} from "./harness";
 
 const CONVEX_URL = process.env.CONVEX_URL;
-const maybeDescribe = CONVEX_URL ? describe : describe.skip;
+const maybeDescribe =
+  CONVEX_URL && process.env.RUN_CONVEX_E2E === "1" ? describe : describe.skip;
 
 type LiveClient = Awaited<ReturnType<typeof createLiveClient>>["client"] & {
   close(): Promise<void>;
@@ -75,14 +77,14 @@ maybeDescribe("live persisted restart", () => {
       description: `Restart persistence ${suffix}`,
     });
     const canonicalProjectId = await waitForMappedRemoteId<
-      import("../../convex/_generated/dataModel").Id<"projects">
+      import("../../../convex/_generated/dataModel").Id<"projects">
     >(first.client, projectId);
     const issueId = await first.client.mutation(api.issues.create, {
       projectId: canonicalProjectId,
       title: `Issue ${suffix}`,
     });
     const canonicalIssueId = await waitForMappedRemoteId<
-      import("../../convex/_generated/dataModel").Id<"issues">
+      import("../../../convex/_generated/dataModel").Id<"issues">
     >(first.client, issueId);
 
     first.connectivity.setOnline(false);
@@ -111,22 +113,23 @@ maybeDescribe("live persisted restart", () => {
     await waitForResolved(second.client, 40_000);
 
     const issues = await pollUntil({
+      description: `restarted client sees issue ${canonicalIssueId} in_progress`,
       read: async () =>
-        (await second.client.query(api.issues.forProject, {
+        (await second.client.query(api.issues.allForProject, {
           projectId: canonicalProjectId,
-        })) as {
-          issues: Array<{ _id: string; status: string }>;
-        },
-      accept: (result) =>
-        result.issues.some(
+        })) as Array<{ _id: string; status: string }>,
+      accept: (issues) =>
+        issues.some(
           (issue) =>
             issue._id === canonicalIssueId && issue.status === "in_progress",
         ),
+      diagnostics: () => describeLiveClientState(second.client),
       timeoutMs: 40_000,
       intervalMs: 250,
     });
 
     const comments = await pollUntil({
+      description: `restarted client sees persisted comment for ${canonicalIssueId}`,
       read: async () =>
         (await second.client.query(api.comments.forIssue, {
           issueId: canonicalIssueId,
@@ -135,12 +138,13 @@ maybeDescribe("live persisted restart", () => {
         result.some(
           (comment) => comment.body === `persisted-comment-${suffix}`,
         ),
+      diagnostics: () => describeLiveClientState(second.client),
       timeoutMs: 40_000,
       intervalMs: 250,
     });
 
     expect(
-      issues.issues.some(
+      issues.some(
         (issue) =>
           issue._id === canonicalIssueId && issue.status === "in_progress",
       ),
@@ -173,14 +177,14 @@ maybeDescribe("live persisted restart", () => {
       description: `Processing persistence ${suffix}`,
     });
     const canonicalProjectId = await waitForMappedRemoteId<
-      import("../../convex/_generated/dataModel").Id<"projects">
+      import("../../../convex/_generated/dataModel").Id<"projects">
     >(first.client, projectId);
     const issueId = await first.client.mutation(api.issues.create, {
       projectId: canonicalProjectId,
       title: `Issue ${suffix}`,
     });
     const canonicalIssueId = await waitForMappedRemoteId<
-      import("../../convex/_generated/dataModel").Id<"issues">
+      import("../../../convex/_generated/dataModel").Id<"issues">
     >(first.client, issueId);
 
     first.connectivity.setOnline(false);
@@ -225,23 +229,23 @@ maybeDescribe("live persisted restart", () => {
     await waitForResolved(second.client, 40_000);
 
     const issues = await pollUntil({
+      description: `reclaimed client sees issue ${canonicalIssueId} in_progress`,
       read: async () =>
-        (await second.client.query(api.issues.forProject, {
+        (await second.client.query(api.issues.allForProject, {
           projectId: canonicalProjectId,
-        })) as {
-          issues: Array<{ _id: string; status: string }>;
-        },
-      accept: (result) =>
-        result.issues.some(
+        })) as Array<{ _id: string; status: string }>,
+      accept: (issues) =>
+        issues.some(
           (issue) =>
             issue._id === canonicalIssueId && issue.status === "in_progress",
         ),
+      diagnostics: () => describeLiveClientState(second.client),
       timeoutMs: 40_000,
       intervalMs: 250,
     });
 
     expect(
-      issues.issues.some(
+      issues.some(
         (issue) =>
           issue._id === canonicalIssueId && issue.status === "in_progress",
       ),
@@ -273,14 +277,14 @@ maybeDescribe("live persisted restart", () => {
       description: `Volume persistence ${suffix}`,
     });
     const canonicalProjectId = await waitForMappedRemoteId<
-      import("../../convex/_generated/dataModel").Id<"projects">
+      import("../../../convex/_generated/dataModel").Id<"projects">
     >(first.client, projectId);
     const issueId = await first.client.mutation(api.issues.create, {
       projectId: canonicalProjectId,
       title: `Issue ${suffix}`,
     });
     const canonicalIssueId = await waitForMappedRemoteId<
-      import("../../convex/_generated/dataModel").Id<"issues">
+      import("../../../convex/_generated/dataModel").Id<"issues">
     >(first.client, issueId);
 
     first.connectivity.setOnline(false);
@@ -345,19 +349,18 @@ maybeDescribe("live persisted restart", () => {
     await waitForResolved(second.client, 60_000);
 
     const issues = await pollUntil({
+      description: `volume restart sees final issue ${canonicalIssueId}`,
       read: async () =>
-        (await second.client.query(api.issues.forProject, {
+        (await second.client.query(api.issues.allForProject, {
           projectId: canonicalProjectId,
-        })) as {
-          issues: Array<{
-            _id: string;
-            title: string;
-            status: string;
-            priority: string;
-          }>;
-        },
-      accept: (result) =>
-        result.issues.some(
+        })) as Array<{
+          _id: string;
+          title: string;
+          status: string;
+          priority: string;
+        }>,
+      accept: (issues) =>
+        issues.some(
           (issue) =>
             issue._id === canonicalIssueId &&
             issue.status === "done" &&
@@ -365,11 +368,13 @@ maybeDescribe("live persisted restart", () => {
             issue.title ===
               `Volume title ${commentBodies.length - 1} ${suffix}`,
         ),
+      diagnostics: () => describeLiveClientState(second.client),
       timeoutMs: 60_000,
       intervalMs: 250,
     });
 
     const comments = await pollUntil({
+      description: `volume restart sees all ${commentBodies.length} comments`,
       read: async () =>
         (await second.client.query(api.comments.forIssue, {
           issueId: canonicalIssueId,
@@ -378,11 +383,12 @@ maybeDescribe("live persisted restart", () => {
         const bodies = new Set(result.map((comment) => comment.body));
         return commentBodies.every((body) => bodies.has(body));
       },
+      diagnostics: () => describeLiveClientState(second.client),
       timeoutMs: 60_000,
       intervalMs: 250,
     });
 
-    const issue = issues.issues.find(
+    const issue = issues.find(
       (candidate) => candidate._id === canonicalIssueId,
     );
     expect(issue).toMatchObject({

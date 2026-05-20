@@ -1,26 +1,33 @@
+import appSchema, * as appSchemaModule from "@convex/schema";
 import {
-  extractProseText,
-  createEmptyDoc,
-  getRegisterConflict,
-  resolveRegister,
-  getCounterValue,
-  getSetMembers,
-  encodeStateVector,
   applyUpdate,
+  createEmptyDoc,
   encodeState,
+  encodeStateVector,
+  extractProseText,
+  getCounterValue,
+  getRegisterConflict,
+  getSetMembers,
   materializeYjsDoc,
+  resolveRegister,
 } from "@resolve/client/schema";
 import { createEmptyProseContent } from "@resolve/crdt/prose/content";
 import {
-  define,
-  register,
   counter,
-  set,
+  define,
   omit,
   prose,
+  register,
+  set,
 } from "@resolve/server/schema";
+import {
+  extractConvexSchemaExport,
+  extractEmbeddedTableDefinitions,
+  getCrdtType as getEmbeddedCrdtType,
+} from "@resolve/shared/schema";
+import { CrdtType } from "@resolve/shared/types";
 import { initYjsDoc } from "@resolve/shared/yjs";
-import { describe, it, expect } from "@tests/testkit";
+import { describe, expect, it } from "@tests/testkit";
 import { v } from "convex/values";
 import * as Y from "yjs";
 
@@ -447,5 +454,24 @@ describe("materializeYjsDoc()", () => {
     expect(result.body).toEqual(createEmptyProseContent());
     expect(result.votes).toBe(0);
     expect(result.tags).toEqual([]);
+  });
+});
+
+describe("embedded schema extraction", () => {
+  it("uses the default export from a Convex schema module namespace", () => {
+    expect(extractConvexSchemaExport(appSchemaModule)).toBe(appSchema);
+  });
+
+  it("extracts embedded table definitions from named schema exports", () => {
+    const definitions = extractEmbeddedTableDefinitions(appSchemaModule);
+    const projects = definitions.get("projects");
+    const issues = definitions.get("issues");
+
+    expect(projects).toBeDefined();
+    expect(issues).toBeDefined();
+    expect(getEmbeddedCrdtType(projects?.shape.description)).toBe(
+      CrdtType.Prose,
+    );
+    expect(getEmbeddedCrdtType(issues?.shape.description)).toBe(CrdtType.Prose);
   });
 });

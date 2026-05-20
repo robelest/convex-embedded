@@ -18,6 +18,11 @@ const importableSpecifiers = [
   "@robelest/convex-embedded/server",
   "@robelest/convex-embedded/client",
   "@robelest/convex-embedded/crdt",
+  "@robelest/convex-embedded/codegen",
+  "@robelest/convex-embedded/next",
+  "@robelest/convex-embedded/nitro",
+  "@robelest/convex-embedded/unplugin",
+  "@robelest/convex-embedded/vite",
   "@robelest/convex-embedded/test",
   "@robelest/convex-embedded/convex.config",
 ] as const;

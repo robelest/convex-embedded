@@ -29,7 +29,7 @@ describe("scheduler/cron-discover", () => {
           default: {
             isCrons: true,
             crons: {
-              "tick": {
+              tick: {
                 name: "ticks:run",
                 args: [{ source: "demo" }],
                 schedule: { type: "interval", seconds: 30 },
@@ -111,7 +111,7 @@ describe("scheduler/cron-discover", () => {
           default: {
             isCrons: true,
             crons: {
-              "good": {
+              good: {
                 name: "ticks:run",
                 args: [{}],
                 schedule: { type: "interval", minutes: 1 },

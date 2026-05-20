@@ -7,8 +7,8 @@ import type {
   SqliteDriver,
   SqliteStatement,
 } from "@embedded/storage/sqlite/driver";
-import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "@tests/testkit";
+import Database from "better-sqlite3";
 
 function createMemoryDriver(): SqliteDriver & { close: () => Promise<void> } {
   const db = new Database(":memory:");

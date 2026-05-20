@@ -1,5 +1,5 @@
-import type { StorageAdapter } from "@embedded/storage/adapter";
 import { Database } from "@embedded/runtime/db/database";
+import type { StorageAdapter } from "@embedded/storage/adapter";
 import { OpaqueTestAdapter, mockAdapter } from "@tests/helpers/adapter";
 import { describe, it, expect } from "@tests/testkit";
 import { vi } from "vitest";
@@ -215,7 +215,7 @@ describe("Database storage", () => {
       db.startTransaction();
       const doc = db.get(
         undefined,
-        db.normalizeId("tasks", Object.keys((db as any)._documents)[0])!,
+        db.normalizeId("tasks", (db as any)._documents.keys().next().value)!,
       );
       db.rollbackWrites();
 

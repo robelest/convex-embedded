@@ -703,6 +703,127 @@ describe("engine.create()", () => {
     m.stop();
   });
 
+  it("hydrates missing referenced documents before ingesting scoped children", async () => {
+    const localClient = createMockLocalClient();
+    const docsByTable = new Map<string, Array<Record<string, unknown>>>([
+      ["projects", []],
+      ["issues", []],
+    ]);
+    const embedded: any = {
+      client: localClient,
+      ingestDocuments: vi
+        .fn()
+        .mockImplementation(
+          async (table: string, docs: Array<Record<string, unknown>>) => {
+            docsByTable.set(table, docs);
+          },
+        ),
+      canonicalizeMappedCreate: vi.fn().mockResolvedValue(undefined),
+      getDocumentsForTable: vi
+        .fn()
+        .mockImplementation(
+          async (table: string) => docsByTable.get(table) ?? [],
+        ),
+      hasLocalDocumentId: vi
+        .fn()
+        .mockImplementation((id: string) =>
+          Array.from(docsByTable.values()).some((docs) =>
+            docs.some((doc) => doc._id === id),
+          ),
+        ),
+    };
+    const remoteClient: any = {
+      query: vi.fn().mockImplementation(async (ref: string, args: any) => {
+        if (ref === "projects.resolve") {
+          return {
+            mode: "full",
+            collectionSeq: 0,
+            documents: (args.docIds ?? []).map((docId: string) => ({
+              docId,
+              seq: 0,
+              document: {
+                _id: docId,
+                _creationTime: 1,
+                name: "Project",
+              },
+            })),
+            isDone: true,
+            continueCursor: null,
+          };
+        }
+        if (ref === "issues.resolve") {
+          return {
+            mode: "full",
+            collectionSeq: 0,
+            documents: [
+              {
+                docId: "issue-1",
+                seq: 0,
+                document: {
+                  _id: "issue-1",
+                  _creationTime: 2,
+                  projectId: "project-1",
+                  title: "Issue",
+                },
+              },
+            ],
+            isDone: true,
+            continueCursor: null,
+          };
+        }
+        return { mode: "full", collectionSeq: 0, documents: [] };
+      }),
+      mutation: vi.fn().mockResolvedValue(null),
+      onUpdate: vi.fn().mockReturnValue(vi.fn()),
+    };
+
+    const m = createEngine({
+      embedded,
+      remoteClient,
+      tables: {
+        projects: tableConfig(
+          "projects.resolve",
+          undefined,
+          createMockSchema({
+            shape: { name: "string" },
+            getShape: () => ({ name: "string" }),
+          }),
+        ),
+        issues: tableConfig(
+          "issues.resolve",
+          undefined,
+          createMockSchema({
+            shape: { projectId: v.id("projects"), title: "string" },
+            getShape: () => ({ projectId: v.id("projects"), title: "string" }),
+          }),
+        ),
+      },
+    });
+
+    m.start();
+    await settle();
+    await m.ensureScopeReady("issues", { projectId: "project-1" });
+
+    expect(remoteClient.query).toHaveBeenCalledWith("projects.resolve", {
+      collectionSeq: null,
+      documents: [],
+      docIds: ["project-1"],
+    });
+    expect(docsByTable.get("projects")).toEqual([
+      { _id: "project-1", _creationTime: 1, name: "Project" },
+    ]);
+    expect(docsByTable.get("issues")).toEqual([
+      {
+        _id: "issue-1",
+        _creationTime: 2,
+        projectId: "project-1",
+        title: "Issue",
+      },
+    ]);
+
+    m.stop();
+  });
+
   it("transitions to error when resolve fails after retries", async () => {
     const { embedded } = createMockEmbedded();
     const remoteClient: any = {
@@ -1629,9 +1750,7 @@ describe("engine.create()", () => {
     ]);
 
     const remoteClient = createMockRemoteClient();
-    remoteClient.query.mockResolvedValue([
-      { docId: "doc-1" },
-    ]);
+    remoteClient.query.mockResolvedValue([{ docId: "doc-1" }]);
 
     const m = createEngine({
       embedded,
@@ -1663,9 +1782,7 @@ describe("engine.create()", () => {
     ]);
 
     const remoteClient = createMockRemoteClient();
-    remoteClient.query.mockResolvedValue([
-      { docId: "doc-1" },
-    ]);
+    remoteClient.query.mockResolvedValue([{ docId: "doc-1" }]);
 
     const m = createEngine({
       embedded,

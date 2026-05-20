@@ -68,6 +68,11 @@ const mockEngineInstances: Array<{
   on: ReturnType<typeof vi.fn>;
   start: ReturnType<typeof vi.fn>;
   stop: ReturnType<typeof vi.fn>;
+  idMap: {
+    translateLocalIdsToRemote: ReturnType<typeof vi.fn>;
+    translateClientIdsToRuntime: ReturnType<typeof vi.fn>;
+    translateResult: ReturnType<typeof vi.fn>;
+  };
 }> = [];
 const mockEngineFactory = {
   create: vi.fn(() => {
@@ -76,6 +81,11 @@ const mockEngineFactory = {
       on: vi.fn(),
       start: vi.fn(),
       stop: vi.fn(),
+      idMap: {
+        translateLocalIdsToRemote: vi.fn((value: unknown) => value),
+        translateClientIdsToRuntime: vi.fn((value: unknown) => value),
+        translateResult: vi.fn((value: unknown) => value),
+      },
     };
     mockEngineInstances.push(instance);
     return instance;
@@ -94,6 +104,9 @@ const localOnlyCreateRef =
 const remoteFetchRef = makeFunctionReference<"query">("remote:fetch");
 const remoteRunRef = makeFunctionReference<"action">("remote:run");
 const remoteWatchRef = makeFunctionReference<"query">("remote:watch");
+const remotePaginatedWatchRef = makeFunctionReference<"query">(
+  "remote:paginatedWatch",
+);
 const localWatchRef = makeFunctionReference<"query">("local:watch");
 const localPaginatedWatchRef = makeFunctionReference<"query">(
   "local:paginatedWatch",
@@ -119,6 +132,7 @@ function createModules() {
       fetch: remoteOnly(() => "ok"),
       run: remoteOnly(() => "ok"),
       watch: remoteOnly(() => "ok"),
+      paginatedWatch: remoteOnly(() => "ok"),
     }),
     local: async () => ({
       create: () => "ok",
@@ -138,6 +152,54 @@ function createModules() {
     forced: async () => ({
       publish: remoteOnly(() => "ok"),
     }),
+  };
+}
+
+function createModulesWithRemoteMetadata() {
+  const resolveExport = () => {};
+  Object.defineProperty(
+    resolveExport,
+    Symbol.for("convex-embedded:remoteMeta"),
+    {
+      value: {
+        __brand: "convex-embedded:remoteMeta",
+        table: "projects",
+        resolveExport: "resolve",
+        listExport: "list",
+        schema: undefined,
+      },
+    },
+  );
+
+  return {
+    ...createModules(),
+    projects: async () => ({
+      resolve: resolveExport,
+      list: () => [],
+    }),
+  };
+}
+
+function createManifestRoutedModules() {
+  return {
+    modules: {
+      "_generated/api": async () => ({}),
+      remote: async () => ({
+        paginatedWatch: () => ({
+          page: [{ source: "local" }],
+          isDone: true,
+          continueCursor: "_end_cursor",
+        }),
+      }),
+    },
+    manifest: {
+      remote: {
+        routeModes: {
+          "remote:paginatedWatch": "remote" as const,
+        },
+        tables: {},
+      },
+    },
   };
 }
 
@@ -459,6 +521,70 @@ describe("remoteOnly routing", () => {
     unsubscribe();
   });
 
+  it("translates local ids before remote-routed query subscriptions", async () => {
+    mockEngineFactory.create.mockImplementationOnce(() => {
+      const instance = {
+        mutation: vi.fn(),
+        on: vi.fn(),
+        start: vi.fn(),
+        stop: vi.fn(),
+        idMap: {
+          translateLocalIdsToRemote: vi.fn((value: unknown) =>
+            JSON.parse(
+              JSON.stringify(value).replaceAll(
+                "local-project",
+                "remote-project",
+              ),
+            ),
+          ),
+          translateClientIdsToRuntime: vi.fn((value: unknown) => value),
+          translateResult: vi.fn((value: unknown) => value),
+        },
+      };
+      mockEngineInstances.push(instance);
+      return instance;
+    });
+    const client = createConvexClient({
+      convex: { modules: createModulesWithRemoteMetadata() },
+      remote: { url: REMOTE_URL },
+    }) as any;
+    clientsToClose.push(client);
+
+    const result = await client.query(remoteFetchRef, {
+      projectId: "local-project",
+    });
+    const unsubscribe = client.onUpdate(
+      remoteWatchRef,
+      {
+        projectId: "local-project",
+        paginationOpts: { cursor: null, numItems: 100, id: 1 },
+      },
+      vi.fn(),
+      vi.fn(),
+    );
+    await settle();
+
+    const convexBrowser = (await vi.importMock("convex/browser")) as any;
+    const instances = convexBrowser.__mock.instances() as Array<any>;
+    const remote = instances.find((c) => c.url === REMOTE_URL)!;
+
+    expect(result.url).toBe(REMOTE_URL);
+    expect(remote.query).toHaveBeenCalledWith(remoteFetchRef, {
+      projectId: "remote-project",
+    });
+    expect(remote.onUpdate).toHaveBeenCalledWith(
+      remoteWatchRef,
+      {
+        projectId: "remote-project",
+        paginationOpts: { cursor: null, numItems: 100, id: 1 },
+      },
+      expect.any(Function),
+      expect.any(Function),
+    );
+
+    unsubscribe();
+  });
+
   it("routes local onUpdate subscriptions through the cache pipeline", async () => {
     const client = createConvexClient({
       convex: { modules: createModules() },
@@ -522,6 +648,45 @@ describe("remoteOnly routing", () => {
       expect.objectContaining({
         paginationOpts: expect.objectContaining({ numItems: 1 }),
       }),
+      expect.any(Function),
+      expect.any(Function),
+    );
+
+    unsubscribe();
+  });
+
+  it("routes manifest-marked paginated subscriptions to the remote client", async () => {
+    const client = createConvexClient({
+      convex: createManifestRoutedModules(),
+      remote: { url: REMOTE_URL },
+    }) as any;
+    clientsToClose.push(client);
+
+    const callback = vi.fn();
+    const unsubscribe = client.onPaginatedUpdate_experimental(
+      remotePaginatedWatchRef,
+      { projectId: "project-1" },
+      { initialNumItems: 100 },
+      callback,
+      vi.fn(),
+    );
+
+    await settle();
+
+    const convexBrowser = (await vi.importMock("convex/browser")) as any;
+    const instances = convexBrowser.__mock.instances() as Array<any>;
+    const remote = instances.find((c) => c.url === REMOTE_URL)!;
+
+    expect(remote.onPaginatedUpdate_experimental).toHaveBeenCalledWith(
+      remotePaginatedWatchRef,
+      { projectId: "project-1" },
+      { initialNumItems: 100 },
+      expect.any(Function),
+      expect.any(Function),
+    );
+    expect(remote.onUpdate).not.toHaveBeenCalledWith(
+      "remote:paginatedWatch",
+      expect.anything(),
       expect.any(Function),
       expect.any(Function),
     );

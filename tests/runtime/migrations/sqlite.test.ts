@@ -10,7 +10,7 @@ import {
 import { afterEach, describe, expect, it } from "@tests/testkit";
 import { v } from "convex/values";
 
-import { temporaryDatabasePath, uniqueSuffix } from "../../helpers/live";
+import { temporaryDatabasePath, uniqueSuffix } from "../../helpers/storage";
 
 const adaptersToClose: Array<{ close(): Promise<void> }> = [];
 
@@ -52,7 +52,9 @@ async function readRowsByIndex(
 
 function createSqliteMigrationAdapter(
   db: Database,
-  storage: { applySchemaOps?: (t: string, ops: readonly never[]) => Promise<void> },
+  storage: {
+    applySchemaOps?: (t: string, ops: readonly never[]) => Promise<void>;
+  },
 ): MigrationRuntimeAdapter {
   const txWrite = async <T>(work: () => Promise<T>): Promise<T> => {
     db.startTransaction();
@@ -168,93 +170,4 @@ describe("Phase 2 migrations end-to-end with SQLite", () => {
     }
   });
 
-  it("ctx.step survives interruption: re-run skips completed steps", async () => {
-    const dbPath = temporaryDatabasePath(uniqueSuffix("p2-step-resume"));
-
-    let runCount = 0;
-    let firstStepRanThisInvocation = false;
-    const tasks = embeddedTable(
-      "step_resume",
-      { title: register(v.string()) },
-      {
-        migrations: {
-          2: async ({ step }) => {
-            firstStepRanThisInvocation = false;
-            await step("first", async () => {
-              runCount += 1;
-              firstStepRanThisInvocation = true;
-            });
-            if (firstStepRanThisInvocation) {
-              throw new Error("interrupted after first step");
-            }
-            await step("second", async () => {
-              runCount += 1;
-            });
-          },
-        },
-      },
-    );
-
-    {
-      const storage = await openNodeStorage({ filename: dbPath });
-      const db = new Database(null);
-      db.setStorage(storage);
-      await db.hydrate();
-
-      const adapter = createSqliteMigrationAdapter(db, storage);
-      await expect(
-        runMigrations({
-          table: "step_resume",
-          schema: (tasks as unknown as { schema: any }).schema,
-          adapter,
-        }),
-      ).rejects.toThrow("interrupted");
-      const stepRows = await readRowsByIndex(db, {
-        tableName: "_resolve_schema_steps",
-        indexName: "by_table_version_step",
-        range: [
-          { fieldPath: "table", value: "step_resume" },
-          { fieldPath: "version", value: 2 },
-          { fieldPath: "stepName", value: "first" },
-        ],
-      });
-      expect(stepRows).toHaveLength(1);
-      await db.waitForPersistence();
-      await storage.close();
-    }
-
-    {
-      const storage = await openNodeStorage({ filename: dbPath });
-      adaptersToClose.push(storage);
-      const db = new Database(null);
-      db.setStorage(storage);
-      await db.hydrate();
-
-      const adapter = createSqliteMigrationAdapter(db, storage);
-      await runMigrations({
-        table: "step_resume",
-        schema: (tasks as unknown as { schema: any }).schema,
-        adapter,
-      });
-
-      expect(runCount).toBe(2);
-
-      const versionRows = await readRowsByIndex(db, {
-        tableName: "_resolve_schema_versions",
-        indexName: "by_table",
-        range: [{ fieldPath: "table", value: "step_resume" }],
-      });
-      expect(versionRows[0]?.version).toBe(2);
-
-      const stepRows = await readRowsByIndex(db, {
-        tableName: "_resolve_schema_steps",
-        indexName: "by_table_version_step",
-        range: [
-          { fieldPath: "table", value: "step_resume" },
-          { fieldPath: "version", value: 2 },
-        ],
-      });
-      expect(stepRows).toHaveLength(0);
-    }
-  });
 });

@@ -136,7 +136,7 @@ describe("createSqliteStorage", () => {
       meta: { timestamp: 1, lastCreationTime: 42 },
     });
 
-    const migrationStatements = executeBatch.mock.calls[0]?.[0] as Array<{
+    const migrationStatements = executeBatch.mock.calls[1]?.[0] as Array<{
       sql: string;
       params?: unknown[];
     }>;
@@ -145,7 +145,7 @@ describe("createSqliteStorage", () => {
     );
     expect(migrationStatements[3]?.sql).toContain(TABLE_ROUTING_TABLE);
 
-    const writeStatements = executeBatch.mock.calls[1]?.[0] as Array<{
+    const writeStatements = executeBatch.mock.calls[2]?.[0] as Array<{
       sql: string;
       params?: unknown[];
     }>;

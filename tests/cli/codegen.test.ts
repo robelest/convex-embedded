@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { runCodegen } from "@embedded/cli/codegen";
+import { runCodegen } from "@embedded/codegen";
 import { afterEach, beforeEach, describe, expect, it } from "@tests/testkit";
 
 let workDir: string;
@@ -41,7 +41,7 @@ describe("runCodegen", () => {
     expect(result.modulesExcluded).toEqual([]);
 
     const generated = await readFile(result.outFile, "utf8");
-    expect(generated).toContain('"messages": () => import(');
+    expect(generated).toContain("messages: () => import(");
     expect(generated).toContain("../messages");
   });
 
@@ -78,7 +78,7 @@ describe("runCodegen", () => {
     expect(companion).not.toMatch(/=\s*remoteOnly\(/);
 
     const generated = await readFile(result.outFile, "utf8");
-    expect(generated).toContain('"billing": () => import("./embedded/billing")');
+    expect(generated).toContain('billing: () => import("./embedded/billing")');
   });
 
   it("excludes a fully-remoteOnly module from the registry entirely", async () => {
@@ -158,7 +158,7 @@ describe("runCodegen", () => {
     expect(result.modulesIncluded).toEqual(["messages"]);
 
     const generated = await readFile(result.outFile, "utf8");
-    expect(generated).toContain('"messages": () => import(');
+    expect(generated).toContain("messages: () => import(");
     // billing/charge does not appear as an importable module, but its
     // routing entry is still recorded in the manifest
     expect(generated).not.toMatch(/import\(.*billing\/charge/);
@@ -192,6 +192,8 @@ describe("runCodegen", () => {
     // outFile is at convex/_generated/embedded.ts; companion is at
     // convex/_generated/embedded/billing/index.ts; relative import is
     // "./embedded/billing/index"
-    expect(generated).toContain('"billing/index": () => import("./embedded/billing/index")');
+    expect(generated).toContain(
+      '"billing/index": () => import("./embedded/billing/index")',
+    );
   });
 });

@@ -84,9 +84,6 @@ function deferredPromise<T>() {
 function createSqlStorage(
   rowsByTable: Record<string, Array<Record<string, unknown>>>,
 ) {
-  const getDocumentsByTable = vi.fn(async (tableName: string) => [
-    ...(rowsByTable[tableName] ?? []),
-  ]);
   const getDocument = vi.fn(async (tableName: string, id: string) => {
     return (
       rowsByTable[tableName]?.find((row) => String(row._id) === id) ?? null
@@ -555,6 +552,7 @@ describe("onMutationCommit", () => {
       });
 
       await flushRuntimeWatch();
+      await (runtimeB as any)._crossTabSyncChain;
 
       expect(syncSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
     } finally {
@@ -953,11 +951,7 @@ describe("executeLocal query", () => {
   });
 
   it("reads persisted sql-backed id map rows through system queries", async () => {
-    const {
-      storage,
-      list: getDocumentsByTable,
-      readSource,
-    } = createSqlStorage({
+    const { storage, list: getDocumentsByTable } = createSqlStorage({
       _resolve_id_map: [
         {
           _id: "map-1",
@@ -1003,11 +997,7 @@ describe("executeLocal query", () => {
   });
 
   it("reads sql-backed collection and document metadata through system queries", async () => {
-    const {
-      storage,
-      readSource,
-      list: getDocumentsByTable,
-    } = createSqlStorage({
+    const { storage, list: getDocumentsByTable } = createSqlStorage({
       _resolve_collection_metadata: [
         {
           _id: "collection-meta-1",
@@ -1075,7 +1065,7 @@ describe("executeLocal query", () => {
   });
 
   it("reads sql-backed auth state and pending identity keys through system queries", async () => {
-    const { storage, list: getDocumentsByTable } = createSqlStorage({
+    const { storage } = createSqlStorage({
       _resolve_auth_state: [
         {
           _id: "auth-1",
@@ -1782,7 +1772,7 @@ describe("executeLocal system mutation", () => {
   });
 
   it("claims persisted sql-backed pending entries through system mutations", async () => {
-    const { storage, readSource } = createSqlStorage({
+    const { storage } = createSqlStorage({
       _resolve_pending: [
         {
           _id: "pending-1",
@@ -1842,7 +1832,7 @@ describe("executeLocal system mutation", () => {
   });
 
   it("updates sql-backed collection and document metadata through system mutations", async () => {
-    const { storage, readSource } = createSqlStorage({
+    const { storage } = createSqlStorage({
       _resolve_collection_metadata: [],
       _resolve_document_metadata: [],
     });

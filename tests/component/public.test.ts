@@ -38,69 +38,93 @@ function createMockCtx() {
   };
   let idCounter = 0;
 
+  function terminalMethods(rows: any[], tableName: string) {
+    return {
+      unique: async () => {
+        if (rows.length > 1) {
+          throw new Error(`Expected unique result for ${tableName}`);
+        }
+        return clone(rows[0] ?? null);
+      },
+      first: async () => clone(rows[0] ?? null),
+      collect: async () => clone(rows),
+      take: async (count: number) => clone(rows.slice(0, count)),
+      paginate: async (opts: { cursor: string | null; numItems: number }) => {
+        const start = opts.cursor ? parseInt(opts.cursor, 10) : 0;
+        const end = start + opts.numItems;
+        return {
+          page: clone(rows.slice(start, end)),
+          isDone: end >= rows.length,
+          continueCursor: end < rows.length ? String(end) : null,
+        };
+      },
+      order: (direction: "asc" | "desc") => {
+        const sorted = [...rows].sort((a, b) => {
+          const orderField =
+            "_creationTime" in a ? "_creationTime" : "seq";
+          const aVal = a[orderField] ?? 0;
+          const bVal = b[orderField] ?? 0;
+          return direction === "desc" ? bVal - aVal : aVal - bVal;
+        });
+        return terminalMethods(sorted, tableName);
+      },
+      filter: (predicate: (q: any) => any) => {
+        const filtered = rows.filter((row) => predicate(row));
+        return terminalMethods(filtered, tableName);
+      },
+    };
+  }
+
+  function applyFilters(tableName: TableName, filters: Record<string, unknown>) {
+    return tables[tableName].filter((row) =>
+      Object.entries(filters).every(([key, value]) => {
+        const currentRow = row as Record<string, any>;
+        if (value && typeof value === "object") {
+          const op = value as Record<string, any>;
+          if ("$gt" in op) return currentRow[key] > op.$gt;
+          if ("$gte" in op) return currentRow[key] >= op.$gte;
+          if ("$lt" in op) return currentRow[key] < op.$lt;
+          if ("$lte" in op) return currentRow[key] <= op.$lte;
+        }
+        return currentRow[key] === value;
+      }),
+    );
+  }
+
+  function indexFilterBuilder() {
+    const filters: Record<string, unknown> = {};
+    const self: any = {
+      eq: (field: string, value: unknown) => {
+        filters[field] = value;
+        return self;
+      },
+      gt: (field: string, value: unknown) => {
+        filters[field] = { $gt: value };
+        return self;
+      },
+      gte: (field: string, value: unknown) => {
+        filters[field] = { $gte: value };
+        return self;
+      },
+      lt: (field: string, value: unknown) => {
+        filters[field] = { $lt: value };
+        return self;
+      },
+      lte: (field: string, value: unknown) => {
+        filters[field] = { $lte: value };
+        return self;
+      },
+    };
+    return { proxy: self, filters };
+  }
+
   const queryTable = (tableName: TableName) => ({
-    withIndex: (indexName: string, builder: (q: any) => any) => {
-      const filters: Record<string, unknown> = {};
-      builder({
-        eq: (field: string, value: unknown) => {
-          filters[field] = value;
-          return {
-            eq: (nextField: string, nextValue: unknown) => {
-              filters[nextField] = nextValue;
-              return {
-                gt: (gtField: string, gtValue: unknown) => {
-                  filters[gtField] = { $gt: gtValue };
-                  return undefined;
-                },
-              };
-            },
-            gt: (nextField: string, nextValue: unknown) => {
-              filters[nextField] = { $gt: nextValue };
-              return undefined;
-            },
-          };
-        },
-      });
-
-      const rows = tables[tableName].filter((row) =>
-        Object.entries(filters).every(([key, value]) => {
-          const currentRow = row as Record<string, any>;
-          if (
-            value &&
-            typeof value === "object" &&
-            "$gt" in (value as Record<string, unknown>)
-          ) {
-            return currentRow[key] > (value as { $gt: any }).$gt;
-          }
-          return currentRow[key] === value;
-        }),
-      );
-
-      return {
-        unique: async () => {
-          if (rows.length > 1) {
-            throw new Error(`Expected unique result for ${tableName}`);
-          }
-          return clone(rows[0] ?? null);
-        },
-        collect: async () => clone(rows),
-        take: async (count: number) => clone(rows.slice(0, count)),
-        order: (direction: "asc" | "desc") => {
-          const ordered = [...rows].sort((a, b) => {
-            const orderField = indexName.endsWith("updatedAt")
-              ? "updatedAt"
-              : "seq";
-            const aOrder = a[orderField] ?? 0;
-            const bOrder = b[orderField] ?? 0;
-            return direction === "desc" ? bOrder - aOrder : aOrder - bOrder;
-          });
-
-          return {
-            first: async () => clone(ordered[0] ?? null),
-            collect: async () => clone(ordered),
-          };
-        },
-      };
+    ...terminalMethods([...tables[tableName]], tableName),
+    withIndex: (_indexName: string, builder: (q: any) => any) => {
+      const { proxy, filters } = indexFilterBuilder();
+      builder(proxy);
+      const rows = applyFilters(tableName, filters);
+      return terminalMethods(rows, tableName);
     },
   });
 

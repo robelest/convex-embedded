@@ -12,9 +12,6 @@ const STUB_MODULES: Record<string, () => Promise<any>> = {
 function createSqlStorage(
   rowsByTable: Record<string, Array<Record<string, unknown>>>,
 ) {
-  const getDocumentsByTable = vi.fn(async (tableName: string) => [
-    ...(rowsByTable[tableName] ?? []),
-  ]);
   const listDocuments = vi.fn(async (tableName: string) => [
     ...(rowsByTable[tableName] ?? []),
   ]);
@@ -70,7 +67,7 @@ function createSqlStorage(
 
 describe("runLocalMigrations", () => {
   it("migrates only pending entries for the active identity via indexed reads", async () => {
-    const { adapter: storage, readSource } = createSqlStorage({
+    const { adapter: storage } = createSqlStorage({
       _resolve_pending: [
         {
           _id: "pending-a",

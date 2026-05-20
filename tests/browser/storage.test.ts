@@ -1,9 +1,13 @@
 import { EmbeddedRuntime } from "@embedded/runtime/embedded";
-import { createBrowserStorageSurface } from "@resolve/browser/storage";
+import {
+  createBrowserStorageSurface,
+  createBrowserUploadFetch,
+} from "@resolve/browser/storage";
 import { afterEach, describe, expect, it } from "@tests/testkit";
 
 const runtimes: EmbeddedRuntime[] = [];
 const surfaces: Array<{ close(): void }> = [];
+const uploadFetch = createBrowserUploadFetch();
 
 afterEach(() => {
   for (const surface of surfaces.splice(0)) {
@@ -24,7 +28,7 @@ describe("browser storage surface", () => {
     runtime.setStorageSurface(surface);
 
     const uploadUrl = await surface.generateUploadUrl();
-    const uploadResponse = await fetch(uploadUrl, {
+    const uploadResponse = await uploadFetch(uploadUrl, {
       method: "POST",
       headers: { "Content-Type": "text/plain" },
       body: new Blob(["hello embedded"], { type: "text/plain" }),
@@ -64,7 +68,7 @@ describe("browser storage surface", () => {
     runtime.setStorageSurface(surface);
 
     const uploadUrl = await surface.generateUploadUrl();
-    const uploadResponse = await fetch(uploadUrl, {
+    const uploadResponse = await uploadFetch(uploadUrl, {
       method: "POST",
       body: new Blob(["delete-me"], { type: "text/plain" }),
     });
@@ -96,11 +100,11 @@ describe("browser storage surface", () => {
 
     const uploadUrl = await surface.generateUploadUrl();
 
-    const first = await fetch(uploadUrl, {
+    const first = await uploadFetch(uploadUrl, {
       method: "POST",
       body: new Blob(["once"]),
     });
-    const second = await fetch(uploadUrl, {
+    const second = await uploadFetch(uploadUrl, {
       method: "POST",
       body: new Blob(["twice"]),
     });
@@ -118,7 +122,7 @@ describe("browser storage surface", () => {
     runtime.setStorageSurface(surface);
 
     const uploadUrl = await surface.generateUploadUrl();
-    const response = await fetch(uploadUrl, { method: "GET" });
+    const response = await uploadFetch(uploadUrl, { method: "GET" });
     const body = (await response.json()) as { error: string };
 
     expect(response.status).toBe(405);

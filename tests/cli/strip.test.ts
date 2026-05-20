@@ -1,4 +1,4 @@
-import { stripRemoteOnlyExports } from "@embedded/cli/strip";
+import { stripRemoteOnlyExports } from "@embedded/codegen/strip";
 import { describe, expect, it } from "@tests/testkit";
 
 function strip(source: string, fileName = "billing.ts") {

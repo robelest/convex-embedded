@@ -2,11 +2,13 @@
 
 import { api } from "@convex/_generated/api";
 import type { Id } from "@convex/_generated/dataModel";
-import schema from "@convex/schema";
 import { projects } from "@convex/schema";
-import type { ConvexModuleRegistry } from "@embedded/kernel/modules";
 import { initYjsDoc } from "@resolve/shared/yjs";
-import { register as registerResolveComponent } from "@robelest/convex-embedded/test";
+import {
+  createAppConvexTest,
+  readRegister,
+  toArrayBuffer,
+} from "@tests/helpers/convex";
 /**
  * Integration test for convex-embedded using convex-test.
  *
@@ -17,56 +19,21 @@ import { register as registerResolveComponent } from "@robelest/convex-embedded/
  *   -> client applies diff
  *   -> resolve returns empty (up to date)
  */
-import { describe, it, expect, beforeEach } from "@tests/testkit";
-import { convexTest } from "convex-test";
+import { afterEach, beforeEach, describe, expect, it } from "@tests/testkit";
 import { vi } from "vitest";
 import * as Y from "yjs";
-
-/** Safely convert a Uint8Array to a proper ArrayBuffer for Convex v.bytes() */
-function toArrayBuffer(data: Uint8Array): ArrayBuffer {
-  const buf = new ArrayBuffer(data.byteLength);
-  new Uint8Array(buf).set(data);
-  return buf;
-}
-
-/**
- * Read the winning value from a register field in the Yjs doc.
- * Register fields are stored as Y.Map<{ value, timestamp }> keyed by client ID.
- * The winning value is the entry with the highest timestamp (last-write-wins).
- */
-function readRegister(fields: Y.Map<unknown>, key: string): unknown {
-  const registerMap = fields.get(key) as Y.Map<unknown>;
-  // Early return via ternary — no Y.Map means no register
-  return registerMap instanceof Y.Map
-    ? Array.from(registerMap.values()).reduce<
-        { value: unknown; timestamp: number } | undefined
-      >(
-        (winner, entry: any) =>
-          !winner || (entry.timestamp && entry.timestamp > winner.timestamp)
-            ? entry
-            : winner,
-        undefined,
-      )?.value
-    : undefined;
-}
-
-const modules = {
-  "_generated/api": () => import("../../convex/_generated/api.js"),
-  "_generated/server": () => import("../../convex/_generated/server.js"),
-  schema: () => import("../../convex/schema"),
-  projects: () => import("../../convex/projects"),
-  issues: () => import("../../convex/issues"),
-  comments: () => import("../../convex/comments"),
-} satisfies ConvexModuleRegistry;
 
 describe("convex-embedded integration", () => {
   beforeEach(() => {
     vi.useFakeTimers();
   });
 
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("creates a task, records a delta inline, and resolves a diff", async () => {
-    const t = convexTest(schema, modules);
-    registerResolveComponent(t);
+    const t = createAppConvexTest();
 
     // 1. Create a task via the wrapped mutation.
     //    Delta recording happens inline (same transaction) — no scheduler needed.
@@ -129,8 +96,7 @@ describe("convex-embedded integration", () => {
   });
 
   it("handles update mutation and re-resolves correctly", async () => {
-    const t = convexTest(schema, modules);
-    registerResolveComponent(t);
+    const t = createAppConvexTest();
 
     // Create a task — delta recorded inline
     const projectId: Id<"projects"> = await t.mutation(api.projects.create, {
@@ -192,8 +158,7 @@ describe("convex-embedded integration", () => {
   });
 
   it("resolves with no delta if document has never been recorded", async () => {
-    const t = convexTest(schema, modules);
-    registerResolveComponent(t);
+    const t = createAppConvexTest();
 
     const emptyDoc = new Y.Doc();
     const emptyVector = Y.encodeStateVector(emptyDoc);

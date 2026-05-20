@@ -3,7 +3,7 @@ import { v } from "convex/values";
 
 import { internalQuery } from "./_generated/server";
 import { prose } from "./prose";
-import { userSummary } from "./workspace";
+import { mapUser, requireGroup } from "./access";
 
 export const issueForAssistant = internalQuery({
   args: { issueId: v.id("issues") },
@@ -17,11 +17,12 @@ export const issueForAssistant = internalQuery({
     if (!project) {
       throw new ConvexError("Project not found");
     }
+    requireGroup(project.groupId);
 
     const comments = await ctx.db
       .query("comments")
       .withIndex("by_issueId", (q) => q.eq("issueId", issue._id))
-      .collect();
+      .take(20);
 
     return {
       identifier: `${project.identifier}-${issue.number}`,
@@ -31,10 +32,10 @@ export const issueForAssistant = internalQuery({
       priority: issue.priority,
       labels: issue.labels,
       assigneeName: issue.assigneeUserId
-        ? userSummary(issue.assigneeUserId).name
+        ? mapUser(issue.assigneeUserId).name
         : null,
       comments: comments.map((comment) => ({
-        authorName: userSummary(comment.authorUserId).name,
+        authorName: mapUser(comment.authorUserId).name,
         body: prose.text(comment.body),
       })),
     };
@@ -48,6 +49,7 @@ export const projectForAssistant = internalQuery({
     if (!project) {
       throw new ConvexError("Project not found");
     }
+    requireGroup(project.groupId);
 
     const users = Object.fromEntries([
       ["user_alice", "Alice Chen"],
@@ -59,10 +61,8 @@ export const projectForAssistant = internalQuery({
       await ctx.db
         .query("issues")
         .withIndex("by_projectId", (q) => q.eq("projectId", args.projectId))
-        .collect()
-    )
-      .sort((a, b) => a.position - b.position)
-      .slice(0, 20);
+        .take(20)
+    ).sort((a, b) => a.position - b.position);
 
     return {
       identifier: project.identifier,

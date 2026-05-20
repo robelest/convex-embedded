@@ -1,36 +1,45 @@
 import { bindTable } from "@robelest/convex-embedded/server";
 import { ConvexError, v } from "convex/values";
 
+import { GROUP_ID, USER_ID, requireGroup, requirePermission } from "./access";
 import { components } from "./_generated/api";
 import { prose } from "./prose";
 import { projects } from "./schema";
-import { DEFAULT_USER_ID, DEMO_WORKSPACE_ID, toSlug } from "./workspace";
 
 export const bind = bindTable(projects, components.embedded);
 
+const PROJECT_LIST_LIMIT = 1_000;
+
+function toSlug(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48);
+}
+
 export const list = projects.query({
-  args: { workspaceId: v.string() },
-  handler: async (ctx, args) => {
+  args: {},
+  handler: async (ctx) => {
+    await requirePermission(ctx, "canReadProjects");
     return await ctx.db
       .query("projects")
-      .withIndex("by_groupId", (q) => q.eq("groupId", args.workspaceId))
-      .collect();
+      .withIndex("by_groupId", (q) => q.eq("groupId", GROUP_ID))
+      .take(PROJECT_LIST_LIMIT);
   },
 });
 
 export const create = projects.mutation({
   args: {
-    workspaceId: v.string(),
-    teamGroupId: v.optional(v.string()),
     name: v.string(),
     identifier: v.string(),
     description: v.string(),
+    teamGroupId: v.optional(v.string()),
   },
   returns: v.id("projects"),
   handler: async (ctx, args) => {
-    if (args.workspaceId !== DEMO_WORKSPACE_ID) {
-      throw new ConvexError("Unknown workspace");
-    }
+    await requirePermission(ctx, "canCreateProjects");
 
     const slug = toSlug(args.name);
     if (!slug) {
@@ -42,26 +51,34 @@ export const create = projects.mutation({
       throw new ConvexError("Project identifier is required.");
     }
 
-    const existingInGroup = await ctx.db
+    const existingSlug = await ctx.db
       .query("projects")
-      .withIndex("by_groupId", (q) => q.eq("groupId", DEMO_WORKSPACE_ID))
-      .collect();
-    if (existingInGroup.some((project) => project.slug === slug)) {
+      .withIndex("by_groupId_and_slug", (q) =>
+        (q.eq("groupId", GROUP_ID) as any).eq("slug", slug),
+      )
+      .unique();
+    if (existingSlug) {
       throw new ConvexError("A project with that name already exists.");
     }
-    if (existingInGroup.some((project) => project.identifier === identifier)) {
+    const existingIdentifier = await ctx.db
+      .query("projects")
+      .withIndex("by_groupId_and_identifier", (q) =>
+        (q.eq("groupId", GROUP_ID) as any).eq("identifier", identifier),
+      )
+      .unique();
+    if (existingIdentifier) {
       throw new ConvexError("That project identifier is already in use.");
     }
 
     return await ctx.db.insert("projects", {
-      groupId: DEMO_WORKSPACE_ID,
+      groupId: GROUP_ID,
       teamGroupId: args.teamGroupId,
       name: args.name.trim(),
       identifier,
       slug,
       description: prose.normalize(args.description),
       status: "active",
-      createdByUserId: DEFAULT_USER_ID,
+      createdByUserId: USER_ID,
       issueCounter: 0,
       openIssueCount: 0,
     });
@@ -75,10 +92,12 @@ export const update = projects.mutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
+    await requirePermission(ctx, "canManageProjects");
     const project = await ctx.db.get(args.projectId);
     if (!project) {
       throw new ConvexError("Project not found");
     }
+    requireGroup(project.groupId);
 
     const updates: Record<string, unknown> = {};
     if (args.description !== undefined) {

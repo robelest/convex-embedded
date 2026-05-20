@@ -7,6 +7,10 @@ import { v } from "convex/values";
 
 import { components, internal } from "./_generated/api";
 import { action } from "./_generated/server";
+import { requirePermission } from "./access";
+
+const MAX_HISTORY_MESSAGES = 12;
+const MAX_CHAT_MESSAGE_LENGTH = 2000;
 
 // ---------------------------------------------------------------------------
 // Agent setup
@@ -48,6 +52,7 @@ const summarizeIssueAction = action({
   args: { issueId: v.id("issues") },
   returns: v.object({ summary: v.string() }),
   handler: async (ctx, args): Promise<{ summary: string }> => {
+    await requirePermission(ctx, "canReadProjects");
     const issue = await ctx.runQuery(internal.assistant.issueForAssistant, {
       issueId: args.issueId,
     });
@@ -93,6 +98,7 @@ const summarizeProjectAction = action({
   args: { projectId: v.id("projects") },
   returns: v.object({ summary: v.string() }),
   handler: async (ctx, args): Promise<{ summary: string }> => {
+    await requirePermission(ctx, "canReadProjects");
     const project = await ctx.runQuery(internal.assistant.projectForAssistant, {
       projectId: args.projectId,
     });
@@ -152,6 +158,14 @@ const chatProjectAction = action({
   },
   returns: v.object({ reply: v.string() }),
   handler: async (ctx, args): Promise<{ reply: string }> => {
+    await requirePermission(ctx, "canReadProjects");
+    const message = args.message.trim();
+    if (!message) {
+      throw new Error("Message is required.");
+    }
+    if (message.length > MAX_CHAT_MESSAGE_LENGTH) {
+      throw new Error("Message is too long.");
+    }
     const project = await ctx.runQuery(internal.assistant.projectForAssistant, {
       projectId: args.projectId,
     });
@@ -189,8 +203,11 @@ const chatProjectAction = action({
         role: "user" as const,
         content: `Project context for the conversation. Use this as the source of truth.\n\n${context}`,
       },
-      ...args.history,
-      { role: "user" as const, content: args.message },
+      ...args.history.slice(-MAX_HISTORY_MESSAGES).map((entry) => ({
+        role: entry.role,
+        content: entry.content.slice(0, MAX_CHAT_MESSAGE_LENGTH),
+      })),
+      { role: "user" as const, content: message },
     ];
 
     const result: { text: string } = await issueAgent.generateText(

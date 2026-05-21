@@ -1,0 +1,35 @@
+name: e2e-live
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# The live suite deploys to a single fixed-name Convex preview
+# (embedded-e2e). Only one run may own it at a time, so serialize rather
+# than cancel — a queued run still executes after the active one finishes.
+concurrency:
+  group: convex-e2e-preview
+  cancel-in-progress: false
+
+jobs:
+  live:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Installs Vite+ (vp), Node, and the package manager with caching.
+      - uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version: lts
+          cache: true
+
+      - run: vp install
+
+      # `test:live` runs `convex deploy --preview-create=embedded-e2e`,
+      # which creates/recreates an isolated preview, deploys convex/, and
+      # runs the e2e suite with CONVEX_URL pointed at the preview.
+      # CONVEX_DEPLOY_KEY must be a Preview Deploy Key (repo secret).
+      - run: vp run test:live
+        env:
+          CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}

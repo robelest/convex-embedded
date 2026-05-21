@@ -30,7 +30,8 @@
     "deploy:demo": "vp exec convex deploy --cmd 'vp run build:demo' --cmd-url-env-var-name CONVEX_URL && vp run --filter demo-svelte deploy",
     "dev:convex": "vp exec convex dev",
     "dev:svelte": "vp run --filter demo-svelte dev",
-    "test:live": "RUN_CONVEX_E2E=1 vp test --run tests/e2e/convex",
+    "test:live": "vp exec convex deploy --preview-create=embedded-e2e --cmd-url-env-var-name CONVEX_URL --cmd 'RUN_CONVEX_E2E=1 vp test --run tests/e2e/convex'",
+    "test:live:url": "RUN_CONVEX_E2E=1 vp test --run tests/e2e/convex",
     "prepare": "vp config"
   },
   "dependencies": {

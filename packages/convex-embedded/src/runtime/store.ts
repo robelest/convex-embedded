@@ -83,7 +83,9 @@ interface DocumentAdapter {
 function hasDocumentMethods(
   adapter: StorageAdapter,
 ): adapter is StorageAdapter & DocumentAdapter {
-  return typeof (adapter as any).getDocuments === "function";
+  return (
+    typeof (adapter as { getDocuments?: unknown }).getDocuments === "function"
+  );
 }
 
 function isSystemTable(tableName: string): boolean {

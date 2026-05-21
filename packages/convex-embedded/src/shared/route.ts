@@ -107,7 +107,9 @@ export function markRoute<T>(value: T, mode: RouteMode): T {
  */
 export function getRouteMode(value: unknown): RouteMode | null {
   if (!isTaggable(value)) return null;
-  const meta = (value as any)[ROUTE] as RouteMeta | undefined;
+  const meta = (value as Record<PropertyKey, unknown>)[ROUTE] as
+    | RouteMeta
+    | undefined;
   return meta?.__brand === "convex-embedded:route" ? meta.mode : null;
 }
 

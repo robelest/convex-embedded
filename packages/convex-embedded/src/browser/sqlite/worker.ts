@@ -70,7 +70,10 @@ async function collectRows(sql: string, params?: Array<unknown>) {
     const rows: Array<Record<string, unknown>> = [];
     for await (const stmt of ready.sqlite3.statements(ready.db, sql)) {
       if (params !== undefined) {
-        ready.sqlite3.bind_collection(stmt, params as any[]);
+        ready.sqlite3.bind_collection(
+          stmt,
+          params as Parameters<typeof ready.sqlite3.bind_collection>[1],
+        );
       }
       let columnNames: Array<string> | undefined;
       while (

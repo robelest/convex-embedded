@@ -30,6 +30,7 @@ import type { EmbeddedRuntime } from "@/runtime/embedded";
 import type { ConnectivityAdapter } from "@/runtime/platform";
 import type { QueryCacheStorage } from "@/runtime/sqlite/cache";
 import type { RouteMode } from "@/shared/route";
+import type { EngineStatus } from "@/shared/types";
 import { PubSub } from "@/utils/pubsub";
 import { DisposableScope } from "@/utils/scope";
 
@@ -93,11 +94,11 @@ type BrowserResolvePhase =
  */
 export interface EngineInstance {
   mutation(
-    ref: any,
-    args: any,
+    ref: unknown,
+    args: Record<string, unknown>,
     options?: { enqueueForReplay?: boolean },
-  ): Promise<any>;
-  on(event: string, cb: (status: any) => void): void;
+  ): Promise<unknown>;
+  on(event: "change", cb: (status: EngineStatus) => void): void;
   resolveNow?(): Promise<void>;
   ensureTableReady?(tableName: string): Promise<void>;
   ensureScopeReady?(
@@ -121,7 +122,7 @@ export interface ResolveAttachment {
   /** Forward `clearAuth()` calls to the hidden remote Convex client. */
   forwardClearAuth: () => void;
   /** Forward admin-auth calls when available. */
-  forwardSetAdminAuth: (...args: any[]) => void;
+  forwardSetAdminAuth: (...args: unknown[]) => void;
   /** Read the number of queued mutations waiting for replay. */
   getPendingCount: () => number;
   /** Ensure a lazy table is hydrated/resolved before first use. */
@@ -130,6 +131,16 @@ export interface ResolveAttachment {
   refresh: () => Promise<void>;
   /** Tear down the remote engine and release all resources. */
   close: () => Promise<void>;
+}
+
+/**
+ * Auth surface of the hidden remote `ConvexClient` beyond the public
+ * `setAuth`. `clearAuth`/`setAdminAuth` exist at runtime but aren't on the
+ * exported type.
+ */
+interface RemoteAuthClient {
+  clearAuth(): void;
+  setAdminAuth?(...args: unknown[]): void;
 }
 
 /**
@@ -231,9 +242,13 @@ export function deleteResolveEntry(client: ConvexClient): void {
   getResolveEntriesStore().delete(client);
 }
 
-async function loadEngine(): Promise<any> {
+async function loadEngine(): Promise<{
+  create(config: unknown): EngineInstance;
+}> {
   const mod = await import("@/client/engine");
-  return mod.engine;
+  return mod.engine as unknown as {
+    create(config: unknown): EngineInstance;
+  };
 }
 
 function resolveMutationRoute(entry: ResolveEntry, ref: unknown) {
@@ -324,11 +339,13 @@ function toErrorMessage(error: unknown): string {
   }
 }
 
-function toResolvePhase(status: any): BrowserResolvePhase {
+function toResolvePhase(
+  status: EngineStatus | null | undefined,
+): BrowserResolvePhase {
   if (!status) return { _tag: "Idle" };
 
-  const handlers = {
-    resolving: (current: any): BrowserResolvePhase => ({
+  return matchTag(status, "status", {
+    resolving: (current): BrowserResolvePhase => ({
       _tag: "Syncing",
       progress: current.progress
         ? {
@@ -338,21 +355,16 @@ function toResolvePhase(status: any): BrowserResolvePhase {
         : undefined,
     }),
     resolved: (): BrowserResolvePhase => ({ _tag: "Ready" }),
-    error: (current: any): BrowserResolvePhase => ({
+    error: (current): BrowserResolvePhase => ({
       _tag: "Error",
       error: current.error,
     }),
     offline: (): BrowserResolvePhase => ({ _tag: "Offline" }),
     idle: (): BrowserResolvePhase => ({ _tag: "Idle" }),
-  } as const;
-
-  const handler =
-    handlers[(status.status as keyof typeof handlers) ?? "idle"] ??
-    handlers.idle;
-  return handler(status);
+  });
 }
 
-function mapStatus(s: any): RemoteState {
+function mapStatus(s: EngineStatus): RemoteState {
   const phase = toResolvePhase(s);
   return matchTag(phase, "_tag", {
     Idle: (): RemoteState => ({ status: "idle" }),
@@ -435,7 +447,7 @@ async function discoverAndStart(input: ResolveInput): Promise<void> {
         entry.scope.addFinalizer(() => {
           engine.stop();
         });
-        engine.on("change", (monitorStatus: any) => {
+        engine.on("change", (monitorStatus) => {
           if (entry.closed) return;
           notifyResolveListeners(entry, mapStatus(monitorStatus));
 
@@ -523,7 +535,10 @@ export function attachResolve(input: {
     try {
       await closeRemoteClientSafely(remoteClient);
     } catch (err) {
-      console.warn("[convex-embedded] error during remote client teardown", err);
+      console.warn(
+        "[convex-embedded] error during remote client teardown",
+        err,
+      );
     }
   });
   entry.scope.addFinalizer(() => {
@@ -622,15 +637,16 @@ export function attachResolve(input: {
     entry.discovery = discovery;
   }
 
+  const remoteAuth = remoteClient as unknown as RemoteAuthClient;
   return {
     forwardSetAuth: (...args) => {
-      (remoteClient as any).setAuth(...args);
+      remoteClient.setAuth(...args);
     },
     forwardClearAuth: () => {
-      (remoteClient as any).clearAuth();
+      remoteAuth.clearAuth();
     },
     forwardSetAdminAuth: (...args) => {
-      (remoteClient as any).setAdminAuth?.(...args);
+      remoteAuth.setAdminAuth?.(...args);
     },
     getPendingCount: () => entry.engine?.pendingCount?.() ?? 0,
     ensureTableReady: (tableName) =>

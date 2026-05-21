@@ -33,7 +33,7 @@ export function getFunctionRefName(ref: unknown): string {
     return "";
   }
   try {
-    return getFunctionName(ref as any);
+    return getFunctionName(ref as Parameters<typeof getFunctionName>[0]);
   } catch {
     return "";
   }
@@ -60,7 +60,9 @@ export function getFunctionRefPath(ref: unknown): FunctionPath | null {
     candidate.functionHandle === undefined
   ) {
     try {
-      return resolveFunctionPath({ name: getFunctionName(ref as any) });
+      return resolveFunctionPath({
+        name: getFunctionName(ref as Parameters<typeof getFunctionName>[0]),
+      });
     } catch {
       return null;
     }

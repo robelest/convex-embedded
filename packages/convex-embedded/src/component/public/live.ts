@@ -154,7 +154,7 @@ export const recordDelete = mutation({
     while (!tailDone) {
       const tailPage = await ctx.db
         .query("deltaTail")
-        .withIndex("by_collection_doc_seq", (q: any) =>
+        .withIndex("by_collection_doc_seq", (q) =>
           q.eq("collection", args.collection).eq("docId", args.docId),
         )
         .paginate({ cursor: tailCursor, numItems: 100 });
@@ -234,16 +234,16 @@ export const getLiveStates = query({
       while (!isDone) {
         const page = await ctx.db
           .query("liveStates")
-          .withIndex("by_collection_doc", (q: any) =>
+          .withIndex("by_collection_doc", (q) =>
             q.eq("collection", args.collection),
           )
           .paginate({ cursor, numItems: 100 });
         for (const state of page.page) {
           results.push({
-            docId: (state as any).docId,
-            update: (state as any).update,
-            seq: (state as any).seq,
-            docCreationTime: (state as any).docCreationTime,
+            docId: state.docId,
+            update: state.update,
+            seq: state.seq,
+            docCreationTime: state.docCreationTime,
           });
         }
         isDone = page.isDone;
@@ -300,7 +300,7 @@ export const getLiveStatesPage = query({
     const limit = Math.max(1, Math.min(args.limit ?? 64, 128));
     const query = ctx.db
       .query("liveStates")
-      .withIndex("by_collection_doc", (q: any) => {
+      .withIndex("by_collection_doc", (q) => {
         const builder = q.eq("collection", args.collection);
         return args.cursor ? builder.gt("docId", args.cursor) : builder;
       });
@@ -309,7 +309,7 @@ export const getLiveStatesPage = query({
     const lastRow = pageRows[pageRows.length - 1] ?? null;
 
     return {
-      page: pageRows.map((state: any) => ({
+      page: pageRows.map((state) => ({
         docId: String(state.docId),
         update: state.update,
         seq: state.seq,

@@ -1,5 +1,5 @@
 import { ConvexHttpClient } from "convex/browser";
-import type { FunctionReference } from "convex/server";
+import type { DefaultFunctionArgs, FunctionReference } from "convex/server";
 import { convexToJson, type JSONValue } from "convex/values";
 
 type PrefetchDocument = Record<string, JSONValue>;
@@ -49,7 +49,7 @@ export interface Prefetch {
  */
 export type EmbeddedPrefetchQuerySpec<TResult> = {
   /** Public query function to execute against the remote deployment. */
-  query: FunctionReference<"query", "public", any, TResult>;
+  query: FunctionReference<"query", "public", DefaultFunctionArgs, TResult>;
   /** Serializable arguments to pass to the query. */
   args: Record<string, unknown>;
   /** Optional embedded collection name to hydrate from this query result. */
@@ -62,12 +62,25 @@ export type EmbeddedPrefetchQuerySpec<TResult> = {
 };
 
 /**
+ * Structural supertype of every {@link EmbeddedPrefetchQuerySpec}, used as the
+ * generic constraint without widening per-query result inference. The `never`
+ * projector input keeps the type contravariantly assignable from any concrete
+ * spec.
+ */
+type AnyEmbeddedPrefetchQuerySpec = {
+  query: FunctionReference<"query">;
+  args: Record<string, unknown>;
+  collection?: string;
+  selectDocuments?: (result: never) => Array<{ _id: string }>;
+};
+
+/**
  * Options for {@link createEmbeddedPrefetch}.
  *
  * @typeParam TQueries - Map of named SSR/prefetch queries.
  */
 export interface CreateEmbeddedPrefetchOptions<
-  TQueries extends Record<string, EmbeddedPrefetchQuerySpec<any>>,
+  TQueries extends Record<string, AnyEmbeddedPrefetchQuerySpec>,
 > {
   /** Remote Convex deployment URL. */
   url: string;
@@ -79,7 +92,7 @@ export interface CreateEmbeddedPrefetchOptions<
    * Embedded tables to hydrate via their `bind` (resolve) ref returned from
    * `bindTable(...)`. Keyed by embedded collection name.
    */
-  tables?: Record<string, FunctionReference<"query", "public", any, any>>;
+  tables?: Record<string, FunctionReference<"query">>;
   /** Optional per-table scope args forwarded to the resolve call. */
   scopeArgs?: Record<string, Record<string, unknown>>;
   /** Non-embedded remote queries the app wants prefetched. */
@@ -92,7 +105,7 @@ export interface CreateEmbeddedPrefetchOptions<
  * @typeParam TQueries - The prefetch query map passed into the factory.
  */
 export type CreateEmbeddedPrefetchResult<
-  TQueries extends Record<string, EmbeddedPrefetchQuerySpec<any>>,
+  TQueries extends Record<string, AnyEmbeddedPrefetchQuerySpec>,
 > = {
   /** Embedded prefetch payload to pass into runtime/client load. */
   embedded: Prefetch;
@@ -236,7 +249,7 @@ export function emptyEmbeddedPrefetch(identityKey?: string | null): Prefetch {
  * ```
  */
 export async function createEmbeddedPrefetch<
-  TQueries extends Record<string, EmbeddedPrefetchQuerySpec<any>>,
+  TQueries extends Record<string, AnyEmbeddedPrefetchQuerySpec>,
 >(
   options: CreateEmbeddedPrefetchOptions<TQueries>,
 ): Promise<CreateEmbeddedPrefetchResult<TQueries>> {
@@ -251,7 +264,7 @@ export async function createEmbeddedPrefetch<
 
   if (options.tables) {
     for (const [collection, bindRef] of Object.entries(options.tables)) {
-      const response = (await remoteClient.consistentQuery(bindRef as any, {
+      const response = (await remoteClient.consistentQuery(bindRef, {
         collectionSeq: null,
         documents: [],
         scopeArgs: options.scopeArgs?.[collection],
@@ -263,21 +276,23 @@ export async function createEmbeddedPrefetch<
 
   if (options.queries) {
     for (const [name, spec] of Object.entries(options.queries) as Array<
-      [keyof TQueries & string, TQueries[keyof TQueries]]
+      [keyof TQueries & string, AnyEmbeddedPrefetchQuerySpec]
     >) {
-      const result = (await remoteClient.consistentQuery(
-        spec.query as any,
+      const result: unknown = await remoteClient.consistentQuery(
+        spec.query,
         spec.args,
-      )) as CreateEmbeddedPrefetchResult<TQueries>["results"][typeof name];
-      results[name] = result;
+      );
+      results[name] =
+        result as CreateEmbeddedPrefetchResult<TQueries>["results"][typeof name];
 
       if (!spec.collection) {
         continue;
       }
 
-      const documents = spec.selectDocuments
-        ? spec.selectDocuments(result)
-        : inferDocuments(result);
+      const select = spec.selectDocuments as
+        | ((result: unknown) => Array<{ _id: string }>)
+        | undefined;
+      const documents = select ? select(result) : inferDocuments(result);
       embedded.tables[spec.collection] = normalizePrefetchDocuments(
         spec.collection,
         documents,

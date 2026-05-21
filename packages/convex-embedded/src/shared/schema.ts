@@ -12,7 +12,7 @@ export function isCrdtField(
     typeof value === "object" &&
     value !== null &&
     CRDT_FIELD in value &&
-    (value as any)[CRDT_FIELD] === true
+    (value as Record<PropertyKey, unknown>)[CRDT_FIELD] === true
   );
 }
 

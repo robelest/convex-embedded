@@ -107,8 +107,9 @@ function resolveRegisterValue(
   if (!(registerMap instanceof Y.Map)) return undefined;
 
   const entries: Array<{ value: unknown; timestamp: number }> = [];
-  registerMap.forEach((val: any) => {
-    entries.push({ value: val.value, timestamp: val.timestamp ?? 0 });
+  registerMap.forEach((val) => {
+    const record = val as { value: unknown; timestamp?: number };
+    entries.push({ value: record.value, timestamp: record.timestamp ?? 0 });
   });
 
   if (entries.length === 0) return undefined;
@@ -129,8 +130,13 @@ function getCounterValue(doc: Y.Doc, fieldName: string): number {
 
   let sum = 0;
   for (let index = 0; index < counterArr.length; index += 1) {
-    const entry = counterArr.get(index) as any;
-    if (entry && typeof entry.delta === "number") {
+    const entry = counterArr.get(index);
+    if (
+      entry &&
+      typeof entry === "object" &&
+      "delta" in entry &&
+      typeof entry.delta === "number"
+    ) {
       sum += entry.delta;
     }
   }
@@ -144,7 +150,7 @@ function getSetMembers<T = string>(doc: Y.Doc, fieldName: string): T[] {
   if (!(setMap instanceof Y.Map)) return [];
 
   const members: T[] = [];
-  setMap.forEach((_value: any, key: string) => {
+  setMap.forEach((_value, key) => {
     try {
       members.push(JSON.parse(key) as T);
     } catch {
@@ -175,8 +181,16 @@ export function materializeYjsDoc(
       result[key] = resolveRegisterValue(
         doc,
         key,
-        (fieldDef as { resolve?: ((conflict: any) => unknown) | undefined })
-          ?.resolve,
+        (
+          fieldDef as {
+            resolve?:
+              | ((conflict: {
+                  latest(): unknown;
+                  values: unknown[];
+                }) => unknown)
+              | undefined;
+          }
+        )?.resolve,
       );
     } else if (crdtType === CrdtType.Counter) {
       result[key] = getCounterValue(doc, key);

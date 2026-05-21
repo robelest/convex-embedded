@@ -52,6 +52,15 @@ export type LocalMutationExecutorFn = (
 
 export type LocalDocumentPresenceFn = (id: string) => boolean;
 
+/**
+ * The embedded ConvexClient invoked with raw `_system:*` path strings, which
+ * the public generic `query`/`mutation` signatures don't accept.
+ */
+interface SystemPathClient {
+  query(path: string, args: Record<string, unknown>): Promise<unknown>;
+  mutation(path: string, args: Record<string, unknown>): Promise<unknown>;
+}
+
 export class IdMap {
   private _cache = new Map<string, string>();
   private _reverse = new Map<string, string>();
@@ -61,6 +70,10 @@ export class IdMap {
   private _getIdentityKey: (() => string | null) | null;
   private _hasLocalDocumentId: LocalDocumentPresenceFn | null;
   private _schemaIdFields: Set<string>;
+
+  private get _sysClient(): SystemPathClient {
+    return this._localClient as unknown as SystemPathClient;
+  }
 
   constructor(
     localClient: ConvexClient,
@@ -99,7 +112,7 @@ export class IdMap {
             }>
           >;
         }
-        return (this._localClient as any).query(SYS_ID_MAP_GET_ALL, {
+        return this._sysClient.query(SYS_ID_MAP_GET_ALL, {
           identityKey,
         }) as Promise<
           Array<{
@@ -197,7 +210,7 @@ export class IdMap {
             table,
             identityKey: this._getIdentityKey?.() ?? null,
           })
-        : ((this._localClient as any).mutation(SYS_ID_MAP_SET, {
+        : (this._sysClient.mutation(SYS_ID_MAP_SET, {
             localId,
             remoteId,
             table,
@@ -226,7 +239,7 @@ export class IdMap {
             localId,
             identityKey: this._getIdentityKey?.() ?? null,
           })
-        : ((this._localClient as any).mutation(SYS_ID_MAP_DELETE, {
+        : (this._sysClient.mutation(SYS_ID_MAP_DELETE, {
             localId,
             identityKey: this._getIdentityKey?.() ?? null,
           }) as Promise<unknown>));
@@ -287,7 +300,12 @@ export class IdMap {
   }
 
   private _shouldTranslateKey(key: string): boolean {
-    if (key === "_id" || key === "id" || key.endsWith("Id") || key.endsWith("Ids")) {
+    if (
+      key === "_id" ||
+      key === "id" ||
+      key.endsWith("Id") ||
+      key.endsWith("Ids")
+    ) {
       return true;
     }
     return this._schemaIdFields.has(key);
@@ -305,7 +323,11 @@ export class IdMap {
     if (Array.isArray(value)) {
       let changed = false;
       const translated = value.map((item) => {
-        const result = this._translateValue(item, mapString, allowStringRewrite);
+        const result = this._translateValue(
+          item,
+          mapString,
+          allowStringRewrite,
+        );
         if (result !== item) changed = true;
         return result;
       });

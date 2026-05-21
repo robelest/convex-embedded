@@ -119,7 +119,7 @@ export interface EmbeddedTableRuntimeHandle {
   /** Normalized embedded schema definition. */
   readonly schema: Definition;
   /** Generated resolve query used by the remote sync engine. */
-  resolve: RegisteredQuery<"public", DefaultFunctionArgs, any>;
+  resolve: RegisteredQuery<"public", DefaultFunctionArgs, unknown>;
   /** Table-scoped mutation builder. */
   mutation: EmbeddedMutationBuilder;
   /** Table-scoped query builder. */

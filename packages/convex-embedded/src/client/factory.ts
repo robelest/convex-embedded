@@ -48,12 +48,12 @@ import {
 import type { EmbeddedPlatformAdapter } from "@/runtime/platform";
 import { createQueryCacheStorage } from "@/runtime/sqlite/cache";
 import type { QueryCacheStorage } from "@/runtime/sqlite/cache";
-import type { SqliteDriver } from "@/storage/sqlite/driver";
-import type { StorageAdapter } from "@/storage/adapter";
 import { SCHEDULED_FUNCTIONS_STORE_MIGRATIONS } from "@/scheduler/executor";
 import { createLogger } from "@/shared/logger";
 import { extractEmbeddedTableDefinitions } from "@/shared/schema";
 import type { PendingReplayMeta } from "@/shared/symbols";
+import type { StorageAdapter } from "@/storage/adapter";
+import type { SqliteDriver } from "@/storage/sqlite/driver";
 import { PubSub } from "@/utils/pubsub";
 import { DisposableScope } from "@/utils/scope";
 
@@ -162,8 +162,7 @@ function createResolveAttachment(input: {
   uploadFetch?: typeof globalThis.fetch;
   leaderLock?: <T>(fn: () => Promise<T>) => Promise<T>;
 }): ResolveAttachment {
-  const { runtime, platform, connectivity, processorId } =
-    input.platformConfig;
+  const { runtime, platform, connectivity, processorId } = input.platformConfig;
 
   return attachResolve({
     client: input.client,
@@ -477,19 +476,20 @@ export function createEmbeddedClient(input: {
 
   const originalClose = client.close.bind(client);
   let closePromise: Promise<void> | null = null;
-  (client as any).close = async function patchedClose(): Promise<void> {
-    if (closePromise) {
+  (client as { close: () => Promise<void> }).close =
+    async function patchedClose(): Promise<void> {
+      if (closePromise) {
+        return closePromise;
+      }
+
+      closePromise = (async () => {
+        clientClosed = true;
+        await rootScope.close();
+        await originalClose();
+      })();
+
       return closePromise;
-    }
-
-    closePromise = (async () => {
-      clientClosed = true;
-      await rootScope.close();
-      await originalClose();
-    })();
-
-    return closePromise;
-  };
+    };
 
   return client;
 }

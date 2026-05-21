@@ -431,7 +431,7 @@ export function createAsyncSyscall(
         options?.onDependency?.(dependency);
       }
       const { page, isDone, continueCursor } = await db.paginateAsync({
-        query: query as any,
+        query: query as SerializedQuery,
         cursor,
         pageSize,
       });

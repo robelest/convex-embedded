@@ -23,16 +23,19 @@ export { materializeYjsDoc };
  * Returns the text content of the Y.XmlFragment.
  */
 export function extractProseText(doc: Y.Doc, fieldName: string): string {
-  const collectText = (node: any): string => {
+  const collectText = (node: unknown): string => {
     if (node instanceof Y.XmlText) {
       return node.toString();
     }
 
-    if (typeof node?.toArray === "function") {
-      return node
-        .toArray()
-        .map((child: unknown) => collectText(child))
-        .join("");
+    if (
+      node &&
+      typeof node === "object" &&
+      "toArray" in node &&
+      typeof node.toArray === "function"
+    ) {
+      const children = (node.toArray as () => unknown[])();
+      return children.map((child) => collectText(child)).join("");
     }
 
     return "";
@@ -69,11 +72,12 @@ export function getRegisterConflict<T>(
   if (!(registerMap instanceof Y.Map)) return null;
 
   const entries: ConflictEntry<T>[] = [];
-  registerMap.forEach((val: any, key: string) => {
+  registerMap.forEach((val, key) => {
+    const record = val as { value: unknown; timestamp?: number };
     entries.push({
-      value: val.value as T,
+      value: record.value as T,
       clientId: key,
-      timestamp: val.timestamp ?? 0,
+      timestamp: record.timestamp ?? 0,
     });
   });
 
@@ -96,11 +100,12 @@ export function resolveRegister<T>(
   if (!(registerMap instanceof Y.Map)) return undefined;
 
   const entries: ConflictEntry<T>[] = [];
-  registerMap.forEach((val: any, key: string) => {
+  registerMap.forEach((val, key) => {
+    const record = val as { value: unknown; timestamp?: number };
     entries.push({
-      value: val.value as T,
+      value: record.value as T,
       clientId: key,
-      timestamp: val.timestamp ?? 0,
+      timestamp: record.timestamp ?? 0,
     });
   });
 
@@ -123,8 +128,13 @@ export function getCounterValue(doc: Y.Doc, fieldName: string): number {
 
   let sum = 0;
   for (let i = 0; i < counterArr.length; i++) {
-    const entry = counterArr.get(i) as any;
-    if (entry && typeof entry.delta === "number") {
+    const entry = counterArr.get(i);
+    if (
+      entry &&
+      typeof entry === "object" &&
+      "delta" in entry &&
+      typeof entry.delta === "number"
+    ) {
       sum += entry.delta;
     }
   }
@@ -141,7 +151,7 @@ export function getSetMembers<T = string>(doc: Y.Doc, fieldName: string): T[] {
   if (!(setMap instanceof Y.Map)) return [];
 
   const members: T[] = [];
-  setMap.forEach((_val: any, key: string) => {
+  setMap.forEach((_val, key) => {
     try {
       members.push(JSON.parse(key) as T);
     } catch {

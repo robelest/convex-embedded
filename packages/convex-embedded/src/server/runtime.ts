@@ -158,11 +158,17 @@ function isComponentUnavailableError(error: unknown): boolean {
   );
 }
 
+interface RuntimeHandleInternals {
+  _hooks: RuntimeHooks;
+  _declaredIndexes?: Map<string, readonly string[]>;
+}
+
 export function bindTableRuntime(
   handle: EmbeddedTableRuntimeHandle,
   component?: ComponentBinding,
 ): void {
-  const tableDef = handle as any;
+  const tableDef = handle as EmbeddedTableRuntimeHandle &
+    RuntimeHandleInternals;
   const hooks: RuntimeHooks = tableDef._hooks;
   const tableName = handle.table;
   const schemaDef = handle.schema;
@@ -231,7 +237,7 @@ export function bindTableRuntime(
           })
           .paginate({ cursor, numItems: 500 });
         for (const doc of page.page) {
-          ids.push((doc as any)._id);
+          ids.push((doc as { _id: string })._id);
         }
         isDone = page.isDone;
         cursor = page.continueCursor;
@@ -312,7 +318,7 @@ export function bindTableRuntime(
       }
       const nextSeq = (current?.seq ?? -1) + 1;
       const crdtFields = pickCrdtFields(schemaDef, doc);
-      const update = encodeDocumentState(schemaDef as any, crdtFields, nextSeq);
+      const update = encodeDocumentState(schemaDef, crdtFields, nextSeq);
       await ctx.runMutation(component!.public.recordUpdate, {
         collection: tableName,
         docId,
@@ -552,7 +558,11 @@ export function bindTableRuntime(
         : ((await ctx.runQuery(component!.public.getLiveStates, {
             collection: tableName,
             docIds: needsStateDocIds,
-          })) as Array<{ docId: string; update: ArrayBuffer; seq: number } | null>);
+          })) as Array<{
+            docId: string;
+            update: ArrayBuffer;
+            seq: number;
+          } | null>);
 
     const liveStateMap = new Map<
       string,
@@ -694,9 +704,13 @@ export function bindTableRuntime(
 export function bindTable(
   table: EmbeddedTableRuntimeHandle,
   component?: ComponentBinding,
-): RegisteredQuery<"public", DefaultFunctionArgs, any> {
+): RegisteredQuery<"public", DefaultFunctionArgs, unknown> {
   bindTableRuntime(table, component);
-  const resolveQuery = (table as any)._resolveRaw;
+  const resolveQuery = (
+    table as EmbeddedTableRuntimeHandle & {
+      _resolveRaw: RegisteredQuery<"public", DefaultFunctionArgs, unknown>;
+    }
+  )._resolveRaw;
   Object.defineProperty(resolveQuery, REMOTE_META, {
     value: {
       __brand: "convex-embedded:remoteMeta" as const,

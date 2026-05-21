@@ -49,6 +49,15 @@ export type {
 } from "@/client/ids";
 
 /**
+ * The embedded ConvexClient invoked with raw `_system:*` path strings, which
+ * the public generic `query`/`mutation` signatures don't accept.
+ */
+interface SystemPathClient {
+  query(path: string, args: Record<string, unknown>): Promise<unknown>;
+  mutation(path: string, args: Record<string, unknown>): Promise<unknown>;
+}
+
+/**
  * Persistent queue of `ctx.storage.store(blob)` calls that still need to be
  * uploaded to the remote Convex deployment. Mirrors {@link PendingQueue}
  * but for blobs.
@@ -62,6 +71,10 @@ export class PendingUploadQueue {
     private readonly _mutationFn: LocalMutationExecutorFn | null = null,
     private readonly _getIdentityKey: (() => string | null) | null = null,
   ) {}
+
+  private get _sysClient(): SystemPathClient {
+    return this._localClient as unknown as SystemPathClient;
+  }
 
   get length(): number {
     return this._entries.length;
@@ -201,16 +214,12 @@ export class PendingUploadQueue {
   }
 
   private _runQuery(path: string, args: Record<string, unknown>) {
-    return (
-      this._queryFn?.(path, args) ??
-      ((this._localClient as any).query(path, args) as Promise<unknown>)
-    );
+    return this._queryFn?.(path, args) ?? this._sysClient.query(path, args);
   }
 
   private _runMutation(path: string, args: Record<string, unknown>) {
     return (
-      this._mutationFn?.(path, args) ??
-      ((this._localClient as any).mutation(path, args) as Promise<unknown>)
+      this._mutationFn?.(path, args) ?? this._sysClient.mutation(path, args)
     );
   }
 }

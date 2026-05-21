@@ -10,7 +10,7 @@
  */
 
 import { convexToJson } from "convex/values";
-import type { JSONValue } from "convex/values";
+import type { JSONValue, Value } from "convex/values";
 
 import type { QueryDependency, StoredDocument } from "@/runtime/db/types";
 import {
@@ -97,7 +97,7 @@ function extractErrorData(err: unknown): JSONValue | undefined {
   ) {
     const data = (err as { data?: unknown }).data;
     return data !== undefined
-      ? (convexToJson(data as any) as JSONValue)
+      ? (convexToJson(data as Value) as JSONValue)
       : undefined;
   }
   return undefined;

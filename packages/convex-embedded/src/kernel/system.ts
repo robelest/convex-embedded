@@ -33,6 +33,62 @@ export interface SystemFunctionDef {
   handler: SystemFn;
 }
 
+// Row shapes for the internal `_resolve_*` system tables. These are read
+// views, not extensions of StoredDocument: StoredDocument carries a `Value`
+// index signature that forbids optional (`undefined`) properties, so these
+// stand alone and are produced by the generic query helpers below.
+
+/** Row of the `_resolve_id_map` system table. */
+interface IdMapRow {
+  _id: DocumentId;
+  localId: string;
+  remoteId: string;
+  table: string;
+  identityKey?: string | null;
+}
+
+/** Row of the `_resolve_pending` system table (queued mutations). */
+interface PendingRow {
+  _id: DocumentId;
+  ref: string;
+  args: string;
+  localResult: string;
+  table: string;
+  payloadVersion?: number;
+  identityKey?: string | null;
+  state?: string;
+  owner?: string;
+  processingStartedAt?: number;
+  leaseExpiresAt?: number;
+  blockedReason?: string;
+  createdAt?: number;
+}
+
+/** Row of the `_resolve_pending_uploads` system table (queued blob uploads). */
+interface PendingUploadRow {
+  _id: DocumentId;
+  localStorageId: string;
+  sha256: string;
+  size: number;
+  contentType: string;
+  identityKey?: string | null;
+  state?: string;
+  owner?: string;
+  processingStartedAt?: number;
+  leaseExpiresAt?: number;
+  createdAt?: number;
+}
+
+/** Row of the `_resolve_document_metadata` system table. */
+interface DocumentMetadataRow {
+  _id: DocumentId;
+  collection: string;
+  docId: string;
+  seq: number;
+  identityKey?: string | null;
+  schemaVersion?: number;
+}
+
 const AUTH_STATE_DOCUMENT_ID = "auth_state" as DocumentId;
 
 async function readActiveAuthState(
@@ -52,7 +108,7 @@ async function readActiveAuthState(
     | null;
 }
 
-async function firstByIndex(
+async function firstByIndex<T = StoredDocument>(
   db: Database,
   tableName: string,
   indexName: string,
@@ -61,7 +117,7 @@ async function firstByIndex(
     fieldPath: string;
     value: unknown;
   }>,
-): Promise<StoredDocument | null> {
+): Promise<T | null> {
   const qid = db.startQueryAsync({
     source: {
       type: "IndexRange",
@@ -73,7 +129,7 @@ async function firstByIndex(
   });
   const next = await db.queryNextAsync(qid);
   db.queryCleanup(qid);
-  return next.done ? null : (next.value as StoredDocument);
+  return next.done ? null : (next.value as T);
 }
 
 async function readPendingById(
@@ -147,7 +203,7 @@ async function readDocumentMetadata(
   );
 }
 
-async function allByIndex(
+async function allByIndex<T = StoredDocument>(
   db: Database,
   tableName: string,
   indexName: string,
@@ -156,7 +212,7 @@ async function allByIndex(
     fieldPath: string;
     value: unknown;
   }>,
-): Promise<StoredDocument[]> {
+): Promise<T[]> {
   const qid = db.startQueryAsync({
     source: {
       type: "IndexRange",
@@ -166,11 +222,11 @@ async function allByIndex(
     } as never,
     operators: [],
   });
-  const results: StoredDocument[] = [];
+  const results: T[] = [];
   let next = await db.queryNextAsync(qid);
   while (!next.done) {
     if (next.value) {
-      results.push(next.value as StoredDocument);
+      results.push(next.value as T);
     }
     next = await db.queryNextAsync(qid);
   }
@@ -236,23 +292,16 @@ const idMapGet: SystemFunctionDef = {
       identityKey?: string | null;
     };
 
-    return (
-      (
-        (await firstByIndex(
-          db,
-          "_resolve_id_map",
-          "by_identity_key_and_local_id",
-          [
-            {
-              type: "Eq",
-              fieldPath: "identityKey",
-              value: identityKey ?? null,
-            },
-            { type: "Eq", fieldPath: "localId", value: localId },
-          ],
-        )) as any
-      )?.remoteId ?? null
+    const row = await firstByIndex<IdMapRow>(
+      db,
+      "_resolve_id_map",
+      "by_identity_key_and_local_id",
+      [
+        { type: "Eq", fieldPath: "identityKey", value: identityKey ?? null },
+        { type: "Eq", fieldPath: "localId", value: localId },
+      ],
     );
+    return row?.remoteId ?? null;
   },
 };
 
@@ -273,17 +322,17 @@ const idMapGetAll: SystemFunctionDef = {
       identityKey?: string;
     }> = [];
 
-    for (const doc of await allByIndex(
+    for (const row of await allByIndex<IdMapRow>(
       db,
       "_resolve_id_map",
       "by_identity_key_and_local_id",
       [{ type: "Eq", fieldPath: "identityKey", value: identityKey ?? null }],
     )) {
       results.push({
-        localId: (doc as any).localId,
-        remoteId: (doc as any).remoteId,
-        table: (doc as any).table,
-        identityKey: (doc as any).identityKey ?? undefined,
+        localId: row.localId,
+        remoteId: row.remoteId,
+        table: row.table,
+        identityKey: row.identityKey ?? undefined,
       });
     }
     return results;
@@ -374,27 +423,29 @@ const pendingGetAll: SystemFunctionDef = {
   handler: async (db, args) => {
     const { identityKey } = args as { identityKey?: string | null };
     return (
-      await allByIndex(
+      await allByIndex<PendingRow>(
         db,
         "_resolve_pending",
         "by_identity_key_and_creation_time",
         [{ type: "Eq", fieldPath: "identityKey", value: identityKey ?? null }],
       )
-    ).map((doc) => ({
-      _id: doc._id,
-      ref: (doc as any).ref,
-      args: (doc as any).args,
-      localResult: (doc as any).localResult,
-      table: (doc as any).table,
-      payloadVersion: (doc as any).payloadVersion,
-      identityKey: (doc as any).identityKey,
-      state: (doc as any).state,
-      owner: (doc as any).owner,
-      processingStartedAt: (doc as any).processingStartedAt,
-      leaseExpiresAt: (doc as any).leaseExpiresAt,
-      blockedReason: (doc as any).blockedReason,
-      createdAt: (doc as any).createdAt,
-    }));
+    ).map((row) => {
+      return {
+        _id: row._id,
+        ref: row.ref,
+        args: row.args,
+        localResult: row.localResult,
+        table: row.table,
+        payloadVersion: row.payloadVersion,
+        identityKey: row.identityKey,
+        state: row.state,
+        owner: row.owner,
+        processingStartedAt: row.processingStartedAt,
+        leaseExpiresAt: row.leaseExpiresAt,
+        blockedReason: row.blockedReason,
+        createdAt: row.createdAt,
+      };
+    });
   },
 };
 
@@ -411,17 +462,16 @@ const pendingClaimNext: SystemFunctionDef = {
     const expiresAt = now + (leaseMs ?? 30_000);
     const processorCutoff = now - (processorStaleMs ?? leaseMs ?? 30_000);
 
-    const candidates = await allByIndex(
+    const candidates = await allByIndex<PendingRow>(
       db,
       "_resolve_pending",
       "by_identity_key_and_creation_time",
       [{ type: "Eq", fieldPath: "identityKey", value: identityKey ?? null }],
     );
     for (const doc of candidates) {
-      const state = (doc as { state?: string }).state ?? "pending";
-      const processingOwner = (doc as { owner?: string }).owner ?? null;
-      const leaseExpiresAt = (doc as { leaseExpiresAt?: number })
-        .leaseExpiresAt;
+      const state = doc.state ?? "pending";
+      const processingOwner = doc.owner ?? null;
+      const leaseExpiresAt = doc.leaseExpiresAt;
       const processor =
         processingOwner === null
           ? null
@@ -451,22 +501,7 @@ const pendingClaimNext: SystemFunctionDef = {
       const claimed = (await db.getAsync(
         "_resolve_pending",
         doc._id as DocumentId,
-      )) as
-        | (StoredDocument & {
-            ref?: string;
-            args?: string;
-            localResult?: string;
-            table?: string;
-            payloadVersion?: number;
-            identityKey?: string | null;
-            state?: string;
-            owner?: string;
-            processingStartedAt?: number;
-            leaseExpiresAt?: number;
-            blockedReason?: string;
-            createdAt?: number;
-          })
-        | null;
+      )) as PendingRow | null;
       if (!claimed) {
         return null;
       }
@@ -680,7 +715,7 @@ const pendingUploadGetAll: SystemFunctionDef = {
   handler: async (db, args) => {
     const { identityKey } = args as { identityKey?: string | null };
     return (
-      await allByIndex(
+      await allByIndex<PendingUploadRow>(
         db,
         "_resolve_pending_uploads",
         "by_identity_key_and_creation_time",
@@ -692,19 +727,21 @@ const pendingUploadGetAll: SystemFunctionDef = {
           },
         ],
       )
-    ).map((doc) => ({
-      _id: doc._id,
-      localStorageId: (doc as any).localStorageId,
-      sha256: (doc as any).sha256,
-      size: (doc as any).size,
-      contentType: (doc as any).contentType,
-      identityKey: (doc as any).identityKey,
-      state: (doc as any).state,
-      owner: (doc as any).owner,
-      processingStartedAt: (doc as any).processingStartedAt,
-      leaseExpiresAt: (doc as any).leaseExpiresAt,
-      createdAt: (doc as any).createdAt,
-    }));
+    ).map((row) => {
+      return {
+        _id: row._id,
+        localStorageId: row.localStorageId,
+        sha256: row.sha256,
+        size: row.size,
+        contentType: row.contentType,
+        identityKey: row.identityKey,
+        state: row.state,
+        owner: row.owner,
+        processingStartedAt: row.processingStartedAt,
+        leaseExpiresAt: row.leaseExpiresAt,
+        createdAt: row.createdAt,
+      };
+    });
   },
 };
 
@@ -721,7 +758,7 @@ const pendingUploadClaimNext: SystemFunctionDef = {
     const expiresAt = now + (leaseMs ?? 30_000);
     const processorCutoff = now - (processorStaleMs ?? leaseMs ?? 30_000);
 
-    const candidates = await allByIndex(
+    const candidates = await allByIndex<PendingUploadRow>(
       db,
       "_resolve_pending_uploads",
       "by_identity_key_and_creation_time",
@@ -734,10 +771,9 @@ const pendingUploadClaimNext: SystemFunctionDef = {
       ],
     );
     for (const doc of candidates) {
-      const state = (doc as { state?: string }).state ?? "pending";
-      const processingOwner = (doc as { owner?: string }).owner ?? null;
-      const leaseExpiresAt = (doc as { leaseExpiresAt?: number })
-        .leaseExpiresAt;
+      const state = doc.state ?? "pending";
+      const processingOwner = doc.owner ?? null;
+      const leaseExpiresAt = doc.leaseExpiresAt;
       const processor =
         processingOwner === null
           ? null
@@ -763,20 +799,7 @@ const pendingUploadClaimNext: SystemFunctionDef = {
       const claimed = (await db.getAsync(
         "_resolve_pending_uploads",
         doc._id as DocumentId,
-      )) as
-        | (StoredDocument & {
-            localStorageId?: string;
-            sha256?: string;
-            size?: number;
-            contentType?: string;
-            identityKey?: string | null;
-            state?: string;
-            owner?: string;
-            processingStartedAt?: number;
-            leaseExpiresAt?: number;
-            createdAt?: number;
-          })
-        | null;
+      )) as PendingUploadRow | null;
       if (!claimed) return null;
       return {
         _id: claimed._id,
@@ -937,7 +960,7 @@ const documentMetadataGetBatch: SystemFunctionDef = {
       identityKey?: string | null;
       schemaVersion: number;
     };
-    const rows = await allByIndex(
+    const rows = await allByIndex<DocumentMetadataRow>(
       db,
       "_resolve_document_metadata",
       "by_identity_key_and_collection_and_doc_id",
@@ -949,10 +972,10 @@ const documentMetadataGetBatch: SystemFunctionDef = {
     );
     const wanted = new Set(docIds);
     return rows
-      .filter((row) => wanted.has(String((row as any).docId)))
+      .filter((row) => wanted.has(String(row.docId)))
       .map((row) => ({
-        docId: String((row as any).docId),
-        seq: Number((row as any).seq),
+        docId: String(row.docId),
+        seq: Number(row.seq),
       }));
   },
 };

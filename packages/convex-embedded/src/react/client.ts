@@ -61,6 +61,28 @@ type EmbeddedReactClient = ConvexReactClient & {
   [EMBEDDED_BROWSER_CLIENT]?: ConvexClient;
 };
 
+/**
+ * The embedded `ConvexClient` augmented by the routing adapter with members
+ * the public `ConvexClient` type doesn't expose. The wrapper reaches these
+ * through a single cast rather than scattering `as any`.
+ */
+interface EmbeddedClientInternals {
+  setAuth(...args: unknown[]): void;
+  clearAuth(...args: unknown[]): void;
+  setAdminAuth(...args: unknown[]): void;
+  mutation(...args: unknown[]): Promise<unknown>;
+  action(...args: unknown[]): Promise<unknown>;
+  query(...args: unknown[]): Promise<unknown>;
+  getWorkScheduler?(): WorkScheduler | undefined;
+  setWorkScheduler?(scheduler: WorkScheduler | null): void;
+  peekCurrentValue?(ref: unknown, args: unknown): unknown;
+  peekPaginatedCurrentValue?(
+    ref: unknown,
+    args: unknown,
+    options: { initialNumItems: number },
+  ): unknown;
+}
+
 function scheduleImmediateCallback(callback: () => void): () => void {
   let cancelled = false;
   queueMicrotask(() => {
@@ -91,10 +113,7 @@ export class EmbeddedConvexReactClient extends ConvexReactClient {
       enumerable: false,
       writable: false,
     });
-    const augmented = embeddedClient as unknown as {
-      getWorkScheduler?: () => WorkScheduler | undefined;
-      setWorkScheduler?: (scheduler: WorkScheduler | null) => void;
-    };
+    const augmented = embeddedClient as unknown as EmbeddedClientInternals;
     const base = augmented.getWorkScheduler?.() ?? createDefaultWorkScheduler();
     const reactScheduler: WorkScheduler = {
       post(priority: WorkPriority, work: () => void) {
@@ -110,16 +129,20 @@ export class EmbeddedConvexReactClient extends ConvexReactClient {
     augmented.setWorkScheduler?.(reactScheduler);
   }
 
+  private get _internals(): EmbeddedClientInternals {
+    return this.embeddedClient as unknown as EmbeddedClientInternals;
+  }
+
   setAuth(...args: Parameters<ConvexReactClient["setAuth"]>): void {
-    (this.embeddedClient as any).setAuth(...args);
+    this._internals.setAuth(...args);
   }
 
   clearAuth(...args: Parameters<ConvexReactClient["clearAuth"]>): void {
-    (this.embeddedClient as any).clearAuth(...args);
+    this._internals.clearAuth(...args);
   }
 
-  setAdminAuth(...args: any[]): void {
-    (this.embeddedClient as any).setAdminAuth(...args);
+  setAdminAuth(...args: unknown[]): void {
+    this._internals.setAdminAuth(...args);
   }
 
   watchQuery<Query extends FunctionReference<"query">>(
@@ -179,9 +202,7 @@ export class EmbeddedConvexReactClient extends ConvexReactClient {
           return subscription.getCurrentValue();
         }
         const peek = (
-          embedded as unknown as {
-            peekCurrentValue?: (ref: unknown, args: unknown) => unknown;
-          }
+          embedded as unknown as EmbeddedClientInternals
         ).peekCurrentValue;
         return typeof peek === "function" ? peek(query, args) : undefined;
       },
@@ -248,13 +269,7 @@ export class EmbeddedConvexReactClient extends ConvexReactClient {
           return subscription.getCurrentValue();
         }
         const peek = (
-          embedded as unknown as {
-            peekPaginatedCurrentValue?: (
-              ref: unknown,
-              args: unknown,
-              opts: { initialNumItems: number },
-            ) => unknown;
-          }
+          embedded as unknown as EmbeddedClientInternals
         ).peekPaginatedCurrentValue;
         return typeof peek === "function"
           ? peek(query, args, { initialNumItems: options.initialNumItems })
@@ -267,21 +282,27 @@ export class EmbeddedConvexReactClient extends ConvexReactClient {
     mutation: Mutation,
     ...argsAndOptions: ArgsAndOptions<Mutation, MutationOptions>
   ): Promise<Awaited<FunctionReturnType<Mutation>>> {
-    return (this.embeddedClient as any).mutation(mutation, ...argsAndOptions);
+    return this._internals.mutation(mutation, ...argsAndOptions) as Promise<
+      Awaited<FunctionReturnType<Mutation>>
+    >;
   }
 
   action<Action extends FunctionReference<"action">>(
     action: Action,
     ...args: OptionalRestArgs<Action>
   ): Promise<Awaited<FunctionReturnType<Action>>> {
-    return (this.embeddedClient as any).action(action, ...args);
+    return this._internals.action(action, ...args) as Promise<
+      Awaited<FunctionReturnType<Action>>
+    >;
   }
 
   query<Query extends FunctionReference<"query">>(
     query: Query,
     ...args: OptionalRestArgs<Query>
   ): Promise<Awaited<FunctionReturnType<Query>>> {
-    return (this.embeddedClient as any).query(query, ...args);
+    return this._internals.query(query, ...args) as Promise<
+      Awaited<FunctionReturnType<Query>>
+    >;
   }
 
   connectionState(): ConnectionState {

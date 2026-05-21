@@ -82,12 +82,25 @@ import type {
   LocalMutationExecutorFn,
 } from "@/client/ids";
 
+/**
+ * The embedded ConvexClient invoked with raw `_system:*` path strings, which
+ * the public generic `query`/`mutation` signatures don't accept.
+ */
+interface SystemPathClient {
+  query(path: string, args: Record<string, unknown>): Promise<unknown>;
+  mutation(path: string, args: Record<string, unknown>): Promise<unknown>;
+}
+
 export class PendingQueue {
   private _entries: PendingEntry[] = [];
   private _localClient: ConvexClient;
   private _queryFn: LocalQueryExecutorFn | null;
   private _mutationFn: LocalMutationExecutorFn | null;
   private _getIdentityKey: (() => string | null) | null;
+
+  private get _sysClient(): SystemPathClient {
+    return this._localClient as unknown as SystemPathClient;
+  }
 
   constructor(
     localClient: ConvexClient,
@@ -114,12 +127,12 @@ export class PendingQueue {
             identityKey,
           }) as Promise<Array<Record<string, unknown>>>;
         }
-        return (this._localClient as any).query(SYS_PENDING_GET_ALL, {
+        return this._sysClient.query(SYS_PENDING_GET_ALL, {
           identityKey,
         }) as Promise<Array<Record<string, unknown>>>;
       })();
 
-      this._entries = entries.map((e: any) => ({
+      this._entries = entries.map((e: Record<string, unknown>) => ({
         _id: e._id as string,
         ref: e.ref as string,
         args: e.args as string,
@@ -162,7 +175,7 @@ export class PendingQueue {
     table: string,
     payloadVersion = 1,
   ): Promise<void> {
-    const refName = typeof ref === "string" ? ref : getFunctionName(ref as any);
+    const refName = typeof ref === "string" ? ref : getFunctionName(ref as Parameters<typeof getFunctionName>[0]);
 
     const serialized = {
       ref: refName,
@@ -195,7 +208,7 @@ export class PendingQueue {
       const id = await ((
         this._mutationFn
           ? this._mutationFn(SYS_PENDING_PUSH, serialized)
-          : (this._localClient as any).mutation(SYS_PENDING_PUSH, serialized)
+          : this._sysClient.mutation(SYS_PENDING_PUSH, serialized)
       ) as Promise<string>);
 
       this._entries.push({ _id: id, ...serialized, hydrated: false });
@@ -243,7 +256,7 @@ export class PendingQueue {
 
     await (this._mutationFn
       ? this._mutationFn(SYS_PENDING_BLOCK, { id: entry._id, reason })
-      : ((this._localClient as any).mutation(SYS_PENDING_BLOCK, {
+      : (this._sysClient.mutation(SYS_PENDING_BLOCK, {
           id: entry._id,
           reason,
         }) as Promise<unknown>));
@@ -262,7 +275,7 @@ export class PendingQueue {
       ? this._mutationFn(SYS_PENDING_UNBLOCK_ALL, {
           identityKey: this._getIdentityKey?.() ?? null,
         })
-      : ((this._localClient as any).mutation(SYS_PENDING_UNBLOCK_ALL, {
+      : (this._sysClient.mutation(SYS_PENDING_UNBLOCK_ALL, {
           identityKey: this._getIdentityKey?.() ?? null,
         }) as Promise<unknown>));
   }
@@ -293,7 +306,7 @@ export class PendingQueue {
     try {
       const result = await (this._mutationFn
         ? this._mutationFn(SYS_PENDING_REMOVE, { id: entry._id, owner })
-        : ((this._localClient as any).mutation(SYS_PENDING_REMOVE, {
+        : (this._sysClient.mutation(SYS_PENDING_REMOVE, {
             id: entry._id,
             owner,
           }) as Promise<unknown>));
@@ -325,7 +338,7 @@ export class PendingQueue {
           leaseMs,
           processorStaleMs,
         })
-      : ((this._localClient as any).mutation(SYS_PENDING_CLAIM_NEXT, {
+      : (this._sysClient.mutation(SYS_PENDING_CLAIM_NEXT, {
           identityKey,
           owner,
           leaseMs,
@@ -376,7 +389,7 @@ export class PendingQueue {
           owner,
           leaseMs,
         })
-      : ((this._localClient as any).mutation(SYS_PENDING_RENEW_LEASE, {
+      : (this._sysClient.mutation(SYS_PENDING_RENEW_LEASE, {
           id: entry._id,
           owner,
           leaseMs,
@@ -407,7 +420,7 @@ export class PendingQueue {
 
     await (this._mutationFn
       ? this._mutationFn(SYS_PENDING_RELEASE, { id: entry._id, owner })
-      : ((this._localClient as any).mutation(SYS_PENDING_RELEASE, {
+      : (this._sysClient.mutation(SYS_PENDING_RELEASE, {
           id: entry._id,
           owner,
         }) as Promise<unknown>));
@@ -424,7 +437,7 @@ export class PendingQueue {
         ? this._mutationFn(SYS_PENDING_CLEAR, {
             identityKey: this._getIdentityKey?.() ?? null,
           })
-        : ((this._localClient as any).mutation(SYS_PENDING_CLEAR, {
+        : (this._sysClient.mutation(SYS_PENDING_CLEAR, {
             identityKey: this._getIdentityKey?.() ?? null,
           }) as Promise<unknown>));
     } catch (err) {

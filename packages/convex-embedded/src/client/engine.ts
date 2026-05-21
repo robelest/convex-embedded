@@ -45,6 +45,22 @@ import { retryWithBackoff } from "@/utils/retry";
 const log = createLogger("resolve");
 
 /**
+ * The remote Convex client, reached through a narrow view because the sync
+ * engine calls it with raw refs/paths the public generic signatures reject.
+ */
+interface RemoteCallable {
+  onUpdate(...args: unknown[]): () => void;
+  mutation(ref: unknown, args: unknown): Promise<unknown>;
+  query(ref: unknown, args: unknown): Promise<unknown>;
+}
+
+/** The embedded client invoked with raw refs or `_system:*` path strings. */
+interface LocalPathCallable {
+  mutation(ref: unknown, args: unknown): Promise<unknown>;
+  query(ref: unknown, args: unknown): Promise<unknown>;
+}
+
+/**
  * Strip fields marked with `schema.omit()` from a set of documents.
  *
  * Remote documents may contain fields that only exist on the remote
@@ -525,7 +541,7 @@ function registerRemoteSubscription(input: {
     baseHandler(docs);
   };
 
-  const unsub = (remoteClient as any).onUpdate(
+  const unsub = (remoteClient as unknown as RemoteCallable).onUpdate(
     input.tableConfig.resolve,
     {
       collectionSeq: null,
@@ -824,7 +840,7 @@ function inferTableFromRef(
   ref: unknown,
   tables: Record<string, TableConfig>,
 ): string | null {
-  const name = getFunctionName(ref as any);
+  const name = getFunctionName(ref as Parameters<typeof getFunctionName>[0]);
 
   const moduleName = name.split(":")[0] ?? "";
   if (moduleName in tables) {
@@ -1360,7 +1376,7 @@ async function uploadBlobToRemote(input: {
   contentType?: string;
   uploadFetch?: typeof globalThis.fetch;
 }): Promise<string> {
-  const uploadUrl = (await (input.remoteClient as any).mutation(
+  const uploadUrl = (await (input.remoteClient as unknown as RemoteCallable).mutation(
     input.uploadUrlRef,
     {},
   )) as string;
@@ -1748,7 +1764,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     ? (ref: unknown, args: Record<string, unknown>) =>
         executeLocal({
           kind: "mutation",
-          path: getFunctionName(ref as any),
+          path: getFunctionName(ref as Parameters<typeof getFunctionName>[0]),
           args,
           applyLocalEffects: true,
         })
@@ -2525,7 +2541,7 @@ function createEngine(config: EngineConfig): EngineInstance {
                   let remoteResult: unknown;
                   try {
                     remoteResult = await heartbeat.race(
-                      (remoteClient as any).mutation(ref, translatedArgs),
+                      (remoteClient as unknown as RemoteCallable).mutation(ref, translatedArgs),
                     );
                   } finally {
                     heartbeat.stop();
@@ -2906,7 +2922,7 @@ function createEngine(config: EngineConfig): EngineInstance {
       }
       attempts++;
       try {
-        return (remoteClient as any).query(tableConfig.resolve, {
+        return (remoteClient as unknown as RemoteCallable).query(tableConfig.resolve, {
           collectionSeq: metadata.collectionSeq,
           documents: resolveDocuments,
         } satisfies ResolveArgs) as Promise<
@@ -3183,7 +3199,7 @@ function createEngine(config: EngineConfig): EngineInstance {
 
     let rawResolveResult: ResolveResponse | Array<ResolveResultRow>;
     try {
-      rawResolveResult = (await (remoteClient as any).query(
+      rawResolveResult = (await (remoteClient as unknown as RemoteCallable).query(
         tableConfig.resolve,
         {
           collectionSeq: null,
@@ -3315,7 +3331,7 @@ function createEngine(config: EngineConfig): EngineInstance {
         }
         attempts++;
         try {
-          return (remoteClient as any).query(tableConfig.resolve, {
+          return (remoteClient as unknown as RemoteCallable).query(tableConfig.resolve, {
             collectionSeq: effectiveCollectionSeq,
             documents: resolveDocuments,
             ...(scopeArgs && Object.keys(scopeArgs).length > 0
@@ -3688,7 +3704,7 @@ function createEngine(config: EngineConfig): EngineInstance {
       });
       return;
     }
-    await (localClient as any).mutation(path, args);
+    await (localClient as unknown as LocalPathCallable).mutation(path, args);
   }
 
   async function runLocalSystemQuery<T>(
@@ -3702,7 +3718,7 @@ function createEngine(config: EngineConfig): EngineInstance {
         args,
       })) as T;
     }
-    return (await (localClient as any).query(path, args)) as T;
+    return (await (localClient as unknown as LocalPathCallable).query(path, args)) as T;
   }
 
   async function readResolveMetadata(
@@ -3975,9 +3991,9 @@ function createEngine(config: EngineConfig): EngineInstance {
       const executeMutationLocally = executeLocalMutationWithEffects
         ? executeLocalMutationWithEffects
         : (r: unknown, a: Record<string, unknown>) =>
-            (localClient as any).mutation(r, a) as Promise<unknown>;
+            (localClient as unknown as LocalPathCallable).mutation(r, a) as Promise<unknown>;
 
-      const refName = getFunctionName(ref as any);
+      const refName = getFunctionName(ref as Parameters<typeof getFunctionName>[0]);
       const localArgs = idMap.translateRemoteIdsToLocal(args);
 
       const __mutStart = globalThis.performance?.now?.() ?? Date.now();
@@ -4002,7 +4018,7 @@ function createEngine(config: EngineConfig): EngineInstance {
       );
 
       if (localFailed) {
-        const remoteResult = await (remoteClient as any).mutation(ref, args);
+        const remoteResult = await (remoteClient as unknown as RemoteCallable).mutation(ref, args);
         return remoteResult;
       }
 

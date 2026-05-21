@@ -474,10 +474,13 @@ export class UdfExecutor {
     fn: () => Promise<T>,
     executionContext: ExecutionContext = {},
   ): Promise<T> {
-    const db = this._db;
+    const db = this._db as Database & {
+      getActiveIdentityKey?: () => string | null;
+      setActiveIdentityKey?: (key: string | null) => void;
+    };
     const previousIdentityKey =
-      typeof (db as any).getActiveIdentityKey === "function"
-        ? (db as any).getActiveIdentityKey()
+      typeof db.getActiveIdentityKey === "function"
+        ? db.getActiveIdentityKey()
         : null;
 
     const ops = createOpsContext();
@@ -488,8 +491,8 @@ export class UdfExecutor {
     );
     const previousConvex = globalThis.Convex;
     this._contextStack.push(executionContext);
-    if (typeof (db as any).setActiveIdentityKey === "function") {
-      (db as any).setActiveIdentityKey(executionContext.identityKey ?? null);
+    if (typeof db.setActiveIdentityKey === "function") {
+      db.setActiveIdentityKey(executionContext.identityKey ?? null);
     }
     installGlobalConvex(this._installedConvex);
 
@@ -498,8 +501,8 @@ export class UdfExecutor {
     } finally {
       restoreGlobalConvex(previousConvex, previousConvexDescriptor);
       this._contextStack.pop();
-      if (typeof (db as any).setActiveIdentityKey === "function") {
-        (db as any).setActiveIdentityKey(previousIdentityKey);
+      if (typeof db.setActiveIdentityKey === "function") {
+        db.setActiveIdentityKey(previousIdentityKey);
       }
       restoreGlobals(savedGlobals);
     }

@@ -204,6 +204,13 @@ export function switchIdentity(
  * forwarding hooks.
  * @internal
  */
+/** Auth methods patched onto / read from the ConvexClient instance. */
+interface AuthPatchableClient {
+  setAuth(...args: unknown[]): void;
+  clearAuth?(): void;
+  setAdminAuth?(...args: unknown[]): void;
+}
+
 export function installAuthController(
   client: ConvexClient,
   runtime: EmbeddedRuntime,
@@ -212,15 +219,16 @@ export function installAuthController(
     authOptions?: AuthOptions;
     forwardSetAuth?: (...args: Parameters<ConvexClient["setAuth"]>) => void;
     forwardClearAuth?: () => void;
-    forwardSetAdminAuth?: (...args: any[]) => void;
+    forwardSetAdminAuth?: (...args: unknown[]) => void;
   },
 ): void {
+  const authClient = client as unknown as AuthPatchableClient;
   const originalSetAuth = client.setAuth.bind(client);
-  const originalClearAuth = (client as any).clearAuth?.bind(client);
-  const originalSetAdminAuth = (client as any).setAdminAuth?.bind(client);
+  const originalClearAuth = authClient.clearAuth?.bind(authClient);
+  const originalSetAdminAuth = authClient.setAdminAuth?.bind(authClient);
 
-  (client as any).setAuth = (...args: Parameters<typeof client.setAuth>) => {
-    const [fetchToken, onChange] = args;
+  authClient.setAuth = (...args: unknown[]) => {
+    const [fetchToken, onChange] = args as Parameters<typeof client.setAuth>;
     const wrappedFetchToken = wrapFetchToken(
       entry,
       runtime,
@@ -234,7 +242,7 @@ export function installAuthController(
     options.forwardSetAuth?.(wrappedFetchToken, onChange);
   };
 
-  (client as any).clearAuth = () => {
+  authClient.clearAuth = () => {
     entry.currentAuthFetcher = undefined;
     originalClearAuth?.();
     options.forwardClearAuth?.();
@@ -242,7 +250,7 @@ export function installAuthController(
   };
 
   if (typeof originalSetAdminAuth === "function") {
-    (client as any).setAdminAuth = (...args: any[]) => {
+    authClient.setAdminAuth = (...args: unknown[]) => {
       entry.currentAuthFetcher = undefined;
       originalSetAdminAuth(...args);
       options.forwardSetAdminAuth?.(...args);
@@ -250,7 +258,7 @@ export function installAuthController(
   }
 
   if (options.authOptions?.fetchToken) {
-    (client as any).setAuth(options.authOptions.fetchToken);
+    authClient.setAuth(options.authOptions.fetchToken);
     return;
   }
 

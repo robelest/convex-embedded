@@ -24,8 +24,78 @@ import { withSpanSync } from "@/tracing/spans";
 
 const log = createLogger("cache");
 
-function createNoopUnsubscribe(): any {
-  const noop = (() => {}) as any;
+/** Callable unsubscribe with optional snapshot accessors attached. */
+interface SubscriptionHandle {
+  (): void;
+  unsubscribe?: () => void;
+  getCurrentValue?: () => unknown;
+  getQueryLogs?: () => string[] | undefined;
+}
+
+type OptimisticUpdateCallback = (
+  store: { getQuery: (refName: string, args: unknown) => unknown },
+  args: Record<string, unknown>,
+) => Array<{ refName: string; args: unknown; value: unknown }>;
+
+/** Local query-access surface patched onto the base Convex client. */
+interface BaseLocalClient {
+  localQueryResult?: (
+    refName: string,
+    args: Record<string, unknown>,
+  ) => unknown;
+  localQueryLogs?: (
+    refName: string,
+    args: Record<string, unknown>,
+  ) => string[] | undefined;
+}
+
+/**
+ * The Convex `ConvexClient` instance augmented at runtime by the patch
+ * helpers below with embedded-specific members its public type doesn't
+ * expose. Cast the instance once to this and assign/read through it instead
+ * of scattering `as any`.
+ */
+interface PatchableConvexClient {
+  client?: BaseLocalClient;
+  mutation(...args: unknown[]): Promise<unknown>;
+  query(...args: unknown[]): Promise<unknown>;
+  action(...args: unknown[]): Promise<unknown>;
+  onUpdate(...args: unknown[]): unknown;
+  onPaginatedUpdate_experimental?(...args: unknown[]): unknown;
+  peekCurrentValue(ref: unknown, args: unknown): unknown;
+  peekPaginatedCurrentValue(
+    ref: unknown,
+    args: unknown,
+    options: { initialNumItems: number },
+  ): unknown;
+  applyOptimisticTransition(
+    updates: Array<{ refName: string; args: unknown; value: unknown }>,
+  ): void;
+  registerOptimisticUpdate(
+    ref: unknown,
+    callback: OptimisticUpdateCallback,
+  ): void;
+  setWorkScheduler(scheduler: WorkScheduler | null): void;
+  getWorkScheduler(): WorkScheduler | undefined;
+  dispatchHttpRequest(request: Request): Promise<Response>;
+}
+
+/** Invoke a subscription handle that may be a bare function or `{ unsubscribe }`. */
+function callUnsubscribe(handle: unknown): void {
+  if (typeof handle === "function") {
+    (handle as () => void)();
+    return;
+  }
+  if (
+    handle &&
+    typeof (handle as { unsubscribe?: unknown }).unsubscribe === "function"
+  ) {
+    (handle as { unsubscribe: () => void }).unsubscribe();
+  }
+}
+
+function createNoopUnsubscribe(): SubscriptionHandle {
+  const noop = (() => {}) as SubscriptionHandle;
   noop.unsubscribe = noop;
   noop.getCurrentValue = () => undefined;
   noop.getQueryLogs = () => undefined;
@@ -479,11 +549,15 @@ class CachePipeline {
 
     let unsubscribe: (() => void) | null = null;
     try {
-      const result = watch.onUpdate(handleLocal) as any;
+      const result: unknown = watch.onUpdate(handleLocal);
       if (typeof result === "function") {
-        unsubscribe = result;
-      } else if (result && typeof result.unsubscribe === "function") {
-        unsubscribe = () => result.unsubscribe();
+        unsubscribe = result as () => void;
+      } else if (
+        result &&
+        typeof (result as { unsubscribe?: unknown }).unsubscribe === "function"
+      ) {
+        unsubscribe = () =>
+          (result as { unsubscribe: () => void }).unsubscribe();
       }
     } catch {
       return;
@@ -525,7 +599,8 @@ class CachePipeline {
   private openRemoteSubscription(entry: ActiveSubscription): void {
     const remoteClient = this.config.remoteClient;
     if (!remoteClient) return;
-    const onUpdate = (remoteClient as any).onUpdate as
+    const onUpdate = (remoteClient as unknown as PatchableConvexClient)
+      .onUpdate as
       | ((
           ref: unknown,
           args: unknown,
@@ -610,17 +685,21 @@ class CachePipeline {
 
     let unsubscribe: (() => void) | null = null;
     try {
-      const result = onUpdate.call(
+      const result: unknown = onUpdate.call(
         remoteClient,
         entry.refName as unknown,
         entry.args,
         handlePush,
         handleError,
-      ) as any;
+      );
       if (typeof result === "function") {
-        unsubscribe = result;
-      } else if (result && typeof result.unsubscribe === "function") {
-        unsubscribe = () => result.unsubscribe();
+        unsubscribe = result as () => void;
+      } else if (
+        result &&
+        typeof (result as { unsubscribe?: unknown }).unsubscribe === "function"
+      ) {
+        unsubscribe = () =>
+          (result as { unsubscribe: () => void }).unsubscribe();
       }
     } catch (error) {
       handleError(this.config.asError(error));
@@ -785,7 +864,7 @@ function createCacheOnUpdate(input: {
       args: args ?? {},
       onValue: fireValue,
       onError: fireError,
-    }) as any;
+    }) as SubscriptionHandle;
 
     unsubscribe.unsubscribe = unsubscribe;
     unsubscribe.getCurrentValue = () => {
@@ -865,7 +944,7 @@ function createCachePaginatedOnUpdate(input: {
       args: baseArgs,
       onValue: fireValue,
       onError: fireError,
-    }) as any;
+    }) as SubscriptionHandle;
 
     unsubscribe.unsubscribe = unsubscribe;
     unsubscribe.getCurrentValue = () => {
@@ -925,7 +1004,7 @@ function createRuntimeLocalOnUpdate(input: {
       }
     };
 
-    const unsubscribe = watch.onUpdate(notify) as any;
+    const unsubscribe = watch.onUpdate(notify) as SubscriptionHandle;
     unsubscribe.unsubscribe = unsubscribe;
     unsubscribe.getCurrentValue = () =>
       toClientResult(
@@ -992,7 +1071,7 @@ function createRuntimeLocalPaginatedOnUpdate(input: {
       }
     };
 
-    const unsubscribe = watch.onUpdate(notify) as any;
+    const unsubscribe = watch.onUpdate(notify) as SubscriptionHandle;
     unsubscribe.unsubscribe = unsubscribe;
     unsubscribe.getCurrentValue = () =>
       toClientResult(
@@ -1018,7 +1097,7 @@ function patchBaseClientLocalQueryAccess(input: {
   translateLocalResultToClient?: <T>(value: T) => T;
   cache?: EmbeddedQueryCache | null;
 }) {
-  const baseClient = (input.client as any).client as any;
+  const baseClient = (input.client as unknown as PatchableConvexClient).client;
   if (!baseClient) {
     return;
   }
@@ -1073,49 +1152,31 @@ function patchBaseClientLocalQueryAccess(input: {
 }
 
 function deferSubscription(input: {
-  factory: () => Promise<any>;
+  factory: () => Promise<unknown>;
   asError: (error: unknown) => Error;
   onInitError?: (error: Error) => void;
-}): any {
-  let inner: any = null;
+}): SubscriptionHandle {
+  let inner: SubscriptionHandle | null = null;
   let cancelled = false;
 
   const unsubscribe = (() => {
     cancelled = true;
-    if (typeof inner === "function") {
-      inner();
-    } else if (inner && typeof inner.unsubscribe === "function") {
-      inner.unsubscribe();
-    }
-  }) as any;
+    callUnsubscribe(inner);
+  }) as SubscriptionHandle;
 
   unsubscribe.unsubscribe = unsubscribe;
-  unsubscribe.getCurrentValue = () => {
-    if (inner && typeof inner.getCurrentValue === "function") {
-      return inner.getCurrentValue();
-    }
-    return undefined;
-  };
-  unsubscribe.getQueryLogs = () => {
-    if (inner && typeof inner.getQueryLogs === "function") {
-      return inner.getQueryLogs();
-    }
-    return undefined;
-  };
+  unsubscribe.getCurrentValue = () => inner?.getCurrentValue?.();
+  unsubscribe.getQueryLogs = () => inner?.getQueryLogs?.();
 
   void input
     .factory()
     .then(
       (actual) => {
         if (cancelled) {
-          if (typeof actual === "function") {
-            actual();
-          } else if (actual && typeof actual.unsubscribe === "function") {
-            actual.unsubscribe();
-          }
+          callUnsubscribe(actual);
           return;
         }
-        inner = actual;
+        inner = actual as SubscriptionHandle;
       },
       (error) => {
         const normalized = input.asError(error);
@@ -1307,10 +1368,14 @@ export function patchRoutedConvexClient(input: {
     return input.translateClientArgsToRemote?.(args) ?? args;
   };
 
+  const remotePatchable = remoteClient
+    ? (remoteClient as unknown as PatchableConvexClient)
+    : null;
+
   const createRemoteCaller =
     (method: "mutation" | "query" | "action") =>
-    (...args: any[]): Promise<any> => {
-      if (!remoteClient) {
+    (...args: unknown[]): Promise<unknown> => {
+      if (!remotePatchable) {
         return Promise.reject(
           new ConvexError({
             code: "REMOTE_CLIENT_UNAVAILABLE",
@@ -1323,33 +1388,31 @@ export function patchRoutedConvexClient(input: {
       }
       const remoteArgs = [...args];
       remoteArgs[1] = translateRemoteArgs(remoteArgs[1] ?? {});
-      return (remoteClient as any)[method](...remoteArgs);
+      return remotePatchable[method](...remoteArgs);
     };
 
-  const remoteOnUpdate = remoteClient
-    ? (...args: any[]): any => {
+  const remoteOnUpdate = remotePatchable
+    ? (...args: unknown[]): unknown => {
         const remoteArgs = [...args];
         remoteArgs[1] = translateRemoteArgs(remoteArgs[1] ?? {});
-        return (remoteClient as any).onUpdate(...remoteArgs);
+        return remotePatchable.onUpdate(...remoteArgs);
       }
     : () => createNoopUnsubscribe();
 
-  const remotePaginatedOnUpdate = remoteClient
-    ? (...args: any[]): any => {
+  const remotePaginatedOnUpdate = remotePatchable
+    ? (...args: unknown[]): unknown => {
         const remoteArgs = [...args];
         remoteArgs[1] = translateRemoteArgs(remoteArgs[1] ?? {});
-        return (remoteClient as any).onPaginatedUpdate_experimental(
-          ...remoteArgs,
-        );
+        return remotePatchable.onPaginatedUpdate_experimental?.(...remoteArgs);
       }
     : () => createNoopUnsubscribe();
 
   const createSubscriptionFactory = (
-    localSubscribe: (...args: any[]) => any,
-    remoteSubscribe: (...args: any[]) => any,
+    localSubscribe: (...args: unknown[]) => unknown,
+    remoteSubscribe: (...args: unknown[]) => unknown,
     errorArgIndex: number,
   ) => {
-    const subscribeWithRoute = (...args: any[]): any => {
+    const subscribeWithRoute = (...args: unknown[]): unknown => {
       const route = input.resolveReadPlan(args[0]);
       if (route.kind === "local") {
         return localSubscribe(...args);
@@ -1377,7 +1440,7 @@ export function patchRoutedConvexClient(input: {
       return remoteSubscribe(...args);
     };
 
-    return (...args: any[]): any => {
+    return (...args: unknown[]): unknown => {
       if (isReady()) {
         return subscribeWithRoute(...args);
       }
@@ -1387,14 +1450,18 @@ export function patchRoutedConvexClient(input: {
         factory: () => waitUntilReady(async () => subscribeWithRoute(...args)),
         asError: input.asError,
         onInitError:
-          typeof onInitError === "function" ? onInitError : undefined,
+          typeof onInitError === "function"
+            ? (onInitError as (error: Error) => void)
+            : undefined,
       });
     };
   };
 
-  (input.client as any).mutation = function patchedMutation(
-    ...args: Parameters<typeof input.client.mutation>
-  ): Promise<any> {
+  const patchable = input.client as unknown as PatchableConvexClient;
+
+  patchable.mutation = function patchedMutation(
+    ...args: unknown[]
+  ): Promise<unknown> {
     if (pipeline) {
       try {
         const ref = args[0];
@@ -1459,9 +1526,9 @@ export function patchRoutedConvexClient(input: {
     });
   };
 
-  (input.client as any).query = function patchedQuery(
-    ...args: Parameters<typeof input.client.query>
-  ): Promise<any> {
+  patchable.query = function patchedQuery(
+    ...args: unknown[]
+  ): Promise<unknown> {
     return waitUntilReady(async () => {
       const route = input.resolveReadPlan(args[0]);
       if (route.kind === "error") {
@@ -1501,9 +1568,9 @@ export function patchRoutedConvexClient(input: {
     });
   };
 
-  (input.client as any).action = function patchedAction(
-    ...args: Parameters<typeof input.client.action>
-  ): Promise<any> {
+  patchable.action = function patchedAction(
+    ...args: unknown[]
+  ): Promise<unknown> {
     return waitUntilReady(async () => {
       const route = input.resolveReadPlan(args[0]);
       if (route.kind === "error") {
@@ -1543,13 +1610,13 @@ export function patchRoutedConvexClient(input: {
     });
   };
 
-  (input.client as any).onUpdate = createSubscriptionFactory(
+  patchable.onUpdate = createSubscriptionFactory(
     localOnUpdate,
     remoteOnUpdate,
     3,
   );
 
-  (input.client as any).peekCurrentValue = (
+  patchable.peekCurrentValue = (
     ref: unknown,
     args: unknown,
   ): unknown => {
@@ -1560,7 +1627,7 @@ export function patchRoutedConvexClient(input: {
     return toClientResult(raw, input.translateLocalResultToClient);
   };
 
-  (input.client as any).peekPaginatedCurrentValue = (
+  patchable.peekPaginatedCurrentValue = (
     ref: unknown,
     args: unknown,
     options: { initialNumItems: number },
@@ -1584,14 +1651,14 @@ export function patchRoutedConvexClient(input: {
     return toClientResult(raw, input.translateLocalResultToClient);
   };
 
-  (input.client as any).applyOptimisticTransition = (
+  patchable.applyOptimisticTransition = (
     updates: Array<{ refName: string; args: unknown; value: unknown }>,
   ): void => {
     if (!pipeline) return;
     pipeline.applyOptimisticTransition(updates);
   };
 
-  (input.client as any).registerOptimisticUpdate = (
+  patchable.registerOptimisticUpdate = (
     ref: unknown,
     callback: (
       store: { getQuery: (refName: string, args: unknown) => unknown },
@@ -1602,23 +1669,23 @@ export function patchRoutedConvexClient(input: {
     explicitOptimistic.set(ref, callback);
   };
 
-  (input.client as any).setWorkScheduler = (
+  patchable.setWorkScheduler = (
     scheduler: WorkScheduler | null,
   ): void => {
     pipeline?.setWorkScheduler(scheduler);
   };
 
-  (input.client as any).getWorkScheduler = (): WorkScheduler | undefined =>
+  patchable.getWorkScheduler = (): WorkScheduler | undefined =>
     pipeline?.getWorkScheduler();
 
-  (input.client as any).dispatchHttpRequest = (
+  patchable.dispatchHttpRequest = (
     request: Request,
   ): Promise<Response> => input.runtime.dispatchHttpRequest(request);
 
   if (
-    typeof (input.client as any).onPaginatedUpdate_experimental === "function"
+    typeof patchable.onPaginatedUpdate_experimental === "function"
   ) {
-    (input.client as any).onPaginatedUpdate_experimental =
+    patchable.onPaginatedUpdate_experimental =
       createSubscriptionFactory(
         localPaginatedOnUpdate,
         remotePaginatedOnUpdate,

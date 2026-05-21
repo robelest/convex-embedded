@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it } from "@tests/testkit";
 
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
-import { DEMO_WORKSPACE_ID } from "../../../convex/workspace";
 import {
   createLiveClient,
   describeLiveClientState,
@@ -24,7 +23,6 @@ type LiveClient = Awaited<ReturnType<typeof createLiveClient>>["client"] & {
 async function createProjectAndIssue(client: LiveClient) {
   const suffix = uniqueSuffix("merge");
   const projectId = await client.mutation(api.projects.create, {
-    workspaceId: DEMO_WORKSPACE_ID,
     name: `Merge ${suffix}`,
     identifier: suffix.slice(-6).toUpperCase(),
     description: `Merge seed ${suffix}`,

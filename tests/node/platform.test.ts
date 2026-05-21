@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "@tests/testkit";
 
 import { api } from "../../convex/_generated/api";
 import schema from "../../convex/schema";
-import { DEMO_WORKSPACE_ID } from "../../convex/workspace";
+import { GROUP_ID } from "../../convex/access";
 import { getEmbeddedClientEntry } from "../../packages/convex-embedded/src/client/entry";
 import { createConvexClient } from "../../packages/convex-embedded/src/node/index";
 import { openNodeStorage } from "../../packages/convex-embedded/src/node/sqlite/adapter";
@@ -30,12 +30,9 @@ describe("node platform storage", () => {
     });
     clientsToClose.push(firstClient as { close(): Promise<void> });
 
-    await firstClient.query(api.projects.list, {
-      workspaceId: DEMO_WORKSPACE_ID,
-    });
+    await firstClient.query(api.projects.list, {});
 
     const projectId = await firstClient.mutation(api.projects.create, {
-      workspaceId: DEMO_WORKSPACE_ID,
       name: `Node Persist ${name}`,
       identifier: name.slice(-6).toUpperCase(),
       description: `Node storage ${name}`,
@@ -85,7 +82,6 @@ describe("node platform storage", () => {
 
     for (let index = 0; index < projectCount; index += 1) {
       await firstClient.mutation(api.projects.create, {
-        workspaceId: DEMO_WORKSPACE_ID,
         name: `Node Volume ${name}-${index}`,
         identifier: `V${String(index).padStart(5, "0")}`,
         description: `Node volume ${name}-${index}`,
@@ -126,7 +122,7 @@ describe("node platform storage", () => {
       hydratedProjects
         .filter(
           (entry) =>
-            (entry as { groupId?: string }).groupId === DEMO_WORKSPACE_ID,
+            (entry as { groupId?: string }).groupId === GROUP_ID,
         )
         .filter((entry) =>
           String((entry as { name?: string }).name).startsWith(
@@ -138,7 +134,7 @@ describe("node platform storage", () => {
       persistedProjects
         .filter(
           (entry) =>
-            (entry as { groupId?: string }).groupId === DEMO_WORKSPACE_ID,
+            (entry as { groupId?: string }).groupId === GROUP_ID,
         )
         .filter((entry) =>
           String((entry as { name?: string }).name).startsWith(
@@ -149,7 +145,7 @@ describe("node platform storage", () => {
     expect(persistedProjects).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          groupId: DEMO_WORKSPACE_ID,
+          groupId: GROUP_ID,
           name: `Node Volume ${name}-${projectCount - 1}`,
         }),
       ]),
@@ -169,7 +165,6 @@ describe("node platform storage", () => {
     clientsToClose.push(client as { close(): Promise<void> });
 
     const projectId = await client.mutation(api.projects.create, {
-      workspaceId: DEMO_WORKSPACE_ID,
       name: `Node Project ${name}`,
       identifier: name.slice(-6).toUpperCase(),
       description: `Node project ${name}`,
@@ -180,9 +175,7 @@ describe("node platform storage", () => {
       title: `Issue ${name}`,
     });
 
-    const projects = (await client.query(api.projects.list, {
-      workspaceId: DEMO_WORKSPACE_ID,
-    })) as Array<{
+    const projects = (await client.query(api.projects.list, {})) as Array<{
       _id: string;
       groupId: string;
       openIssueCount: number;
@@ -190,7 +183,7 @@ describe("node platform storage", () => {
 
     const matchingProjects = projects.filter(
       (project) =>
-        project.groupId === DEMO_WORKSPACE_ID && project._id === projectId,
+        project.groupId === GROUP_ID && project._id === projectId,
     );
     expect(matchingProjects).toHaveLength(1);
     expect(matchingProjects[0]?.openIssueCount).toBe(1);

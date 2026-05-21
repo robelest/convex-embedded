@@ -38,7 +38,6 @@ describe("convex-embedded integration", () => {
     // 1. Create a task via the wrapped mutation.
     //    Delta recording happens inline (same transaction) — no scheduler needed.
     const projectId: Id<"projects"> = await t.mutation(api.projects.create, {
-      workspaceId: "workspace_demo",
       name: "Write tests",
       identifier: "WT",
       description: "Integration test for convex-resolve",
@@ -100,7 +99,6 @@ describe("convex-embedded integration", () => {
 
     // Create a task — delta recorded inline
     const projectId: Id<"projects"> = await t.mutation(api.projects.create, {
-      workspaceId: "workspace_demo",
       name: "Original title",
       identifier: "OT",
       description: "Original body",

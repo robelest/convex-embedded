@@ -2,7 +2,6 @@
 
 import { api } from "@convex/_generated/api";
 import type { Id } from "@convex/_generated/dataModel";
-import { DEMO_WORKSPACE_ID } from "@convex/workspace";
 import { createAppConvexTest } from "@tests/helpers/convex";
 import { describe, expect, it } from "@tests/testkit";
 
@@ -13,7 +12,6 @@ describe("scoped resolve", () => {
     const firstProjectId: Id<"projects"> = await t.mutation(
       api.projects.create,
       {
-        workspaceId: DEMO_WORKSPACE_ID,
         name: "Scoped A",
         identifier: "SCA",
         description: "First scoped project",
@@ -22,7 +20,6 @@ describe("scoped resolve", () => {
     const secondProjectId: Id<"projects"> = await t.mutation(
       api.projects.create,
       {
-        workspaceId: DEMO_WORKSPACE_ID,
         name: "Scoped B",
         identifier: "SCB",
         description: "Second scoped project",
@@ -45,9 +42,9 @@ describe("scoped resolve", () => {
 
     expect(result.mode).toBe("full");
     expect(result.isDone).toBe(true);
-    expect(result.documents.map((document) => document.docId)).toEqual([
-      firstIssueId,
-    ]);
+    expect(
+      result.documents.map((document: { docId: string }) => document.docId),
+    ).toEqual([firstIssueId]);
     expect(result.documents[0]).toMatchObject({
       docId: firstIssueId,
       document: expect.objectContaining({
@@ -56,8 +53,8 @@ describe("scoped resolve", () => {
         title: "First scoped issue",
       }),
     });
-    expect(result.documents.map((document) => document.docId)).not.toContain(
-      secondIssueId,
-    );
+    expect(
+      result.documents.map((document: { docId: string }) => document.docId),
+    ).not.toContain(secondIssueId);
   });
 });

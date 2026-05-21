@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it } from "@tests/testkit";
 
 import { api } from "../../../convex/_generated/api";
 import type { Id } from "../../../convex/_generated/dataModel";
-import { DEMO_WORKSPACE_ID } from "../../../convex/workspace";
 import {
   createDirectRemoteClient,
   createLiveClient,
@@ -26,7 +25,6 @@ type ClosableClient = Awaited<ReturnType<typeof createLiveClient>>["client"] & {
 async function createProjectAndIssue(client: ClosableClient) {
   const suffix = uniqueSuffix("durability");
   const projectId = await client.mutation(api.projects.create, {
-    workspaceId: DEMO_WORKSPACE_ID,
     name: `Durability ${suffix}`,
     identifier: suffix.slice(-6).toUpperCase(),
     description: `Durability seed ${suffix}`,

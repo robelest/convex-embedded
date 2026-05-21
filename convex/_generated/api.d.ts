@@ -8,6 +8,7 @@
  * @module
  */
 
+import type * as access from "../access.js";
 import type * as agent from "../agent.js";
 import type * as assistant from "../assistant.js";
 import type * as comments from "../comments.js";
@@ -15,7 +16,6 @@ import type * as issues from "../issues.js";
 import type * as projects from "../projects.js";
 import type * as prose from "../prose.js";
 import type * as validators from "../validators.js";
-import type * as workspace from "../workspace.js";
 
 import type {
   ApiFromModules,
@@ -24,6 +24,7 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  access: typeof access;
   agent: typeof agent;
   assistant: typeof assistant;
   comments: typeof comments;
@@ -31,7 +32,6 @@ declare const fullApi: ApiFromModules<{
   projects: typeof projects;
   prose: typeof prose;
   validators: typeof validators;
-  workspace: typeof workspace;
 }>;
 
 /**

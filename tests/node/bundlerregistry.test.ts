@@ -4,8 +4,8 @@ import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "@tests/testkit";
 
 import { api } from "../../convex/_generated/api";
+import type { Id } from "../../convex/_generated/dataModel";
 import * as schema from "../../convex/schema";
-import { DEMO_WORKSPACE_ID } from "../../convex/workspace";
 import { generateEmbeddedRegistry } from "../../packages/convex-embedded/src/codegen/index";
 import { getEmbeddedClientEntry } from "../../packages/convex-embedded/src/client/entry";
 import {
@@ -165,9 +165,9 @@ runWhenRemote("bundler registry syncs remote data into local sqlite", () => {
 
     await pollLocalTable(client, "projects");
 
-    const projects = (await client.query(api.projects.list, {
-      workspaceId: DEMO_WORKSPACE_ID,
-    })) as Array<{ _id: string }>;
+    const projects = (await client.query(api.projects.list, {})) as Array<{
+      _id: Id<"projects">;
+    }>;
 
     const projectsToLoad = projects.slice(0, 2);
     for (const project of projectsToLoad) {
@@ -242,9 +242,13 @@ runWhenRemote("bundler registry syncs remote data into local sqlite", () => {
       databasePath,
     });
 
-    const projects = (await offlineClient.query(api.projects.list, {
-      workspaceId: DEMO_WORKSPACE_ID,
-    })) as Array<{ _id: string; name: string }>;
+    const projects = (await offlineClient.query(
+      api.projects.list,
+      {},
+    )) as Array<{
+      _id: Id<"projects">;
+      name: string;
+    }>;
 
     expect(projects.length).toBeGreaterThan(0);
 

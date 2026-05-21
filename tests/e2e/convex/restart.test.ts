@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it } from "@tests/testkit";
 
 import { api } from "../../../convex/_generated/api";
-import { DEMO_WORKSPACE_ID } from "../../../convex/workspace";
 import { getEmbeddedClientEntry } from "../../../packages/convex-embedded/src/client/entry";
 import { SystemPaths } from "../../../packages/convex-embedded/src/index";
 import {
@@ -71,7 +70,6 @@ maybeDescribe("live persisted restart", () => {
     await waitForResolved(first.client, 40_000);
 
     const projectId = await first.client.mutation(api.projects.create, {
-      workspaceId: DEMO_WORKSPACE_ID,
       name: `Restart ${suffix}`,
       identifier: suffix.slice(-6).toUpperCase(),
       description: `Restart persistence ${suffix}`,
@@ -171,7 +169,6 @@ maybeDescribe("live persisted restart", () => {
     await waitForResolved(first.client, 40_000);
 
     const projectId = await first.client.mutation(api.projects.create, {
-      workspaceId: DEMO_WORKSPACE_ID,
       name: `Processing ${suffix}`,
       identifier: suffix.slice(-6).toUpperCase(),
       description: `Processing persistence ${suffix}`,
@@ -271,7 +268,6 @@ maybeDescribe("live persisted restart", () => {
     await waitForResolved(first.client, 40_000);
 
     const projectId = await first.client.mutation(api.projects.create, {
-      workspaceId: DEMO_WORKSPACE_ID,
       name: `Volume ${suffix}`,
       identifier: suffix.slice(-6).toUpperCase(),
       description: `Volume persistence ${suffix}`,

@@ -18,7 +18,6 @@ import { createConvexClient } from "@robelest/convex-embedded/node";
 
 import { api } from "../convex/_generated/api";
 import schema from "../convex/schema";
-import { DEMO_WORKSPACE_ID } from "../convex/workspace";
 
 const CONVEX_URL =
   process.env.CONVEX_URL ?? "https://academic-pigeon-835.convex.cloud";
@@ -74,7 +73,6 @@ function createModules(): ConvexModuleRegistry {
     projects: () => import("../convex/projects"),
     issues: () => import("../convex/issues"),
     comments: () => import("../convex/comments"),
-    workspace: () => import("../convex/workspace"),
   } satisfies ConvexModuleRegistry;
 }
 
@@ -262,7 +260,7 @@ async function main() {
 
   const projectsUnsub = client.onUpdate(
     api.projects.list,
-    { workspaceId: DEMO_WORKSPACE_ID },
+    {},
     (result: ProjectRow[] | undefined) => {
       if (!Array.isArray(result)) return;
       const before = projects.length;

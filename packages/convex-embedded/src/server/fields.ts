@@ -7,7 +7,7 @@
  * @packageDocumentation
  */
 
-import type { Validator } from "convex/values";
+import type { OptionalProperty, Validator } from "convex/values";
 import { v } from "convex/values";
 
 import { createConflict } from "@/shared/conflict";
@@ -59,7 +59,7 @@ export function prose(): CrdtFieldDescriptor & { [CRDT_FIELD]: true } {
  * @returns A field descriptor suitable for `embeddedTable({...})`.
  */
 export function register<T>(
-  validator: Validator<T, any, any>,
+  validator: Validator<T, OptionalProperty, string>,
   options?: RegisterOptions<T>,
 ): CrdtFieldDescriptor & { [CRDT_FIELD]: true } {
   return {
@@ -93,7 +93,7 @@ export function counter(): CrdtFieldDescriptor & { [CRDT_FIELD]: true } {
  * @returns A field descriptor suitable for `embeddedTable({...})`.
  */
 export function set<T>(
-  validator: Validator<T, any, any>,
+  validator: Validator<T, OptionalProperty, string>,
 ): CrdtFieldDescriptor & { [CRDT_FIELD]: true } {
   return {
     [CRDT_FIELD]: true as const,
@@ -113,7 +113,7 @@ export function set<T>(
  * @returns A field descriptor suitable for `embeddedTable({...})`.
  */
 export function omit<T>(
-  validator: Validator<T, any, any>,
+  validator: Validator<T, OptionalProperty, string>,
 ): CrdtFieldDescriptor & { [CRDT_FIELD]: true } {
   return {
     [CRDT_FIELD]: true as const,

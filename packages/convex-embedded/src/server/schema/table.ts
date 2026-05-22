@@ -3,6 +3,7 @@ import type {
   ArgsArrayToObject,
   DefaultArgsForOptionalValidator,
   DefaultFunctionArgs,
+  GenericDataModel,
   GenericMutationCtx,
   GenericQueryCtx,
   RegisteredMutation,
@@ -11,7 +12,7 @@ import type {
   TableDefinition,
 } from "convex/server";
 import { defineTable, mutationGeneric, queryGeneric } from "convex/server";
-import type { PropertyValidators, Validator } from "convex/values";
+import type { GenericValidator, PropertyValidators } from "convex/values";
 import { v } from "convex/values";
 
 import type { MigrationsMap } from "@/shared/migrations/types";
@@ -33,34 +34,28 @@ import {
 } from "./meta.js";
 
 type EmbeddedIndexMethod = (name: string, fields: string[]) => unknown;
-type EmbeddedSearchIndexMethod = (...args: any[]) => unknown;
-type EmbeddedVectorIndexMethod = (...args: any[]) => unknown;
+type EmbeddedSearchIndexMethod = (...args: unknown[]) => unknown;
+type EmbeddedVectorIndexMethod = (...args: unknown[]) => unknown;
 
 /**
  * Mutation builder attached to an embedded table handle.
  */
 export type EmbeddedMutationBuilder = <
-  ArgsValidator extends
-    | PropertyValidators
-    | Validator<any, "required", any>
-    | void,
-  ReturnsValidator extends
-    | PropertyValidators
-    | Validator<any, "required", any>
-    | void,
+  ArgsValidator extends PropertyValidators | GenericValidator | void,
+  ReturnsValidator extends PropertyValidators | GenericValidator | void,
   OneOrZeroArgs extends ArgsArrayForOptionalValidator<ArgsValidator> =
     DefaultArgsForOptionalValidator<ArgsValidator>,
 >(def: {
   args?: ArgsValidator;
   returns?: ReturnsValidator;
   handler: (
-    ctx: GenericMutationCtx<any>,
+    ctx: GenericMutationCtx<GenericDataModel>,
     ...args: OneOrZeroArgs
   ) =>
     | ReturnValueForOptionalValidator<ReturnsValidator>
     | Promise<ReturnValueForOptionalValidator<ReturnsValidator>>;
   remote?: (
-    ctx: GenericMutationCtx<any>,
+    ctx: GenericMutationCtx<GenericDataModel>,
     args: ArgsArrayToObject<OneOrZeroArgs>,
     result: Awaited<ReturnValueForOptionalValidator<ReturnsValidator>>,
   ) => unknown;
@@ -78,27 +73,21 @@ export type EmbeddedMutationBuilder = <
  * Query builder attached to an embedded table handle.
  */
 export type EmbeddedQueryBuilder = <
-  ArgsValidator extends
-    | PropertyValidators
-    | Validator<any, "required", any>
-    | void,
-  ReturnsValidator extends
-    | PropertyValidators
-    | Validator<any, "required", any>
-    | void,
+  ArgsValidator extends PropertyValidators | GenericValidator | void,
+  ReturnsValidator extends PropertyValidators | GenericValidator | void,
   OneOrZeroArgs extends ArgsArrayForOptionalValidator<ArgsValidator> =
     DefaultArgsForOptionalValidator<ArgsValidator>,
 >(def: {
   args?: ArgsValidator;
   returns?: ReturnsValidator;
   handler: (
-    ctx: GenericQueryCtx<any>,
+    ctx: GenericQueryCtx<GenericDataModel>,
     ...args: OneOrZeroArgs
   ) =>
     | ReturnValueForOptionalValidator<ReturnsValidator>
     | Promise<ReturnValueForOptionalValidator<ReturnsValidator>>;
   remote?: (
-    ctx: GenericQueryCtx<any>,
+    ctx: GenericQueryCtx<GenericDataModel>,
     args: ArgsArrayToObject<OneOrZeroArgs>,
     result: Awaited<ReturnValueForOptionalValidator<ReturnsValidator>>,
   ) =>
@@ -153,7 +142,7 @@ export interface EmbeddedTableHandle<
 type EmbeddedIndexFn<
   TableName extends string,
   Shape extends Record<string, unknown>,
-> = TableDefinition<any, any, any, any>["index"] &
+> = TableDefinition["index"] &
   ((
     ...args: Parameters<EmbeddedIndexMethod>
   ) => EmbeddedTable<TableName, Shape>);
@@ -161,7 +150,7 @@ type EmbeddedIndexFn<
 type EmbeddedSearchIndexFn<
   TableName extends string,
   Shape extends Record<string, unknown>,
-> = TableDefinition<any, any, any, any>["searchIndex"] &
+> = TableDefinition["searchIndex"] &
   ((
     ...args: Parameters<EmbeddedSearchIndexMethod>
   ) => EmbeddedTable<TableName, Shape>);
@@ -169,7 +158,7 @@ type EmbeddedSearchIndexFn<
 type EmbeddedVectorIndexFn<
   TableName extends string,
   Shape extends Record<string, unknown>,
-> = TableDefinition<any, any, any, any>["vectorIndex"] &
+> = TableDefinition["vectorIndex"] &
   ((
     ...args: Parameters<EmbeddedVectorIndexMethod>
   ) => EmbeddedTable<TableName, Shape>);
@@ -180,21 +169,56 @@ type EmbeddedVectorIndexFn<
 export type EmbeddedTable<
   TableName extends string = string,
   Shape extends Record<string, unknown> = Record<string, unknown>,
-> = TableDefinition<any, any, any, any> &
+> = TableDefinition &
   EmbeddedTableHandle<TableName, Shape> & {
     index: EmbeddedIndexFn<TableName, Shape>;
     searchIndex: EmbeddedSearchIndexFn<TableName, Shape>;
     vectorIndex: EmbeddedVectorIndexFn<TableName, Shape>;
   };
 
-/**
- * Runtime hooks attached by runtime binding for component-dependent behavior.
- * @internal
- */
+/** Definition object accepted by the runtime mutation builder. */
+interface EmbeddedMutationDef {
+  args?: PropertyValidators | GenericValidator;
+  returns?: PropertyValidators | GenericValidator;
+  handler: (
+    ctx: GenericMutationCtx<GenericDataModel>,
+    args: DefaultFunctionArgs,
+  ) => unknown;
+  remote?: (
+    ctx: GenericMutationCtx<GenericDataModel>,
+    args: DefaultFunctionArgs,
+    result: unknown,
+  ) => unknown;
+  replay?: {
+    version?: number;
+    migrate?: Record<number, PendingReplayMigrationStep>;
+  };
+}
+
+/** Definition object accepted by the runtime query builder. */
+interface EmbeddedQueryDef {
+  args?: PropertyValidators | GenericValidator;
+  returns?: PropertyValidators | GenericValidator;
+  handler: (
+    ctx: GenericQueryCtx<GenericDataModel>,
+    args: DefaultFunctionArgs,
+  ) => unknown;
+  remote?: (
+    ctx: GenericQueryCtx<GenericDataModel>,
+    args: DefaultFunctionArgs,
+    result: unknown,
+  ) => unknown;
+}
+
 export interface RuntimeHooks {
-  afterMutation?: (ctx: any, def: any, args: any, result: any) => Promise<void>;
+  afterMutation?: (
+    ctx: GenericMutationCtx<GenericDataModel>,
+    def: EmbeddedMutationDef,
+    args: DefaultFunctionArgs,
+    result: unknown,
+  ) => Promise<void>;
   resolveHandler?: (
-    ctx: any,
+    ctx: GenericQueryCtx<GenericDataModel>,
     args: {
       collectionSeq: number | null;
       documents: Array<{
@@ -219,12 +243,36 @@ export interface RuntimeHooks {
     continueCursor?: string | null;
     isDone?: boolean;
   }>;
-  detectRuntime?: (ctx: any) => Promise<boolean>;
+  detectRuntime?: (ctx: GenericQueryCtx<GenericDataModel>) => Promise<boolean>;
 }
 
-const REGISTRY_KEY = Symbol.for("convex-embedded:table-registry");
+/**
+ * The Convex `defineTable` result monkey-patched with the embedded table's
+ * runtime members. The base builder doesn't expose these, so the boundary cast
+ * is centralized here.
+ */
+interface PatchableTableDef {
+  index?: (name: string, fields: string[]) => unknown;
+  searchIndex?: (...args: unknown[]) => unknown;
+  vectorIndex?: (...args: unknown[]) => unknown;
+  _resolveRaw: RegisteredQuery<"public", DefaultFunctionArgs, unknown>;
+  mutation: (
+    def: EmbeddedMutationDef,
+  ) => RegisteredMutation<"public", DefaultFunctionArgs, unknown>;
+  query: (
+    def: EmbeddedQueryDef,
+  ) => RegisteredQuery<"public", DefaultFunctionArgs, unknown>;
+}
 
-const registry: Map<string, EmbeddedTableRuntimeHandle> = ((globalThis as any)[
+const REGISTRY_KEY: unique symbol = Symbol.for(
+  "convex-embedded:table-registry",
+);
+
+const globalWithRegistry = globalThis as typeof globalThis & {
+  [REGISTRY_KEY]?: Map<string, EmbeddedTableRuntimeHandle>;
+};
+
+const registry: Map<string, EmbeddedTableRuntimeHandle> = (globalWithRegistry[
   REGISTRY_KEY
 ] ??= new Map());
 
@@ -284,12 +332,12 @@ export function embeddedTable<
     migrations: options?.migrations,
   });
 
-  const validators: Record<string, any> = {};
+  const validators: Record<string, GenericValidator> = {};
   for (const [key, value] of Object.entries(shape)) {
     validators[key] = extractValidator(value);
   }
 
-  const tableDef = defineTable(validators) as any;
+  const tableDef = defineTable(validators) as unknown as PatchableTableDef;
   const originalIndex =
     typeof tableDef.index === "function" ? tableDef.index.bind(tableDef) : null;
   const originalSearchIndex =
@@ -393,7 +441,7 @@ export function embeddedTable<
       isDone: v.optional(v.boolean()),
     }),
     handler: async (
-      ctx: any,
+      ctx: GenericQueryCtx<GenericDataModel>,
       args: {
         collectionSeq: number | null;
         documents: Array<{
@@ -435,26 +483,33 @@ export function embeddedTable<
     get() {
       return tableDef._resolveRaw;
     },
-    set(value: any) {
+    set(value: RegisteredQuery<"public", DefaultFunctionArgs, unknown>) {
       tableDef._resolveRaw = value;
     },
     enumerable: false,
     configurable: true,
   });
 
-  tableDef.mutation = function mutationBuilder(def: any) {
+  tableDef.mutation = function mutationBuilder(def: EmbeddedMutationDef) {
     const { args, returns, handler, replay } = def;
-    const mutation = mutationGeneric({
+    const mutation = (
+      mutationGeneric as (
+        config: unknown,
+      ) => RegisteredMutation<"public", DefaultFunctionArgs, unknown>
+    )({
       args,
       ...(returns !== undefined ? { returns } : {}),
-      handler: async (ctx: GenericMutationCtx<any>, fnArgs: any) => {
+      handler: async (
+        ctx: GenericMutationCtx<GenericDataModel>,
+        fnArgs: DefaultFunctionArgs,
+      ) => {
         const result = await handler(ctx, fnArgs);
         if (hooks.afterMutation) {
           await hooks.afterMutation(ctx, def, fnArgs, result);
         }
         return result;
       },
-    } as any) as RegisteredMutation<any, any, any>;
+    });
 
     Object.defineProperty(mutation, PENDING_REPLAY_META, {
       value: {
@@ -469,12 +524,19 @@ export function embeddedTable<
     return mutation;
   };
 
-  tableDef.query = function queryBuilder(def: any) {
+  tableDef.query = function queryBuilder(def: EmbeddedQueryDef) {
     const { args, returns, handler, remote } = def;
-    const query = queryGeneric({
+    const query = (
+      queryGeneric as (
+        config: unknown,
+      ) => RegisteredQuery<"public", DefaultFunctionArgs, unknown>
+    )({
       args,
       ...(returns !== undefined ? { returns } : {}),
-      handler: async (ctx: GenericQueryCtx<any>, fnArgs: any) => {
+      handler: async (
+        ctx: GenericQueryCtx<GenericDataModel>,
+        fnArgs: DefaultFunctionArgs,
+      ) => {
         let result = await handler(ctx, fnArgs);
         if (remote && hooks.detectRuntime) {
           const isRemote = await hooks.detectRuntime(ctx);
@@ -484,12 +546,16 @@ export function embeddedTable<
         }
         return result;
       },
-    } as any) as RegisteredQuery<any, any, any>;
+    });
 
     return query;
   };
 
-  registry.set(tableName, tableDef as EmbeddedTable<TableName, Shape>);
+  const embeddedTableDef = tableDef as unknown as EmbeddedTable<
+    TableName,
+    Shape
+  >;
+  registry.set(tableName, embeddedTableDef);
 
-  return tableDef as EmbeddedTable<TableName, Shape>;
+  return embeddedTableDef;
 }

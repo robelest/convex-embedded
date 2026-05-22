@@ -1,4 +1,4 @@
-import type { Validator } from "convex/values";
+import type { OptionalProperty, Validator } from "convex/values";
 
 /**
  * Internal CRDT field kind constants used by schema descriptors.
@@ -77,7 +77,7 @@ export type ProseFieldDescriptor = TypedFieldDescriptor<typeof CrdtType.Prose>;
 /** Register CRDT field descriptor. */
 export type RegisterFieldDescriptor<T> = TypedFieldDescriptor<
   typeof CrdtType.Register,
-  Validator<T, any, any>,
+  Validator<T, OptionalProperty, string>,
   (conflict: Conflict<T>) => T
 >;
 
@@ -89,13 +89,13 @@ export type CounterFieldDescriptor = TypedFieldDescriptor<
 /** Set CRDT field descriptor. */
 export type SetFieldDescriptor<T> = TypedFieldDescriptor<
   typeof CrdtType.Set,
-  Validator<T, any, any>
+  Validator<T, OptionalProperty, string>
 >;
 
 /** Omitted-field descriptor. */
 export type OmittedFieldDescriptor<T> = TypedFieldDescriptor<
   typeof CrdtType.Omitted,
-  Validator<T, any, any>
+  Validator<T, OptionalProperty, string>
 >;
 
 const CRDT_FIELD = Symbol.for("convex-embedded:crdt-field");
@@ -143,13 +143,15 @@ export {
 /**
  * Infer the runtime CRDT kind string for a field descriptor.
  */
-export type FieldKindForDescriptor<Field> = Field extends ProseFieldDescriptor
+export type FieldKindForDescriptor<Field> = Field extends {
+  type: typeof CrdtType.Prose;
+}
   ? "prose"
-  : Field extends RegisterFieldDescriptor<any>
+  : Field extends { type: typeof CrdtType.Register }
     ? "register"
-    : Field extends SetFieldDescriptor<any>
+    : Field extends { type: typeof CrdtType.Set }
       ? "set"
-      : Field extends CounterFieldDescriptor
+      : Field extends { type: typeof CrdtType.Counter }
         ? "counter"
         : string;
 

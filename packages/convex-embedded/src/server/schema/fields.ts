@@ -1,4 +1,8 @@
-import type { Validator } from "convex/values";
+import type {
+  GenericValidator,
+  OptionalProperty,
+  Validator,
+} from "convex/values";
 import { v } from "convex/values";
 
 import { createConflict } from "./conflict.js";
@@ -36,24 +40,24 @@ export interface RegisterOptions<T> {
  * @returns The validator that should be fed into `defineTable(...)`.
  * @internal
  */
-export function extractValidator(value: unknown): any {
+export function extractValidator(value: unknown): GenericValidator {
   if (isCrdtField(value)) {
     switch (getCrdtType(value)) {
       case CrdtType.Prose:
         return v.any();
       case CrdtType.Register:
-        return value.validator;
+        return value.validator as GenericValidator;
       case CrdtType.Counter:
         return v.number();
       case CrdtType.Set:
-        return v.array(value.validator as Validator<any, any, any>);
+        return v.array(value.validator as GenericValidator);
       case CrdtType.Omitted:
       case CrdtType.Plain:
       default:
-        return value.validator;
+        return value.validator as GenericValidator;
     }
   }
-  return value;
+  return value as GenericValidator;
 }
 
 /**
@@ -78,7 +82,7 @@ export function prose(): ProseFieldDescriptor & { [CRDT_FIELD]: true } {
  * @returns A descriptor for a last-write-wins register field.
  */
 export function register<T>(
-  validator: Validator<T, any, any>,
+  validator: Validator<T, OptionalProperty, string>,
   options?: RegisterOptions<T>,
 ): RegisterFieldDescriptor<T> & { [CRDT_FIELD]: true } {
   return {
@@ -110,7 +114,7 @@ export function counter(): CounterFieldDescriptor & { [CRDT_FIELD]: true } {
  * @returns A descriptor for an add-wins set field.
  */
 export function set<T>(
-  validator: Validator<T, any, any>,
+  validator: Validator<T, OptionalProperty, string>,
 ): SetFieldDescriptor<T> & { [CRDT_FIELD]: true } {
   return {
     [CRDT_FIELD]: true as const,
@@ -130,7 +134,7 @@ export function set<T>(
  * @returns A descriptor for a remote-only field.
  */
 export function omit<T>(
-  validator: Validator<T, any, any>,
+  validator: Validator<T, OptionalProperty, string>,
 ): OmittedFieldDescriptor<T> & { [CRDT_FIELD]: true } {
   return {
     [CRDT_FIELD]: true as const,

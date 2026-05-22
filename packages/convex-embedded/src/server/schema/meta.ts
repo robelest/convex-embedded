@@ -56,12 +56,12 @@ export interface PendingReplayMeta {
 
 interface ResolveComponentApi {
   public: {
-    recordDelete: FunctionReference<"mutation", any>;
-    recordUpdate: FunctionReference<"mutation", any>;
-    getCollectionChanges: FunctionReference<"query", any>;
-    getLiveState: FunctionReference<"query", any>;
-    getLiveStates: FunctionReference<"query", any>;
-    getLiveStatesPage: FunctionReference<"query", any>;
+    recordDelete: FunctionReference<"mutation">;
+    recordUpdate: FunctionReference<"mutation">;
+    getCollectionChanges: FunctionReference<"query">;
+    getLiveState: FunctionReference<"query">;
+    getLiveStates: FunctionReference<"query">;
+    getLiveStatesPage: FunctionReference<"query">;
   };
 }
 

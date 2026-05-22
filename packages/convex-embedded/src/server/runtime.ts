@@ -8,7 +8,14 @@
  * @internal
  */
 
-import type { DefaultFunctionArgs, RegisteredQuery } from "convex/server";
+import type {
+  DefaultFunctionArgs,
+  GenericDataModel,
+  GenericMutationCtx,
+  GenericQueryCtx,
+  RegisteredQuery,
+} from "convex/server";
+import type { GenericId } from "convex/values";
 
 import type {
   ComponentBinding,
@@ -94,8 +101,8 @@ function encodeScopeCursor(offset: number): string {
 }
 
 function extractDocId(
-  result: any,
-  args: any,
+  result: unknown,
+  args: Record<string, unknown> | null | undefined,
   tableName?: string,
 ): string | null {
   if (typeof result === "string") return result;
@@ -163,6 +170,31 @@ interface RuntimeHandleInternals {
   _declaredIndexes?: Map<string, readonly string[]>;
 }
 
+/** Minimal index-range builder used to chain equality constraints. */
+interface IndexEqChain {
+  eq(field: string, value: unknown): IndexEqChain;
+}
+
+/**
+ * Structural view of the generic-table reader used by scope resolution. The
+ * concrete convex builder types depend on the consumer data model, so this
+ * captures only the surface the runtime touches.
+ */
+interface ScopedIndexReader {
+  query(table: string): {
+    withIndex(
+      indexName: string,
+      range: (q: IndexEqChain) => IndexEqChain,
+    ): {
+      paginate(opts: { cursor: string | null; numItems: number }): Promise<{
+        page: unknown[];
+        isDone: boolean;
+        continueCursor: string;
+      }>;
+    };
+  };
+}
+
 export function bindTableRuntime(
   handle: EmbeddedTableRuntimeHandle,
   component?: ComponentBinding,
@@ -212,23 +244,20 @@ export function bindTableRuntime(
    * scope args (runtime falls back to paginated full snapshot).
    */
   async function resolveScopedDocIds(
-    ctx: any,
+    ctx: GenericQueryCtx<GenericDataModel>,
     scopeArgs: Record<string, unknown>,
   ): Promise<string[] | null> {
     const match = pickIndex(scopeArgs);
     if (!match) return null;
+    const db = ctx.db as unknown as ScopedIndexReader;
     try {
       const ids: string[] = [];
       let cursor: string | null = null;
       let isDone = false;
       while (!isDone) {
-        const page: {
-          page: unknown[];
-          isDone: boolean;
-          continueCursor: string;
-        } = await ctx.db
+        const page = await db
           .query(tableName)
-          .withIndex(match.indexName, (q: any) => {
+          .withIndex(match.indexName, (q) => {
             let chain = q;
             for (const field of match.fields) {
               chain = chain.eq(field, scopeArgs[field]);
@@ -254,7 +283,10 @@ export function bindTableRuntime(
 
   const runtimeCache = new WeakMap<object, boolean>();
 
-  function cacheRuntimeValue(ctx: any, isRemote: boolean): boolean {
+  function cacheRuntimeValue(
+    ctx: GenericQueryCtx<GenericDataModel>,
+    isRemote: boolean,
+  ): boolean {
     if (
       ctx !== null &&
       (typeof ctx === "object" || typeof ctx === "function")
@@ -264,7 +296,9 @@ export function bindTableRuntime(
     return isRemote;
   }
 
-  async function detectRuntime(ctx: any): Promise<boolean> {
+  async function detectRuntime(
+    ctx: GenericQueryCtx<GenericDataModel>,
+  ): Promise<boolean> {
     if (
       ctx !== null &&
       (typeof ctx === "object" || typeof ctx === "function")
@@ -290,10 +324,13 @@ export function bindTableRuntime(
     }
   }
 
-  async function recordRemoteChange(ctx: any, docId: string): Promise<void> {
+  async function recordRemoteChange(
+    ctx: GenericMutationCtx<GenericDataModel>,
+    docId: string,
+  ): Promise<void> {
     try {
       if (!hasCrdtFields(schemaDef)) {
-        const doc = await ctx.db.get(docId);
+        const doc = await ctx.db.get(docId as GenericId<string>);
         if (!doc) {
           await ctx.runMutation(component!.public.recordDelete, {
             collection: tableName,
@@ -303,7 +340,7 @@ export function bindTableRuntime(
         return;
       }
       const [doc, current] = await Promise.all([
-        ctx.db.get(docId),
+        ctx.db.get(docId as GenericId<string>),
         ctx.runQuery(component!.public.getLiveState, {
           collection: tableName,
           docId,
@@ -371,7 +408,11 @@ export function bindTableRuntime(
     ) => {
       const canDbGet = typeof ctx.db?.get === "function";
       const documents: Array<Record<string, unknown> | null> = canDbGet
-        ? await Promise.all(rawStates.map((state) => ctx.db.get(state.docId)))
+        ? await Promise.all(
+            rawStates.map((state) =>
+              ctx.db.get(state.docId as GenericId<string>),
+            ),
+          )
         : rawStates.map(() => null);
 
       return rawStates
@@ -580,7 +621,7 @@ export function bindTableRuntime(
         .filter((doc) => changedById.get(doc.docId) === "upsert")
         .map((doc) => doc.docId);
       const scopeDocs = await Promise.all(
-        upsertDocIds.map((id) => ctx.db.get(id)),
+        upsertDocIds.map((id) => ctx.db.get(id as GenericId<string>)),
       );
       upsertDocIds.forEach((id, i) => scopeDocCache.set(id, scopeDocs[i]));
     }
@@ -658,7 +699,9 @@ export function bindTableRuntime(
       remoteOnlyChanges.length === 0
         ? []
         : await Promise.all(
-            remoteOnlyChanges.map((change) => ctx.db.get(change.docId)),
+            remoteOnlyChanges.map((change) =>
+              ctx.db.get(change.docId as GenericId<string>),
+            ),
           );
     const remoteOnlyResults = remoteOnlyChanges
       .map((change, i) => {

@@ -1,6 +1,6 @@
 import path from "node:path";
 
-import { createUnplugin } from "unplugin";
+import { createUnplugin, type UnpluginInstance } from "unplugin";
 
 import {
   generateEmbeddedRegistry,
@@ -19,14 +19,10 @@ export interface ConvexEmbeddedPluginOptions {
   watch?: boolean;
 }
 
-export interface ConvexEmbeddedUnplugin {
-  vite: (options?: ConvexEmbeddedPluginOptions) => any;
-  webpack: (options?: ConvexEmbeddedPluginOptions) => any;
-  rspack: (options?: ConvexEmbeddedPluginOptions) => any;
-  esbuild: (options?: ConvexEmbeddedPluginOptions) => any;
-  rollup: (options?: ConvexEmbeddedPluginOptions) => any;
-  rolldown: (options?: ConvexEmbeddedPluginOptions) => any;
-}
+export type ConvexEmbeddedUnplugin = Pick<
+  UnpluginInstance<ConvexEmbeddedPluginOptions | undefined>,
+  "vite" | "webpack" | "rspack" | "esbuild" | "rollup" | "rolldown"
+>;
 
 const DEFAULT_CONVEX_DIR = "./convex";
 const DEFAULT_OUT_FILE = "./convex/_generated/embedded.ts";

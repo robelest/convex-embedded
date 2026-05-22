@@ -62,7 +62,7 @@ export async function openBrowserSqlClient(options: {
   const pending = new Map<
     number,
     {
-      resolve: (value: any) => void;
+      resolve: (value: unknown) => void;
       reject: (error: unknown) => void;
       timeoutId: ReturnType<typeof globalThis.setTimeout>;
     }
@@ -128,7 +128,11 @@ export async function openBrowserSqlClient(options: {
         );
       }, RPC_TIMEOUT_MS);
 
-      pending.set(id, { resolve, reject, timeoutId });
+      pending.set(id, {
+        resolve: resolve as (value: unknown) => void,
+        reject,
+        timeoutId,
+      });
       const message: StorageWorkerRequest = {
         id,
         method,
@@ -151,7 +155,10 @@ export async function openBrowserSqlClient(options: {
   }
 
   return {
-    query: (sql, params) => request("query", { sql, params }) as Promise<any>,
+    query: <T extends Record<string, unknown> = Record<string, unknown>>(
+      sql: string,
+      params?: unknown[],
+    ) => request("query", { sql, params }) as unknown as Promise<T[]>,
     execute: async (sql, params) => {
       await request("execute", { sql, params });
     },

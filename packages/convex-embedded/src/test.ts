@@ -64,7 +64,7 @@ export function register(
  * ```
  */
 export function createTestIdentity(
-  attrs: Record<string, any> = {},
+  attrs: Record<string, unknown> = {},
 ): UserIdentity {
   const subject = (attrs.subject as string) ?? "test-user-1";
   const issuer = (attrs.issuer as string) ?? "https://embedded.local";

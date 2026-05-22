@@ -1,4 +1,4 @@
-type AnyHandler = (...args: any[]) => any;
+type AnyHandler = (...args: never[]) => unknown;
 
 export function createDispatch<THandlers extends Record<string, AnyHandler>>(
   handlers: THandlers,
@@ -10,6 +10,6 @@ export function createDispatch<THandlers extends Record<string, AnyHandler>>(
   return ((key: string, ...args: unknown[]) => {
     const handler = map.get(key);
     if (!handler) throw new Error(`Unknown dispatch key: "${key}"`);
-    return handler(...args);
+    return (handler as (...handlerArgs: unknown[]) => unknown)(...args);
   }) as never;
 }

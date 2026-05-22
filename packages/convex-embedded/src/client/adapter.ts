@@ -454,7 +454,7 @@ class CachePipeline {
         entry.args as Record<string, unknown>,
       ) ?? (entry.args as Record<string, unknown>);
 
-    let watch: any;
+    let watch: ReturnType<EmbeddedRuntime["watchLocalQuery"]>;
     try {
       watch = runtime.watchLocalQuery(entry.refName, translatedArgs);
     } catch {
@@ -1314,31 +1314,38 @@ export function patchRoutedConvexClient(input: {
       })
     : null;
 
-  const localOnUpdate = (...args: any[]): any => {
-    const refName = input.getRefName(args[0]);
+  const localOnUpdate = (...args: unknown[]): unknown => {
+    const [ref, queryArgs, callback, onError] = args as [
+      unknown,
+      Record<string, unknown>,
+      (result: unknown, meta?: unknown) => unknown,
+      ((error: Error, meta?: unknown) => unknown) | undefined,
+    ];
+    const refName = input.getRefName(ref);
     if (cacheOnUpdate && !isSystemRefName(refName)) {
-      return cacheOnUpdate(args[0], args[1], args[2], args[3]);
+      return cacheOnUpdate(ref, queryArgs, callback, onError);
     }
-    return runtimeLocalOnUpdate(args[0], args[1], args[2], args[3]);
+    return runtimeLocalOnUpdate(ref, queryArgs, callback, onError);
   };
 
-  const localPaginatedOnUpdate = (...args: any[]): any => {
-    const refName = input.getRefName(args[0]);
+  const localPaginatedOnUpdate = (...args: unknown[]): unknown => {
+    const [ref, queryArgs, options, callback, onError] = args as [
+      unknown,
+      Record<string, unknown>,
+      { initialNumItems: number },
+      (result: unknown, meta?: unknown) => unknown,
+      ((error: Error, meta?: unknown) => unknown) | undefined,
+    ];
+    const refName = input.getRefName(ref);
     if (cachePaginatedOnUpdate && !isSystemRefName(refName)) {
-      return cachePaginatedOnUpdate(
-        args[0],
-        args[1],
-        args[2],
-        args[3],
-        args[4],
-      );
+      return cachePaginatedOnUpdate(ref, queryArgs, options, callback, onError);
     }
     return runtimeLocalPaginatedOnUpdate(
-      args[0],
-      args[1],
-      args[2],
-      args[3],
-      args[4],
+      ref,
+      queryArgs,
+      options,
+      callback,
+      onError,
     );
   };
 
@@ -1616,10 +1623,7 @@ export function patchRoutedConvexClient(input: {
     3,
   );
 
-  patchable.peekCurrentValue = (
-    ref: unknown,
-    args: unknown,
-  ): unknown => {
+  patchable.peekCurrentValue = (ref: unknown, args: unknown): unknown => {
     if (!pipeline) return undefined;
     const refName = input.getRefName(ref);
     const raw = pipeline.getCurrentValue(refName, args ?? {});
@@ -1669,28 +1673,22 @@ export function patchRoutedConvexClient(input: {
     explicitOptimistic.set(ref, callback);
   };
 
-  patchable.setWorkScheduler = (
-    scheduler: WorkScheduler | null,
-  ): void => {
+  patchable.setWorkScheduler = (scheduler: WorkScheduler | null): void => {
     pipeline?.setWorkScheduler(scheduler);
   };
 
   patchable.getWorkScheduler = (): WorkScheduler | undefined =>
     pipeline?.getWorkScheduler();
 
-  patchable.dispatchHttpRequest = (
-    request: Request,
-  ): Promise<Response> => input.runtime.dispatchHttpRequest(request);
+  patchable.dispatchHttpRequest = (request: Request): Promise<Response> =>
+    input.runtime.dispatchHttpRequest(request);
 
-  if (
-    typeof patchable.onPaginatedUpdate_experimental === "function"
-  ) {
-    patchable.onPaginatedUpdate_experimental =
-      createSubscriptionFactory(
-        localPaginatedOnUpdate,
-        remotePaginatedOnUpdate,
-        4,
-      );
+  if (typeof patchable.onPaginatedUpdate_experimental === "function") {
+    patchable.onPaginatedUpdate_experimental = createSubscriptionFactory(
+      localPaginatedOnUpdate,
+      remotePaginatedOnUpdate,
+      4,
+    );
   }
 
   return {

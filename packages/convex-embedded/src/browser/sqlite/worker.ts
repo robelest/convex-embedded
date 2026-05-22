@@ -142,11 +142,14 @@ async function handleInit(name: string) {
     const module = await SQLiteESMFactory();
     const moduleReady = globalThis.performance?.now?.() ?? Date.now();
     const sqlite = WaSqlite.Factory(module);
-    const vfs: any = await withRetryOps(() =>
+    const vfs = (await withRetryOps(() =>
       OPFSCoopSyncVFS.create("opfs", module as never),
-    );
+    )) as { close?: () => void };
     const vfsReady = globalThis.performance?.now?.() ?? Date.now();
-    sqlite.vfs_register(vfs, true);
+    sqlite.vfs_register(
+      vfs as unknown as Parameters<typeof sqlite.vfs_register>[0],
+      true,
+    );
 
     sqliteModule = module as { retryOps?: Array<Promise<unknown>> };
     const openedDb = await withRetryOps(async () =>

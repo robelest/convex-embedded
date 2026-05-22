@@ -174,9 +174,7 @@ function scanModuleExports(
   );
   let syncMetaTagged = false;
 
-  for (const [exportName, exportValue] of Object.entries(
-    mod as Record<string, any>,
-  )) {
+  for (const [exportName, exportValue] of Object.entries(mod)) {
     if (
       !exportValue ||
       (typeof exportValue !== "object" && typeof exportValue !== "function")
@@ -189,7 +187,16 @@ function scanModuleExports(
       accumulator.routeModes.set(`${moduleName}:${exportName}`, routeMode);
     }
 
-    const meta = exportValue[REMOTE_META];
+    const exportMeta = exportValue as Record<symbol, unknown>;
+
+    const meta = exportMeta[REMOTE_META] as
+      | {
+          __brand: string;
+          table: string;
+          schema: unknown;
+          resolveExport: string;
+        }
+      | undefined;
     if (
       !syncMetaTagged &&
       meta &&
@@ -202,7 +209,9 @@ function scanModuleExports(
       };
     }
 
-    const storageUploadUrlMeta = exportValue[STORAGE_UPLOAD_URL_META];
+    const storageUploadUrlMeta = exportMeta[STORAGE_UPLOAD_URL_META] as
+      | { __brand: string }
+      | undefined;
     if (
       accumulator.uploadUrl === undefined &&
       ((storageUploadUrlMeta &&

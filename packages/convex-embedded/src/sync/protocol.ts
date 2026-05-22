@@ -199,13 +199,13 @@ interface ClientAuthenticate {
   tokenType: "User" | "Admin" | "None";
   value?: string;
   baseVersion: number;
-  impersonating?: any;
+  impersonating?: unknown;
 }
 
 interface ClientEvent {
   type: "Event";
   eventType: string;
-  event: any;
+  event: unknown;
 }
 
 type StateModification =

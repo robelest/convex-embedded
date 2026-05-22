@@ -590,16 +590,8 @@ class CachePipeline {
   private openRemoteSubscription(entry: ActiveSubscription): void {
     const remoteClient = this.config.remoteClient;
     if (!remoteClient) return;
-    const onUpdate = (remoteClient as unknown as PatchableConvexClient)
-      .onUpdate as
-      | ((
-          ref: unknown,
-          args: unknown,
-          callback: (value: unknown) => void,
-          onError?: (error: Error) => void,
-        ) => unknown)
-      | undefined;
-    if (typeof onUpdate !== "function") return;
+    const patchable = remoteClient as unknown as PatchableConvexClient;
+    if (typeof patchable.onUpdate !== "function") return;
 
     const applyPush = (value: unknown) => {
       if (!this.active.has(entry.argsKey)) return;
@@ -676,8 +668,7 @@ class CachePipeline {
 
     let unsubscribe: (() => void) | null = null;
     try {
-      const result: unknown = onUpdate.call(
-        remoteClient,
+      const result: unknown = patchable.onUpdate(
         entry.refName as unknown,
         entry.args,
         handlePush,

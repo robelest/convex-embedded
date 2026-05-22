@@ -29,7 +29,6 @@ export {
   type Definition,
   type FieldKindForDescriptor,
   type FieldValueForDescriptor,
-  type LocalTableMigrationStep,
   type OmittedFieldDescriptor,
   type ProseFieldDescriptor,
   type ProseJson,

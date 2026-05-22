@@ -32,10 +32,7 @@ export {
   STORAGE_UPLOAD_URL_META,
 } from "@/shared/symbols";
 
-export type {
-  EmbeddedTableHandle,
-  LocalTableMigrationStep,
-} from "@/server/schema";
+export type { EmbeddedTableHandle } from "@/server/schema";
 export type {
   PendingReplayMeta,
   PendingReplayMigrationContext,

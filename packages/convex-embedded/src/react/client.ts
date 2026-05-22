@@ -198,9 +198,10 @@ export class EmbeddedConvexReactClient extends ConvexReactClient {
         if (subscription !== null) {
           return subscription.getCurrentValue();
         }
-        const peek = (embedded as unknown as EmbeddedClientInternals)
-          .peekCurrentValue;
-        return typeof peek === "function" ? peek(query, args) : undefined;
+        const internals = embedded as unknown as EmbeddedClientInternals;
+        return typeof internals.peekCurrentValue === "function"
+          ? internals.peekCurrentValue(query, args)
+          : undefined;
       },
       localQueryLogs() {
         return subscription?.getQueryLogs?.();
@@ -264,10 +265,11 @@ export class EmbeddedConvexReactClient extends ConvexReactClient {
         if (subscription !== null) {
           return subscription.getCurrentValue();
         }
-        const peek = (embedded as unknown as EmbeddedClientInternals)
-          .peekPaginatedCurrentValue;
-        return typeof peek === "function"
-          ? peek(query, args, { initialNumItems: options.initialNumItems })
+        const internals = embedded as unknown as EmbeddedClientInternals;
+        return typeof internals.peekPaginatedCurrentValue === "function"
+          ? internals.peekPaginatedCurrentValue(query, args, {
+              initialNumItems: options.initialNumItems,
+            })
           : undefined;
       },
     };

@@ -1,4 +1,4 @@
-import type { MigrationsMap, MigrationStep } from "@/shared/migrations/types";
+import type { MigrationsMap } from "@/shared/migrations/types";
 import { targetVersionFromMigrations } from "@/shared/migrations/types";
 import type { CrdtFieldDescriptor } from "@/shared/types";
 import { CrdtType } from "@/shared/types";
@@ -20,9 +20,6 @@ export function getCrdtType(field: unknown): CrdtType | null {
   if (isCrdtField(field)) return field.type;
   return null;
 }
-
-/** @deprecated Re-exported for transitional uses; prefer `MigrationStep`. */
-export type LocalTableMigrationStep = MigrationStep;
 
 export interface DefineOptions {
   shape: Record<string, unknown>;

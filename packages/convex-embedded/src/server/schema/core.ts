@@ -133,12 +133,7 @@ export { CRDT_FIELD };
 
 // Definition + define() are owned by `@/shared/schema`. Re-export here so
 // existing `from "@/server/schema/core"` imports keep working.
-export {
-  define,
-  type DefineOptions,
-  type Definition,
-  type LocalTableMigrationStep,
-} from "@/shared/schema";
+export { define, type DefineOptions, type Definition } from "@/shared/schema";
 
 /**
  * Infer the runtime CRDT kind string for a field descriptor.

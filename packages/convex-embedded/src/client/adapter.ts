@@ -24,7 +24,6 @@ import { withSpanSync } from "@/tracing/spans";
 
 const log = createLogger("cache");
 
-/** Callable unsubscribe with optional snapshot accessors attached. */
 interface SubscriptionHandle {
   (): void;
   unsubscribe?: () => void;
@@ -37,7 +36,6 @@ type OptimisticUpdateCallback = (
   args: Record<string, unknown>,
 ) => Array<{ refName: string; args: unknown; value: unknown }>;
 
-/** Local query-access surface patched onto the base Convex client. */
 interface BaseLocalClient {
   localQueryResult?: (
     refName: string,
@@ -49,12 +47,6 @@ interface BaseLocalClient {
   ) => string[] | undefined;
 }
 
-/**
- * The Convex `ConvexClient` instance augmented at runtime by the patch
- * helpers below with embedded-specific members its public type doesn't
- * expose. Cast the instance once to this and assign/read through it instead
- * of scattering `as any`.
- */
 interface PatchableConvexClient {
   client?: BaseLocalClient;
   mutation(...args: unknown[]): Promise<unknown>;
@@ -80,7 +72,6 @@ interface PatchableConvexClient {
   dispatchHttpRequest(request: Request): Promise<Response>;
 }
 
-/** Invoke a subscription handle that may be a bare function or `{ unsubscribe }`. */
 function callUnsubscribe(handle: unknown): void {
   if (typeof handle === "function") {
     (handle as () => void)();

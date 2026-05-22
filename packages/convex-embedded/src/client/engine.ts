@@ -44,17 +44,12 @@ import { retryWithBackoff } from "@/utils/retry";
 
 const log = createLogger("resolve");
 
-/**
- * The remote Convex client, reached through a narrow view because the sync
- * engine calls it with raw refs/paths the public generic signatures reject.
- */
 interface RemoteCallable {
   onUpdate(...args: unknown[]): () => void;
   mutation(ref: unknown, args: unknown): Promise<unknown>;
   query(ref: unknown, args: unknown): Promise<unknown>;
 }
 
-/** The embedded client invoked with raw refs or `_system:*` path strings. */
 interface LocalPathCallable {
   mutation(ref: unknown, args: unknown): Promise<unknown>;
   query(ref: unknown, args: unknown): Promise<unknown>;
@@ -1376,10 +1371,9 @@ async function uploadBlobToRemote(input: {
   contentType?: string;
   uploadFetch?: typeof globalThis.fetch;
 }): Promise<string> {
-  const uploadUrl = (await (input.remoteClient as unknown as RemoteCallable).mutation(
-    input.uploadUrlRef,
-    {},
-  )) as string;
+  const uploadUrl = (await (
+    input.remoteClient as unknown as RemoteCallable
+  ).mutation(input.uploadUrlRef, {})) as string;
 
   if (typeof uploadUrl !== "string" || uploadUrl.length === 0) {
     throw new Error(
@@ -1581,10 +1575,7 @@ function mergeResolveResult(input: {
         return acc;
       }
 
-      mergedDocsById.set(
-        docId,
-        input.translateRemoteDocument(entry.localDoc),
-      );
+      mergedDocsById.set(docId, input.translateRemoteDocument(entry.localDoc));
       if (typeof seq === "number") {
         acc.metadataEntries.push({ docId, seq });
       }
@@ -2541,7 +2532,10 @@ function createEngine(config: EngineConfig): EngineInstance {
                   let remoteResult: unknown;
                   try {
                     remoteResult = await heartbeat.race(
-                      (remoteClient as unknown as RemoteCallable).mutation(ref, translatedArgs),
+                      (remoteClient as unknown as RemoteCallable).mutation(
+                        ref,
+                        translatedArgs,
+                      ),
                     );
                   } finally {
                     heartbeat.stop();
@@ -2922,12 +2916,13 @@ function createEngine(config: EngineConfig): EngineInstance {
       }
       attempts++;
       try {
-        return (remoteClient as unknown as RemoteCallable).query(tableConfig.resolve, {
-          collectionSeq: metadata.collectionSeq,
-          documents: resolveDocuments,
-        } satisfies ResolveArgs) as Promise<
-          ResolveResponse | Array<ResolveResultRow>
-        >;
+        return (remoteClient as unknown as RemoteCallable).query(
+          tableConfig.resolve,
+          {
+            collectionSeq: metadata.collectionSeq,
+            documents: resolveDocuments,
+          } satisfies ResolveArgs,
+        ) as Promise<ResolveResponse | Array<ResolveResultRow>>;
       } catch (err) {
         if (!(err instanceof DOMException && err.name === "AbortError")) {
           log.warn(
@@ -3199,14 +3194,13 @@ function createEngine(config: EngineConfig): EngineInstance {
 
     let rawResolveResult: ResolveResponse | Array<ResolveResultRow>;
     try {
-      rawResolveResult = (await (remoteClient as unknown as RemoteCallable).query(
-        tableConfig.resolve,
-        {
-          collectionSeq: null,
-          documents: resolveDocuments,
-          docIds: ids,
-        } satisfies ResolveArgs,
-      )) as ResolveResponse | Array<ResolveResultRow>;
+      rawResolveResult = (await (
+        remoteClient as unknown as RemoteCallable
+      ).query(tableConfig.resolve, {
+        collectionSeq: null,
+        documents: resolveDocuments,
+        docIds: ids,
+      } satisfies ResolveArgs)) as ResolveResponse | Array<ResolveResultRow>;
     } catch (error) {
       if (!isUnsupportedDocIdsResolveError(error)) {
         throw error;
@@ -3331,16 +3325,17 @@ function createEngine(config: EngineConfig): EngineInstance {
         }
         attempts++;
         try {
-          return (remoteClient as unknown as RemoteCallable).query(tableConfig.resolve, {
-            collectionSeq: effectiveCollectionSeq,
-            documents: resolveDocuments,
-            ...(scopeArgs && Object.keys(scopeArgs).length > 0
-              ? { scopeArgs }
-              : {}),
-            ...(fullCursor !== undefined ? { fullCursor } : {}),
-          } satisfies ResolveArgs) as Promise<
-            ResolveResponse | Array<ResolveResultRow>
-          >;
+          return (remoteClient as unknown as RemoteCallable).query(
+            tableConfig.resolve,
+            {
+              collectionSeq: effectiveCollectionSeq,
+              documents: resolveDocuments,
+              ...(scopeArgs && Object.keys(scopeArgs).length > 0
+                ? { scopeArgs }
+                : {}),
+              ...(fullCursor !== undefined ? { fullCursor } : {}),
+            } satisfies ResolveArgs,
+          ) as Promise<ResolveResponse | Array<ResolveResultRow>>;
         } catch (err) {
           if (!(err instanceof DOMException && err.name === "AbortError")) {
             log.warn(
@@ -3627,12 +3622,7 @@ function createEngine(config: EngineConfig): EngineInstance {
         onPartialResponse: () => {
           runDetached(
             () =>
-              resolveTable(
-                tableName,
-                tableConfig,
-                undefined,
-                normalizedScope,
-              ),
+              resolveTable(tableName, tableConfig, undefined, normalizedScope),
             `[sync] paginated resolve for scoped "${tableName}":`,
           );
         },
@@ -3718,7 +3708,10 @@ function createEngine(config: EngineConfig): EngineInstance {
         args,
       })) as T;
     }
-    return (await (localClient as unknown as LocalPathCallable).query(path, args)) as T;
+    return (await (localClient as unknown as LocalPathCallable).query(
+      path,
+      args,
+    )) as T;
   }
 
   async function readResolveMetadata(
@@ -3991,9 +3984,14 @@ function createEngine(config: EngineConfig): EngineInstance {
       const executeMutationLocally = executeLocalMutationWithEffects
         ? executeLocalMutationWithEffects
         : (r: unknown, a: Record<string, unknown>) =>
-            (localClient as unknown as LocalPathCallable).mutation(r, a) as Promise<unknown>;
+            (localClient as unknown as LocalPathCallable).mutation(
+              r,
+              a,
+            ) as Promise<unknown>;
 
-      const refName = getFunctionName(ref as Parameters<typeof getFunctionName>[0]);
+      const refName = getFunctionName(
+        ref as Parameters<typeof getFunctionName>[0],
+      );
       const localArgs = idMap.translateRemoteIdsToLocal(args);
 
       const __mutStart = globalThis.performance?.now?.() ?? Date.now();
@@ -4018,7 +4016,9 @@ function createEngine(config: EngineConfig): EngineInstance {
       );
 
       if (localFailed) {
-        const remoteResult = await (remoteClient as unknown as RemoteCallable).mutation(ref, args);
+        const remoteResult = await (
+          remoteClient as unknown as RemoteCallable
+        ).mutation(ref, args);
         return remoteResult;
       }
 

@@ -170,16 +170,10 @@ interface RuntimeHandleInternals {
   _declaredIndexes?: Map<string, readonly string[]>;
 }
 
-/** Minimal index-range builder used to chain equality constraints. */
 interface IndexEqChain {
   eq(field: string, value: unknown): IndexEqChain;
 }
 
-/**
- * Structural view of the generic-table reader used by scope resolution. The
- * concrete convex builder types depend on the consumer data model, so this
- * captures only the surface the runtime touches.
- */
 interface ScopedIndexReader {
   query(table: string): {
     withIndex(

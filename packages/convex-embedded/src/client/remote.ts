@@ -133,11 +133,6 @@ export interface ResolveAttachment {
   close: () => Promise<void>;
 }
 
-/**
- * Auth surface of the hidden remote `ConvexClient` beyond the public
- * `setAuth`. `clearAuth`/`setAdminAuth` exist at runtime but aren't on the
- * exported type.
- */
 interface RemoteAuthClient {
   clearAuth(): void;
   setAdminAuth?(...args: unknown[]): void;

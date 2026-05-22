@@ -33,12 +33,6 @@ export interface SystemFunctionDef {
   handler: SystemFn;
 }
 
-// Row shapes for the internal `_resolve_*` system tables. These are read
-// views, not extensions of StoredDocument: StoredDocument carries a `Value`
-// index signature that forbids optional (`undefined`) properties, so these
-// stand alone and are produced by the generic query helpers below.
-
-/** Row of the `_resolve_id_map` system table. */
 interface IdMapRow {
   _id: DocumentId;
   localId: string;
@@ -47,7 +41,6 @@ interface IdMapRow {
   identityKey?: string | null;
 }
 
-/** Row of the `_resolve_pending` system table (queued mutations). */
 interface PendingRow {
   _id: DocumentId;
   ref: string;
@@ -64,7 +57,6 @@ interface PendingRow {
   createdAt?: number;
 }
 
-/** Row of the `_resolve_pending_uploads` system table (queued blob uploads). */
 interface PendingUploadRow {
   _id: DocumentId;
   localStorageId: string;
@@ -79,7 +71,6 @@ interface PendingUploadRow {
   createdAt?: number;
 }
 
-/** Row of the `_resolve_document_metadata` system table. */
 interface DocumentMetadataRow {
   _id: DocumentId;
   collection: string;

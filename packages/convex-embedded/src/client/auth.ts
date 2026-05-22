@@ -204,7 +204,6 @@ export function switchIdentity(
  * forwarding hooks.
  * @internal
  */
-/** Auth methods patched onto / read from the ConvexClient instance. */
 interface AuthPatchableClient {
   setAuth(...args: unknown[]): void;
   clearAuth?(): void;

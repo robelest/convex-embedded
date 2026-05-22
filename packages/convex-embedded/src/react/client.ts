@@ -61,11 +61,6 @@ type EmbeddedReactClient = ConvexReactClient & {
   [EMBEDDED_BROWSER_CLIENT]?: ConvexClient;
 };
 
-/**
- * The embedded `ConvexClient` augmented by the routing adapter with members
- * the public `ConvexClient` type doesn't expose. The wrapper reaches these
- * through a single cast rather than scattering `as any`.
- */
 interface EmbeddedClientInternals {
   setAuth(...args: unknown[]): void;
   clearAuth(...args: unknown[]): void;
@@ -201,9 +196,8 @@ export class EmbeddedConvexReactClient extends ConvexReactClient {
         if (subscription !== null) {
           return subscription.getCurrentValue();
         }
-        const peek = (
-          embedded as unknown as EmbeddedClientInternals
-        ).peekCurrentValue;
+        const peek = (embedded as unknown as EmbeddedClientInternals)
+          .peekCurrentValue;
         return typeof peek === "function" ? peek(query, args) : undefined;
       },
       localQueryLogs() {
@@ -268,9 +262,8 @@ export class EmbeddedConvexReactClient extends ConvexReactClient {
         if (subscription !== null) {
           return subscription.getCurrentValue();
         }
-        const peek = (
-          embedded as unknown as EmbeddedClientInternals
-        ).peekPaginatedCurrentValue;
+        const peek = (embedded as unknown as EmbeddedClientInternals)
+          .peekPaginatedCurrentValue;
         return typeof peek === "function"
           ? peek(query, args, { initialNumItems: options.initialNumItems })
           : undefined;

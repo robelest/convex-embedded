@@ -176,7 +176,6 @@ export type EmbeddedTable<
     vectorIndex: EmbeddedVectorIndexFn<TableName, Shape>;
   };
 
-/** Definition object accepted by the runtime mutation builder. */
 interface EmbeddedMutationDef {
   args?: PropertyValidators | GenericValidator;
   returns?: PropertyValidators | GenericValidator;
@@ -195,7 +194,6 @@ interface EmbeddedMutationDef {
   };
 }
 
-/** Definition object accepted by the runtime query builder. */
 interface EmbeddedQueryDef {
   args?: PropertyValidators | GenericValidator;
   returns?: PropertyValidators | GenericValidator;
@@ -246,11 +244,6 @@ export interface RuntimeHooks {
   detectRuntime?: (ctx: GenericQueryCtx<GenericDataModel>) => Promise<boolean>;
 }
 
-/**
- * The Convex `defineTable` result monkey-patched with the embedded table's
- * runtime members. The base builder doesn't expose these, so the boundary cast
- * is centralized here.
- */
 interface PatchableTableDef {
   index?: (name: string, fields: string[]) => unknown;
   searchIndex?: (...args: unknown[]) => unknown;

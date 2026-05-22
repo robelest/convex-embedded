@@ -82,10 +82,6 @@ import type {
   LocalMutationExecutorFn,
 } from "@/client/ids";
 
-/**
- * The embedded ConvexClient invoked with raw `_system:*` path strings, which
- * the public generic `query`/`mutation` signatures don't accept.
- */
 interface SystemPathClient {
   query(path: string, args: Record<string, unknown>): Promise<unknown>;
   mutation(path: string, args: Record<string, unknown>): Promise<unknown>;
@@ -175,7 +171,10 @@ export class PendingQueue {
     table: string,
     payloadVersion = 1,
   ): Promise<void> {
-    const refName = typeof ref === "string" ? ref : getFunctionName(ref as Parameters<typeof getFunctionName>[0]);
+    const refName =
+      typeof ref === "string"
+        ? ref
+        : getFunctionName(ref as Parameters<typeof getFunctionName>[0]);
 
     const serialized = {
       ref: refName,

@@ -61,12 +61,6 @@ export type EmbeddedPrefetchQuerySpec<TResult> = {
   selectDocuments?: (result: TResult) => Array<{ _id: string }>;
 };
 
-/**
- * Structural supertype of every {@link EmbeddedPrefetchQuerySpec}, used as the
- * generic constraint without widening per-query result inference. The `never`
- * projector input keeps the type contravariantly assignable from any concrete
- * spec.
- */
 type AnyEmbeddedPrefetchQuerySpec = {
   query: FunctionReference<"query">;
   args: Record<string, unknown>;

@@ -52,10 +52,6 @@ export type LocalMutationExecutorFn = (
 
 export type LocalDocumentPresenceFn = (id: string) => boolean;
 
-/**
- * The embedded ConvexClient invoked with raw `_system:*` path strings, which
- * the public generic `query`/`mutation` signatures don't accept.
- */
 interface SystemPathClient {
   query(path: string, args: Record<string, unknown>): Promise<unknown>;
   mutation(path: string, args: Record<string, unknown>): Promise<unknown>;

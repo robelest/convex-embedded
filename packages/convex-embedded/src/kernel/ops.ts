@@ -60,16 +60,16 @@ function uuidV4(rng: () => number): string {
     bytes[i + 3] = (r >>> 24) & 0xff;
   }
 
-  bytes[6] = (bytes[6] & 0x0f) | 0x40;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
 
   let uuid = "";
   for (let i = 0; i < 16; i++) {
     if (i === 4 || i === 6 || i === 8 || i === 10) {
       uuid += "-";
     }
-    uuid += HEX[bytes[i] >> 4];
-    uuid += HEX[bytes[i] & 0x0f];
+    uuid += HEX[bytes[i]! >> 4];
+    uuid += HEX[bytes[i]! & 0x0f];
   }
   return uuid;
 }

@@ -107,7 +107,7 @@ function normalizeVector(values: number[]): {
 
   const magnitude = Math.sqrt(norm);
   for (let index = 0; index < normalized.length; index += 1) {
-    normalized[index] /= magnitude;
+    normalized[index] = normalized[index]! / magnitude;
   }
 
   return { vector: normalized, isZero: false };

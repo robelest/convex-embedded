@@ -415,7 +415,8 @@ export function evaluateNormalizedFilter(
       current.children.some(
         (child) => evaluateNormalizedFilter(document, child) === true,
       ),
-    Not: (current) => evaluateNormalizedFilter(document, current.child) !== true,
+    Not: (current) =>
+      evaluateNormalizedFilter(document, current.child) !== true,
     Gt: (current) => evaluateComparisonFilter(document, current),
     Gte: (current) => evaluateComparisonFilter(document, current),
     Lt: (current) => evaluateComparisonFilter(document, current),
@@ -433,7 +434,7 @@ export function evaluateNormalizedFilter(
 function invalidRangeOperator(ctx: RangeValidationContext): never {
   throw new Error(
     `Incorrect operator used in \`withIndex\`, cannot chain \`.${ctx.filter.type.toLowerCase()}()\` ` +
-      `after \`.${ctx.source.range[ctx.filterIndex - 1].type.toLowerCase()}()\``,
+      `after \`.${ctx.source.range[ctx.filterIndex - 1]!.type.toLowerCase()}()\``,
   );
 }
 
@@ -465,7 +466,7 @@ function advanceRangeValidation(
     actual: string,
   ) => never = wrongFieldRangeError,
 ): RangeValidationState {
-  const expectedField = ctx.fields[expectedFieldIndex];
+  const expectedField = ctx.fields[expectedFieldIndex]!;
   return ctx.filter.fieldPath === expectedField
     ? {
         state: nextState,
@@ -739,7 +740,10 @@ export class QueryEngine {
     filter: VectorSearchExpression | null,
     limit?: number,
   ): Array<{ _id: string; _score: number }> {
-    const [tableName, indexName] = tableAndIndexName.split(".");
+    const [tableName, indexName] = tableAndIndexName.split(".") as [
+      string,
+      string,
+    ];
     const definition = resolveVectorIndexDefinition(
       this._schema?.tables.get(tableName)?.vectorIndexes,
       tableName,
@@ -846,7 +850,10 @@ export class QueryEngine {
   private _evaluateIndexRangeSource(
     source: Extract<Source, { type: "IndexRange" }>,
   ): SourceEvaluation {
-    const [tableName, indexName] = source.indexName.split(".");
+    const [tableName, indexName] = source.indexName.split(".") as [
+      string,
+      string,
+    ];
     const fields = this._resolveIndexFields(tableName, indexName);
     validateIndexRangeExpression(source, fields);
     const rangePredicate = this._buildRangePredicate(source.range);
@@ -862,7 +869,10 @@ export class QueryEngine {
     source: Extract<Source, { type: "Search" }>,
     limit: number | null,
   ): SourceEvaluation {
-    const [tableName, indexName] = source.indexName.split(".");
+    const [tableName, indexName] = source.indexName.split(".") as [
+      string,
+      string,
+    ];
     const definition = resolveSearchIndexDefinition(
       this._schema?.tables.get(tableName)?.searchIndexes,
       tableName,

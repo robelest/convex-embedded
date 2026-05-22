@@ -50,7 +50,7 @@ export function getFunctionFromHandle(handle: string): FunctionPath {
   if (payload === undefined) {
     throw new Error(`Invalid function handle: "${handle}"`);
   }
-  const [componentPath, udfPath] = payload.split(";");
+  const [componentPath = "", udfPath] = payload.split(";");
   if (udfPath === undefined) {
     throw new Error(`Malformed function handle: "${handle}"`);
   }

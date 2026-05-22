@@ -85,7 +85,10 @@ function extractQueryDependencies(query: unknown): QueryDependency[] {
     return [{ type: "FullTableScan", tableName: source.tableName }];
   }
   if (source.type === "IndexRange") {
-    const [tableName, indexName] = source.indexName.split(".");
+    const [tableName, indexName] = source.indexName.split(".") as [
+      string,
+      string,
+    ];
     return [
       {
         type: "IndexRange",
@@ -97,7 +100,10 @@ function extractQueryDependencies(query: unknown): QueryDependency[] {
     ];
   }
   if (source.type === "Search") {
-    const [tableName, indexName] = source.indexName.split(".");
+    const [tableName, indexName] = source.indexName.split(".") as [
+      string,
+      string,
+    ];
     return [
       {
         type: "Search",

@@ -110,7 +110,7 @@ export function buildSearchQueryPlan(
     );
   }
 
-  const [searchFilter] = searchFilters;
+  const searchFilter = searchFilters[0]!;
   if (searchFilter.fieldPath !== definition.searchField) {
     throw new Error(
       `Search index "${definition.indexDescriptor}" expects searchField "${definition.searchField}", got "${searchFilter.fieldPath}".`,

@@ -37,18 +37,6 @@ import {
   type SearchIndexState,
 } from "@/runtime/db/search";
 import { sourceTableName } from "@/runtime/db/sql";
-/**
- * Core in-memory database engine with MVCC timestamps.
- *
- * Ported from convex-test's `DatabaseFake`, enhanced with:
- *  - MVCC timestamp that increments on each committed transaction
- *  - Per-transaction tracking of which tables were written
- *  - Delegation to QueryEngine for query evaluation
- *
- * ID format: UUIDs generated via `crypto.randomUUID()`.
- * A separate `_idTableMap` maps each UUID to its table name.
- */
-import { structuralEqual } from "@/shared/equals";
 import type { GenericDocument } from "@/runtime/db/types";
 import type {
   DocumentId,
@@ -72,6 +60,18 @@ import {
 } from "@/runtime/db/vector";
 import { createStore } from "@/runtime/store";
 import type { Store } from "@/runtime/store";
+/**
+ * Core in-memory database engine with MVCC timestamps.
+ *
+ * Ported from convex-test's `DatabaseFake`, enhanced with:
+ *  - MVCC timestamp that increments on each committed transaction
+ *  - Per-transaction tracking of which tables were written
+ *  - Delegation to QueryEngine for query evaluation
+ *
+ * ID format: UUIDs generated via `crypto.randomUUID()`.
+ * A separate `_idTableMap` maps each UUID to its table name.
+ */
+import { structuralEqual } from "@/shared/equals";
 import { createLogger } from "@/shared/logger";
 import type { ReadOptions, StorageAdapter } from "@/storage/adapter";
 import type { CommitBatch } from "@/storage/adapter";
@@ -215,6 +215,10 @@ function evaluateValue(value: JSONValue): Value | undefined {
     return undefined;
   }
   return jsonToConvex(value);
+}
+
+function splitIndexName(indexName: string): [string, string] {
+  return indexName.split(".") as [string, string];
 }
 
 function formatValueForError(value: unknown): string {
@@ -1504,7 +1508,10 @@ export class Database {
     filter: VectorSearchExpression | null,
     limit?: number,
   ): Array<{ _id: string; _score: number }> {
-    const [tableName, indexName] = tableAndIndexName.split(".");
+    const [tableName, indexName] = tableAndIndexName.split(".") as [
+      string,
+      string,
+    ];
     const state = this._vectorIndexes.get(`${tableName}.${indexName}`);
     if (state) {
       resolveVectorIndexDefinition(
@@ -1548,7 +1555,10 @@ export class Database {
     filter: VectorSearchExpression | null,
     limit?: number,
   ): Promise<Array<{ _id: string; _score: number }>> {
-    const [tableName, indexName] = tableAndIndexName.split(".");
+    const [tableName, indexName] = tableAndIndexName.split(".") as [
+      string,
+      string,
+    ];
     const definition = resolveVectorIndexDefinition(
       this._schema?.tables.get(tableName)?.vectorIndexes,
       tableName,
@@ -1699,7 +1709,7 @@ export class Database {
     id: DocumentId,
     newValue: StoredDocument | null,
   ): void {
-    const writes = this._writes[level];
+    const writes = this._writes[level]!;
     if (writes[id] === undefined) {
       this._pendingWriteCount += 1;
       this._writeCounts[level] = (this._writeCounts[level] ?? 0) + 1;
@@ -1964,7 +1974,7 @@ export class Database {
     let document: IdentityScopedDocument | null = null;
 
     for (let i = this._writes.length - 1; i >= 0; i--) {
-      const write = this._writes[i][id];
+      const write = this._writes[i]![id];
       if (write !== undefined) {
         hasPendingWrite = true;
         document = write as IdentityScopedDocument | null;
@@ -2197,7 +2207,10 @@ export class Database {
     }
 
     if (source.type === "IndexRange") {
-      const [tableName, indexName] = source.indexName.split(".");
+      const [tableName, indexName] = source.indexName.split(".") as [
+        string,
+        string,
+      ];
       const orderedDocs = this.getIndexedDocuments(tableName, indexName);
       const fields = this._getIndexDefinitions(tableName).find(
         (entry) => entry.indexName === indexName,
@@ -2248,7 +2261,10 @@ export class Database {
     }
 
     if (source.type === "Search") {
-      const [tableName, indexName] = source.indexName.split(".");
+      const [tableName, indexName] = source.indexName.split(".") as [
+        string,
+        string,
+      ];
       const state = this._searchIndexes.get(`${tableName}.${indexName}`);
       if (!state) {
         return null;
@@ -2306,16 +2322,19 @@ export class Database {
       const searchDefinition =
         source.type === "Search"
           ? resolveSearchIndexDefinition(
-              this._schema?.tables.get(source.indexName.split(".")[0])
+              this._schema?.tables.get(splitIndexName(source.indexName)[0])
                 ?.searchIndexes,
-              source.indexName.split(".")[0],
-              source.indexName.split(".")[1],
+              splitIndexName(source.indexName)[0],
+              splitIndexName(source.indexName)[1],
             )
           : undefined;
       const indexFields =
         source.type === "IndexRange"
-          ? (this._getIndexDefinitions(source.indexName.split(".")[0]).find(
-              (entry) => entry.indexName === source.indexName.split(".")[1],
+          ? (this._getIndexDefinitions(
+              splitIndexName(source.indexName)[0],
+            ).find(
+              (entry) =>
+                entry.indexName === splitIndexName(source.indexName)[1],
             )?.fields ?? null)
           : null;
       const results = await this._store.source(source, {
@@ -2391,7 +2410,10 @@ export class Database {
     }
 
     if (query.source.type === "IndexRange") {
-      const [tableName, indexName] = query.source.indexName.split(".");
+      const [tableName, indexName] = query.source.indexName.split(".") as [
+        string,
+        string,
+      ];
       const fields = this._getIndexDefinitions(tableName).find(
         (entry) => entry.indexName === indexName,
       )?.fields;
@@ -2474,11 +2496,11 @@ export class Database {
       const indexFields =
         query.source.type === "IndexRange"
           ? (this._getIndexDefinitions(
-              query.source.indexName.split(".")[0],
+              splitIndexName(query.source.indexName)[0],
             ).find(
               (entry) =>
                 query.source.type === "IndexRange" &&
-                entry.indexName === query.source.indexName.split(".")[1],
+                entry.indexName === splitIndexName(query.source.indexName)[1],
             )?.fields ?? null)
           : null;
       const pushedDown = await this._store.query({
@@ -2507,15 +2529,19 @@ export class Database {
       const searchDefinition =
         query.source.type === "Search"
           ? resolveSearchIndexDefinition(
-              this._schema?.tables.get(query.source.indexName.split(".")[0])
-                ?.searchIndexes,
-              query.source.indexName.split(".")[0],
-              query.source.indexName.split(".")[1],
+              this._schema?.tables.get(
+                splitIndexName(query.source.indexName)[0],
+              )?.searchIndexes,
+              splitIndexName(query.source.indexName)[0],
+              splitIndexName(query.source.indexName)[1],
             )
           : undefined;
       let indexFields: string[] | null | undefined;
       if (query.source.type === "IndexRange") {
-        const [tbl, idx] = query.source.indexName.split(".");
+        const [tbl, idx] = query.source.indexName.split(".") as [
+          string,
+          string,
+        ];
         indexFields =
           this._getIndexDefinitions(tbl).find(
             (entry) => entry.indexName === idx,
@@ -2564,7 +2590,7 @@ export class Database {
       return this._hasPendingWritesForTable(source.tableName);
     }
     if (source.type === "IndexRange" || source.type === "Search") {
-      const [tableName] = source.indexName.split(".");
+      const [tableName] = source.indexName.split(".") as [string];
       return this._hasPendingWritesForTable(tableName);
     }
     return this._hasPendingWrites();

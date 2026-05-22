@@ -617,7 +617,9 @@ export function bindTableRuntime(
       const scopeDocs = await Promise.all(
         upsertDocIds.map((id) => ctx.db.get(id as GenericId<string>)),
       );
-      upsertDocIds.forEach((id, i) => scopeDocCache.set(id, scopeDocs[i]));
+      upsertDocIds.forEach((id, i) =>
+        scopeDocCache.set(id, scopeDocs[i] ?? null),
+      );
     }
 
     const requestedResults = args.documents.map((doc) => {

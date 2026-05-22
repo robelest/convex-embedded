@@ -540,7 +540,7 @@ export class UdfExecutor {
       return cached;
     }
 
-    const [modulePath, maybeExportName] = functionPath.udfPath.split(":");
+    const [modulePath = "", maybeExportName] = functionPath.udfPath.split(":");
     const exportName =
       maybeExportName === undefined ? "default" : maybeExportName;
 
@@ -617,7 +617,7 @@ export class UdfExecutor {
   }
 
   private _noHandlerError(functionPath: FunctionPath): Error {
-    const [modulePath, maybeExportName] = functionPath.udfPath.split(":");
+    const [modulePath = "", maybeExportName] = functionPath.udfPath.split(":");
     const exportName =
       maybeExportName === undefined ? "default" : maybeExportName;
     return new Error(

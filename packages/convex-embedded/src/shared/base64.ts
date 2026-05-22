@@ -66,7 +66,7 @@ function decodeChar(charCode: number): number {
   if (charCode >= LOOKUP.length) {
     throw new Error("Invalid base64 character");
   }
-  const value = LOOKUP[charCode];
+  const value = LOOKUP[charCode]!;
   if (value === -1) {
     throw new Error("Invalid base64 character");
   }

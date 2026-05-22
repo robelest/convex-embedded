@@ -313,7 +313,7 @@ async function setStoredVersion(
   }
 
   const [primary, ...duplicates] = existing;
-  await adapter.systemPatch(primary._id as string, { version });
+  await adapter.systemPatch(primary!._id as string, { version });
   for (const stale of duplicates) {
     await adapter.systemDelete(stale._id as string);
   }

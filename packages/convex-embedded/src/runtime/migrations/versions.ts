@@ -78,7 +78,7 @@ async function writeVersionRows(
   }
 
   const [primary, ...duplicates] = existing;
-  db.patch(undefined, primary._id as DocumentId, doc);
+  db.patch(undefined, primary!._id as DocumentId, doc);
   for (const stale of duplicates) {
     db.delete(undefined, stale._id as DocumentId);
   }

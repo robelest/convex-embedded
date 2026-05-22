@@ -39,7 +39,6 @@ export function getTracer() {
   const tracer = trace.getTracer(TRACER_NAME);
   if (!probeLogged) {
     probeLogged = true;
-    // eslint-disable-next-line no-console
     console.log(
       `[tracing] first getTracer() called, tracer=${tracer.constructor?.name ?? "?"}`,
     );

@@ -112,7 +112,6 @@ export class BufferingSpanProcessor implements SpanProcessor {
 
   onEnd(span: ReadableSpan): void {
     if (this._spans.length === 0) {
-      // eslint-disable-next-line no-console
       console.log(
         `[tracing] BufferingSpanProcessor.onEnd first span: ${span.name}`,
       );

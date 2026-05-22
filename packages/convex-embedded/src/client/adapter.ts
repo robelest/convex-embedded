@@ -1484,7 +1484,6 @@ export function patchRoutedConvexClient(input: {
           pipeline.applyOptimisticTransition(updates);
         }
       } catch (error) {
-        // eslint-disable-next-line no-console
         console.warn("[convex-embedded] optimistic apply failed:", error);
       }
     }

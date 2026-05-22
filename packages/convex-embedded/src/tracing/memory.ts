@@ -72,12 +72,10 @@ export function installInMemoryTracing(
   });
   metrics.setGlobalMeterProvider(meterProvider);
 
-  // eslint-disable-next-line no-console
   console.log(
     `[tracing] installInMemoryTracing registered=${registered} capacity=${capacity}`,
   );
   const probeTracer = trace.getTracer("convex-embedded");
-  // eslint-disable-next-line no-console
   console.log(
     `[tracing] probe tracer constructor=${probeTracer.constructor?.name ?? "?"}`,
   );

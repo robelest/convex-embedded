@@ -63,6 +63,8 @@ export default defineConfig({
         files: ["packages/convex-embedded/src/**/*.ts"],
         rules: {
           "typescript/no-explicit-any": "error",
+          "typescript/no-empty-object-type": "error",
+          "typescript/no-unused-expressions": "error",
         },
       },
     ],

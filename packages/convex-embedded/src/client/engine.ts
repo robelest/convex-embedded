@@ -3966,7 +3966,7 @@ function createEngine(config: EngineConfig): EngineInstance {
       listeners.clear();
     },
 
-    on(event: "change", listener: ChangeListener): () => void {
+    on(_event: "change", listener: ChangeListener): () => void {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },

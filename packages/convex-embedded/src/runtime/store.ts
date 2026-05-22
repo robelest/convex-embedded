@@ -96,12 +96,10 @@ class UnifiedStore implements Store {
   private adapter: StorageAdapter | null = null;
   private readOverlay: AsyncReadBackend | null = null;
   private _queryable = false;
-  private _hasDocuments = false;
 
   setStorage(storage: StorageAdapter | null): void {
     this.adapter = storage;
     this._queryable = storage != null && isQueryable(storage);
-    this._hasDocuments = storage != null && hasDocumentMethods(storage);
   }
 
   setReadBackendForTests(readBackend: AsyncReadBackend | null): void {

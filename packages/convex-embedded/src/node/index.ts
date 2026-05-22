@@ -14,10 +14,7 @@ import { createEmbeddedClient } from "@/client/factory";
 import type { Prefetch } from "@/client/prefetch";
 import type { RemoteOptions, RemoteState } from "@/client/remote";
 import type { ConvexInput } from "@/kernel/modules";
-import {
-  createNodePlatformAdapter,
-  type NodePlatformOptions,
-} from "@/node/platform";
+import { createNodePlatformAdapter } from "@/node/platform";
 import { openNodeStorage } from "@/node/sqlite/adapter";
 import type {
   ConnectivityAdapter,

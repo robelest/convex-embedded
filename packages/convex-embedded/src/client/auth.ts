@@ -13,12 +13,7 @@ import {
   restoreAuthenticatedIfNeeded,
   setOfflineStaleIfNeeded,
 } from "@/client/auth/entry";
-import type {
-  AuthEntry,
-  AuthOptions,
-  AuthState,
-  AuthTokenFetcher,
-} from "@/client/auth/entry";
+import type { AuthEntry, AuthOptions, AuthState } from "@/client/auth/entry";
 import type { EmbeddedRuntime } from "@/runtime/embedded";
 
 /**

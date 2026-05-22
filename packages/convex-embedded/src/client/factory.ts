@@ -162,7 +162,7 @@ function createResolveAttachment(input: {
   uploadFetch?: typeof globalThis.fetch;
   leaderLock?: <T>(fn: () => Promise<T>) => Promise<T>;
 }): ResolveAttachment {
-  const { runtime, platform, connectivity, processorId } = input.platformConfig;
+  const { runtime, connectivity, processorId } = input.platformConfig;
 
   return attachResolve({
     client: input.client,

@@ -356,7 +356,6 @@ export class EmbeddedRuntime {
   readonly scheduler: SchedulerExecutor;
   readonly cronRunner: CronRunner;
   private _httpDispatcher: HttpDispatcher | null = null;
-  private readonly _protocolQueryObservers: RuntimeQueryObserverRegistry<ProtocolQueryRecord>;
   private readonly _localQueryWatches: RuntimeQueryObserverRegistry<LocalQueryWatchRecord>;
   private readonly _localPaginatedQueryWatches: RuntimeQueryObserverRegistry<LocalPaginatedWatchRecord>;
   private readonly _queryTablesReadCache = new Map<string, Set<string>>();
@@ -368,7 +367,6 @@ export class EmbeddedRuntime {
   private readonly _prefetchSchemaVersions: Map<string, number>;
   private readonly _userTableSpecs: Map<string, InternalTableSpec> | null;
 
-  private _schema: ParsedSchema | null;
   private _storageAdapter: StorageAdapter | null;
   private _transports: EmbeddedTransport[] = [];
   private _storageHydrated: Promise<void>;
@@ -394,7 +392,6 @@ export class EmbeddedRuntime {
       Object.keys(options.convex.modules).length,
     );
     const state = this._buildRuntimeState({ runtime: this, options });
-    this._schema = state.schema;
     this._storageAdapter = state.storageAdapter;
     this._verifyTokenHook = state.verifyTokenHook;
     this.crypto = state.crypto;
@@ -403,7 +400,6 @@ export class EmbeddedRuntime {
     this.executor = state.executor;
     this.transactionManager = state.transactionManager;
     this.subscriptions = state.subscriptions;
-    this._protocolQueryObservers = state.protocolQueryObservers;
     this._localQueryWatches = state.localQueryWatches;
     this._localPaginatedQueryWatches = state.localPaginatedQueryWatches;
     this.protocolQueries = state.protocolQueries;

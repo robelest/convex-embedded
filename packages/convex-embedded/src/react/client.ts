@@ -128,11 +128,13 @@ export class EmbeddedConvexReactClient extends ConvexReactClient {
     return this.embeddedClient as unknown as EmbeddedClientInternals;
   }
 
-  setAuth(...args: Parameters<ConvexReactClient["setAuth"]>): void {
+  override setAuth(...args: Parameters<ConvexReactClient["setAuth"]>): void {
     this._internals.setAuth(...args);
   }
 
-  clearAuth(...args: Parameters<ConvexReactClient["clearAuth"]>): void {
+  override clearAuth(
+    ...args: Parameters<ConvexReactClient["clearAuth"]>
+  ): void {
     this._internals.clearAuth(...args);
   }
 
@@ -140,7 +142,7 @@ export class EmbeddedConvexReactClient extends ConvexReactClient {
     this._internals.setAdminAuth(...args);
   }
 
-  watchQuery<Query extends FunctionReference<"query">>(
+  override watchQuery<Query extends FunctionReference<"query">>(
     query: Query,
     ...argsAndOptions: [args?: FunctionArgs<Query>, options?: WatchQueryOptions]
   ) {
@@ -271,7 +273,7 @@ export class EmbeddedConvexReactClient extends ConvexReactClient {
     };
   }
 
-  mutation<Mutation extends FunctionReference<"mutation">>(
+  override mutation<Mutation extends FunctionReference<"mutation">>(
     mutation: Mutation,
     ...argsAndOptions: ArgsAndOptions<Mutation, MutationOptions>
   ): Promise<Awaited<FunctionReturnType<Mutation>>> {
@@ -280,7 +282,7 @@ export class EmbeddedConvexReactClient extends ConvexReactClient {
     >;
   }
 
-  action<Action extends FunctionReference<"action">>(
+  override action<Action extends FunctionReference<"action">>(
     action: Action,
     ...args: OptionalRestArgs<Action>
   ): Promise<Awaited<FunctionReturnType<Action>>> {
@@ -289,7 +291,7 @@ export class EmbeddedConvexReactClient extends ConvexReactClient {
     >;
   }
 
-  query<Query extends FunctionReference<"query">>(
+  override query<Query extends FunctionReference<"query">>(
     query: Query,
     ...args: OptionalRestArgs<Query>
   ): Promise<Awaited<FunctionReturnType<Query>>> {
@@ -298,17 +300,17 @@ export class EmbeddedConvexReactClient extends ConvexReactClient {
     >;
   }
 
-  connectionState(): ConnectionState {
+  override connectionState(): ConnectionState {
     return this.embeddedClient.connectionState();
   }
 
-  subscribeToConnectionState(
+  override subscribeToConnectionState(
     cb: (connectionState: ConnectionState) => void,
   ): () => void {
     return this.embeddedClient.subscribeToConnectionState(cb);
   }
 
-  async close(): Promise<void> {
+  override async close(): Promise<void> {
     await super.close();
     await this.embeddedClient.close();
   }

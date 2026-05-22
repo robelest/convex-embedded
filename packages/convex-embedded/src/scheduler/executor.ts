@@ -34,7 +34,6 @@ interface PendingJob {
  * cleared.
  */
 export class SchedulerExecutor {
-  private _db: Database;
   private _runFunction: (
     path: string,
     args: Record<string, unknown>,
@@ -43,7 +42,6 @@ export class SchedulerExecutor {
   private _nextId = 1;
 
   constructor(options: SchedulerExecutorOptions) {
-    this._db = options.db;
     this._runFunction = options.runFunction;
   }
 

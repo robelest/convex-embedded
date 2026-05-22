@@ -39,7 +39,7 @@ export default defineConfig({
       "**/dist/**",
       "**/coverage/**",
       "**/node_modules/**",
-      "**/convex/_generated/**",
+      "**/_generated/**",
       "packages/convex-embedded/consumer-types/**",
       "**/*.d.ts",
     ],
@@ -52,12 +52,20 @@ export default defineConfig({
         },
       ],
       "typescript/ban-ts-comment": "error",
-      "typescript/no-explicit-any": "off",
+      "typescript/no-explicit-any": "warn",
       "typescript/no-empty-object-type": "off",
       "typescript/no-require-imports": "off",
       "typescript/no-unused-expressions": "off",
       "jest/no-focused-tests": "warn",
     },
+    overrides: [
+      {
+        files: ["packages/convex-embedded/src/**/*.ts"],
+        rules: {
+          "typescript/no-explicit-any": "error",
+        },
+      },
+    ],
     options: {
       typeAware: true,
       typeCheck: false,

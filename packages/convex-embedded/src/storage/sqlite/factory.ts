@@ -1517,12 +1517,9 @@ export async function createSqliteStorage(input: {
         internalSpec: resolveInternalSpec(route.table_name),
       };
       const tableRows = await readTableDocuments(driver, target);
-      results.push(
-        ...tableRows.map((doc) => ({
-          doc,
-          tableName: route.table_name,
-        })),
-      );
+      for (const doc of tableRows) {
+        results.push({ doc, tableName: route.table_name });
+      }
     }
 
     return results;
@@ -1595,7 +1592,9 @@ export async function createSqliteStorage(input: {
       for (const tableName of tableNames) {
         const target = await getStorageTarget(tableName);
         const docs = await readTableDocuments(driver, target);
-        results.push(...docs.map((doc) => ({ doc, tableName })));
+        for (const doc of docs) {
+          results.push({ doc, tableName });
+        }
       }
       return results;
     },

@@ -2211,6 +2211,9 @@ function createEngine(config: EngineConfig): EngineInstance {
   }
 
   function emit(newStatus: EngineStatus) {
+    if (newStatus.status === "resolved" && status.status !== "resolved") {
+      recordCounter("sync.cycle");
+    }
     status = newStatus;
     for (const listener of listeners) {
       try {
@@ -3178,8 +3181,9 @@ function createEngine(config: EngineConfig): EngineInstance {
       throw new DOMException("Aborted", "AbortError");
     }
 
+    const idSet = new Set(ids);
     const localDocs = (await getDocumentsForTable(input.tableName)).filter(
-      (doc) => typeof doc._id === "string" && ids.includes(String(doc._id)),
+      (doc) => typeof doc._id === "string" && idSet.has(String(doc._id)),
     );
     const metadata = await readResolveMetadata(
       input.tableName,

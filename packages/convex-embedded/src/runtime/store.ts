@@ -128,7 +128,9 @@ class UnifiedStore implements Store {
       const results: StoredDocumentWithTable[] = [];
       for (const tableName of tables) {
         const docs = (await da.getDocuments(tableName)) as StoredDocument[];
-        results.push(...docs.map((doc) => ({ doc, tableName })));
+        for (const doc of docs) {
+          results.push({ doc, tableName });
+        }
       }
       documents = results;
     }

@@ -75,6 +75,7 @@ import { structuralEqual } from "@/shared/equals";
 import { createLogger } from "@/shared/logger";
 import type { ReadOptions, StorageAdapter } from "@/storage/adapter";
 import type { CommitBatch } from "@/storage/adapter";
+import { recordCounter } from "@/tracing/metrics";
 import { withSpan, withSpanSync } from "@/tracing/spans";
 
 const IDENTITY_SCOPE_FIELD = "__identityKey";
@@ -255,6 +256,10 @@ export class Database {
 
   /** Committed index orderings keyed by `table.index`. */
   private _indexDocuments: Map<string, string[]> = new Map();
+  private _indexDefsCache: Map<
+    string,
+    Array<{ indexName: string; fields: string[] }>
+  > = new Map();
 
   /** Committed search index state keyed by `table.index`. */
   private _searchIndexes: Map<string, SearchIndexState> = new Map();
@@ -707,6 +712,13 @@ export class Database {
   }
 
   async commitAsync(): Promise<DatabaseCommitResult> {
+    return withSpan("convex-embedded.db.commit", () => {
+      recordCounter("commit");
+      return this._commitAsyncImpl();
+    });
+  }
+
+  private async _commitAsyncImpl(): Promise<DatabaseCommitResult> {
     const isSqlCommit = this._store.usesExternalCommitPath();
     if (!isSqlCommit) {
       return this.commit();
@@ -741,7 +753,7 @@ export class Database {
       };
     }
 
-    const { puts, deletes, rowChanges, invalidation } =
+    const { puts, deletes, rowChanges, stateChanges, invalidation } =
       this._buildCommittedWriteArtifacts(lastWrites);
     const nextTimestamp = this._timestamp + 1;
 
@@ -773,18 +785,9 @@ export class Database {
       this._applyCommittedIdHints(rowChanges);
       this._timestamp = nextTimestamp;
       this._lastCreationTime = batch.meta.lastCreationTime;
-      const dirtyTables = new Set<string>();
-      for (const change of rowChanges) {
-        if (change.tableName === "") continue;
-        dirtyTables.add(change.tableName);
-      }
       if (rowChanges.length > 0) {
         this._applyCommittedRowChanges(rowChanges);
-        for (const tableName of dirtyTables) {
-          this._rebuildTableIndexes(tableName);
-          this._rebuildTableSearchIndexes(tableName);
-          this._rebuildTableVectorIndexes(tableName);
-        }
+        this._applyCommittedStateChanges(stateChanges, { skipQueryable: false });
       }
       this._tablesWritten.clear();
 
@@ -1242,7 +1245,7 @@ export class Database {
 
     if (this._storage) {
       this._storage.deleteBlob(storageId).catch((error) => {
-        console.error("[convex-embedded] blob delete failed:", error);
+        log.error("blob delete failed:", error);
       });
     }
   }
@@ -3248,7 +3251,21 @@ export class Database {
     }
   }
 
-  private _applyCommittedStateChanges(changes: CommittedStateChange[]): void {
+  private _applyCommittedStateChanges(
+    changes: CommittedStateChange[],
+    options: { skipQueryable?: boolean } = {},
+  ): void {
+    withSpanSync("convex-embedded.db.applyIndexChanges", (span) => {
+      span.setAttribute("convex.change_count", changes.length);
+      this._applyCommittedStateChangesImpl(changes, options);
+    });
+  }
+
+  private _applyCommittedStateChangesImpl(
+    changes: CommittedStateChange[],
+    options: { skipQueryable?: boolean } = {},
+  ): void {
+    const skipQueryable = options.skipQueryable ?? true;
     const changesByTable = new Map<string, CommittedStateChange[]>();
     for (const change of changes) {
       let tableChanges = changesByTable.get(change.tableName);
@@ -3260,7 +3277,7 @@ export class Database {
     }
 
     for (const [tableName, tableChanges] of changesByTable) {
-      if (this._isQueryableTable(tableName)) {
+      if (skipQueryable && this._isQueryableTable(tableName)) {
         continue;
       }
 
@@ -3330,30 +3347,21 @@ export class Database {
         if (change.after === null) {
           continue;
         }
+        const changeId = change.id as string;
         const insertAt = this._binarySearchIndexInsertPosition(
           ids,
           indexName,
           fields,
           change.after,
         );
-        ids.splice(insertAt, 0, change.id as string);
-      }
-
-      const seenIds = new Set<string>();
-      let hasDuplicates = false;
-      for (const id of ids) {
-        if (seenIds.has(id)) {
-          hasDuplicates = true;
-          break;
+        if (insertAt > 0 && ids[insertAt - 1] === changeId) {
+          log.warn(
+            `duplicate incremental id detected for ${key}; rebuilding index`,
+          );
+          this._rebuildTableIndexes(tableName);
+          return;
         }
-        seenIds.add(id);
-      }
-
-      if (hasDuplicates) {
-        log.warn(
-          `duplicate incremental ids detected for ${key}; rebuilding index`,
-        );
-        this._rebuildTableIndexes(tableName);
+        ids.splice(insertAt, 0, changeId);
       }
     }
   }
@@ -3468,6 +3476,11 @@ export class Database {
   private _getIndexDefinitions(
     tableName: string,
   ): Array<{ indexName: string; fields: string[] }> {
+    const cached = this._indexDefsCache.get(tableName);
+    if (cached !== undefined) {
+      return cached;
+    }
+
     const tableSchema = this._schema?.tables.get(tableName);
     const schemaIndexes =
       tableSchema?.indexes.map((index) => ({
@@ -3476,13 +3489,15 @@ export class Database {
       })) ?? [];
     const systemIndexes = SYSTEM_INDEX_DEFINITIONS[tableName] ?? [];
 
-    return [
+    const definitions = [
       { indexName: "by_creation_time", fields: ["_creationTime", "_id"] },
       { indexName: "by_creation_time_desc", fields: ["_creationTime", "_id"] },
       { indexName: "by_id", fields: ["_id"] },
       ...systemIndexes,
       ...schemaIndexes,
     ];
+    this._indexDefsCache.set(tableName, definitions);
+    return definitions;
   }
 
   private _hasPendingWrites(): boolean {

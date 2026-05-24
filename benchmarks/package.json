@@ -1,0 +1,29 @@
+{
+  "name": "benchmarks",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "bench": "vp exec vitest bench --run",
+    "bench:crdt": "vp exec vitest bench --run crdt.bench.ts",
+    "bench:component": "vp exec vitest bench --run component.bench.ts",
+    "bench:compute": "vp exec vitest bench --run compute.bench.ts",
+    "bench:storage": "vp exec vitest bench --run storage.bench.ts",
+    "bench:queries": "vp exec vitest bench --run queries.bench.ts",
+    "bench:reactivity": "vp exec vitest bench --run reactivity.bench.ts",
+    "bench:platform": "vp exec vitest bench --run platform.bench.ts",
+    "bench:remote": "vp exec vitest bench --run remote.bench.ts",
+    "profile": "vp exec vitest run profile.test.ts --disableConsoleIntercept"
+  },
+  "devDependencies": {
+    "@robelest/convex-embedded": "workspace:*",
+    "@types/better-sqlite3": "^7.6.0",
+    "@types/node": "^25.5.0",
+    "better-sqlite3": "^11.0.0",
+    "convex": "catalog:",
+    "typescript": "catalog:",
+    "vite-plus": "catalog:",
+    "vitest": "catalog:",
+    "yjs": "^13.6.0"
+  }
+}

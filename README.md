@@ -29,6 +29,24 @@ Embedded Convex runtime with offline-first sync for local-first applications.
 | [Concepts](https://embedded.estifanos.com/concepts/architecture/)               | Architecture, persistence, offline reconciliation, embedded runtime internals, and search. |
 | [Reference](https://embedded.estifanos.com/reference/config/)                   | Configuration, migration notes, troubleshooting, and error handling.                       |
 
+## Performance
+
+Throughput and latency are measured end-to-end through the real runtime (real JS
+compute, real indexed SQLite, real Yjs merge) at offline-app scale (~10k–50k
+docs). Headline numbers on an Apple M4 / Node 24:
+
+| Path | Throughput | p50 |
+| --- | ---: | ---: |
+| CRDT offline reconcile | ~22k doc-merges/sec | ~9 ms / 200-doc batch |
+| Component `recordUpdate` (fresh) | 26,827 ops/sec | 0.036 ms |
+| `executeLocal` indexed paginate (take 20) | 620 ops/sec | 1.6 ms |
+| `executeLocal` mutation insert (full write path) | 6,789 ops/sec | 0.12 ms |
+| Blob get (64 KB) | 37,749 ops/sec | 0.021 ms |
+
+Full methodology, per-suite results, and the offline rationale are in
+[`benchmarks/README.md`](./benchmarks/README.md). Run with
+`vp run --filter benchmarks bench`.
+
 ## Contributing
 
 ```bash

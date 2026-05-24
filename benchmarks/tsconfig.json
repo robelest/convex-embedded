@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "noEmit": true,
+    "lib": ["ES2022", "DOM", "ESNext.Disposable"],
+    "types": ["vitest/globals", "node"],
+    "paths": {
+      "@/*": ["../packages/convex-embedded/src/*"],
+      "@embedded/*": ["../packages/convex-embedded/src/*"],
+      "@resolve/*": ["../packages/convex-embedded/src/*"],
+      "@tests/helpers/*": ["../tests/helpers/*"],
+      "@tests/*": ["./*"]
+    }
+  },
+  "include": ["**/*.bench.ts", "helpers.ts", "testkit.ts"],
+  "exclude": ["node_modules"]
+}

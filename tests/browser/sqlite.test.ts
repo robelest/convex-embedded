@@ -1,9 +1,25 @@
 import { openBrowserSqlClient } from "@embedded/browser/sqlite/client";
-import { afterEach, beforeEach, describe, expect, it } from "@tests/testkit";
-import { vi } from "vitest";
+import type {
+  StorageWorkerRequest,
+  StorageWorkerResponse,
+} from "@embedded/browser/sqlite/protocol";
+import { withFakeTimers } from "@tests/helpers/time";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "@tests/testkit";
 
-type MessageHandler = (event: MessageEvent<any>) => void;
+type MessageHandler = (event: MessageEvent<StorageWorkerResponse>) => void;
 type ErrorHandler = (event: ErrorEvent) => void;
+
+interface RecordedMessage {
+  message: StorageWorkerRequest;
+  transfer: Array<Transferable>;
+}
 
 class MockWorker {
   static instances: MockWorker[] = [];
@@ -11,14 +27,11 @@ class MockWorker {
   readonly messageHandlers = new Set<MessageHandler>();
   readonly errorHandlers = new Set<ErrorHandler>();
   readonly postMessage = vi.fn(
-    (message: unknown, transfer?: Array<Transferable>) => {
+    (message: StorageWorkerRequest, transfer?: Array<Transferable>) => {
       this.messages.push({ message, transfer: transfer ?? [] });
     },
   );
-  readonly messages: Array<{
-    message: any;
-    transfer: Array<Transferable>;
-  }> = [];
+  readonly messages: RecordedMessage[] = [];
   terminated = false;
 
   constructor(
@@ -31,7 +44,7 @@ class MockWorker {
   addEventListener(
     type: "message" | "error",
     handler: MessageHandler | ErrorHandler,
-  ) {
+  ): void {
     if (type === "message") {
       this.messageHandlers.add(handler as MessageHandler);
       return;
@@ -39,25 +52,40 @@ class MockWorker {
     this.errorHandlers.add(handler as ErrorHandler);
   }
 
-  terminate() {
+  terminate(): void {
     this.terminated = true;
   }
 
-  reply(response: unknown) {
+  reply(response: StorageWorkerResponse): void {
     for (const handler of this.messageHandlers) {
-      handler({ data: response } as MessageEvent<any>);
+      handler({ data: response } as MessageEvent<StorageWorkerResponse>);
     }
   }
 
-  fail(error: Error) {
+  fail(error: Error): void {
     for (const handler of this.errorHandlers) {
       handler({ error, message: error.message } as ErrorEvent);
     }
   }
 
-  static reset() {
+  static reset(): void {
     MockWorker.instances = [];
   }
+}
+
+function firstWorker(): MockWorker {
+  const worker = MockWorker.instances[0];
+  expect(worker).toBeDefined();
+  return worker!;
+}
+
+async function openInitializedClient(name: string) {
+  const opening = openBrowserSqlClient({ name });
+  const worker = firstWorker();
+  const initMessage = worker.messages[0]!.message;
+  worker.reply({ id: initMessage.id, ok: true, result: null });
+  const client = await opening;
+  return { client, worker };
 }
 
 describe("openBrowserSqlClient", () => {
@@ -67,38 +95,30 @@ describe("openBrowserSqlClient", () => {
   });
 
   afterEach(() => {
-    vi.useRealTimers();
     vi.unstubAllGlobals();
     MockWorker.reset();
   });
 
   it("terminates the worker when init fails", async () => {
     const opening = openBrowserSqlClient({ name: "sqlite-init-fail" });
-    const worker = MockWorker.instances[0]!;
-    const initMessage = worker.messages[0]?.message;
+    const worker = firstWorker();
+    const initMessage = worker.messages[0]!.message;
 
     expect(initMessage).toMatchObject({
       method: "init",
       payload: { name: "sqlite-init-fail" },
     });
 
-    worker.reply({
-      id: initMessage.id,
-      ok: false,
-      error: "init failed",
-    });
+    worker.reply({ id: initMessage.id, ok: false, error: "init failed" });
 
     await expect(opening).rejects.toThrow("init failed");
     expect(worker.terminated).toBe(true);
   });
 
   it("rejects in-flight requests when the worker errors", async () => {
-    const opening = openBrowserSqlClient({ name: "sqlite-worker-error" });
-    const worker = MockWorker.instances[0]!;
-    const initMessage = worker.messages[0]!.message;
-
-    worker.reply({ id: initMessage.id, ok: true, result: null });
-    const client = await opening;
+    const { client, worker } = await openInitializedClient(
+      "sqlite-worker-error",
+    );
 
     const getMetaPromise = client.getMeta();
     const requestMessage = worker.messages[1]!.message;
@@ -110,31 +130,23 @@ describe("openBrowserSqlClient", () => {
   });
 
   it("times out requests that never receive a response", async () => {
-    vi.useFakeTimers();
+    await withFakeTimers(async () => {
+      const { client } = await openInitializedClient("sqlite-timeout");
 
-    const opening = openBrowserSqlClient({ name: "sqlite-timeout" });
-    const worker = MockWorker.instances[0]!;
-    const initMessage = worker.messages[0]!.message;
-    worker.reply({ id: initMessage.id, ok: true, result: null });
-    const client = await opening;
+      const pending = client.getMeta();
+      const rejection = pending.catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(15_000);
 
-    const pending = client.getMeta();
-    const rejection = pending.catch((error) => error);
-    await vi.advanceTimersByTimeAsync(15_000);
-
-    const error = await rejection;
-    expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toMatch(
-      /timed out after 15000ms.*getMeta/,
-    );
+      const error = await rejection;
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toMatch(
+        /timed out after 15000ms.*getMeta/,
+      );
+    });
   });
 
   it("passes ArrayBuffer transferables for storeBlob and terminates on close", async () => {
-    const opening = openBrowserSqlClient({ name: "sqlite-transfer" });
-    const worker = MockWorker.instances[0]!;
-    const initMessage = worker.messages[0]!.message;
-    worker.reply({ id: initMessage.id, ok: true, result: null });
-    const client = await opening;
+    const { client, worker } = await openInitializedClient("sqlite-transfer");
 
     const payload = Uint8Array.from([1, 2, 3]).buffer;
     const storeBlobPromise = client.storeBlob("blob-1", payload);

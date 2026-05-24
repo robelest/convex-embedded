@@ -8,6 +8,7 @@ import {
   isCrdtField,
   getCrdtType,
   createConflict,
+  type Conflict,
 } from "@resolve/server/schema";
 import { CrdtType } from "@resolve/shared/types";
 import {
@@ -21,11 +22,22 @@ import { describe, it, expect } from "@tests/testkit";
 import { v } from "convex/values";
 import * as Y from "yjs";
 
+interface RegisterEntry {
+  value: unknown;
+  timestamp: number;
+}
+
+interface CounterEntry {
+  client: string;
+  delta: number;
+  timestamp: number;
+}
+
 // ---------------------------------------------------------------------------
 // Field constructors
 // ---------------------------------------------------------------------------
 
-describe("CRDT field constructors", () => {
+describe.concurrent("CRDT field constructors", () => {
   it("prose() creates a Prose descriptor", () => {
     const field = prose();
     expect(isCrdtField(field)).toBe(true);
@@ -39,7 +51,7 @@ describe("CRDT field constructors", () => {
   });
 
   it("register() accepts a custom resolver", () => {
-    const resolver = (conflict: any) => conflict.values[0];
+    const resolver = (conflict: Conflict<string>) => conflict.values[0]!;
     const field = register(v.string(), { resolve: resolver });
     expect(field.resolve).toBeDefined();
   });
@@ -81,7 +93,7 @@ describe("CRDT field constructors", () => {
 // schema.define()
 // ---------------------------------------------------------------------------
 
-describe("define()", () => {
+describe.concurrent("define()", () => {
   it("creates a Definition with version and shape", () => {
     const def = define({
       shape: {
@@ -95,7 +107,7 @@ describe("define()", () => {
     expect(def.shape).toHaveProperty("body");
   });
 
-  it("getShape() returns current shape for current version", () => {
+  it("getShape() returns a stable shape reference", () => {
     const def = define({
       shape: { title: register(v.string()) },
     });
@@ -105,7 +117,7 @@ describe("define()", () => {
     expect(def.getShape()).toBe(shape);
   });
 
-  it("stores migration steps and derives version from max key", () => {
+  it("stores migration steps and derives version from the max key", () => {
     const migrations = {
       2: async () => undefined,
       3: async () => undefined,
@@ -126,7 +138,7 @@ describe("define()", () => {
         title: register(v.string()),
         body: prose(),
         count: counter(),
-        plain: "not a crdt field" as any,
+        plain: "not a crdt field",
       },
     });
 
@@ -153,7 +165,7 @@ describe("define()", () => {
     expect(omitted).not.toContain("title");
   });
 
-  it("defaults are stored", () => {
+  it("stores defaults", () => {
     const def = define({
       shape: { title: register(v.string()) },
       defaults: { title: "untitled" },
@@ -167,7 +179,7 @@ describe("define()", () => {
 // Yjs document helpers
 // ---------------------------------------------------------------------------
 
-describe("initYjsDoc()", () => {
+describe.concurrent("initYjsDoc()", () => {
   it("creates a Y.Doc with a fields map", () => {
     const def = define({
       shape: {
@@ -180,21 +192,21 @@ describe("initYjsDoc()", () => {
     expect(fields).toBeDefined();
   });
 
-  it("initializes a register field as Y.Map with value", () => {
+  it("initializes a register field as a Y.Map with its value", () => {
     const def = define({
       shape: { title: register(v.string()) },
     });
 
     const doc = initYjsDoc(def, { title: "Test" });
     const fields = doc.getMap("fields");
-    const titleMap = fields.get("title") as Y.Map<any>;
+    const titleMap = fields.get("title");
 
     expect(titleMap).toBeInstanceOf(Y.Map);
-    const init = titleMap.get("_init");
-    expect(init.value).toBe("Test");
+    const init = (titleMap as Y.Map<RegisterEntry>).get("_init");
+    expect(init?.value).toBe("Test");
   });
 
-  it("initializes a prose field as XmlFragment", () => {
+  it("initializes a prose field as an XmlFragment", () => {
     const def = define({
       shape: { body: prose() },
     });
@@ -204,40 +216,40 @@ describe("initYjsDoc()", () => {
     expect(xml.length).toBeGreaterThan(0);
   });
 
-  it("initializes a counter field as Y.Array", () => {
+  it("initializes a counter field as a Y.Array", () => {
     const def = define({
       shape: { votes: counter() },
     });
 
     const doc = initYjsDoc(def, { votes: 5 });
     const fields = doc.getMap("fields");
-    const arr = fields.get("votes") as Y.Array<any>;
+    const arr = fields.get("votes") as Y.Array<CounterEntry>;
 
     expect(arr).toBeInstanceOf(Y.Array);
     expect(arr.length).toBe(1);
-    expect(arr.get(0).delta).toBe(5);
+    expect(arr.get(0)?.delta).toBe(5);
   });
 
-  it("initializes a counter with 0 as empty Y.Array", () => {
+  it("initializes a counter of 0 as an empty Y.Array", () => {
     const def = define({
       shape: { votes: counter() },
     });
 
     const doc = initYjsDoc(def, { votes: 0 });
     const fields = doc.getMap("fields");
-    const arr = fields.get("votes") as Y.Array<any>;
+    const arr = fields.get("votes") as Y.Array<CounterEntry>;
 
     expect(arr.length).toBe(0);
   });
 
-  it("initializes a set field as Y.Map", () => {
+  it("initializes a set field as a Y.Map keyed by member", () => {
     const def = define({
       shape: { tags: set(v.string()) },
     });
 
     const doc = initYjsDoc(def, { tags: ["a", "b", "c"] });
     const fields = doc.getMap("fields");
-    const setMap = fields.get("tags") as Y.Map<any>;
+    const setMap = fields.get("tags") as Y.Map<unknown>;
 
     expect(setMap).toBeInstanceOf(Y.Map);
     expect(setMap.has("a")).toBe(true);
@@ -278,7 +290,7 @@ describe("initYjsDoc()", () => {
 
   it("does not store plain (non-CRDT) fields in the Y.Doc", () => {
     const def = define({
-      shape: { done: "plain_validator" as any },
+      shape: { done: "plain_validator" },
     });
 
     const doc = initYjsDoc(def, { done: true });
@@ -292,7 +304,7 @@ describe("initYjsDoc()", () => {
 // Encode / Diff / Merge
 // ---------------------------------------------------------------------------
 
-describe("encodeDocumentState()", () => {
+describe.concurrent("encodeDocumentState()", () => {
   it("encodes a document as a Uint8Array", () => {
     const def = define({
       shape: { title: register(v.string()) },
@@ -304,44 +316,34 @@ describe("encodeDocumentState()", () => {
   });
 });
 
-describe("computeDiff()", () => {
-  it("returns a diff between server and client states", () => {
+describe.concurrent("computeDiff()", () => {
+  it("returns a non-empty diff between server and empty client states", () => {
     const def = define({
       shape: { title: register(v.string()) },
     });
 
-    // Server has a document
     const serverUpdate = encodeDocumentState(def, { title: "Server value" });
-
-    // Client has an empty state vector
     const clientDoc = new Y.Doc();
     const clientVector = Y.encodeStateVector(clientDoc);
 
     const diff = computeDiff(serverUpdate, clientVector);
     expect(diff).toBeInstanceOf(Uint8Array);
-    expect(diff.byteLength).toBeGreaterThan(2); // Non-empty diff
+    expect(diff.byteLength).toBeGreaterThan(2);
   });
 
-  it("returns small diff when client is up to date", () => {
-    // When the server and client have the SAME Y.Doc (same clientID + clock),
-    // the diff is truly empty. But encodeDocumentState creates a fresh doc
-    // each time with a different clientID, so a diff between two separate
-    // docs with the same logical content will contain the state vector entries.
-    // The isDiffEmpty heuristic (<=2 bytes) works for same-origin docs.
-
+  it("returns an empty diff when the client is up to date", () => {
     const doc = new Y.Doc();
     const fields = doc.getMap("fields");
     fields.set("title", "value");
     const fullUpdate = Y.encodeStateAsUpdateV2(doc);
     const stateVector = Y.encodeStateVector(doc);
 
-    // Diff same doc against its own state vector → truly empty
     const diff = computeDiff(fullUpdate, stateVector);
     expect(isDiffEmpty(diff)).toBe(true);
   });
 });
 
-describe("mergeUpdate()", () => {
+describe.concurrent("mergeUpdate()", () => {
   it("merges two updates into a combined state", () => {
     const def = define({
       shape: { title: register(v.string()) },
@@ -356,7 +358,7 @@ describe("mergeUpdate()", () => {
   });
 });
 
-describe("isDiffEmpty()", () => {
+describe.concurrent("isDiffEmpty()", () => {
   it("returns true for 0 bytes", () => {
     expect(isDiffEmpty(new Uint8Array(0))).toBe(true);
   });
@@ -366,7 +368,7 @@ describe("isDiffEmpty()", () => {
     expect(isDiffEmpty(v2Empty)).toBe(true);
   });
 
-  it("returns false for non-empty 13-byte array", () => {
+  it("returns false for a non-empty 13-byte array", () => {
     const notEmpty = new Uint8Array([1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0]);
     expect(isDiffEmpty(notEmpty)).toBe(false);
   });
@@ -386,7 +388,7 @@ describe("isDiffEmpty()", () => {
 // createConflict re-export
 // ---------------------------------------------------------------------------
 
-describe("createConflict (re-exported)", () => {
+describe.concurrent("createConflict (re-exported)", () => {
   it("is accessible from server/schema", () => {
     const conflict = createConflict([
       { value: "a", clientId: "c1", timestamp: 100 },

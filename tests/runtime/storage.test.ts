@@ -1,74 +1,126 @@
+import type { Prefetch } from "@embedded/client/prefetch";
+import type { DocumentId, StoredDocument } from "@embedded/runtime/db/types";
+import type { EmbeddedRuntime } from "@embedded/runtime/embedded";
+import type { EmbeddedPlatformAdapter } from "@embedded/runtime/platform";
+import type { StorageAdapter } from "@embedded/storage/adapter";
 import { attachPlatformStorage } from "@resolve/runtime/load";
 import { mockAdapter } from "@tests/helpers/adapter";
 import { describe, expect, it, vi } from "@tests/testkit";
 
+function doc(id: string, fields: Record<string, unknown> = {}): StoredDocument {
+  return { _id: id as DocumentId, _creationTime: 1, ...fields };
+}
+
+type Db = EmbeddedRuntime["db"];
+
+interface FakeRuntimeDb {
+  setReadBackendForTests: ReturnType<typeof vi.fn>;
+  setStorage: ReturnType<typeof vi.fn>;
+  hydrate: ReturnType<typeof vi.fn<Db["hydrate"]>>;
+  hasDocumentsForTable: ReturnType<typeof vi.fn<Db["hasDocumentsForTable"]>>;
+}
+
+interface FakeRuntime {
+  setStorage: ReturnType<typeof vi.fn>;
+  getIdentityKey: ReturnType<typeof vi.fn<EmbeddedRuntime["getIdentityKey"]>>;
+  ingestPrefetchUngated: ReturnType<
+    typeof vi.fn<EmbeddedRuntime["ingestPrefetchUngated"]>
+  >;
+  resumePersistedState: ReturnType<
+    typeof vi.fn<EmbeddedRuntime["resumePersistedState"]>
+  >;
+  db: FakeRuntimeDb;
+}
+
+function createFakeRuntime(
+  dbOverrides: Partial<FakeRuntimeDb> = {},
+): FakeRuntime {
+  return {
+    setStorage: vi.fn(),
+    getIdentityKey: vi.fn(() => null),
+    ingestPrefetchUngated: vi.fn(async () => undefined),
+    resumePersistedState: vi.fn(async () => undefined),
+    db: {
+      setReadBackendForTests: vi.fn(),
+      setStorage: vi.fn(),
+      hydrate: vi.fn(async () => undefined),
+      hasDocumentsForTable: vi.fn(() => false),
+      ...dbOverrides,
+    },
+  };
+}
+
+function fakePlatform(storage: StorageAdapter): EmbeddedPlatformAdapter {
+  return {
+    openStorage: vi.fn(async () => storage),
+  } as unknown as EmbeddedPlatformAdapter;
+}
+
+function attach(
+  runtime: FakeRuntime,
+  platform: EmbeddedPlatformAdapter,
+  prefetch?: Prefetch,
+): Promise<void> {
+  return attachPlatformStorage({
+    runtime: runtime as unknown as EmbeddedRuntime,
+    platform,
+    name: "test",
+    prefetch,
+  });
+}
+
 function createStorage(
-  rowsByTable: Record<string, Array<Record<string, unknown>>>,
+  rowsByTable: Record<string, StoredDocument[]>,
   kind: "opaque" | "sql" = "opaque",
-) {
+): StorageAdapter {
   const base = {
-    listAll: vi.fn(async () =>
-      Object.entries(rowsByTable).flatMap(([tableName, docs]) =>
-        docs.map((doc) => ({ tableName, doc })),
-      ),
+    getDocuments: vi.fn(async (table?: string) =>
+      table === undefined
+        ? Object.entries(rowsByTable).flatMap(([tableName, docs]) =>
+            docs.map((doc) => ({ tableName, doc })),
+          )
+        : (rowsByTable[table] ?? []),
     ),
-    list: vi.fn(async (tableName: string) => rowsByTable[tableName] ?? []),
-    meta: vi.fn(async () => ({ timestamp: 1, lastCreationTime: 1 })),
+    getMetadata: vi.fn(async () => ({ timestamp: 1, lastCreationTime: 1 })),
     listBlobs: vi.fn(async () => []),
-    commit: vi.fn(async () => undefined),
+    write: vi.fn(async () => undefined),
     putBlob: vi.fn(async () => undefined),
     deleteBlob: vi.fn(async () => undefined),
-    clear: vi.fn(async () => undefined),
+    clearAll: vi.fn(async () => undefined),
     close: vi.fn(async () => undefined),
   };
   if (kind === "sql") {
-    // Real SQL adapters expose pushdown reads + atomic commits.
     return mockAdapter({
       ...base,
       source: vi.fn(async () => []),
       query: vi.fn(async () => []),
       vectorSearch: vi.fn(async () => []),
-      atomicCommit: vi.fn(async () => ({
-        meta: { timestamp: 1, lastCreationTime: 1 },
-        tables: [],
-      })),
+      write: vi.fn(async (_batch, opts) =>
+        opts
+          ? {
+              meta: { timestamp: 1, lastCreationTime: 1 },
+              tables: [],
+            }
+          : undefined,
+      ),
     });
   }
   return mockAdapter(base);
 }
 
+const PREFETCH: Prefetch = {
+  identityKey: null,
+  tables: { tasks: [{ _id: "task-1", _creationTime: 1 }] },
+  metadata: {
+    tasks: { collectionSeq: 1, documents: [{ docId: "task-1", seq: 1 }] },
+  },
+};
+
 describe("attachPlatformStorage", () => {
   it("hydrates all tables then persists prefetch when storage has no user rows", async () => {
-    const storage = createStorage({});
-    const runtime = {
-      setStorage: vi.fn(),
-      setIdentityKey: vi.fn(),
-      crypto: {} as never,
-      getIdentityKey: vi.fn(() => null),
-      ingestPrefetchUngated: vi.fn(async () => undefined),
-      resumePersistedState: vi.fn(async () => undefined),
-      db: {
-        setReadBackendForTests: vi.fn(),
-        setStorage: vi.fn(),
-        hydrate: vi.fn(async () => undefined),
-        hasDocumentsForTable: vi.fn(() => false),
-      },
-    } as any;
+    const runtime = createFakeRuntime();
 
-    await attachPlatformStorage({
-      runtime,
-      platform: {
-        openStorage: vi.fn(async () => storage),
-      } as any,
-      name: "test",
-      prefetch: {
-        identityKey: null,
-        tables: { tasks: [{ _id: "task-1", _creationTime: 1 }] },
-        metadata: {
-          tasks: { collectionSeq: 1, documents: [{ docId: "task-1", seq: 1 }] },
-        },
-      },
-    });
+    await attach(runtime, fakePlatform(createStorage({})), PREFETCH);
 
     expect(runtime.db.hydrate).toHaveBeenCalledWith();
     expect(runtime.ingestPrefetchUngated).toHaveBeenCalledTimes(1);
@@ -76,65 +128,22 @@ describe("attachPlatformStorage", () => {
 
   it("skips prefetch ingest and hydrates full data when storage already has user rows", async () => {
     const storage = createStorage({
-      tasks: [{ _id: "task-local", _creationTime: 1, title: "Persisted" }],
+      tasks: [doc("task-local", { title: "Persisted" })],
     });
-    const runtime = {
-      setStorage: vi.fn(),
-      crypto: {} as never,
-      getIdentityKey: vi.fn(() => null),
-      ingestPrefetchUngated: vi.fn(async () => undefined),
-      resumePersistedState: vi.fn(async () => undefined),
-      db: {
-        setReadBackendForTests: vi.fn(),
-        setStorage: vi.fn(),
-        hydrate: vi.fn(async () => undefined),
-        // Simulates the post-hydrate state: durable storage populated `tasks`.
-        hasDocumentsForTable: vi.fn((name: string) => name === "tasks"),
-      },
-    } as any;
+    const runtime = createFakeRuntime({
+      hasDocumentsForTable: vi.fn((name: string) => name === "tasks"),
+    });
 
-    await attachPlatformStorage({
-      runtime,
-      platform: {
-        openStorage: vi.fn(async () => storage),
-      } as any,
-      name: "test",
-      prefetch: {
-        identityKey: null,
-        tables: { tasks: [{ _id: "task-1", _creationTime: 1 }] },
-        metadata: {
-          tasks: { collectionSeq: 1, documents: [{ docId: "task-1", seq: 1 }] },
-        },
-      },
-    });
+    await attach(runtime, fakePlatform(storage), PREFETCH);
 
     expect(runtime.db.hydrate).toHaveBeenCalledWith();
     expect(runtime.ingestPrefetchUngated).not.toHaveBeenCalled();
   });
 
   it("hydrates all tables eagerly at startup, including for sql storage adapters", async () => {
-    const storage = createStorage({}, "sql");
-    const runtime = {
-      setStorage: vi.fn(),
-      crypto: {} as never,
-      getIdentityKey: vi.fn(() => null),
-      ingestPrefetchUngated: vi.fn(async () => undefined),
-      resumePersistedState: vi.fn(async () => undefined),
-      db: {
-        setReadBackendForTests: vi.fn(),
-        setStorage: vi.fn(),
-        hydrate: vi.fn(async () => undefined),
-        hasDocumentsForTable: vi.fn(() => false),
-      },
-    } as any;
+    const runtime = createFakeRuntime();
 
-    await attachPlatformStorage({
-      runtime,
-      platform: {
-        openStorage: vi.fn(async () => storage),
-      } as any,
-      name: "test",
-    });
+    await attach(runtime, fakePlatform(createStorage({}, "sql")));
 
     expect(runtime.db.hydrate).toHaveBeenCalledWith();
   });

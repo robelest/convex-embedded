@@ -1,4 +1,10 @@
 import { engine } from "@resolve/client/engine";
+import type {
+  EmbeddedClientLike,
+  EngineConfig,
+  EngineInstance,
+  TableConfig,
+} from "@resolve/client/engine";
 import {
   define,
   prose,
@@ -6,9 +12,59 @@ import {
 } from "@resolve/server/schema";
 import type { Definition } from "@resolve/server/schema";
 import { canonicalizeMappedCreateTable } from "@resolve/shared/canonicalize";
+import { flushMicrotasks, withFakeTimers } from "@tests/helpers/time";
 import { describe, it, expect, beforeEach, afterEach } from "@tests/testkit";
+import type { ConvexClient } from "convex/browser";
+import { getFunctionName } from "convex/server";
 import { v } from "convex/values";
-import { vi } from "vitest";
+
+// ---------------------------------------------------------------------------
+// Mock client / embedded types
+// ---------------------------------------------------------------------------
+
+type Args = Record<string, unknown>;
+type Doc = Record<string, unknown>;
+type PendingRow = Record<string, unknown>;
+
+type QueryMock = ReturnType<
+  typeof vi.fn<(path: string, args?: Args) => Promise<unknown>>
+>;
+type MutationMock = ReturnType<
+  typeof vi.fn<(path: string, args: Args) => Promise<unknown>>
+>;
+
+interface MockSystemClient {
+  query: QueryMock;
+  mutation: MutationMock;
+}
+
+interface MockRemoteClient {
+  query: QueryMock;
+  mutation: MutationMock;
+  onUpdate: ReturnType<typeof vi.fn>;
+}
+
+/** Cast a system-path mock into the `ConvexClient` the engine expects. */
+function asConvexClient(
+  client: MockSystemClient | MockRemoteClient,
+): ConvexClient {
+  return client as unknown as ConvexClient;
+}
+
+/**
+ * The mock embedded client. Carries spies for the methods the engine drives;
+ * {@link createEngine} adapts it into the real {@link EmbeddedClientLike}.
+ */
+interface MockEmbedded {
+  client: ConvexClient;
+  ingestDocuments: ReturnType<typeof vi.fn>;
+  canonicalizeMappedCreate: ReturnType<typeof vi.fn>;
+  getDocumentsForTable: ReturnType<typeof vi.fn>;
+  hasLocalDocumentId?: ReturnType<typeof vi.fn>;
+  getStorageMetadata?: ReturnType<typeof vi.fn>;
+  getStorageBlob?: ReturnType<typeof vi.fn>;
+  registerUploadUrlSource?: ReturnType<typeof vi.fn>;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -41,12 +97,12 @@ function deferredPromise<T>() {
   return { promise, resolve, reject };
 }
 
-function createMockLocalClient(): any {
-  let pendingEntries: Array<Record<string, unknown>> = [];
+function createMockLocalClient(): MockSystemClient {
+  let pendingEntries: PendingRow[] = [];
   let nextPendingId = 1;
 
   return {
-    query: vi.fn().mockImplementation((path: string) => {
+    query: vi.fn((path: string): Promise<unknown> => {
       const routes: Record<string, unknown> = {
         "_system:idMapGetAll": [],
       };
@@ -55,7 +111,7 @@ function createMockLocalClient(): any {
       }
       return Promise.resolve(routes[path] ?? null);
     }),
-    mutation: vi.fn().mockImplementation((path: string, args: any) => {
+    mutation: vi.fn((path: string, args: Args): Promise<unknown> => {
       if (path === "_system:pendingPush") {
         const entry = {
           _id: `pending-doc-${nextPendingId++}`,
@@ -81,13 +137,15 @@ function createMockLocalClient(): any {
         entry.state = "processing";
         entry.owner = args.owner;
         entry.processingStartedAt = Date.now();
-        entry.leaseExpiresAt = Date.now() + (args.leaseMs ?? 30_000);
+        entry.leaseExpiresAt =
+          Date.now() + ((args.leaseMs as number) ?? 30_000);
         return Promise.resolve({ ...entry });
       }
       if (path === "_system:pendingRenewLease") {
         const entry = pendingEntries.find((current) => current._id === args.id);
         if (entry && entry.owner === args.owner) {
-          entry.leaseExpiresAt = Date.now() + (args.leaseMs ?? 30_000);
+          entry.leaseExpiresAt =
+            Date.now() + ((args.leaseMs as number) ?? 30_000);
           return Promise.resolve(true);
         }
         return Promise.resolve(false);
@@ -148,112 +206,114 @@ function createMockLocalClient(): any {
         return Promise.resolve([]);
       }
 
-      const routes: Record<string, unknown> = {};
-      return Promise.resolve(routes[path] ?? null);
+      return Promise.resolve(null);
     }),
   };
 }
 
-function createMockEmbedded(): any {
+interface MockEmbeddedBundle {
+  embedded: MockEmbedded;
+  localClient: MockSystemClient;
+  storageMetadata: Map<string, Doc>;
+  storageBlobs: Map<string, Blob>;
+  uploadUrlSources: Map<string, string>;
+}
+
+function createMockEmbedded(): MockEmbeddedBundle {
   const localClient = createMockLocalClient();
-  const storageMetadata = new Map<string, Record<string, unknown>>();
+  const storageMetadata = new Map<string, Doc>();
   const storageBlobs = new Map<string, Blob>();
   const uploadUrlSources = new Map<string, string>();
+  const embedded: MockEmbedded = {
+    client: asConvexClient(localClient),
+    ingestDocuments: vi.fn(async () => undefined),
+    canonicalizeMappedCreate: vi.fn(async () => undefined),
+    getDocumentsForTable: vi.fn(async () => []),
+    getStorageMetadata: vi.fn(async (storageId: string) => {
+      return storageMetadata.get(storageId) ?? null;
+    }),
+    getStorageBlob: vi.fn(async (storageId: string) => {
+      return storageBlobs.get(storageId) ?? null;
+    }),
+    registerUploadUrlSource: vi.fn((uploadUrl: string, refName: string) => {
+      uploadUrlSources.set(uploadUrl, refName);
+    }),
+  };
   return {
-    embedded: {
-      client: localClient as any,
-      ingestDocuments: vi.fn().mockResolvedValue(undefined),
-      canonicalizeMappedCreate: vi.fn().mockResolvedValue(undefined),
-      getDocumentsForTable: vi.fn().mockResolvedValue([]),
-      getStorageMetadata: vi
-        .fn()
-        .mockImplementation(async (storageId: string) => {
-          return storageMetadata.get(storageId) ?? null;
-        }),
-      getStorageBlob: vi.fn().mockImplementation(async (storageId: string) => {
-        return storageBlobs.get(storageId) ?? null;
-      }),
-      registerUploadUrlSource: vi.fn((uploadUrl: string, refName: string) => {
-        uploadUrlSources.set(uploadUrl, refName);
-      }),
-    } as any,
-    localClient, // keep reference for assertions
+    embedded,
+    localClient,
     storageMetadata,
     storageBlobs,
     uploadUrlSources,
   };
 }
 
-function createStatefulEmbedded(
-  initialDocs: Array<Record<string, unknown>>,
-): any {
+interface StatefulEmbeddedBundle {
+  embedded: MockEmbedded;
+  localClient: MockSystemClient;
+  getDocs: () => Doc[];
+}
+
+function createStatefulEmbedded(initialDocs: Doc[]): StatefulEmbeddedBundle {
   let docs = [...initialDocs];
-  const localClient = {
-    query: vi.fn().mockImplementation((path: string) => {
+  const localClient: MockSystemClient = {
+    query: vi.fn((path: string): Promise<unknown> => {
       const routes: Record<string, unknown> = {
         "_system:idMapGetAll": [],
         "_system:pendingGetAll": [],
       };
       return Promise.resolve(routes[path] ?? null);
     }),
-    mutation: vi
-      .fn()
-      .mockImplementation((path: string, args: Record<string, unknown>) => {
-        if (path === "_system:pendingPush") {
-          return Promise.resolve(`pending-${Math.random()}`);
-        }
-        if (path === "tasks:remove") {
-          docs = docs.filter((doc) => doc._id !== args.id);
-          return Promise.resolve(args.id);
-        }
-        if (path === "tasks:create") {
-          const created = {
-            _id: "local-created",
-            _creationTime: 2,
-            title: args.title,
-            body: args.body ?? "",
-          };
-          docs = [...docs, created];
-          return Promise.resolve(created._id);
-        }
-        return Promise.resolve(null);
-      }),
+    mutation: vi.fn((path: string, args: Args): Promise<unknown> => {
+      if (path === "_system:pendingPush") {
+        return Promise.resolve(`pending-${Math.random()}`);
+      }
+      if (path === "tasks:remove") {
+        docs = docs.filter((doc) => doc._id !== args.id);
+        return Promise.resolve(args.id);
+      }
+      if (path === "tasks:create") {
+        const created = {
+          _id: "local-created",
+          _creationTime: 2,
+          title: args.title,
+          body: args.body ?? "",
+        };
+        docs = [...docs, created];
+        return Promise.resolve(created._id);
+      }
+      return Promise.resolve(null);
+    }),
   };
 
-  const embedded: any = {
-    client: localClient as any,
-    ingestDocuments: vi
-      .fn()
-      .mockImplementation(
-        async (_table: string, nextDocs: Array<Record<string, unknown>>) => {
-          docs = [...nextDocs];
-        },
-      ),
-    canonicalizeMappedCreate: vi
-      .fn()
-      .mockImplementation(
-        async (input: {
-          localId: string;
-          remoteId: string;
-          tableName: string;
-          schemas: Record<string, Definition>;
-        }) => {
-          const schema = input.schemas[input.tableName];
-          if (!schema) {
-            return;
-          }
-          const canonical = canonicalizeMappedCreateTable({
-            docs,
-            schema,
-            localId: input.localId,
-            remoteId: input.remoteId,
-            rewriteOwnId: true,
-            tableName: input.tableName,
-          });
-          docs = canonical.documents;
-        },
-      ),
-    getDocumentsForTable: vi.fn().mockImplementation(async () => [...docs]),
+  const embedded: MockEmbedded = {
+    client: asConvexClient(localClient),
+    ingestDocuments: vi.fn(async (_table: string, nextDocs: Doc[]) => {
+      docs = [...nextDocs];
+    }),
+    canonicalizeMappedCreate: vi.fn(
+      async (input: {
+        localId: string;
+        remoteId: string;
+        tableName: string;
+        schemas: Record<string, Definition>;
+      }) => {
+        const schema = input.schemas[input.tableName];
+        if (!schema) {
+          return;
+        }
+        const canonical = canonicalizeMappedCreateTable({
+          docs,
+          schema,
+          localId: input.localId,
+          remoteId: input.remoteId,
+          rewriteOwnId: true,
+          tableName: input.tableName,
+        });
+        docs = canonical.documents;
+      },
+    ),
+    getDocumentsForTable: vi.fn(async () => [...docs]),
   };
 
   return {
@@ -263,21 +323,29 @@ function createStatefulEmbedded(
   };
 }
 
-function createMockRemoteClient(): any {
+function createMockRemoteClient(): MockRemoteClient {
   return {
-    query: vi.fn().mockResolvedValue([]),
-    mutation: vi.fn().mockResolvedValue(null),
-    onUpdate: vi.fn().mockReturnValue(vi.fn()), // returns unsubscribe fn
+    query: vi.fn(async () => []),
+    mutation: vi.fn(async () => null),
+    onUpdate: vi.fn(() => vi.fn()), // returns unsubscribe fn
   };
 }
 
-function createSharedPendingEmbeddedPair(): any {
-  let pendingEntries: Array<Record<string, unknown>> = [];
+interface SharedPendingPair {
+  embeddedA: MockEmbedded;
+  embeddedB: MockEmbedded;
+  localClientA: MockSystemClient;
+  localClientB: MockSystemClient;
+  getPendingEntries: () => PendingRow[];
+}
+
+function createSharedPendingEmbeddedPair(): SharedPendingPair {
+  let pendingEntries: PendingRow[] = [];
   let nextPendingId = 1;
 
-  function createLocalClient() {
+  function createLocalClient(): MockSystemClient {
     return {
-      query: vi.fn().mockImplementation((path: string, args?: any) => {
+      query: vi.fn((path: string, args?: Args): Promise<unknown> => {
         if (path === "_system:idMapGetAll") {
           return Promise.resolve([]);
         }
@@ -291,7 +359,7 @@ function createSharedPendingEmbeddedPair(): any {
         }
         return Promise.resolve(null);
       }),
-      mutation: vi.fn().mockImplementation((path: string, args: any) => {
+      mutation: vi.fn((path: string, args: Args): Promise<unknown> => {
         if (path === "_system:pendingPush") {
           const entry = {
             _id: `shared-pending-${nextPendingId++}`,
@@ -317,7 +385,8 @@ function createSharedPendingEmbeddedPair(): any {
           entry.state = "processing";
           entry.owner = args.owner;
           entry.processingStartedAt = Date.now();
-          entry.leaseExpiresAt = Date.now() + (args.leaseMs ?? 30_000);
+          entry.leaseExpiresAt =
+            Date.now() + ((args.leaseMs as number) ?? 30_000);
           return Promise.resolve({ ...entry });
         }
         if (path === "_system:pendingRenewLease") {
@@ -325,7 +394,8 @@ function createSharedPendingEmbeddedPair(): any {
             (current) => current._id === args.id,
           );
           if (entry && entry.owner === args.owner) {
-            entry.leaseExpiresAt = Date.now() + (args.leaseMs ?? 30_000);
+            entry.leaseExpiresAt =
+              Date.now() + ((args.leaseMs as number) ?? 30_000);
             return Promise.resolve(true);
           }
           return Promise.resolve(false);
@@ -383,47 +453,82 @@ function createSharedPendingEmbeddedPair(): any {
   const localClientA = createLocalClient();
   const localClientB = createLocalClient();
 
+  function sharedEmbedded(localClient: MockSystemClient): MockEmbedded {
+    return {
+      client: asConvexClient(localClient),
+      ingestDocuments: vi.fn(async () => undefined),
+      canonicalizeMappedCreate: vi.fn(async () => undefined),
+      getDocumentsForTable: vi.fn(async () => []),
+      getStorageMetadata: vi.fn(async () => null),
+      getStorageBlob: vi.fn(async () => null),
+      registerUploadUrlSource: vi.fn(),
+    };
+  }
+
   return {
-    embeddedA: {
-      client: localClientA,
-      ingestDocuments: vi.fn().mockResolvedValue(undefined),
-      getDocumentsForTable: vi.fn().mockResolvedValue([]),
-      getStorageMetadata: vi.fn().mockResolvedValue(null),
-      getStorageBlob: vi.fn().mockResolvedValue(null),
-      registerUploadUrlSource: vi.fn(),
-    },
-    embeddedB: {
-      client: localClientB,
-      ingestDocuments: vi.fn().mockResolvedValue(undefined),
-      getDocumentsForTable: vi.fn().mockResolvedValue([]),
-      getStorageMetadata: vi.fn().mockResolvedValue(null),
-      getStorageBlob: vi.fn().mockResolvedValue(null),
-      registerUploadUrlSource: vi.fn(),
-    },
+    embeddedA: sharedEmbedded(localClientA),
+    embeddedB: sharedEmbedded(localClientB),
     localClientA,
     localClientB,
     getPendingEntries: () => pendingEntries,
   };
 }
 
-function settle(ms = 50) {
-  return new Promise((r) => setTimeout(r, ms));
+/**
+ * Drain queued promise jobs plus the engine's `setTimeout(…, 0)` event-loop
+ * yields. Each iteration flushes microtasks then crosses one macrotask
+ * boundary, so chained `yieldToEventLoop()` hops settle deterministically
+ * without a fixed-duration sleep.
+ */
+async function settle(iterations = 12): Promise<void> {
+  for (let i = 0; i < iterations; i += 1) {
+    await flushMicrotasks(3);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  await flushMicrotasks(3);
+}
+
+function addEventListenerMock(): ReturnType<typeof vi.fn> {
+  return globalThis.addEventListener as unknown as ReturnType<typeof vi.fn>;
 }
 
 function getRegisteredHandler(eventName: string): () => void {
-  const addCalls = (globalThis.addEventListener as ReturnType<typeof vi.fn>)
-    .mock.calls;
-  const entry = addCalls.find((call: unknown[]) => call[0] === eventName);
+  const addCalls = addEventListenerMock().mock.calls as Array<
+    [string, () => void]
+  >;
+  const entry = addCalls.find((call) => call[0] === eventName);
   expect(entry).toBeDefined();
-  return entry![1] as () => void;
+  return entry![1];
 }
 
 function getRegisteredHandlers(eventName: string): Array<() => void> {
-  const addCalls = (globalThis.addEventListener as ReturnType<typeof vi.fn>)
-    .mock.calls;
+  const addCalls = addEventListenerMock().mock.calls as Array<
+    [string, () => void]
+  >;
   return addCalls
-    .filter((call: unknown[]) => call[0] === eventName)
-    .map((call: unknown[]) => call[1] as () => void);
+    .filter((call) => call[0] === eventName)
+    .map((call) => call[1]);
+}
+
+/** Resolve a mutation ref (string or `FunctionReference`) to its name. */
+function refName(ref: unknown): string {
+  return typeof ref === "string"
+    ? ref
+    : getFunctionName(ref as Parameters<typeof getFunctionName>[0]);
+}
+
+type SnapshotHandler = (response: unknown) => void;
+
+/** Extract the resolve-update callback passed to `remoteClient.onUpdate`. */
+function getSnapshotHandler(
+  remoteClient: MockRemoteClient,
+  callIndex = 0,
+): SnapshotHandler {
+  const call = remoteClient.onUpdate.mock.calls[callIndex] as
+    | [unknown, unknown, SnapshotHandler, ...unknown[]]
+    | undefined;
+  expect(call).toBeDefined();
+  return call![2];
 }
 
 /** Shorthand for a table config with a resolve ref. */
@@ -431,33 +536,44 @@ function tableConfig(
   resolve: string,
   _unusedLegacyListRef?: string,
   schema: Definition = createMockSchema(),
-) {
+): TableConfig {
   return { resolve, schema };
 }
 
-function createEngine(config: any) {
-  return engine.create(config as any);
+interface TestEngineConfig extends Omit<
+  EngineConfig,
+  "embedded" | "remoteClient"
+> {
+  embedded: MockEmbedded;
+  remoteClient: MockRemoteClient;
 }
+
+function createEngine(config: TestEngineConfig): EngineInstance {
+  const { embedded, remoteClient, ...rest } = config;
+  return engine.create({
+    ...rest,
+    embedded: embedded as unknown as EmbeddedClientLike,
+    remoteClient: asConvexClient(remoteClient),
+  });
+}
+
+type MutationHandler = (
+  path: string,
+  args: Args,
+) => Promise<unknown> | undefined;
 
 /**
  * Layers a custom mutation handler on top of the base `createMockLocalClient`
  * implementation. The `customHandler` is called first; if it returns
  * `undefined` (not `Promise.resolve(undefined)`!), the call falls through to
  * the original mock implementation which handles all `_system:*` paths.
- *
- * Usage:
- *   const { localClient } = createMockEmbedded();
- *   layerMutationMock(localClient, (path, args) => {
- *     if (path === "tasks:create") return Promise.resolve("local-1");
- *     return undefined; // fall through
- *   });
  */
 function layerMutationMock(
-  localClient: any,
-  customHandler: (path: string, args: any) => Promise<unknown> | undefined,
+  localClient: MockSystemClient,
+  customHandler: MutationHandler,
 ) {
   const baseMutation = localClient.mutation.getMockImplementation();
-  localClient.mutation.mockImplementation((path: string, args: any) => {
+  localClient.mutation.mockImplementation((path: string, args: Args) => {
     const custom = customHandler(path, args);
     if (custom !== undefined) return custom;
     return baseMutation ? baseMutation(path, args) : Promise.resolve(null);
@@ -473,7 +589,7 @@ describe("engine.create()", () => {
   let originalRemoveEventListener:
     | typeof globalThis.removeEventListener
     | undefined;
-  let originalNavigator: any;
+  let originalNavigator: Navigator | undefined;
   let originalFetch: typeof globalThis.fetch | undefined;
 
   beforeEach(() => {
@@ -493,10 +609,12 @@ describe("engine.create()", () => {
   });
 
   afterEach(() => {
-    originalAddEventListener &&
-      (globalThis.addEventListener = originalAddEventListener);
-    originalRemoveEventListener &&
-      (globalThis.removeEventListener = originalRemoveEventListener);
+    if (originalAddEventListener) {
+      globalThis.addEventListener = originalAddEventListener;
+    }
+    if (originalRemoveEventListener) {
+      globalThis.removeEventListener = originalRemoveEventListener;
+    }
     Object.defineProperty(globalThis, "navigator", {
       value: originalNavigator,
       writable: true,
@@ -709,44 +827,38 @@ describe("engine.create()", () => {
       ["projects", []],
       ["issues", []],
     ]);
-    const embedded: any = {
-      client: localClient,
-      ingestDocuments: vi
-        .fn()
-        .mockImplementation(
-          async (table: string, docs: Array<Record<string, unknown>>) => {
-            docsByTable.set(table, docs);
-          },
+    const embedded: MockEmbedded = {
+      client: asConvexClient(localClient),
+      ingestDocuments: vi.fn(async (table: string, docs: Doc[]) => {
+        docsByTable.set(table, docs);
+      }),
+      canonicalizeMappedCreate: vi.fn(async () => undefined),
+      getDocumentsForTable: vi.fn(
+        async (table: string) => docsByTable.get(table) ?? [],
+      ),
+      hasLocalDocumentId: vi.fn((id: string) =>
+        Array.from(docsByTable.values()).some((docs) =>
+          docs.some((doc) => doc._id === id),
         ),
-      canonicalizeMappedCreate: vi.fn().mockResolvedValue(undefined),
-      getDocumentsForTable: vi
-        .fn()
-        .mockImplementation(
-          async (table: string) => docsByTable.get(table) ?? [],
-        ),
-      hasLocalDocumentId: vi
-        .fn()
-        .mockImplementation((id: string) =>
-          Array.from(docsByTable.values()).some((docs) =>
-            docs.some((doc) => doc._id === id),
-          ),
-        ),
+      ),
     };
-    const remoteClient: any = {
-      query: vi.fn().mockImplementation(async (ref: string, args: any) => {
+    const remoteClient: MockRemoteClient = {
+      query: vi.fn(async (ref: string, args?: Args) => {
         if (ref === "projects.resolve") {
           return {
             mode: "full",
             collectionSeq: 0,
-            documents: (args.docIds ?? []).map((docId: string) => ({
-              docId,
-              seq: 0,
-              document: {
-                _id: docId,
-                _creationTime: 1,
-                name: "Project",
-              },
-            })),
+            documents: ((args?.docIds as string[]) ?? []).map(
+              (docId: string) => ({
+                docId,
+                seq: 0,
+                document: {
+                  _id: docId,
+                  _creationTime: 1,
+                  name: "Project",
+                },
+              }),
+            ),
             isDone: true,
             continueCursor: null,
           };
@@ -826,7 +938,7 @@ describe("engine.create()", () => {
 
   it("transitions to error when resolve fails after retries", async () => {
     const { embedded } = createMockEmbedded();
-    const remoteClient: any = {
+    const remoteClient: MockRemoteClient = {
       query: vi.fn().mockRejectedValue(new Error("network error")),
       mutation: vi.fn().mockResolvedValue(null),
       onUpdate: vi.fn().mockReturnValue(vi.fn()),
@@ -886,7 +998,7 @@ describe("engine.create()", () => {
   it("stop() unsubscribes from remote subscriptions", async () => {
     const unsubscribe = vi.fn();
     const { embedded } = createMockEmbedded();
-    const remoteClient: any = {
+    const remoteClient: MockRemoteClient = {
       ...createMockRemoteClient(),
       onUpdate: vi.fn().mockReturnValue(unsubscribe),
     };
@@ -1049,7 +1161,7 @@ describe("engine.create()", () => {
   it("mutation() does not restart remote subscriptions while replaying online", async () => {
     const unsubscribe = vi.fn();
     const { embedded } = createMockEmbedded();
-    const remoteClient: any = {
+    const remoteClient: MockRemoteClient = {
       ...createMockRemoteClient(),
       onUpdate: vi.fn().mockReturnValue(unsubscribe),
     };
@@ -1085,29 +1197,13 @@ describe("engine.create()", () => {
       { _id: "task-1", _creationTime: 1, title: "Keep", body: "" },
       { _id: "task-2", _creationTime: 2, title: "Delete me", body: "" },
     ]);
-    let onUpdateHandler:
-      | ((docs: Array<Record<string, unknown>>) => void)
-      | null = null;
-    const remoteClient: any = {
+    // The remote delete stays in flight for the whole test so the pending
+    // delete must keep projecting over the stale snapshots.
+    const remoteDelete = deferredPromise<string>();
+    const remoteClient: MockRemoteClient = {
       ...createMockRemoteClient(),
-      mutation: vi
-        .fn()
-        .mockImplementation(
-          () =>
-            new Promise((resolve) => setTimeout(() => resolve("task-2"), 50)),
-        ),
-      onUpdate: vi
-        .fn()
-        .mockImplementation(
-          (
-            _query: unknown,
-            _args: unknown,
-            onUpdate: (docs: Array<Record<string, unknown>>) => void,
-          ) => {
-            onUpdateHandler = onUpdate;
-            return vi.fn();
-          },
-        ),
+      mutation: vi.fn(() => remoteDelete.promise),
+      onUpdate: vi.fn(() => vi.fn()),
     };
 
     const m = createEngine({
@@ -1119,72 +1215,62 @@ describe("engine.create()", () => {
     m.start();
     await settle();
 
+    const onUpdateHandler = getSnapshotHandler(remoteClient);
+
     await m.mutation("tasks:remove", { id: "task-2" });
-    expect(
-      getDocs().some((doc: Record<string, unknown>) => doc._id === "task-2"),
-    ).toBe(false);
+    expect(getDocs().some((doc) => doc._id === "task-2")).toBe(false);
 
-    if (onUpdateHandler) {
-      const handler = onUpdateHandler as (response: unknown) => void;
-      handler({
-        mode: "full",
-        collectionSeq: 1,
-        protocolVersion: 1,
-        documents: [
-          {
-            docId: "task-1",
-            seq: 1,
-            document: {
-              _id: "task-1",
-              _creationTime: 1,
-              title: "Keep",
-              body: "",
-            },
+    onUpdateHandler({
+      mode: "full",
+      collectionSeq: 1,
+      protocolVersion: 1,
+      documents: [
+        {
+          docId: "task-1",
+          seq: 1,
+          document: {
+            _id: "task-1",
+            _creationTime: 1,
+            title: "Keep",
+            body: "",
           },
-          {
-            docId: "task-2",
-            seq: 2,
-            document: {
-              _id: "task-2",
-              _creationTime: 2,
-              title: "Delete me",
-              body: "",
-            },
+        },
+        {
+          docId: "task-2",
+          seq: 2,
+          document: {
+            _id: "task-2",
+            _creationTime: 2,
+            title: "Delete me",
+            body: "",
           },
-        ],
-      });
-    }
-    await settle(20);
+        },
+      ],
+    });
+    await settle();
 
-    expect(
-      getDocs().some((doc: Record<string, unknown>) => doc._id === "task-2"),
-    ).toBe(false);
+    expect(getDocs().some((doc) => doc._id === "task-2")).toBe(false);
 
-    if (onUpdateHandler) {
-      const handler = onUpdateHandler as (response: unknown) => void;
-      handler({
-        mode: "full",
-        collectionSeq: 2,
-        protocolVersion: 1,
-        documents: [
-          {
-            docId: "task-1",
-            seq: 1,
-            document: {
-              _id: "task-1",
-              _creationTime: 1,
-              title: "Keep",
-              body: "",
-            },
+    onUpdateHandler({
+      mode: "full",
+      collectionSeq: 2,
+      protocolVersion: 1,
+      documents: [
+        {
+          docId: "task-1",
+          seq: 1,
+          document: {
+            _id: "task-1",
+            _creationTime: 1,
+            title: "Keep",
+            body: "",
           },
-        ],
-      });
-    }
-    await settle(80);
+        },
+      ],
+    });
+    await settle();
 
-    expect(getDocs().map((doc: Record<string, unknown>) => doc._id)).toEqual([
-      "task-1",
-    ]);
+    expect(getDocs().map((doc) => doc._id)).toEqual(["task-1"]);
     m.stop();
   });
 
@@ -1211,7 +1297,7 @@ describe("engine.create()", () => {
     await m.mutation("tasks:remove", { id: "task-1" });
 
     const pendingPushCalls = localClient.mutation.mock.calls.filter(
-      ([path]: [string]) => path === "_system:pendingPush",
+      ([path]) => path === "_system:pendingPush",
     );
 
     expect(pendingPushCalls).toHaveLength(1);
@@ -1345,7 +1431,6 @@ describe("engine.create()", () => {
     const { embedded } = createMockEmbedded();
     const remoteClient = createMockRemoteClient();
     const proseSchema = define({
-      version: 1,
       shape: {
         title: registerField(v.string()),
         body: prose(),
@@ -1543,7 +1628,7 @@ describe("engine.create()", () => {
   it("reloadIdentity() rehydrates scoped state before resolving", async () => {
     let activeIdentityKey: string | null = "user:a";
     let pendingEntries: Array<Record<string, unknown>> = [];
-    const localClient = {
+    const localClient: MockSystemClient = {
       query: vi
         .fn()
         .mockImplementation(
@@ -1589,7 +1674,7 @@ describe("engine.create()", () => {
             return Promise.resolve(null);
           },
         ),
-      mutation: vi.fn().mockImplementation((path: string, args: any) => {
+      mutation: vi.fn().mockImplementation((path: string, args: Args) => {
         if (path === "_system:pendingClaimNext") {
           const entry = pendingEntries.find(
             (current) =>
@@ -1607,7 +1692,8 @@ describe("engine.create()", () => {
           entry.state = "processing";
           entry.owner = args.owner;
           entry.processingStartedAt = Date.now();
-          entry.leaseExpiresAt = Date.now() + (args.leaseMs ?? 30_000);
+          entry.leaseExpiresAt =
+            Date.now() + ((args.leaseMs as number) ?? 30_000);
           return Promise.resolve({ ...entry });
         }
         if (path === "_system:pendingRenewLease") {
@@ -1615,7 +1701,8 @@ describe("engine.create()", () => {
             (current) => current._id === args.id,
           );
           if (entry && entry.owner === args.owner) {
-            entry.leaseExpiresAt = Date.now() + (args.leaseMs ?? 30_000);
+            entry.leaseExpiresAt =
+              Date.now() + ((args.leaseMs as number) ?? 30_000);
             return Promise.resolve(true);
           }
           return Promise.resolve(false);
@@ -1653,10 +1740,11 @@ describe("engine.create()", () => {
       }),
     };
 
-    const embedded: any = {
-      client: localClient,
-      ingestDocuments: vi.fn().mockResolvedValue(undefined),
-      getDocumentsForTable: vi.fn().mockResolvedValue([]),
+    const embedded: MockEmbedded = {
+      client: asConvexClient(localClient),
+      ingestDocuments: vi.fn(async () => undefined),
+      canonicalizeMappedCreate: vi.fn(async () => undefined),
+      getDocumentsForTable: vi.fn(async () => []),
     };
     const remoteClient = createMockRemoteClient();
 
@@ -1763,10 +1851,12 @@ describe("engine.create()", () => {
     await m.resolveNow();
 
     expect(remoteClient.query).toHaveBeenCalledTimes(1);
-    const [, resolveArgs] = remoteClient.query.mock.calls[0]!;
+    const resolveArgs = remoteClient.query.mock.calls[0]![1] as {
+      documents: Array<{ docId: string; vector: unknown }>;
+    };
     expect(resolveArgs.documents).toHaveLength(1);
-    expect(resolveArgs.documents[0].docId).toBe("doc-1");
-    expect(resolveArgs.documents[0].vector).toBeInstanceOf(ArrayBuffer);
+    expect(resolveArgs.documents[0]!.docId).toBe("doc-1");
+    expect(resolveArgs.documents[0]!.vector).toBeInstanceOf(ArrayBuffer);
 
     m.stop();
   });
@@ -1830,7 +1920,7 @@ describe("engine.create()", () => {
 
     // Get the onUpdate callback that was registered.
     expect(remoteClient.onUpdate).toHaveBeenCalledTimes(1);
-    const onUpdateCallback = remoteClient.onUpdate.mock.calls[0]![2];
+    const onUpdateCallback = getSnapshotHandler(remoteClient);
 
     // Simulate a remote resolve-endpoint update. The subscription target is
     // the resolve query; the handler receives ResolveResponse-shaped data
@@ -1855,28 +1945,28 @@ describe("engine.create()", () => {
       ],
     });
 
-    await settle();
-
     // ingestDocuments should have been called with the omitted fields removed.
-    expect(embedded.ingestDocuments).toHaveBeenCalledWith(
-      "tasks",
-      [
-        expect.objectContaining({
-          _id: "doc-1",
-          _creationTime: 100,
-          title: "Task",
-          body: "Body",
-        }),
-      ],
-      undefined,
+    await vi.waitFor(() =>
+      expect(embedded.ingestDocuments).toHaveBeenCalledWith(
+        "tasks",
+        [
+          expect.objectContaining({
+            _id: "doc-1",
+            _creationTime: 100,
+            title: "Task",
+            body: "Body",
+          }),
+        ],
+        undefined,
+      ),
     );
 
     // Verify the omitted fields are NOT present.
     const ingestCall = embedded.ingestDocuments.mock.calls.find(
-      (call: any[]) => call[0] === "tasks",
+      (call) => call[0] === "tasks",
     );
     expect(ingestCall).toBeDefined();
-    const ingestedDoc = ingestCall![1][0];
+    const ingestedDoc = (ingestCall![1] as Doc[])[0];
     expect(ingestedDoc).not.toHaveProperty("secretField");
     expect(ingestedDoc).not.toHaveProperty("internalData");
 
@@ -1884,36 +1974,29 @@ describe("engine.create()", () => {
   });
 
   it("buffers child-table snapshots until parent-table docs are available locally", async () => {
-    vi.useFakeTimers();
-    try {
+    await withFakeTimers(async () => {
       const docsByTable = new Map<string, Array<Record<string, unknown>>>([
         ["projects", []],
         ["issues", []],
       ]);
       const localClient = createMockLocalClient();
       const ingestOrder: Array<string> = [];
-      const embedded = {
-        client: localClient as any,
-        ingestDocuments: vi
-          .fn()
-          .mockImplementation(
-            async (table: string, docs: Array<Record<string, unknown>>) => {
-              ingestOrder.push(table);
-              docsByTable.set(table, [...docs]);
-            },
-          ),
-        canonicalizeMappedCreate: vi.fn().mockResolvedValue(undefined),
-        getDocumentsForTable: vi
-          .fn()
-          .mockImplementation(async (table: string) => {
-            return [...(docsByTable.get(table) ?? [])];
-          }),
+      const embedded: MockEmbedded = {
+        client: asConvexClient(localClient),
+        ingestDocuments: vi.fn(async (table: string, docs: Doc[]) => {
+          ingestOrder.push(table);
+          docsByTable.set(table, [...docs]);
+        }),
+        canonicalizeMappedCreate: vi.fn(async () => undefined),
+        getDocumentsForTable: vi.fn(async (table: string) => {
+          return [...(docsByTable.get(table) ?? [])];
+        }),
         hasLocalDocumentId: vi.fn((id: string) =>
           [...docsByTable.values()].some((docs) =>
             docs.some((doc) => doc._id === id),
           ),
         ),
-      } as any;
+      };
 
       const projectSchema = createMockSchema({
         shape: { name: "string" },
@@ -1930,20 +2013,15 @@ describe("engine.create()", () => {
         }),
       });
 
-      const updateHandlers = new Map<
-        string,
-        (docs: Array<Record<string, unknown>>) => void
-      >();
-      const remoteClient = {
+      const updateHandlers = new Map<string, SnapshotHandler>();
+      const remoteClient: MockRemoteClient = {
         ...createMockRemoteClient(),
-        onUpdate: vi
-          .fn()
-          .mockImplementation(
-            (query: string, _args: unknown, onUpdate: any) => {
-              updateHandlers.set(query, onUpdate);
-              return vi.fn();
-            },
-          ),
+        onUpdate: vi.fn(
+          (query: string, _args: unknown, onUpdate: SnapshotHandler) => {
+            updateHandlers.set(query, onUpdate);
+            return vi.fn();
+          },
+        ),
       };
 
       const m = createEngine({
@@ -1978,7 +2056,7 @@ describe("engine.create()", () => {
             },
           },
         ],
-      } as any);
+      });
       await vi.advanceTimersByTimeAsync(1);
 
       expect(embedded.ingestDocuments).not.toHaveBeenCalledWith(
@@ -2001,20 +2079,17 @@ describe("engine.create()", () => {
             },
           },
         ],
-      } as any);
+      });
       await vi.advanceTimersByTimeAsync(50);
 
       expect(ingestOrder).toEqual(["projects"]);
       expect(docsByTable.get("issues") ?? []).toEqual([]);
       m.stop();
-    } finally {
-      vi.useRealTimers();
-    }
+    });
   });
 
   it("stops retrying buffered snapshot ingests after the retry budget is exhausted", async () => {
-    vi.useFakeTimers();
-    try {
+    await withFakeTimers(async () => {
       const { embedded } = createMockEmbedded();
       embedded.ingestDocuments.mockRejectedValue(new Error("broken snapshot"));
 
@@ -2063,9 +2138,7 @@ describe("engine.create()", () => {
         callCountAfterRetries,
       );
       m.stop();
-    } finally {
-      vi.useRealTimers();
-    }
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -2159,7 +2232,7 @@ describe("engine.create()", () => {
         },
       ];
 
-      const localClient = {
+      const localClient: MockSystemClient = {
         query: vi.fn().mockImplementation((path: string) => {
           if (path === "_system:idMapGetAll") {
             return Promise.resolve([...idMappings]);
@@ -2169,7 +2242,7 @@ describe("engine.create()", () => {
           }
           return Promise.resolve(null);
         }),
-        mutation: vi.fn().mockImplementation((path: string, args: any) => {
+        mutation: vi.fn().mockImplementation((path: string, args: Args) => {
           if (path === "_system:pendingClaimNext") {
             const entry = pendingEntries[0];
             if (!entry) {
@@ -2177,7 +2250,8 @@ describe("engine.create()", () => {
             }
             entry.state = "processing";
             entry.owner = args.owner;
-            entry.leaseExpiresAt = Date.now() + (args.leaseMs ?? 30_000);
+            entry.leaseExpiresAt =
+              Date.now() + ((args.leaseMs as number) ?? 30_000);
             return Promise.resolve({ ...entry });
           }
           if (path === "_system:pendingRemove") {
@@ -2196,13 +2270,13 @@ describe("engine.create()", () => {
         }),
       };
 
-      const embedded = {
-        client: localClient as any,
-        ingestDocuments: vi.fn().mockResolvedValue(undefined),
-        canonicalizeMappedCreate: vi.fn().mockResolvedValue(undefined),
-        getDocumentsForTable: vi.fn().mockResolvedValue([]),
+      const embedded: MockEmbedded = {
+        client: asConvexClient(localClient),
+        ingestDocuments: vi.fn(async () => undefined),
+        canonicalizeMappedCreate: vi.fn(async () => undefined),
+        getDocumentsForTable: vi.fn(async () => []),
         hasLocalDocumentId: vi.fn((id: string) => id === "remote-id-99"),
-      } as any;
+      };
 
       const remoteClient = createMockRemoteClient();
 
@@ -2235,7 +2309,7 @@ describe("engine.create()", () => {
       }> = [];
       let nextPendingId = 1;
 
-      const localClient = {
+      const localClient: MockSystemClient = {
         query: vi.fn().mockImplementation((path: string) => {
           if (path === "_system:idMapGetAll") {
             return Promise.resolve([...idMappings]);
@@ -2245,7 +2319,7 @@ describe("engine.create()", () => {
           }
           return Promise.resolve(null);
         }),
-        mutation: vi.fn().mockImplementation((path: string, args: any) => {
+        mutation: vi.fn().mockImplementation((path: string, args: Args) => {
           if (path === "comments:create") {
             return Promise.resolve("local-comment-1");
           }
@@ -2277,7 +2351,8 @@ describe("engine.create()", () => {
             entry.state = "processing";
             entry.owner = args.owner;
             entry.processingStartedAt = Date.now();
-            entry.leaseExpiresAt = Date.now() + (args.leaseMs ?? 30_000);
+            entry.leaseExpiresAt =
+              Date.now() + ((args.leaseMs as number) ?? 30_000);
             return Promise.resolve({ ...entry });
           }
           if (path === "_system:pendingRemove") {
@@ -2291,7 +2366,8 @@ describe("engine.create()", () => {
               (current) => current._id === args.id,
             );
             if (entry && entry.owner === args.owner) {
-              entry.leaseExpiresAt = Date.now() + (args.leaseMs ?? 30_000);
+              entry.leaseExpiresAt =
+                Date.now() + ((args.leaseMs as number) ?? 30_000);
               return Promise.resolve(true);
             }
             return Promise.resolve(false);
@@ -2300,9 +2376,9 @@ describe("engine.create()", () => {
             idMappings = idMappings
               .filter((entry) => entry.localId !== args.localId)
               .concat({
-                localId: args.localId,
-                remoteId: args.remoteId,
-                table: args.table,
+                localId: args.localId as string,
+                remoteId: args.remoteId as string,
+                table: args.table as string,
               });
             return Promise.resolve(null);
           }
@@ -2318,13 +2394,13 @@ describe("engine.create()", () => {
 
       const offlineConnectivity = { isOnline: () => false };
       const onlineConnectivity = { isOnline: () => true };
-      const embedded = {
-        client: localClient as any,
-        ingestDocuments: vi.fn().mockResolvedValue(undefined),
-        canonicalizeMappedCreate: vi.fn().mockResolvedValue(undefined),
-        getDocumentsForTable: vi.fn().mockResolvedValue([]),
+      const embedded: MockEmbedded = {
+        client: asConvexClient(localClient),
+        ingestDocuments: vi.fn(async () => undefined),
+        canonicalizeMappedCreate: vi.fn(async () => undefined),
+        getDocumentsForTable: vi.fn(async () => []),
         hasLocalDocumentId: vi.fn((id: string) => id === "local-comment-1"),
-      } as any;
+      };
 
       const remoteClient = createMockRemoteClient();
       remoteClient.mutation.mockResolvedValue("remote-comment-1");
@@ -2411,7 +2487,7 @@ describe("engine.create()", () => {
       );
 
       const baseMutation = localClient.mutation.getMockImplementation();
-      localClient.mutation.mockImplementation((path: string, args: any) => {
+      localClient.mutation.mockImplementation((path: string, args: Args) => {
         if (path === "tasks:create") {
           return Promise.resolve("local-uuid-1");
         }
@@ -2681,7 +2757,7 @@ describe("engine.create()", () => {
         };
         return Promise.resolve(routes[path] ?? null);
       });
-      localClient.mutation.mockImplementation((path: string, args: any) => {
+      localClient.mutation.mockImplementation((path: string, args: Args) => {
         if (path === "_system:pendingClaimNext") {
           if (args.owner === "processor_lease_loss") {
             return Promise.resolve(null);
@@ -2694,7 +2770,7 @@ describe("engine.create()", () => {
             table: "tasks",
             state: "processing",
             owner: args.owner,
-            leaseExpiresAt: Date.now() + (args.leaseMs ?? 30_000),
+            leaseExpiresAt: Date.now() + ((args.leaseMs as number) ?? 30_000),
           });
         }
         if (path === "_system:pendingRenewLease") {
@@ -2721,8 +2797,7 @@ describe("engine.create()", () => {
     });
 
     it("keeps renewing the lease while a remote mutation is in flight", async () => {
-      vi.useFakeTimers();
-      try {
+      await withFakeTimers(async () => {
         const { embedded, localClient } = createMockEmbedded();
         layerMutationMock(localClient, (path) => {
           if (path === "_system:pendingRenewLease") {
@@ -2759,13 +2834,11 @@ describe("engine.create()", () => {
         await mutationPromise;
 
         const renewCalls = localClient.mutation.mock.calls.filter(
-          (call: unknown[]) => call[0] === "_system:pendingRenewLease",
+          (call) => call[0] === "_system:pendingRenewLease",
         );
         expect(renewCalls.length).toBeGreaterThanOrEqual(2);
         m.stop();
-      } finally {
-        vi.useRealTimers();
-      }
+      });
     });
 
     it("drops a hydrated create entry only when the canonical remote doc is already present", async () => {
@@ -2796,7 +2869,7 @@ describe("engine.create()", () => {
       );
       {
         let pendingClaimed = false;
-        localClient.mutation.mockImplementation((path: string, args: any) => {
+        localClient.mutation.mockImplementation((path: string, args: Args) => {
           if (path === "_system:pendingClaimNext" && !pendingClaimed) {
             pendingClaimed = true;
             return Promise.resolve({
@@ -2808,7 +2881,7 @@ describe("engine.create()", () => {
               hydrated: true,
               state: "processing",
               owner: args.owner,
-              leaseExpiresAt: Date.now() + (args.leaseMs ?? 30_000),
+              leaseExpiresAt: Date.now() + ((args.leaseMs as number) ?? 30_000),
               identityKey: null,
             });
           }
@@ -3018,9 +3091,8 @@ describe("engine.create()", () => {
       );
 
       const remoteClient = createMockRemoteClient();
-      remoteClient.mutation.mockImplementation((ref: any, args: any) => {
-        const name =
-          typeof ref === "string" ? ref : ref[Symbol.for("functionName")];
+      remoteClient.mutation.mockImplementation((ref: unknown, args: Args) => {
+        const name = refName(ref);
         if (name === "files:generateUploadUrl") {
           return Promise.resolve("https://uploads.example/upload");
         }
@@ -3104,7 +3176,7 @@ describe("engine.create()", () => {
       const { embedded, localClient, storageMetadata, storageBlobs } =
         createMockEmbedded();
       const originalMutation = localClient.mutation.getMockImplementation();
-      localClient.mutation.mockImplementation((path: string, args: any) => {
+      localClient.mutation.mockImplementation((path: string, args: Args) => {
         if (path === "files:generateUploadUrl") {
           return Promise.resolve(
             "http://convex-embedded.local/__convex_embedded/upload/token-1",
@@ -3130,9 +3202,8 @@ describe("engine.create()", () => {
       );
 
       const remoteClient = createMockRemoteClient();
-      remoteClient.mutation.mockImplementation((ref: any, args: any) => {
-        const name =
-          typeof ref === "string" ? ref : ref[Symbol.for("functionName")];
+      remoteClient.mutation.mockImplementation((ref: unknown, args: Args) => {
+        const name = refName(ref);
         if (name === "files:generateUploadUrl") {
           return Promise.resolve("https://uploads.example/upload");
         }
@@ -3259,7 +3330,7 @@ describe("engine.create()", () => {
 
       const { embeddedA, getPendingEntries } =
         createSharedPendingEmbeddedPair();
-      const remoteClientA: any = {
+      const remoteClientA: MockRemoteClient = {
         ...createMockRemoteClient(),
         mutation: vi.fn().mockRejectedValue(new Error("boom")),
       };
@@ -3308,7 +3379,7 @@ describe("engine.create()", () => {
 
         const { embeddedA, embeddedB, getPendingEntries } =
           createSharedPendingEmbeddedPair();
-        const remoteClientA: any = {
+        const remoteClientA: MockRemoteClient = {
           ...createMockRemoteClient(),
           mutation: vi.fn(() => new Promise(() => {})),
         };
@@ -3366,7 +3437,7 @@ describe("engine.create()", () => {
     it("coalesces duplicate online events into a single active remote cycle", async () => {
       let resolveQuery!: (value: unknown[]) => void;
       const { embedded } = createMockEmbedded();
-      const remoteClient: any = {
+      const remoteClient: MockRemoteClient = {
         ...createMockRemoteClient(),
         query: vi.fn(
           () =>
@@ -3420,7 +3491,7 @@ describe("engine.create()", () => {
         return undefined;
       });
 
-      const remoteClient: any = {
+      const remoteClient: MockRemoteClient = {
         ...createMockRemoteClient(),
         mutation: vi.fn().mockRejectedValue(new Error("network failure")),
       };
@@ -3454,7 +3525,7 @@ describe("engine.create()", () => {
 
     it("drops remove replays that were already applied remotely", async () => {
       const { embedded } = createMockEmbedded();
-      const remoteClient: any = {
+      const remoteClient: MockRemoteClient = {
         ...createMockRemoteClient(),
         mutation: vi
           .fn()
@@ -3519,7 +3590,7 @@ describe("engine.create()", () => {
         return undefined;
       });
 
-      const remoteClient: any = {
+      const remoteClient: MockRemoteClient = {
         ...createMockRemoteClient(),
         mutation: vi
           .fn()
@@ -3592,7 +3663,7 @@ describe("engine.create()", () => {
     it("stops remote subscriptions on offline event", async () => {
       const unsubscribe = vi.fn();
       const { embedded } = createMockEmbedded();
-      const remoteClient: any = {
+      const remoteClient: MockRemoteClient = {
         ...createMockRemoteClient(),
         onUpdate: vi.fn().mockReturnValue(unsubscribe),
       };

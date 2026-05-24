@@ -1,10 +1,12 @@
 import { BrowserWriteBroadcast } from "@embedded/browser/write";
-import { describe, it, expect, beforeEach, afterEach } from "@tests/testkit";
-import { vi } from "vitest";
-
-// ---------------------------------------------------------------------------
-// Mock BroadcastChannel
-// ---------------------------------------------------------------------------
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "@tests/testkit";
 
 class MockBroadcastChannel {
   static instances: MockBroadcastChannel[] = [];
@@ -18,20 +20,15 @@ class MockBroadcastChannel {
     MockBroadcastChannel.instances.push(this);
   }
 
-  postMessage(data: any): void {
-    // Closed channels are silent
-    this._closed ||
-      MockBroadcastChannel.instances
-        .filter(
-          (inst) =>
-            inst !== this &&
-            inst.name === this.name &&
-            !inst._closed &&
-            inst.onmessage,
-        )
-        .forEach((inst) =>
-          inst.onmessage!(new MessageEvent("message", { data })),
-        );
+  postMessage(data: unknown): void {
+    if (this._closed) return;
+
+    for (const instance of MockBroadcastChannel.instances.filter(
+      (current) =>
+        current !== this && current.name === this.name && !current._closed,
+    )) {
+      instance.onmessage?.(new MessageEvent("message", { data }));
+    }
   }
 
   close(): void {
@@ -43,10 +40,6 @@ class MockBroadcastChannel {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Setup / teardown
-// ---------------------------------------------------------------------------
-
 beforeEach(() => {
   MockBroadcastChannel.reset();
   vi.stubGlobal("BroadcastChannel", MockBroadcastChannel);
@@ -57,196 +50,135 @@ afterEach(() => {
   MockBroadcastChannel.reset();
 });
 
-// ---------------------------------------------------------------------------
-// BrowserWriteBroadcast
-// ---------------------------------------------------------------------------
-
 describe("BrowserWriteBroadcast", () => {
-  // -----------------------------------------------------------------------
-  // onNotification
-  // -----------------------------------------------------------------------
-
   describe("onNotification", () => {
-    it("registers a callback", () => {
-      const fanout = new BrowserWriteBroadcast();
-      const cb = vi.fn();
+    it("returns an unsubscribe function", ({ track }) => {
+      const fanout = track(new BrowserWriteBroadcast());
+      const callback = vi.fn();
 
-      // Should not throw
-      const unsub = fanout.onNotification(cb);
-      expect(typeof unsub).toBe("function");
+      const unsubscribe = fanout.onNotification(callback);
 
-      fanout.close();
+      expect(typeof unsubscribe).toBe("function");
     });
   });
-
-  // -----------------------------------------------------------------------
-  // notify + onNotification (cross-tab behaviour)
-  // -----------------------------------------------------------------------
 
   describe("notify + onNotification (cross-tab)", () => {
-    it("callback does NOT fire for own notify (BroadcastChannel only fires in other contexts)", () => {
-      const fanout = new BrowserWriteBroadcast();
-      const cb = vi.fn();
-      fanout.onNotification(cb);
+    it("does not fire the callback for its own notify", ({ track }) => {
+      const fanout = track(new BrowserWriteBroadcast());
+      const callback = vi.fn();
+      fanout.onNotification(callback);
 
-      // notify() posts to BroadcastChannel, but BroadcastChannel does not
-      // fire onmessage on the same instance — only on other instances
       fanout.notify(new Set(["users"]));
 
-      expect(cb).not.toHaveBeenCalled();
-
-      fanout.close();
+      expect(callback).not.toHaveBeenCalled();
     });
 
-    it("callback fires when a different broadcast on the same channel notifies", () => {
-      const fanout1 = new BrowserWriteBroadcast("test-channel");
-      const fanout2 = new BrowserWriteBroadcast("test-channel");
+    it("fires when a different broadcast on the same channel notifies", ({
+      track,
+    }) => {
+      const fanout1 = track(new BrowserWriteBroadcast("test-channel"));
+      const fanout2 = track(new BrowserWriteBroadcast("test-channel"));
+      const callback = vi.fn<(tablesWritten: Set<string>) => void>();
+      fanout1.onNotification(callback);
 
-      const cb1 = vi.fn();
-      fanout1.onNotification(cb1);
-
-      // fanout2 writes → fanout1 should be notified
       fanout2.notify(new Set(["users", "posts"]));
 
-      expect(cb1).toHaveBeenCalledOnce();
-      const received = cb1.mock.calls[0][0] as Set<string>;
-      expect(received).toBeInstanceOf(Set);
-      expect(received.has("users")).toBe(true);
-      expect(received.has("posts")).toBe(true);
-
-      fanout1.close();
-      fanout2.close();
+      expect(callback).toHaveBeenCalledOnce();
+      const received = callback.mock.calls[0]?.[0];
+      expect(received).toEqual(new Set(["users", "posts"]));
     });
 
-    it("callback does NOT fire for a different channel name", () => {
-      const fanout1 = new BrowserWriteBroadcast("channel-a");
-      const fanout2 = new BrowserWriteBroadcast("channel-b");
-
-      const cb = vi.fn();
-      fanout1.onNotification(cb);
+    it("does not fire for a different channel name", ({ track }) => {
+      const fanout1 = track(new BrowserWriteBroadcast("channel-a"));
+      const fanout2 = track(new BrowserWriteBroadcast("channel-b"));
+      const callback = vi.fn();
+      fanout1.onNotification(callback);
 
       fanout2.notify(new Set(["users"]));
 
-      expect(cb).not.toHaveBeenCalled();
-
-      fanout1.close();
-      fanout2.close();
+      expect(callback).not.toHaveBeenCalled();
     });
   });
-
-  // -----------------------------------------------------------------------
-  // Unsubscribe
-  // -----------------------------------------------------------------------
 
   describe("unsubscribe", () => {
-    it("returned function removes the callback", () => {
-      const fanout1 = new BrowserWriteBroadcast("test-unsub");
-      const fanout2 = new BrowserWriteBroadcast("test-unsub");
+    it("removes the callback", ({ track }) => {
+      const fanout1 = track(new BrowserWriteBroadcast("test-unsub"));
+      const fanout2 = track(new BrowserWriteBroadcast("test-unsub"));
+      const callback = vi.fn();
+      const unsubscribe = fanout1.onNotification(callback);
 
-      const cb = vi.fn();
-      const unsub = fanout1.onNotification(cb);
-
-      // Remove callback
-      unsub();
-
-      // Notify from the other fanout
+      unsubscribe();
       fanout2.notify(new Set(["users"]));
 
-      expect(cb).not.toHaveBeenCalled();
-
-      fanout1.close();
-      fanout2.close();
+      expect(callback).not.toHaveBeenCalled();
     });
 
-    it("unsubscribing one callback does not affect others", () => {
-      const fanout1 = new BrowserWriteBroadcast("test-multi");
-      const fanout2 = new BrowserWriteBroadcast("test-multi");
+    it("does not affect other callbacks", ({ track }) => {
+      const fanout1 = track(new BrowserWriteBroadcast("test-multi"));
+      const fanout2 = track(new BrowserWriteBroadcast("test-multi"));
+      const callback1 = vi.fn();
+      const callback2 = vi.fn();
+      const unsubscribe1 = fanout1.onNotification(callback1);
+      fanout1.onNotification(callback2);
 
-      const cb1 = vi.fn();
-      const cb2 = vi.fn();
-
-      const unsub1 = fanout1.onNotification(cb1);
-      fanout1.onNotification(cb2);
-
-      unsub1();
-
+      unsubscribe1();
       fanout2.notify(new Set(["users"]));
 
-      expect(cb1).not.toHaveBeenCalled();
-      expect(cb2).toHaveBeenCalledOnce();
-
-      fanout1.close();
-      fanout2.close();
+      expect(callback1).not.toHaveBeenCalled();
+      expect(callback2).toHaveBeenCalledOnce();
     });
   });
 
-  // -----------------------------------------------------------------------
-  // Close
-  // -----------------------------------------------------------------------
-
   describe("close", () => {
-    it("clears callbacks so they no longer fire", () => {
-      const fanout1 = new BrowserWriteBroadcast("test-close");
-      const fanout2 = new BrowserWriteBroadcast("test-close");
-
-      const cb = vi.fn();
-      fanout1.onNotification(cb);
+    it("clears callbacks so they no longer fire", ({ track }) => {
+      const fanout1 = track(new BrowserWriteBroadcast("test-close"));
+      const fanout2 = track(new BrowserWriteBroadcast("test-close"));
+      const callback = vi.fn();
+      fanout1.onNotification(callback);
 
       fanout1.close();
-
-      // Even if the underlying BroadcastChannel somehow delivers, the
-      // callbacks set has been cleared
       fanout2.notify(new Set(["users"]));
 
-      expect(cb).not.toHaveBeenCalled();
-
-      fanout2.close();
+      expect(callback).not.toHaveBeenCalled();
     });
 
-    it("is idempotent — calling close() twice does not throw", () => {
-      const fanout = new BrowserWriteBroadcast();
+    it("is idempotent", ({ track }) => {
+      const fanout = track(new BrowserWriteBroadcast());
       fanout.close();
       expect(() => fanout.close()).not.toThrow();
     });
   });
 
-  // -----------------------------------------------------------------------
-  // Notify after close
-  // -----------------------------------------------------------------------
-
   describe("notify after close", () => {
-    it("is a no-op and does not throw", () => {
-      const fanout = new BrowserWriteBroadcast();
+    it("is a no-op and does not throw", ({ track }) => {
+      const fanout = track(new BrowserWriteBroadcast());
       fanout.close();
 
       expect(() => fanout.notify(new Set(["users"]))).not.toThrow();
     });
 
-    it("does not post to BroadcastChannel after close", () => {
-      const fanout1 = new BrowserWriteBroadcast("test-closed-notify");
-      const fanout2 = new BrowserWriteBroadcast("test-closed-notify");
-
-      const cb = vi.fn();
-      fanout2.onNotification(cb);
+    it("does not post to BroadcastChannel after close", ({ track }) => {
+      const fanout1 = track(new BrowserWriteBroadcast("test-closed-notify"));
+      const fanout2 = track(new BrowserWriteBroadcast("test-closed-notify"));
+      const callback = vi.fn();
+      fanout2.onNotification(callback);
 
       fanout1.close();
       fanout1.notify(new Set(["users"]));
 
-      expect(cb).not.toHaveBeenCalled();
-
-      fanout2.close();
+      expect(callback).not.toHaveBeenCalled();
     });
   });
 
   describe("localStorage fallback", () => {
-    it("writes unique payloads for repeated notifications", () => {
+    it("writes unique payloads for repeated notifications", ({ track }) => {
       vi.stubGlobal(
         "BroadcastChannel",
         undefined as unknown as typeof BroadcastChannel,
       );
       const localStorageMock = { setItem: vi.fn() };
       vi.stubGlobal("localStorage", localStorageMock);
-      const fanout = new BrowserWriteBroadcast("storage-fallback");
+      const fanout = track(new BrowserWriteBroadcast("storage-fallback"));
 
       fanout.notify(new Set(["users"]));
       fanout.notify(new Set(["users"]));
@@ -255,8 +187,6 @@ describe("BrowserWriteBroadcast", () => {
       expect(localStorageMock.setItem.mock.calls[0]?.[1]).not.toBe(
         localStorageMock.setItem.mock.calls[1]?.[1],
       );
-
-      fanout.close();
     });
   });
 });

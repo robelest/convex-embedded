@@ -1,5 +1,10 @@
 import { register as registerField, prose } from "@resolve/server/fields";
 import { bindTableRuntime } from "@resolve/server/runtime";
+import type {
+  ComponentBinding,
+  EmbeddedTableRuntimeHandle,
+  RuntimeHooks,
+} from "@resolve/server/schema";
 import {
   embeddedTable,
   localOnly,
@@ -7,9 +12,62 @@ import {
   _resetRegistry,
   REMOTE_META,
 } from "@resolve/server/table";
-import { describe, it, expect, vi, beforeEach } from "@tests/testkit";
+import { toArrayBuffer } from "@tests/helpers/convex";
+import { beforeEach, describe, expect, it, vi } from "@tests/testkit";
 import { v } from "convex/values";
 import * as Y from "yjs";
+
+// ---------------------------------------------------------------------------
+// Types describing the runtime surface of embedded functions
+// ---------------------------------------------------------------------------
+
+/** A stand-in for a component function reference, discriminated by `_name`. */
+interface MockRef {
+  _name: string;
+}
+
+interface MockComponent {
+  public: {
+    recordUpdate: MockRef;
+    recordDelete: MockRef;
+    getLiveState: MockRef;
+    getLiveStates: MockRef;
+    getLiveStatesPage: MockRef;
+    getCollectionChanges: MockRef;
+    createCheckpoint: MockRef;
+    listCheckpoints: MockRef;
+    getCheckpoint: MockRef;
+    cleanupDoc: MockRef;
+  };
+}
+
+const ROUTE = Symbol.for("convex-embedded:route");
+
+interface RouteMeta {
+  __brand: string;
+  mode: string;
+}
+
+/** Runtime-only properties the SDK attaches to registered Convex functions. */
+interface RegisteredFn {
+  isQuery?: boolean;
+  isMutation?: boolean;
+  isPublic?: boolean;
+  exportArgs?: () => string;
+  exportReturns?: () => string;
+  _handler: (ctx: object, args: Record<string, unknown>) => Promise<unknown>;
+}
+
+type ResolveArgs = Parameters<NonNullable<RuntimeHooks["resolveHandler"]>>[1];
+type ResolveResult = Awaited<
+  ReturnType<NonNullable<RuntimeHooks["resolveHandler"]>>
+>;
+
+interface ResolveFn {
+  isQuery?: boolean;
+  isPublic?: boolean;
+  _handler: (ctx: object, args: ResolveArgs) => Promise<ResolveResult>;
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -21,25 +79,62 @@ function uniqueTable(): string {
   return `test_table_${++_counter}`;
 }
 
-function makeMockComponent() {
+function makeMockComponent(): MockComponent {
   return {
     public: {
-      recordUpdate: { _name: "recordUpdate" } as any,
-      recordDelete: { _name: "recordDelete" } as any,
-      getLiveState: { _name: "getLiveState" } as any,
-      getLiveStates: { _name: "getLiveStates" } as any,
-      getLiveStatesPage: { _name: "getLiveStatesPage" } as any,
-      getCollectionChanges: { _name: "getCollectionChanges" } as any,
-      createCheckpoint: { _name: "createCheckpoint" } as any,
-      listCheckpoints: { _name: "listCheckpoints" } as any,
-      getCheckpoint: { _name: "getCheckpoint" } as any,
-      cleanupDoc: { _name: "cleanupDoc" } as any,
+      recordUpdate: { _name: "recordUpdate" },
+      recordDelete: { _name: "recordDelete" },
+      getLiveState: { _name: "getLiveState" },
+      getLiveStates: { _name: "getLiveStates" },
+      getLiveStatesPage: { _name: "getLiveStatesPage" },
+      getCollectionChanges: { _name: "getCollectionChanges" },
+      createCheckpoint: { _name: "createCheckpoint" },
+      listCheckpoints: { _name: "listCheckpoints" },
+      getCheckpoint: { _name: "getCheckpoint" },
+      cleanupDoc: { _name: "cleanupDoc" },
     },
   };
 }
 
-function bindRuntime(table: any, component?: any) {
-  bindTableRuntime(table, component);
+function bindRuntime(
+  table: EmbeddedTableRuntimeHandle,
+  component?: MockComponent,
+): void {
+  bindTableRuntime(
+    table,
+    component ? (component as unknown as ComponentBinding) : undefined,
+  );
+}
+
+/**
+ * `.index()` is typed to return the bare `TableDefinition`, but at runtime it
+ * returns the same embedded table handle. Recover the runtime-facing type.
+ */
+function asHandle(table: unknown): EmbeddedTableRuntimeHandle {
+  return table as EmbeddedTableRuntimeHandle;
+}
+
+function asFn(value: unknown): RegisteredFn {
+  return value as RegisteredFn;
+}
+
+function asResolveFn(value: unknown): ResolveFn {
+  return value as ResolveFn;
+}
+
+function readRoute(value: unknown): RouteMeta | undefined {
+  return (value as Record<symbol, RouteMeta | undefined>)[ROUTE];
+}
+
+function readRemoteMeta(
+  value: unknown,
+): { __brand: string; table: string; resolveExport: string } | undefined {
+  return (
+    value as Record<
+      symbol,
+      { __brand: string; table: string; resolveExport: string } | undefined
+    >
+  )[REMOTE_META];
 }
 
 beforeEach(() => {
@@ -52,7 +147,7 @@ beforeEach(() => {
 
 describe("embeddedTable()", () => {
   it("returns a handle with resolve, mutation, and query", () => {
-    const tasks: any = embeddedTable(uniqueTable(), {
+    const tasks = embeddedTable(uniqueTable(), {
       title: registerField(v.string()),
       body: prose(),
     });
@@ -64,63 +159,65 @@ describe("embeddedTable()", () => {
   });
 
   it("resolve exports args via exportArgs", () => {
-    const tasks: any = embeddedTable(uniqueTable(), {
+    const tasks = embeddedTable(uniqueTable(), {
       title: registerField(v.string()),
     });
     bindRuntime(tasks);
 
-    expect(typeof tasks.resolve.exportArgs).toBe("function");
-    // exportArgs() returns a JSON string describing the validator shape.
-    const argsJson = JSON.parse(tasks.resolve.exportArgs());
+    const resolve = asFn(tasks.resolve);
+    expect(typeof resolve.exportArgs).toBe("function");
+    const argsJson: unknown = JSON.parse(resolve.exportArgs!());
     expect(argsJson).toBeDefined();
   });
 
-  it("tags resolve with REMOTE_META symbol", () => {
+  it("tags resolve with the REMOTE_META symbol", () => {
     const name = uniqueTable();
-    const tasks: any = embeddedTable(name, {
+    const tasks = embeddedTable(name, {
       title: registerField(v.string()),
     });
     bindRuntime(tasks);
 
-    const meta = tasks.resolve[REMOTE_META];
+    const meta = readRemoteMeta(tasks.resolve);
     expect(meta).toBeDefined();
-    expect(meta.__brand).toBe("convex-embedded:remoteMeta");
-    expect(meta.table).toBe(name);
-    expect(meta.resolveExport).toBe("resolve");
+    expect(meta?.__brand).toBe("convex-embedded:remoteMeta");
+    expect(meta?.table).toBe(name);
+    expect(meta?.resolveExport).toBe("resolve");
   });
 
-  it("REMOTE_META is accessible via Symbol.for (cross-package)", () => {
+  it("exposes REMOTE_META via Symbol.for (cross-package)", () => {
     const name = uniqueTable();
-    const tasks: any = embeddedTable(name, {
+    const tasks = embeddedTable(name, {
       title: registerField(v.string()),
     });
     bindRuntime(tasks);
 
     const crossPkgSymbol = Symbol.for("convex-embedded:remoteMeta");
-    const meta = tasks.resolve[crossPkgSymbol];
+    const meta = (
+      tasks.resolve as Record<symbol, { table: string } | undefined>
+    )[crossPkgSymbol];
     expect(meta).toBeDefined();
-    expect(meta.table).toBe(name);
+    expect(meta?.table).toBe(name);
   });
 
-  it("REMOTE_META is not enumerable", () => {
-    const tasks: any = embeddedTable(uniqueTable(), {
+  it("does not make REMOTE_META enumerable", () => {
+    const tasks = embeddedTable(uniqueTable(), {
       title: registerField(v.string()),
     });
 
     expect(Object.keys(tasks.resolve)).not.toContain(REMOTE_META.toString());
-    const keys = [];
+    const keys: string[] = [];
     for (const k in tasks.resolve) keys.push(k);
     expect(keys).not.toContain(REMOTE_META.toString());
   });
 
-  it("remoteOnly() tags function exports with route metadata", () => {
-    const tasks: any = embeddedTable(uniqueTable(), {
+  it("remoteOnly() tags function exports with remote route metadata", () => {
+    const tasks = embeddedTable(uniqueTable(), {
       title: registerField(v.string()),
       body: prose(),
     });
     bindRuntime(tasks);
 
-    const fn: any = tasks.query({
+    const fn = tasks.query({
       args: {},
       handler: async () => [],
     });
@@ -128,45 +225,47 @@ describe("embeddedTable()", () => {
     const wrapped = remoteOnly(fn);
 
     expect(wrapped).toBe(fn);
-    expect(wrapped[Symbol.for("convex-embedded:route")]).toEqual({
+    expect(readRoute(wrapped)).toEqual({
       __brand: "convex-embedded:route",
       mode: "remote",
     });
   });
 
   it("localOnly() tags function exports with local route metadata", () => {
-    const tasks: any = embeddedTable(uniqueTable(), {
+    const tasks = embeddedTable(uniqueTable(), {
       title: registerField(v.string()),
     });
     bindRuntime(tasks);
 
-    const fn: any = tasks.query({
+    const fn = tasks.query({
       args: {},
       handler: async () => [],
     });
 
     const wrapped = localOnly(fn);
 
-    expect(wrapped[Symbol.for("convex-embedded:route")]).toEqual({
+    expect(readRoute(wrapped)).toEqual({
       __brand: "convex-embedded:route",
       mode: "local",
     });
   });
 
   it("remoteOnly() rejects non-function values", () => {
-    expect(() => remoteOnly("bad-input" as any)).toThrow(
+    expect(() => remoteOnly("bad-input")).toThrow(
       /expects a Convex function export/,
     );
   });
 
   it("preserves the embedded table handle through chained indexes", () => {
-    const tasks = embeddedTable(uniqueTable(), {
-      projectId: v.id("projects"),
-      title: registerField(v.string()),
-      body: prose(),
-    })
-      .index("by_projectId", ["projectId"])
-      .index("by_projectId_and_title", ["projectId", "title"]);
+    const tasks = asHandle(
+      embeddedTable(uniqueTable(), {
+        projectId: v.id("projects"),
+        title: registerField(v.string()),
+        body: prose(),
+      })
+        .index("by_projectId", ["projectId"])
+        .index("by_projectId_and_title", ["projectId", "title"]),
+    );
 
     expect(tasks.table).toBeDefined();
     expect(typeof tasks.query).toBe("function");
@@ -192,7 +291,9 @@ describe("bindTableRuntime()", () => {
     const tasks = embeddedTable(uniqueTable(), {
       title: registerField(v.string()),
     });
+
     const result = bindTableRuntime(tasks);
+
     expect(result).toBeUndefined();
   });
 
@@ -201,7 +302,8 @@ describe("bindTableRuntime()", () => {
     const tasks = embeddedTable(uniqueTable(), {
       title: registerField(v.string()),
     });
-    expect(() => bindTableRuntime(tasks, component as any)).not.toThrow();
+
+    expect(() => bindRuntime(tasks, component)).not.toThrow();
   });
 });
 
@@ -211,56 +313,63 @@ describe("bindTableRuntime()", () => {
 
 describe("mutation()", () => {
   it("returns a registered Convex mutation", () => {
-    const tasks: any = embeddedTable(uniqueTable(), {
+    const tasks = embeddedTable(uniqueTable(), {
       title: registerField(v.string()),
       body: prose(),
     });
     bindRuntime(tasks);
 
-    const fn: any = tasks.mutation({
-      args: { title: v.string() },
-      handler: async (_ctx: any, args: any) => `id:${args.title}`,
-    });
+    const fn = asFn(
+      tasks.mutation({
+        args: { title: v.string() },
+        handler: async (_ctx, args) => `id:${args.title}`,
+      }),
+    );
 
     expect(fn.isMutation).toBe(true);
     expect(fn.isPublic).toBe(true);
   });
 
-  it("runs handler and returns result on local (no component)", async () => {
-    const tasks: any = embeddedTable(uniqueTable(), {
+  it("runs the handler and returns its result on local (no component)", async () => {
+    const tasks = embeddedTable(uniqueTable(), {
       title: registerField(v.string()),
       body: prose(),
     });
     bindRuntime(tasks);
 
-    const fn: any = tasks.mutation({
-      args: { title: v.string() },
-      handler: async (_ctx: any, args: any) => `id:${args.title}`,
-    });
+    const fn = asFn(
+      tasks.mutation({
+        args: { title: v.string() },
+        handler: async (_ctx, args) => `id:${args.title}`,
+      }),
+    );
 
     const result = await fn._handler({}, { title: "hello" });
+
     expect(result).toBe("id:hello");
   });
 
-  it("runs handler then remote: block on remote", async () => {
+  it("runs the handler then the remote block on remote", async () => {
     const component = makeMockComponent();
-    const tasks: any = embeddedTable(uniqueTable(), {
+    const tasks = embeddedTable(uniqueTable(), {
       title: registerField(v.string()),
       body: prose(),
     });
     bindRuntime(tasks, component);
 
     const callOrder: string[] = [];
-    const fn: any = tasks.mutation({
-      args: {},
-      handler: async () => {
-        callOrder.push("handler");
-        return "doc123";
-      },
-      remote: async () => {
-        callOrder.push("remote");
-      },
-    });
+    const fn = asFn(
+      tasks.mutation({
+        args: {},
+        handler: async () => {
+          callOrder.push("handler");
+          return "doc123";
+        },
+        remote: async () => {
+          callOrder.push("remote");
+        },
+      }),
+    );
 
     const ctx = {
       runQuery: vi.fn().mockResolvedValue([]),
@@ -276,18 +385,20 @@ describe("mutation()", () => {
 
   it("does not cache a local runtime decision across later remote contexts", async () => {
     const component = makeMockComponent();
-    const tasks: any = embeddedTable(uniqueTable(), {
+    const tasks = embeddedTable(uniqueTable(), {
       title: registerField(v.string()),
       body: prose(),
     });
     bindRuntime(tasks, component);
 
-    const remoteBlock = vi.fn(async () => {});
-    const fn: any = tasks.mutation({
-      args: {},
-      handler: async () => "doc123",
-      remote: remoteBlock,
-    });
+    const remoteBlock = vi.fn(async () => undefined);
+    const fn = asFn(
+      tasks.mutation({
+        args: {},
+        handler: async () => "doc123",
+        remote: remoteBlock,
+      }),
+    );
 
     const localCtx = {
       runQuery: vi.fn().mockRejectedValue(new Error("component unavailable")),
@@ -307,9 +418,9 @@ describe("mutation()", () => {
     expect(remoteBlock).toHaveBeenCalledOnce();
   });
 
-  it("records delta inline (same transaction) on remote", async () => {
+  it("records a delta inline (same transaction) on remote", async () => {
     const component = makeMockComponent();
-    const tasks: any = embeddedTable(uniqueTable(), {
+    const tasks = embeddedTable(uniqueTable(), {
       title: registerField(v.string()),
       body: prose(),
     });
@@ -328,10 +439,12 @@ describe("mutation()", () => {
       },
     };
 
-    const fn: any = tasks.mutation({
-      args: {},
-      handler: async () => "doc123",
-    });
+    const fn = asFn(
+      tasks.mutation({
+        args: {},
+        handler: async () => "doc123",
+      }),
+    );
 
     await fn._handler(ctx, {});
 
@@ -344,27 +457,29 @@ describe("mutation()", () => {
     );
   });
 
-  it("does not record delta on local (no component)", async () => {
-    const tasks: any = embeddedTable(uniqueTable(), {
+  it("does not record a delta on local (no component)", async () => {
+    const tasks = embeddedTable(uniqueTable(), {
       title: registerField(v.string()),
       body: prose(),
     });
     bindRuntime(tasks);
 
     const scheduler = { runAfter: vi.fn() };
-    const fn: any = tasks.mutation({
-      args: {},
-      handler: async () => "result",
-    });
+    const fn = asFn(
+      tasks.mutation({
+        args: {},
+        handler: async () => "result",
+      }),
+    );
 
     await fn._handler({ scheduler }, {});
 
     expect(scheduler.runAfter).not.toHaveBeenCalled();
   });
 
-  it("extracts docId from args.id when result is not a string", async () => {
+  it("extracts docId from args.id when the result is not a string", async () => {
     const component = makeMockComponent();
-    const tasks: any = embeddedTable(uniqueTable(), {
+    const tasks = embeddedTable(uniqueTable(), {
       title: registerField(v.string()),
       body: prose(),
     });
@@ -379,10 +494,12 @@ describe("mutation()", () => {
       },
     };
 
-    const fn: any = tasks.mutation({
-      args: {},
-      handler: async () => undefined,
-    });
+    const fn = asFn(
+      tasks.mutation({
+        args: {},
+        handler: async () => undefined,
+      }),
+    );
 
     await fn._handler(ctx, { id: "fromArgs" });
 
@@ -394,7 +511,7 @@ describe("mutation()", () => {
 
   it("does not throw on delta recording failure", async () => {
     const component = makeMockComponent();
-    const tasks: any = embeddedTable(uniqueTable(), {
+    const tasks = embeddedTable(uniqueTable(), {
       title: registerField(v.string()),
       body: prose(),
     });
@@ -408,27 +525,32 @@ describe("mutation()", () => {
       },
     };
 
-    const fn: any = tasks.mutation({
-      args: {},
-      handler: async () => "doc1",
-    });
+    const fn = asFn(
+      tasks.mutation({
+        args: {},
+        handler: async () => "doc1",
+      }),
+    );
 
     const result = await fn._handler(ctx, {});
+
     expect(result).toBe("doc1");
   });
 
-  it("exports args via exportArgs", () => {
-    const tasks: any = embeddedTable(uniqueTable(), {
+  it("exposes exportArgs and exportReturns", () => {
+    const tasks = embeddedTable(uniqueTable(), {
       title: registerField(v.string()),
       body: prose(),
     });
     bindRuntime(tasks);
 
-    const fn: any = tasks.mutation({
-      args: { title: v.string() },
-      returns: v.null(),
-      handler: async () => null,
-    });
+    const fn = asFn(
+      tasks.mutation({
+        args: { title: v.string() },
+        returns: v.null(),
+        handler: async () => null,
+      }),
+    );
 
     expect(typeof fn.exportArgs).toBe("function");
     expect(typeof fn.exportReturns).toBe("function");
@@ -441,23 +563,25 @@ describe("mutation()", () => {
 
 describe("query()", () => {
   it("returns a registered Convex query", () => {
-    const tasks: any = embeddedTable(uniqueTable(), {
+    const tasks = embeddedTable(uniqueTable(), {
       title: registerField(v.string()),
       body: prose(),
     });
     bindRuntime(tasks);
 
-    const fn: any = tasks.query({
-      args: {},
-      handler: async () => [],
-    });
+    const fn = asFn(
+      tasks.query({
+        args: {},
+        handler: async () => [],
+      }),
+    );
 
     expect(fn.isQuery).toBe(true);
     expect(fn.isPublic).toBe(true);
   });
 
-  it("runs handler only on local (no component)", async () => {
-    const tasks: any = embeddedTable(uniqueTable(), {
+  it("runs the handler only on local (no component)", async () => {
+    const tasks = embeddedTable(uniqueTable(), {
       title: registerField(v.string()),
       body: prose(),
     });
@@ -466,28 +590,30 @@ describe("query()", () => {
     const handler = vi.fn().mockResolvedValue([1, 2, 3]);
     const remote = vi.fn();
 
-    const fn: any = tasks.query({ args: {}, handler, remote });
+    const fn = asFn(tasks.query({ args: {}, handler, remote }));
 
     const result = await fn._handler({}, {});
+
     expect(handler).toHaveBeenCalledTimes(1);
     expect(remote).not.toHaveBeenCalled();
     expect(result).toEqual([1, 2, 3]);
   });
 
-  it("runs handler then remote: on remote", async () => {
+  it("runs the handler then the remote block on remote", async () => {
     const component = makeMockComponent();
-    const tasks: any = embeddedTable(uniqueTable(), {
+    const tasks = embeddedTable(uniqueTable(), {
       title: registerField(v.string()),
       body: prose(),
     });
     bindRuntime(tasks, component);
 
     const handler = vi.fn().mockResolvedValue([{ id: 1 }]);
-    const remote = vi.fn(async (_ctx: any, _args: any, result: any) =>
-      result.map((r: any) => ({ ...r, extra: true })),
+    const remote = vi.fn(
+      async (_ctx: object, _args: object, result: Array<{ id: number }>) =>
+        result.map((r) => ({ ...r, extra: true })),
     );
 
-    const fn: any = tasks.query({ args: {}, handler, remote });
+    const fn = asFn(tasks.query({ args: {}, handler, remote }));
 
     const ctx = { runQuery: vi.fn().mockResolvedValue([]) };
     const result = await fn._handler(ctx, {});
@@ -495,18 +621,20 @@ describe("query()", () => {
     expect(result).toEqual([{ id: 1, extra: true }]);
   });
 
-  it("exports args via exportArgs", () => {
-    const tasks: any = embeddedTable(uniqueTable(), {
+  it("exposes exportArgs and exportReturns", () => {
+    const tasks = embeddedTable(uniqueTable(), {
       title: registerField(v.string()),
       body: prose(),
     });
     bindRuntime(tasks);
 
-    const fn: any = tasks.query({
-      args: {},
-      returns: v.array(v.string()),
-      handler: async () => [],
-    });
+    const fn = asFn(
+      tasks.query({
+        args: {},
+        returns: v.array(v.string()),
+        handler: async () => [],
+      }),
+    );
 
     expect(typeof fn.exportArgs).toBe("function");
     expect(typeof fn.exportReturns).toBe("function");
@@ -519,24 +647,25 @@ describe("query()", () => {
 
 describe("resolve handler", () => {
   it("is a registered Convex query", () => {
-    const tasks: any = embeddedTable(uniqueTable(), {
+    const tasks = embeddedTable(uniqueTable(), {
       title: registerField(v.string()),
       body: prose(),
     });
     bindRuntime(tasks);
 
-    expect(tasks.resolve.isQuery).toBe(true);
-    expect(tasks.resolve.isPublic).toBe(true);
+    const resolve = asResolveFn(tasks.resolve);
+    expect(resolve.isQuery).toBe(true);
+    expect(resolve.isPublic).toBe(true);
   });
 
   it("returns empty diffs on local (no component)", async () => {
-    const tasks: any = embeddedTable(uniqueTable(), {
+    const tasks = embeddedTable(uniqueTable(), {
       title: registerField(v.string()),
       body: prose(),
     });
     bindRuntime(tasks);
 
-    const result = await tasks.resolve._handler(
+    const result = await asResolveFn(tasks.resolve)._handler(
       {},
       {
         collectionSeq: null,
@@ -555,7 +684,7 @@ describe("resolve handler", () => {
 
   it("computes diffs from component deltas on remote", async () => {
     const component = makeMockComponent();
-    const tasks: any = embeddedTable(uniqueTable(), {
+    const tasks = embeddedTable(uniqueTable(), {
       title: registerField(v.string()),
       body: prose(),
     });
@@ -568,7 +697,7 @@ describe("resolve handler", () => {
     fields.set("title", titleMap);
     const serverUpdate = Y.encodeStateAsUpdateV2(serverDoc);
 
-    const runQuery = vi.fn().mockImplementation((ref: any, args: any) => {
+    const runQuery = vi.fn((ref: MockRef, args: { docIds?: string[] }) => {
       if (ref._name === "getCollectionChanges") {
         return Promise.resolve({
           mode: "incremental",
@@ -578,7 +707,7 @@ describe("resolve handler", () => {
       }
       if (ref._name === "getLiveStates" && Array.isArray(args.docIds)) {
         return Promise.resolve(
-          args.docIds.map((docId: string) => ({
+          args.docIds.map((docId) => ({
             docId,
             update: serverUpdate.buffer,
             seq: 1,
@@ -594,11 +723,13 @@ describe("resolve handler", () => {
     const clientDoc = new Y.Doc();
     const clientVector = Y.encodeStateVector(clientDoc);
 
-    const result = await tasks.resolve._handler(
+    const result = await asResolveFn(tasks.resolve)._handler(
       { runQuery, db: { get: vi.fn() } },
       {
         collectionSeq: 0,
-        documents: [{ docId: "doc1", vector: clientVector.buffer, lastSeq: 0 }],
+        documents: [
+          { docId: "doc1", vector: toArrayBuffer(clientVector), lastSeq: 0 },
+        ],
       },
     );
 
@@ -609,7 +740,7 @@ describe("resolve handler", () => {
 
   it("does not return remote-only docs for scoped resolves", async () => {
     const component = makeMockComponent();
-    const tasks: any = embeddedTable(uniqueTable(), {
+    const tasks = embeddedTable(uniqueTable(), {
       owner: registerField(v.string()),
       title: registerField(v.string()),
       body: prose(),
@@ -624,7 +755,7 @@ describe("resolve handler", () => {
     const serverUpdate = Y.encodeStateAsUpdateV2(serverDoc);
 
     const ctx = {
-      runQuery: vi.fn().mockImplementation((ref: any, args: any) => {
+      runQuery: vi.fn((ref: MockRef, args: { docIds?: string[] }) => {
         if (ref._name === "getCollectionChanges") {
           return Promise.resolve({
             mode: "full",
@@ -654,7 +785,7 @@ describe("resolve handler", () => {
         return Promise.resolve(null);
       }),
       db: {
-        get: vi.fn().mockImplementation((docId: string) => {
+        get: vi.fn((docId: string) => {
           if (docId === "doc1") {
             return Promise.resolve({
               _id: "doc1",
@@ -678,24 +809,26 @@ describe("resolve handler", () => {
       },
     };
 
-    const result = await tasks.resolve._handler(ctx, {
+    const result = await asResolveFn(tasks.resolve)._handler(ctx, {
       collectionSeq: 0,
       documents: [{ docId: "doc1", vector: new ArrayBuffer(0), lastSeq: 0 }],
       scopeArgs: { owner: "alice" },
     });
 
     expect(result.mode).toBe("full");
-    const returnedIds = result.documents.map((d: any) => d.docId).sort();
+    const returnedIds = result.documents.map((d) => d.docId).sort();
     expect(returnedIds).toEqual(["doc1"]);
   });
 
   it("filters indexed scoped snapshots by the full scope args", async () => {
     const component = makeMockComponent();
-    const tasks: any = embeddedTable(uniqueTable(), {
-      projectId: registerField(v.string()),
-      status: registerField(v.string()),
-      title: registerField(v.string()),
-    }).index("by_projectId", ["projectId"]);
+    const tasks = asHandle(
+      embeddedTable(uniqueTable(), {
+        projectId: registerField(v.string()),
+        status: registerField(v.string()),
+        title: registerField(v.string()),
+      }).index("by_projectId", ["projectId"]),
+    );
     bindRuntime(tasks, component);
 
     const serverDoc = new Y.Doc();
@@ -709,8 +842,8 @@ describe("resolve handler", () => {
       .fn()
       .mockResolvedValue([{ _id: "doc-open" }, { _id: "doc-closed" }]);
     const eqChain = { eq: vi.fn().mockReturnThis() };
-    const ctx: any = {
-      runQuery: vi.fn().mockImplementation((ref: any, args: any) => {
+    const ctx = {
+      runQuery: vi.fn((ref: MockRef, args: { docIds: string[] }) => {
         if (ref._name === "getCollectionChanges") {
           return Promise.resolve({
             mode: "full",
@@ -724,7 +857,7 @@ describe("resolve handler", () => {
           }
           expect(args.docIds.sort()).toEqual(["doc-closed", "doc-open"]);
           return Promise.resolve(
-            args.docIds.map((docId: string) => ({
+            args.docIds.map((docId) => ({
               docId,
               update: serverUpdate.buffer,
               seq: docId === "doc-open" ? 1 : 2,
@@ -735,26 +868,30 @@ describe("resolve handler", () => {
       }),
       db: {
         query: vi.fn(() => ({
-          withIndex: vi.fn((indexName: string, chain: any) => {
-            expect(indexName).toBe("by_projectId");
-            chain(eqChain);
-            expect(eqChain.eq).toHaveBeenCalledWith("projectId", "p1");
-            return {
-              collect: indexedCollect,
-              paginate: vi.fn(async (opts: any) => {
-                const all = await indexedCollect();
-                const start = opts.cursor ? parseInt(opts.cursor, 10) : 0;
-                const end = start + (opts.numItems ?? all.length);
-                return {
-                  page: all.slice(start, end),
-                  isDone: end >= all.length,
-                  continueCursor: end < all.length ? String(end) : null,
-                };
-              }),
-            };
-          }),
+          withIndex: vi.fn(
+            (indexName: string, chain: (q: typeof eqChain) => unknown) => {
+              expect(indexName).toBe("by_projectId");
+              chain(eqChain);
+              expect(eqChain.eq).toHaveBeenCalledWith("projectId", "p1");
+              return {
+                collect: indexedCollect,
+                paginate: vi.fn(
+                  async (opts: { cursor?: string; numItems?: number }) => {
+                    const all = await indexedCollect();
+                    const start = opts.cursor ? parseInt(opts.cursor, 10) : 0;
+                    const end = start + (opts.numItems ?? all.length);
+                    return {
+                      page: all.slice(start, end),
+                      isDone: end >= all.length,
+                      continueCursor: end < all.length ? String(end) : null,
+                    };
+                  },
+                ),
+              };
+            },
+          ),
         })),
-        get: vi.fn().mockImplementation((docId: string) => {
+        get: vi.fn((docId: string) => {
           if (docId === "doc-open") {
             return Promise.resolve({
               _id: "doc-open",
@@ -778,23 +915,25 @@ describe("resolve handler", () => {
       },
     };
 
-    const result = await tasks.resolve._handler(ctx, {
+    const result = await asResolveFn(tasks.resolve)._handler(ctx, {
       collectionSeq: 0,
       documents: [],
       scopeArgs: { projectId: "p1", status: "open" },
     });
 
     expect(result.mode).toBe("full");
-    expect(result.documents.map((d: any) => d.docId)).toEqual(["doc-open"]);
+    expect(result.documents.map((d) => d.docId)).toEqual(["doc-open"]);
     expect(indexedCollect).toHaveBeenCalledTimes(1);
   });
 
   it("resolves scoped first-time subscriptions via a declared index", async () => {
     const component = makeMockComponent();
-    const tasks: any = embeddedTable(uniqueTable(), {
-      owner: registerField(v.string()),
-      title: registerField(v.string()),
-    }).index("by_owner", ["owner"]);
+    const tasks = asHandle(
+      embeddedTable(uniqueTable(), {
+        owner: registerField(v.string()),
+        title: registerField(v.string()),
+      }).index("by_owner", ["owner"]),
+    );
     bindRuntime(tasks, component);
 
     const serverDoc = new Y.Doc();
@@ -808,8 +947,8 @@ describe("resolve handler", () => {
       .fn()
       .mockResolvedValue([{ _id: "doc-alice-1" }, { _id: "doc-alice-2" }]);
     const eqChain = { eq: vi.fn().mockReturnThis() };
-    const ctx: any = {
-      runQuery: vi.fn().mockImplementation((ref: any, args: any) => {
+    const ctx = {
+      runQuery: vi.fn((ref: MockRef, args: { docIds: string[] }) => {
         if (ref._name === "getCollectionChanges") {
           return Promise.resolve({
             mode: "full",
@@ -825,7 +964,7 @@ describe("resolve handler", () => {
           // Should ask for exactly the doc IDs returned by the indexed read.
           expect(args.docIds.sort()).toEqual(["doc-alice-1", "doc-alice-2"]);
           return Promise.resolve(
-            args.docIds.map((docId: string) => ({
+            args.docIds.map((docId) => ({
               docId,
               update: serverUpdate.buffer,
               seq: 1,
@@ -835,27 +974,31 @@ describe("resolve handler", () => {
         return Promise.resolve(null);
       }),
       db: {
-        query: vi.fn((_table: string) => ({
-          withIndex: vi.fn((indexName: string, chain: any) => {
-            expect(indexName).toBe("by_owner");
-            chain(eqChain);
-            expect(eqChain.eq).toHaveBeenCalledWith("owner", "alice");
-            return {
-              collect: indexedCollect,
-              paginate: vi.fn(async (opts: any) => {
-                const all = await indexedCollect();
-                const start = opts.cursor ? parseInt(opts.cursor, 10) : 0;
-                const end = start + (opts.numItems ?? all.length);
-                return {
-                  page: all.slice(start, end),
-                  isDone: end >= all.length,
-                  continueCursor: end < all.length ? String(end) : null,
-                };
-              }),
-            };
-          }),
+        query: vi.fn(() => ({
+          withIndex: vi.fn(
+            (indexName: string, chain: (q: typeof eqChain) => unknown) => {
+              expect(indexName).toBe("by_owner");
+              chain(eqChain);
+              expect(eqChain.eq).toHaveBeenCalledWith("owner", "alice");
+              return {
+                collect: indexedCollect,
+                paginate: vi.fn(
+                  async (opts: { cursor?: string; numItems?: number }) => {
+                    const all = await indexedCollect();
+                    const start = opts.cursor ? parseInt(opts.cursor, 10) : 0;
+                    const end = start + (opts.numItems ?? all.length);
+                    return {
+                      page: all.slice(start, end),
+                      isDone: end >= all.length,
+                      continueCursor: end < all.length ? String(end) : null,
+                    };
+                  },
+                ),
+              };
+            },
+          ),
         })),
-        get: vi.fn().mockImplementation((docId: string) => {
+        get: vi.fn((docId: string) => {
           if (docId === "doc-alice-1") {
             return Promise.resolve({
               _id: "doc-alice-1",
@@ -877,24 +1020,26 @@ describe("resolve handler", () => {
       },
     };
 
-    const result = await tasks.resolve._handler(ctx, {
+    const result = await asResolveFn(tasks.resolve)._handler(ctx, {
       collectionSeq: 0,
       documents: [],
       scopeArgs: { owner: "alice" },
     });
 
     expect(result.mode).toBe("full");
-    const returnedIds = result.documents.map((d: any) => d.docId).sort();
+    const returnedIds = result.documents.map((d) => d.docId).sort();
     expect(returnedIds).toEqual(["doc-alice-1", "doc-alice-2"]);
     expect(indexedCollect).toHaveBeenCalledTimes(1);
   });
 
   it("recomputes indexed scoped snapshots even when the client sends known doc ids", async () => {
     const component = makeMockComponent();
-    const tasks: any = embeddedTable(uniqueTable(), {
-      owner: registerField(v.string()),
-      title: registerField(v.string()),
-    }).index("by_owner", ["owner"]);
+    const tasks = asHandle(
+      embeddedTable(uniqueTable(), {
+        owner: registerField(v.string()),
+        title: registerField(v.string()),
+      }).index("by_owner", ["owner"]),
+    );
     bindRuntime(tasks, component);
 
     const serverDoc = new Y.Doc();
@@ -908,8 +1053,8 @@ describe("resolve handler", () => {
       .fn()
       .mockResolvedValue([{ _id: "doc-alice-1" }, { _id: "doc-alice-2" }]);
     const eqChain = { eq: vi.fn().mockReturnThis() };
-    const ctx: any = {
-      runQuery: vi.fn().mockImplementation((ref: any, args: any) => {
+    const ctx = {
+      runQuery: vi.fn((ref: MockRef, args: { docIds: string[] }) => {
         if (ref._name === "getCollectionChanges") {
           return Promise.resolve({
             mode: "full",
@@ -923,7 +1068,7 @@ describe("resolve handler", () => {
           }
           expect(args.docIds.sort()).toEqual(["doc-alice-1", "doc-alice-2"]);
           return Promise.resolve(
-            args.docIds.map((docId: string) => ({
+            args.docIds.map((docId) => ({
               docId,
               update: serverUpdate.buffer,
               seq: 1,
@@ -934,24 +1079,28 @@ describe("resolve handler", () => {
       }),
       db: {
         query: vi.fn(() => ({
-          withIndex: vi.fn((_indexName: string, chain: any) => {
-            chain(eqChain);
-            return {
-              collect: indexedCollect,
-              paginate: vi.fn(async (opts: any) => {
-                const all = await indexedCollect();
-                const start = opts.cursor ? parseInt(opts.cursor, 10) : 0;
-                const end = start + (opts.numItems ?? all.length);
-                return {
-                  page: all.slice(start, end),
-                  isDone: end >= all.length,
-                  continueCursor: end < all.length ? String(end) : null,
-                };
-              }),
-            };
-          }),
+          withIndex: vi.fn(
+            (_indexName: string, chain: (q: typeof eqChain) => unknown) => {
+              chain(eqChain);
+              return {
+                collect: indexedCollect,
+                paginate: vi.fn(
+                  async (opts: { cursor?: string; numItems?: number }) => {
+                    const all = await indexedCollect();
+                    const start = opts.cursor ? parseInt(opts.cursor, 10) : 0;
+                    const end = start + (opts.numItems ?? all.length);
+                    return {
+                      page: all.slice(start, end),
+                      isDone: end >= all.length,
+                      continueCursor: end < all.length ? String(end) : null,
+                    };
+                  },
+                ),
+              };
+            },
+          ),
         })),
-        get: vi.fn().mockImplementation((docId: string) => {
+        get: vi.fn((docId: string) => {
           if (docId === "doc-alice-1") {
             return Promise.resolve({
               _id: "doc-alice-1",
@@ -973,7 +1122,7 @@ describe("resolve handler", () => {
       },
     };
 
-    const result = await tasks.resolve._handler(ctx, {
+    const result = await asResolveFn(tasks.resolve)._handler(ctx, {
       collectionSeq: 7,
       documents: [
         { docId: "doc-alice-1", vector: new ArrayBuffer(0), lastSeq: 1 },
@@ -982,20 +1131,20 @@ describe("resolve handler", () => {
     });
 
     expect(result.mode).toBe("full");
-    const returnedIds = result.documents.map((d: any) => d.docId).sort();
+    const returnedIds = result.documents.map((d) => d.docId).sort();
     expect(returnedIds).toEqual(["doc-alice-1", "doc-alice-2"]);
   });
 
   it("returns deleted for scoped incremental docs that no longer match the scope", async () => {
     const component = makeMockComponent();
-    const tasks: any = embeddedTable(uniqueTable(), {
+    const tasks = embeddedTable(uniqueTable(), {
       owner: registerField(v.string()),
       title: registerField(v.string()),
     });
     bindRuntime(tasks, component);
 
     const ctx = {
-      runQuery: vi.fn().mockImplementation((ref: any, args: any) => {
+      runQuery: vi.fn((ref: MockRef, args: { docIds?: string[] }) => {
         if (ref._name === "getCollectionChanges") {
           return Promise.resolve({
             mode: "incremental",
@@ -1003,9 +1152,9 @@ describe("resolve handler", () => {
             changes: [{ docId: "doc1", kind: "upsert" }],
           });
         }
-        if (ref._name === "getLiveStates" && Array.isArray(args?.docIds)) {
+        if (ref._name === "getLiveStates" && Array.isArray(args.docIds)) {
           return Promise.resolve(
-            args.docIds.map((docId: string) => ({
+            args.docIds.map((docId) => ({
               docId,
               update: new ArrayBuffer(0),
               seq: 2,
@@ -1027,7 +1176,7 @@ describe("resolve handler", () => {
       },
     };
 
-    const result = await tasks.resolve._handler(ctx as any, {
+    const result = await asResolveFn(tasks.resolve)._handler(ctx, {
       collectionSeq: 1,
       documents: [{ docId: "doc1", vector: new ArrayBuffer(0), lastSeq: 1 }],
       scopeArgs: { owner: "alice" },
@@ -1040,17 +1189,19 @@ describe("resolve handler", () => {
 
   it("rethrows non-component runtime detection failures", async () => {
     const component = makeMockComponent();
-    const tasks: any = embeddedTable(uniqueTable(), {
+    const tasks = embeddedTable(uniqueTable(), {
       title: registerField(v.string()),
       body: prose(),
     });
     bindRuntime(tasks, component);
 
-    const fn: any = tasks.mutation({
-      args: {},
-      handler: async () => "doc123",
-      remote: vi.fn(async () => {}),
-    });
+    const fn = asFn(
+      tasks.mutation({
+        args: {},
+        handler: async () => "doc123",
+        remote: vi.fn(async () => undefined),
+      }),
+    );
 
     const remoteCtx = {
       runQuery: vi.fn().mockRejectedValue(new Error("permission denied")),
@@ -1063,9 +1214,9 @@ describe("resolve handler", () => {
     );
   });
 
-  it("returns no diff when client is up to date", async () => {
+  it("returns no diff when the client is up to date", async () => {
     const component = makeMockComponent();
-    const tasks: any = embeddedTable(uniqueTable(), {
+    const tasks = embeddedTable(uniqueTable(), {
       title: registerField(v.string()),
       body: prose(),
     });
@@ -1077,7 +1228,7 @@ describe("resolve handler", () => {
     const fullUpdate = Y.encodeStateAsUpdateV2(doc);
     const stateVector = Y.encodeStateVector(doc);
 
-    const runQuery = vi.fn().mockImplementation((ref: any, args: any) => {
+    const runQuery = vi.fn((ref: MockRef, args: { docIds?: string[] }) => {
       if (ref._name === "getCollectionChanges") {
         return Promise.resolve({
           mode: "incremental",
@@ -1085,9 +1236,9 @@ describe("resolve handler", () => {
           changes: [{ docId: "doc1", kind: "upsert" }],
         });
       }
-      if (ref._name === "getLiveStates" && Array.isArray(args?.docIds)) {
+      if (ref._name === "getLiveStates" && Array.isArray(args.docIds)) {
         return Promise.resolve(
-          args.docIds.map((docId: string) => ({
+          args.docIds.map((docId) => ({
             docId,
             update: fullUpdate.buffer,
             seq: 1,
@@ -1100,11 +1251,13 @@ describe("resolve handler", () => {
       return Promise.resolve(null);
     });
 
-    const result = await tasks.resolve._handler(
+    const result = await asResolveFn(tasks.resolve)._handler(
       { runQuery, db: { get: vi.fn() } },
       {
         collectionSeq: 0,
-        documents: [{ docId: "doc1", vector: stateVector.buffer, lastSeq: 0 }],
+        documents: [
+          { docId: "doc1", vector: toArrayBuffer(stateVector), lastSeq: 0 },
+        ],
       },
     );
 
@@ -1114,13 +1267,13 @@ describe("resolve handler", () => {
 
   it("handles missing deltas gracefully", async () => {
     const component = makeMockComponent();
-    const tasks: any = embeddedTable(uniqueTable(), {
+    const tasks = embeddedTable(uniqueTable(), {
       title: registerField(v.string()),
       body: prose(),
     });
     bindRuntime(tasks, component);
 
-    const runQuery = vi.fn().mockImplementation((ref: any, args: any) => {
+    const runQuery = vi.fn((ref: MockRef, args: { docIds?: string[] }) => {
       if (ref._name === "getCollectionChanges") {
         return Promise.resolve({
           mode: "incremental",
@@ -1128,10 +1281,8 @@ describe("resolve handler", () => {
           changes: [{ docId: "missing", kind: "upsert" }],
         });
       }
-      if (ref._name === "getLiveStates" && Array.isArray(args?.docIds)) {
-        return Promise.resolve(
-          args.docIds.map(() => null),
-        );
+      if (ref._name === "getLiveStates" && Array.isArray(args.docIds)) {
+        return Promise.resolve(args.docIds.map(() => null));
       }
       if (ref._name === "getLiveState") {
         return Promise.resolve(null);
@@ -1139,7 +1290,7 @@ describe("resolve handler", () => {
       return Promise.resolve(null);
     });
 
-    const result = await tasks.resolve._handler(
+    const result = await asResolveFn(tasks.resolve)._handler(
       { runQuery, db: { get: vi.fn() } },
       {
         collectionSeq: 0,

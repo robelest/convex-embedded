@@ -1,39 +1,51 @@
-import { mkdtempSync, rmSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { runCodegen } from "@embedded/codegen";
-import { afterEach, beforeEach, describe, expect, it } from "@tests/testkit";
+import { describe, expect, it as base } from "@tests/testkit";
 
-let workDir: string;
-
-async function writeFileEnsured(filePath: string, contents: string) {
-  await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, contents, "utf8");
+interface CodegenFixtures {
+  convexDir: string;
+  writeModule: (relativePath: string, contents: string) => Promise<void>;
 }
 
-beforeEach(() => {
-  workDir = mkdtempSync(path.join(tmpdir(), "convex-embedded-codegen-"));
+const it = base.extend<CodegenFixtures>({
+  convexDir: async ({ onTestFinished }, use) => {
+    const workDir = await mkdtemp(
+      path.join(tmpdir(), "convex-embedded-codegen-"),
+    );
+    onTestFinished(() => rm(workDir, { recursive: true, force: true }));
+    await use(path.join(workDir, "convex"));
+  },
+  writeModule: async ({ convexDir }, use) => {
+    await use(async (relativePath, contents) => {
+      const filePath = path.join(convexDir, relativePath);
+      await mkdir(path.dirname(filePath), { recursive: true });
+      await writeFile(filePath, contents, "utf8");
+    });
+  },
 });
 
-afterEach(() => {
-  try {
-    rmSync(workDir, { recursive: true, force: true });
-  } catch {}
-});
+const remoteOnlyModule = (...lines: string[]): string => lines.join("\n");
+
+function outFileFor(convexDir: string): string {
+  return path.join(convexDir, "_generated/embedded.ts");
+}
 
 describe("runCodegen", () => {
-  it("includes plain modules unchanged in the registry", async () => {
-    const convexDir = path.join(workDir, "convex");
-    await writeFileEnsured(
-      path.join(convexDir, "messages.ts"),
+  it("includes plain modules unchanged in the registry", async ({
+    convexDir,
+    writeModule,
+  }) => {
+    await writeModule(
+      "messages.ts",
       `import { query } from "./_generated/server";\nexport const list = query({});\n`,
     );
 
     const result = await runCodegen({
       convexDir,
-      outFile: path.join(convexDir, "_generated/embedded.ts"),
+      outFile: outFileFor(convexDir),
     });
 
     expect(result.modulesIncluded).toEqual(["messages"]);
@@ -45,23 +57,25 @@ describe("runCodegen", () => {
     expect(generated).toContain("../messages");
   });
 
-  it("strips a mixed module to a companion and references it from the registry", async () => {
-    const convexDir = path.join(workDir, "convex");
-    await writeFileEnsured(
-      path.join(convexDir, "billing.ts"),
-      [
+  it("strips a mixed module to a companion and references it from the registry", async ({
+    convexDir,
+    writeModule,
+  }) => {
+    await writeModule(
+      "billing.ts",
+      remoteOnlyModule(
         `import { internalMutation, query } from "./_generated/server";`,
         `import { remoteOnly } from "@robelest/convex-embedded";`,
         ``,
         `export const chargeCard = remoteOnly(internalMutation({}));`,
         `export const list = query({});`,
         ``,
-      ].join("\n"),
+      ),
     );
 
     const result = await runCodegen({
       convexDir,
-      outFile: path.join(convexDir, "_generated/embedded.ts"),
+      outFile: outFileFor(convexDir),
     });
 
     expect(result.modulesIncluded).toEqual([]);
@@ -73,7 +87,6 @@ describe("runCodegen", () => {
     expect(companion).toContain("AUTO-GENERATED");
     expect(companion).toContain("export const list");
     expect(companion).not.toContain("chargeCard");
-    // No `remoteOnly` import or call should remain in the companion
     expect(companion).not.toMatch(/import[^;]*\bremoteOnly\b/);
     expect(companion).not.toMatch(/=\s*remoteOnly\(/);
 
@@ -81,23 +94,25 @@ describe("runCodegen", () => {
     expect(generated).toContain('billing: () => import("./embedded/billing")');
   });
 
-  it("excludes a fully-remoteOnly module from the registry entirely", async () => {
-    const convexDir = path.join(workDir, "convex");
-    await writeFileEnsured(
-      path.join(convexDir, "secrets.ts"),
-      [
+  it("excludes a fully-remoteOnly module from the registry entirely", async ({
+    convexDir,
+    writeModule,
+  }) => {
+    await writeModule(
+      "secrets.ts",
+      remoteOnlyModule(
         `import { internalMutation } from "./_generated/server";`,
         `import { remoteOnly } from "@robelest/convex-embedded";`,
         ``,
         `export const fetch = remoteOnly(internalMutation({}));`,
         `export const rotate = remoteOnly(internalMutation({}));`,
         ``,
-      ].join("\n"),
+      ),
     );
 
     const result = await runCodegen({
       convexDir,
-      outFile: path.join(convexDir, "_generated/embedded.ts"),
+      outFile: outFileFor(convexDir),
     });
 
     expect(result.modulesExcluded).toEqual(["secrets"]);
@@ -109,49 +124,51 @@ describe("runCodegen", () => {
     expect(generated).not.toContain("./_generated/embedded/secrets");
   });
 
-  it("preserves manifest routeModes for stripped exports", async () => {
-    const convexDir = path.join(workDir, "convex");
-    await writeFileEnsured(
-      path.join(convexDir, "billing.ts"),
-      [
+  it("preserves manifest routeModes for stripped exports", async ({
+    convexDir,
+    writeModule,
+  }) => {
+    await writeModule(
+      "billing.ts",
+      remoteOnlyModule(
         `import { internalMutation } from "./_generated/server";`,
         `import { remoteOnly } from "@robelest/convex-embedded";`,
         ``,
         `export const chargeCard = remoteOnly(internalMutation({}));`,
         ``,
-      ].join("\n"),
+      ),
     );
 
     const result = await runCodegen({
       convexDir,
-      outFile: path.join(convexDir, "_generated/embedded.ts"),
+      outFile: outFileFor(convexDir),
     });
 
     expect(result.modulesExcluded).toEqual(["billing"]);
+
     const generated = await readFile(result.outFile, "utf8");
     expect(generated).toContain('"billing:chargeCard": "remote"');
   });
 
-  it("handles nested directories", async () => {
-    const convexDir = path.join(workDir, "convex");
-    await writeFileEnsured(
-      path.join(convexDir, "billing/charge.ts"),
-      [
+  it("handles nested directories", async ({ convexDir, writeModule }) => {
+    await writeModule(
+      "billing/charge.ts",
+      remoteOnlyModule(
         `import { internalMutation } from "./_generated/server";`,
         `import { remoteOnly } from "@robelest/convex-embedded";`,
         ``,
         `export const chargeCard = remoteOnly(internalMutation({}));`,
         ``,
-      ].join("\n"),
+      ),
     );
-    await writeFileEnsured(
-      path.join(convexDir, "messages.ts"),
+    await writeModule(
+      "messages.ts",
       `import { query } from "./_generated/server";\nexport const list = query({});\n`,
     );
 
     const result = await runCodegen({
       convexDir,
-      outFile: path.join(convexDir, "_generated/embedded.ts"),
+      outFile: outFileFor(convexDir),
     });
 
     expect(result.modulesExcluded).toEqual(["billing/charge"]);
@@ -159,39 +176,35 @@ describe("runCodegen", () => {
 
     const generated = await readFile(result.outFile, "utf8");
     expect(generated).toContain("messages: () => import(");
-    // billing/charge does not appear as an importable module, but its
-    // routing entry is still recorded in the manifest
     expect(generated).not.toMatch(/import\(.*billing\/charge/);
     expect(generated).toContain('"billing/charge:chargeCard": "remote"');
   });
 
-  it("strips a mixed module in a nested directory and emits the companion at the matching path", async () => {
-    const convexDir = path.join(workDir, "convex");
-    await writeFileEnsured(
-      path.join(convexDir, "billing/index.ts"),
-      [
+  it("strips a mixed module in a nested directory and emits the companion at the matching path", async ({
+    convexDir,
+    writeModule,
+  }) => {
+    await writeModule(
+      "billing/index.ts",
+      remoteOnlyModule(
         `import { internalMutation, query } from "./_generated/server";`,
         `import { remoteOnly } from "@robelest/convex-embedded";`,
         ``,
         `export const chargeCard = remoteOnly(internalMutation({}));`,
         `export const list = query({});`,
         ``,
-      ].join("\n"),
+      ),
     );
 
     const result = await runCodegen({
       convexDir,
-      outFile: path.join(convexDir, "_generated/embedded.ts"),
+      outFile: outFileFor(convexDir),
     });
 
     expect(result.modulesStripped).toEqual(["billing/index"]);
-    const companion = result.companionFiles[0]!;
-    expect(companion).toContain("billing/index.ts");
+    expect(result.companionFiles[0]!).toContain("billing/index.ts");
 
     const generated = await readFile(result.outFile, "utf8");
-    // outFile is at convex/_generated/embedded.ts; companion is at
-    // convex/_generated/embedded/billing/index.ts; relative import is
-    // "./embedded/billing/index"
     expect(generated).toContain(
       '"billing/index": () => import("./embedded/billing/index")',
     );

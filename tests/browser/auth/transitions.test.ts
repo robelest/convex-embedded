@@ -1,4 +1,6 @@
 import { EmbeddedRuntime } from "@embedded/runtime/embedded";
+import type { LocalExecutionRequest } from "@embedded/runtime/embedded";
+import type { EngineStatus } from "@embedded/shared/types";
 import { createTestIdentity } from "@embedded/test";
 import {
   createConvexClient,
@@ -6,23 +8,36 @@ import {
   switchIdentity,
 } from "@resolve/browser/index";
 import { afterEach, beforeEach, describe, expect, it } from "@tests/testkit";
-import { vi } from "vitest";
+
+type AuthFetcher = (args: {
+  forceRefreshToken: boolean;
+}) => Promise<string | null>;
+
+interface MockConvexClientInstance {
+  url: string;
+  authFetcher: AuthFetcher | null;
+}
+
+interface MockBrowserModule {
+  __mock: {
+    reset: () => void;
+    instances: () => MockConvexClientInstance[];
+  };
+}
 
 vi.mock("convex/browser", () => {
   class MockConvexClient {
     static instances: MockConvexClient[] = [];
 
     url: string;
-    authFetcher:
-      | ((args: { forceRefreshToken: boolean }) => Promise<unknown>)
-      | null = null;
+    authFetcher: AuthFetcher | null = null;
 
     mutation = vi.fn(async () => undefined);
     query = vi.fn(async () => undefined);
     action = vi.fn(async () => undefined);
-    onUpdate = vi.fn(() => (() => {}) as any);
+    onUpdate = vi.fn(() => () => {});
     close = vi.fn(async () => {});
-    setAuth = vi.fn((fetchToken: typeof this.authFetcher) => {
+    setAuth = vi.fn((fetchToken: AuthFetcher | null) => {
       this.authFetcher = fetchToken;
     });
 
@@ -43,21 +58,23 @@ vi.mock("convex/browser", () => {
   };
 });
 
-const engineInstances: Array<{
-  emitChange: (status: unknown) => void;
+interface EngineProbe {
+  emitChange: (status: EngineStatus) => void;
   setPendingCount: (count: number) => void;
   reloadIdentity: ReturnType<typeof vi.fn>;
-}> = [];
+}
+
+const engineInstances: EngineProbe[] = [];
 
 vi.mock("@/client/engine", () => ({
   engine: {
     create: vi.fn(() => {
-      let onChange: ((status: unknown) => void) | null = null;
+      let onChange: ((status: EngineStatus) => void) | null = null;
       let pendingCount = 0;
 
       const instance = {
         mutation: vi.fn(),
-        on: vi.fn((event: string, cb: (status: unknown) => void) => {
+        on: vi.fn((event: string, cb: (status: EngineStatus) => void) => {
           if (event === "change") {
             onChange = cb;
           }
@@ -108,17 +125,10 @@ function createSyncModules() {
   };
 }
 
-async function settle(): Promise<void> {
-  await Promise.resolve();
-  await new Promise((resolve) => setTimeout(resolve, 0));
-}
-
-function mockIdentityQueries(
-  resolver: (path: string) => unknown,
-): ReturnType<typeof vi.spyOn> {
+function mockIdentityQueries(resolver: (path: string) => unknown) {
   return vi
     .spyOn(EmbeddedRuntime.prototype, "executeLocal")
-    .mockImplementation(async function (request) {
+    .mockImplementation(async (request: LocalExecutionRequest) => {
       if (request.kind === "query") {
         return resolver(request.path);
       }
@@ -126,15 +136,14 @@ function mockIdentityQueries(
     });
 }
 
-describe("auth state transitions", () => {
-  const clientsToClose: Array<{ close: () => Promise<void> }> = [];
+async function mockBrowserModule(): Promise<MockBrowserModule> {
+  return (await vi.importMock("convex/browser")) as MockBrowserModule;
+}
 
+describe("auth state transitions", () => {
   beforeEach(async () => {
     engineInstances.length = 0;
-    const convexBrowser = (await vi.importMock("convex/browser")) as {
-      __mock: { reset: () => void };
-    };
-    convexBrowser.__mock.reset();
+    (await mockBrowserModule()).__mock.reset();
     Object.defineProperty(globalThis, "navigator", {
       value: { onLine: true },
       writable: true,
@@ -142,7 +151,7 @@ describe("auth state transitions", () => {
     });
 
     vi.spyOn(EmbeddedRuntime.prototype, "executeLocal").mockImplementation(
-      async function (request) {
+      async (request: LocalExecutionRequest) => {
         if (request.kind === "query") {
           if (request.path === "_system:authStateGetActive") {
             return null;
@@ -156,27 +165,28 @@ describe("auth state transitions", () => {
     );
   });
 
-  afterEach(async () => {
+  afterEach(() => {
     vi.restoreAllMocks();
-    for (const client of clientsToClose.splice(0)) {
-      await client.close();
-    }
   });
 
-  it("transitions authenticated -> offlineStale -> authenticated with remote events", async () => {
+  it("transitions authenticated -> offlineStale -> authenticated with remote events", async ({
+    track,
+  }) => {
     const identity = createTestIdentity({ subject: "alice" });
-    const client = createConvexClient({
-      convex: { modules: createSyncModules() },
-      remote: { url: REMOTE_URL },
-      auth: { getUserIdentity: async () => identity },
-    });
-    clientsToClose.push(client as any);
+    const client = track(
+      createConvexClient({
+        convex: { modules: createSyncModules() },
+        remote: { url: REMOTE_URL },
+        auth: { getUserIdentity: async () => identity },
+      }),
+    );
 
-    await settle();
-    expect(getAuthState(client)).toEqual({
-      status: "authenticated",
-      identity,
-      identityKey: identity.tokenIdentifier,
+    await vi.waitFor(() => {
+      expect(getAuthState(client)).toEqual({
+        status: "authenticated",
+        identity,
+        identityKey: identity.tokenIdentifier,
+      });
     });
 
     engineInstances[0]!.emitChange({ status: "offline" });
@@ -186,7 +196,7 @@ describe("auth state transitions", () => {
       identityKey: identity.tokenIdentifier,
     });
 
-    engineInstances[0]!.emitChange({ status: "resolving" });
+    engineInstances[0]!.emitChange({ status: "resolved" });
     expect(getAuthState(client)).toEqual({
       status: "authenticated",
       identity,
@@ -194,40 +204,33 @@ describe("auth state transitions", () => {
     });
   });
 
-  it("transitions to reauthRequired when a previously authenticated token becomes unavailable", async () => {
+  it("transitions to reauthRequired when a previously authenticated token becomes unavailable", async ({
+    track,
+  }) => {
     const identity = createTestIdentity({ subject: "alice" });
     const fetchToken = vi
-      .fn<
-        (
-          ...args: Array<{ forceRefreshToken: boolean }>
-        ) => Promise<string | null>
-      >()
+      .fn<AuthFetcher>()
       .mockResolvedValueOnce("token")
       .mockResolvedValueOnce(null);
 
-    const client = createConvexClient({
-      convex: { modules: createSyncModules() },
-      remote: { url: REMOTE_URL },
-      auth: {
-        fetchToken,
-        getUserIdentity: async () => identity,
-      },
-    });
-    clientsToClose.push(client as any);
+    const client = track(
+      createConvexClient({
+        convex: { modules: createSyncModules() },
+        remote: { url: REMOTE_URL },
+        auth: { fetchToken, getUserIdentity: async () => identity },
+      }),
+    );
 
-    const convexBrowser = (await vi.importMock("convex/browser")) as {
-      __mock: { instances: () => Array<any> };
-    };
-    const embeddedClient = convexBrowser.__mock.instances()[0];
+    const embeddedClient = (await mockBrowserModule()).__mock.instances()[0]!;
 
-    await embeddedClient.authFetcher({ forceRefreshToken: false });
+    await embeddedClient.authFetcher!({ forceRefreshToken: false });
     expect(getAuthState(client)).toEqual({
       status: "authenticated",
       identity,
       identityKey: identity.tokenIdentifier,
     });
 
-    await embeddedClient.authFetcher({ forceRefreshToken: true });
+    await embeddedClient.authFetcher!({ forceRefreshToken: true });
     expect(getAuthState(client)).toEqual({
       status: "reauthRequired",
       identity,
@@ -235,26 +238,23 @@ describe("auth state transitions", () => {
     });
   });
 
-  it("transitions to identityMismatch when identity changes with pending replay work", async () => {
+  it("transitions to identityMismatch when identity changes with pending replay work", async ({
+    track,
+  }) => {
     let currentIdentity = createTestIdentity({ subject: "alice" });
     const fetchToken = vi.fn(async () => "token");
 
-    const client = createConvexClient({
-      convex: { modules: createSyncModules() },
-      remote: { url: REMOTE_URL },
-      auth: {
-        fetchToken,
-        getUserIdentity: async () => currentIdentity,
-      },
-    });
-    clientsToClose.push(client as any);
+    const client = track(
+      createConvexClient({
+        convex: { modules: createSyncModules() },
+        remote: { url: REMOTE_URL },
+        auth: { fetchToken, getUserIdentity: async () => currentIdentity },
+      }),
+    );
 
-    const convexBrowser = (await vi.importMock("convex/browser")) as {
-      __mock: { instances: () => Array<any> };
-    };
-    const embeddedClient = convexBrowser.__mock.instances()[0];
+    const embeddedClient = (await mockBrowserModule()).__mock.instances()[0]!;
 
-    await embeddedClient.authFetcher({ forceRefreshToken: false });
+    await embeddedClient.authFetcher!({ forceRefreshToken: false });
     expect(getAuthState(client)).toEqual({
       status: "authenticated",
       identity: currentIdentity,
@@ -272,7 +272,7 @@ describe("auth state transitions", () => {
     });
 
     currentIdentity = createTestIdentity({ subject: "bob" });
-    await embeddedClient.authFetcher({ forceRefreshToken: true });
+    await embeddedClient.authFetcher!({ forceRefreshToken: true });
 
     expect(getAuthState(client)).toEqual({
       status: "identityMismatch",
@@ -281,18 +281,23 @@ describe("auth state transitions", () => {
     });
   });
 
-  it("switchIdentity preserves data but surfaces identityMismatch when pending work exists", async () => {
+  it("switchIdentity preserves data but surfaces identityMismatch when pending work exists", async ({
+    track,
+  }) => {
     const alice = createTestIdentity({ subject: "alice" });
     const bob = createTestIdentity({ subject: "bob" });
 
-    const client = createConvexClient({
-      convex: { modules: createSyncModules() },
-      remote: { url: REMOTE_URL },
-      auth: { getUserIdentity: async () => alice },
-    });
-    clientsToClose.push(client as any);
+    const client = track(
+      createConvexClient({
+        convex: { modules: createSyncModules() },
+        remote: { url: REMOTE_URL },
+        auth: { getUserIdentity: async () => alice },
+      }),
+    );
 
-    await settle();
+    await vi.waitFor(() => {
+      expect(getAuthState(client).status).toBe("authenticated");
+    });
     mockIdentityQueries((path) => {
       if (path === "_system:authStateGetActive") {
         return null;
@@ -313,18 +318,23 @@ describe("auth state transitions", () => {
     expect(engineInstances[0]!.reloadIdentity).toHaveBeenCalled();
   });
 
-  it("switching back resumes the previous identity namespace", async () => {
+  it("switching back resumes the previous identity namespace", async ({
+    track,
+  }) => {
     const alice = createTestIdentity({ subject: "alice" });
     const bob = createTestIdentity({ subject: "bob" });
 
-    const client = createConvexClient({
-      convex: { modules: createSyncModules() },
-      remote: { url: REMOTE_URL },
-      auth: { getUserIdentity: async () => alice },
-    });
-    clientsToClose.push(client as any);
+    const client = track(
+      createConvexClient({
+        convex: { modules: createSyncModules() },
+        remote: { url: REMOTE_URL },
+        auth: { getUserIdentity: async () => alice },
+      }),
+    );
 
-    await settle();
+    await vi.waitFor(() => {
+      expect(getAuthState(client).status).toBe("authenticated");
+    });
 
     const executeLocalSpy = mockIdentityQueries((path) => {
       if (path === "_system:authStateGetActive") {
@@ -337,17 +347,19 @@ describe("auth state transitions", () => {
     });
 
     await switchIdentity(client, bob);
-    executeLocalSpy.mockImplementation(async function (request: any) {
-      if (request.kind === "query") {
-        if (request.path === "_system:authStateGetActive") {
-          return null;
+    executeLocalSpy.mockImplementation(
+      async (request: LocalExecutionRequest) => {
+        if (request.kind === "query") {
+          if (request.path === "_system:authStateGetActive") {
+            return null;
+          }
+          if (request.path === "_system:pendingListIdentityKeys") {
+            return ["issuer|alice", "issuer|bob"];
+          }
         }
-        if (request.path === "_system:pendingListIdentityKeys") {
-          return ["issuer|alice", "issuer|bob"];
-        }
-      }
-      return null;
-    });
+        return null;
+      },
+    );
 
     await switchIdentity(client, alice);
 

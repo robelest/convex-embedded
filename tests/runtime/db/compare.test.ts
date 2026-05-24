@@ -1,280 +1,243 @@
 import { compareValues } from "@embedded/runtime/db/compare";
-import { describe, it, expect } from "@tests/testkit";
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+import { describe, expect, it } from "@tests/testkit";
+import type { Value } from "convex/values";
 
 /** Create an ArrayBuffer from a list of byte values. */
 function bytes(...values: number[]): ArrayBuffer {
   return new Uint8Array(values).buffer;
 }
 
-describe("compareValues", () => {
-  // -----------------------------------------------------------------------
-  // Cross-type ordering
-  // -----------------------------------------------------------------------
-
+describe.concurrent("compareValues", () => {
   describe("cross-type ordering", () => {
-    // The total order is:
     // undefined < null < bigint < number < boolean < string < bytes < array < object
-    const ordered: Array<{ label: string; value: any }> = [
-      { label: "undefined", value: undefined },
-      { label: "null", value: null },
-      { label: "bigint(1n)", value: 1n },
-      { label: "number(1)", value: 1 },
-      { label: "boolean(true)", value: true },
-      { label: 'string("a")', value: "a" },
-      { label: "bytes", value: bytes(0x01) },
-      { label: "array([])", value: [] },
-      { label: "object({})", value: {} },
-    ];
+    const ordered: ReadonlyArray<{ label: string; value: Value | undefined }> =
+      [
+        { label: "undefined", value: undefined },
+        { label: "null", value: null },
+        { label: "bigint(1n)", value: 1n },
+        { label: "number(1)", value: 1 },
+        { label: "boolean(true)", value: true },
+        { label: 'string("a")', value: "a" },
+        { label: "bytes", value: bytes(0x01) },
+        { label: "array([])", value: [] },
+        { label: "object({})", value: {} },
+      ];
 
-    for (let i = 0; i < ordered.length; i++) {
-      for (let j = i + 1; j < ordered.length; j++) {
-        it(`${ordered[i].label} < ${ordered[j].label}`, () => {
-          expect(
-            compareValues(ordered[i].value, ordered[j].value),
-          ).toBeLessThan(0);
-        });
-      }
-    }
+    const pairs = ordered.flatMap((lhs, i) =>
+      ordered.slice(i + 1).map((rhs) => ({ lhs, rhs })),
+    );
+
+    it.for(pairs)("$lhs.label < $rhs.label", ({ lhs, rhs }) => {
+      expect(compareValues(lhs.value, rhs.value)).toBeLessThan(0);
+    });
   });
 
-  // -----------------------------------------------------------------------
-  // Same-type comparisons
-  // -----------------------------------------------------------------------
-
   describe("null", () => {
-    it("null === null → 0", () => {
+    it("treats null as equal to null", () => {
       expect(compareValues(null, null)).toBe(0);
     });
   });
 
   describe("numbers", () => {
-    it("1 < 2", () => {
+    it("orders 1 before 2", () => {
       expect(compareValues(1, 2)).toBeLessThan(0);
     });
 
-    it("-1 < 0", () => {
+    it("orders -1 before 0", () => {
       expect(compareValues(-1, 0)).toBeLessThan(0);
     });
 
-    it("0 === 0", () => {
-      expect(compareValues(0, 0)).toBe(0);
+    it("treats equal numbers as equal", () => {
+      expect(compareValues(42, 42)).toBe(0);
     });
 
-    it("NaN === NaN", () => {
+    it("treats NaN as equal to NaN", () => {
       expect(compareValues(NaN, NaN)).toBe(0);
     });
 
-    it("NaN comes after all finite numbers", () => {
+    it("orders NaN after all finite numbers", () => {
       expect(compareValues(Number.MAX_VALUE, NaN)).toBeLessThan(0);
       expect(compareValues(NaN, Number.MAX_VALUE)).toBeGreaterThan(0);
     });
 
-    it("NaN comes after negative numbers", () => {
+    it("orders NaN after negative infinity", () => {
       expect(compareValues(-Infinity, NaN)).toBeLessThan(0);
     });
 
-    it("NaN comes after 0", () => {
+    it("orders NaN after zero", () => {
       expect(compareValues(0, NaN)).toBeLessThan(0);
     });
 
-    it("negative < positive", () => {
+    it("orders negative before positive", () => {
       expect(compareValues(-5, 5)).toBeLessThan(0);
-    });
-
-    it("equal numbers return 0", () => {
-      expect(compareValues(42, 42)).toBe(0);
     });
   });
 
   describe("bigints", () => {
-    it("1n < 2n", () => {
+    it("orders 1n before 2n", () => {
       expect(compareValues(1n, 2n)).toBeLessThan(0);
     });
 
-    it("-1n < 0n", () => {
+    it("orders -1n before 0n", () => {
       expect(compareValues(-1n, 0n)).toBeLessThan(0);
     });
 
-    it("0n === 0n", () => {
-      expect(compareValues(0n, 0n)).toBe(0);
-    });
-
-    it("equal bigints return 0", () => {
+    it("treats equal bigints as equal", () => {
       expect(compareValues(100n, 100n)).toBe(0);
     });
   });
 
   describe("booleans", () => {
-    it("false < true", () => {
+    it("orders false before true", () => {
       expect(compareValues(false, true)).toBeLessThan(0);
     });
 
-    it("true > false", () => {
+    it("orders true after false", () => {
       expect(compareValues(true, false)).toBeGreaterThan(0);
     });
 
-    it("true === true", () => {
+    it("treats equal booleans as equal", () => {
       expect(compareValues(true, true)).toBe(0);
-    });
-
-    it("false === false", () => {
       expect(compareValues(false, false)).toBe(0);
     });
   });
 
   describe("strings", () => {
-    it('"a" < "b"', () => {
+    it("orders by code point", () => {
       expect(compareValues("a", "b")).toBeLessThan(0);
+      expect(compareValues("z", "a")).toBeGreaterThan(0);
     });
 
-    it('"" < "a"', () => {
+    it("orders the empty string first", () => {
       expect(compareValues("", "a")).toBeLessThan(0);
     });
 
-    it('"abc" < "abd"', () => {
+    it("orders by the first differing character", () => {
       expect(compareValues("abc", "abd")).toBeLessThan(0);
     });
 
-    it("equal strings return 0", () => {
+    it("treats equal strings as equal", () => {
       expect(compareValues("hello", "hello")).toBe(0);
-    });
-
-    it('"z" > "a"', () => {
-      expect(compareValues("z", "a")).toBeGreaterThan(0);
     });
   });
 
   describe("bytes (ArrayBuffer)", () => {
-    it("compares by content — equal buffers", () => {
+    it("treats byte-identical buffers as equal", () => {
       expect(compareValues(bytes(1, 2, 3), bytes(1, 2, 3))).toBe(0);
     });
 
-    it("compares by content — first byte differs", () => {
+    it("orders by the first differing byte", () => {
       expect(compareValues(bytes(1, 2, 3), bytes(2, 2, 3))).toBeLessThan(0);
     });
 
-    it("shorter buffer < longer with same prefix", () => {
+    it("orders a shorter buffer before a longer one with the same prefix", () => {
       expect(compareValues(bytes(1, 2), bytes(1, 2, 3))).toBeLessThan(0);
     });
 
-    it("empty buffer < non-empty", () => {
+    it("orders an empty buffer before a non-empty one", () => {
       expect(compareValues(bytes(), bytes(1))).toBeLessThan(0);
     });
 
-    it("empty buffers are equal", () => {
+    it("treats empty buffers as equal", () => {
       expect(compareValues(bytes(), bytes())).toBe(0);
     });
   });
 
   describe("arrays", () => {
-    it("element-wise comparison — first element differs", () => {
+    it("compares element-wise", () => {
       expect(compareValues([1, 2], [2, 1])).toBeLessThan(0);
     });
 
-    it("shorter array < longer array with same prefix", () => {
+    it("orders a shorter array before a longer one with the same prefix", () => {
       expect(compareValues([1, 2], [1, 2, 3])).toBeLessThan(0);
     });
 
-    it("equal arrays return 0", () => {
+    it("treats equal arrays as equal", () => {
       expect(compareValues([1, 2, 3], [1, 2, 3])).toBe(0);
     });
 
-    it("empty arrays are equal", () => {
+    it("treats empty arrays as equal", () => {
       expect(compareValues([], [])).toBe(0);
     });
 
-    it("empty array < non-empty array", () => {
+    it("orders an empty array before a non-empty one", () => {
       expect(compareValues([], [1])).toBeLessThan(0);
     });
 
-    it("nested arrays compare recursively", () => {
+    it("compares nested arrays recursively", () => {
       expect(compareValues([[1]], [[2]])).toBeLessThan(0);
     });
   });
 
   describe("objects", () => {
-    it("equal objects return 0", () => {
+    it("treats equal objects as equal", () => {
       expect(compareValues({ a: 1, b: 2 }, { a: 1, b: 2 })).toBe(0);
     });
 
-    it("objects sorted by keys first", () => {
-      // { a: 1 } vs { b: 1 } — key "a" < key "b"
+    it("orders by keys first", () => {
       expect(compareValues({ a: 1 }, { b: 1 })).toBeLessThan(0);
     });
 
-    it("same keys, different values", () => {
+    it("orders by value when keys match", () => {
       expect(compareValues({ a: 1 }, { a: 2 })).toBeLessThan(0);
     });
 
-    it("fewer keys < more keys with same prefix", () => {
+    it("orders fewer keys before more keys with the same prefix", () => {
       expect(compareValues({ a: 1 }, { a: 1, b: 2 })).toBeLessThan(0);
     });
 
-    it("empty objects are equal", () => {
+    it("treats empty objects as equal", () => {
       expect(compareValues({}, {})).toBe(0);
     });
 
-    it("key order in source doesn't matter (sorted internally)", () => {
+    it("ignores source key order (sorts internally)", () => {
       expect(compareValues({ b: 2, a: 1 }, { a: 1, b: 2 })).toBe(0);
     });
   });
 
-  // -----------------------------------------------------------------------
-  // Symmetry
-  // -----------------------------------------------------------------------
-
   describe("symmetry", () => {
-    const pairs: Array<[string, any, any]> = [
-      ["numbers", 1, 2],
-      ["strings", "a", "b"],
-      ["booleans", false, true],
-      ["bigints", 1n, 2n],
-      ["arrays", [1], [2]],
-      ["objects", { a: 1 }, { a: 2 }],
-      ["cross-type null/number", null, 1],
-      ["cross-type string/array", "z", []],
+    const pairs: ReadonlyArray<{ label: string; a: Value; b: Value }> = [
+      { label: "numbers", a: 1, b: 2 },
+      { label: "strings", a: "a", b: "b" },
+      { label: "booleans", a: false, b: true },
+      { label: "bigints", a: 1n, b: 2n },
+      { label: "arrays", a: [1], b: [2] },
+      { label: "objects", a: { a: 1 }, b: { a: 2 } },
+      { label: "cross-type null/number", a: null, b: 1 },
+      { label: "cross-type string/array", a: "z", b: [] },
     ];
 
-    for (const [label, a, b] of pairs) {
-      it(`${label}: compare(a,b) > 0 ⟹ compare(b,a) < 0`, () => {
-        const ab = compareValues(a, b);
-        const ba = compareValues(b, a);
-        expect(Math.sign(ba)).toBe(-Math.sign(ab));
-      });
-    }
+    it.for(pairs)(
+      "$label: compare(a,b) and compare(b,a) have opposite signs",
+      ({ a, b }) => {
+        expect(Math.sign(compareValues(b, a))).toBe(
+          -Math.sign(compareValues(a, b)),
+        );
+      },
+    );
   });
 
-  // -----------------------------------------------------------------------
-  // Equality (reflexive)
-  // -----------------------------------------------------------------------
-
-  describe("equality (reflexive)", () => {
-    const values: Array<[string, any]> = [
-      ["undefined", undefined],
-      ["null", null],
-      ["number 0", 0],
-      ["number 42", 42],
-      ["NaN", NaN],
-      ["bigint 0n", 0n],
-      ["bigint 99n", 99n],
-      ["boolean true", true],
-      ["boolean false", false],
-      ['string "hello"', "hello"],
-      ['string ""', ""],
-      ["empty array", []],
-      ["array [1,2,3]", [1, 2, 3]],
-      ["empty object", {}],
-      ["object {a:1}", { a: 1 }],
+  describe("reflexivity", () => {
+    const values: ReadonlyArray<{ label: string; value: Value | undefined }> = [
+      { label: "undefined", value: undefined },
+      { label: "null", value: null },
+      { label: "number 0", value: 0 },
+      { label: "number 42", value: 42 },
+      { label: "NaN", value: NaN },
+      { label: "bigint 0n", value: 0n },
+      { label: "bigint 99n", value: 99n },
+      { label: "boolean true", value: true },
+      { label: "boolean false", value: false },
+      { label: 'string "hello"', value: "hello" },
+      { label: 'string ""', value: "" },
+      { label: "empty array", value: [] },
+      { label: "array [1,2,3]", value: [1, 2, 3] },
+      { label: "empty object", value: {} },
+      { label: "object {a:1}", value: { a: 1 } },
     ];
 
-    for (const [label, v] of values) {
-      it(`compare(${label}, ${label}) === 0`, () => {
-        expect(compareValues(v, v)).toBe(0);
-      });
-    }
+    it.for(values)("compare($label, $label) === 0", ({ value }) => {
+      expect(compareValues(value, value)).toBe(0);
+    });
   });
 });

@@ -1,31 +1,31 @@
 import {
   LoopbackWebSocket,
   LoopbackWebSocketConstructor,
+  type LoopbackCloseEvent,
+  type LoopbackErrorEvent,
   type LoopbackMessageEvent,
+  type LoopbackOpenEvent,
 } from "@embedded/runtime/loopback";
 import { createTransport } from "@embedded/runtime/transport";
-import { afterEach, describe, it, expect } from "@tests/testkit";
-import { vi } from "vitest";
+import { flushMicrotasks, withFakeTimers } from "@tests/helpers/time";
+import { describe, expect, it, vi } from "@tests/testkit";
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Flush the microtask queue so the WebSocket transitions to OPEN. */
-const flushMicrotasks = () => new Promise<void>((r) => queueMicrotask(r));
-
-async function settleMicrotasks(count = 4): Promise<void> {
-  for (let i = 0; i < count; i++) {
-    await flushMicrotasks();
-  }
-}
+type Handler = (message: string) => Promise<string[]>;
 
 /** Default echo handler for most tests. */
-function echoHandler() {
-  return vi.fn(async (message: string) => {
-    const parsed = JSON.parse(message);
+function echoHandler(): ReturnType<typeof vi.fn<Handler>> {
+  return vi.fn<Handler>(async (message: string) => {
+    const parsed: unknown = JSON.parse(message);
     return [JSON.stringify({ echo: parsed })];
   });
+}
+
+function parse<T>(data: string): T {
+  return JSON.parse(data) as T;
 }
 
 // ---------------------------------------------------------------------------
@@ -33,10 +33,6 @@ function echoHandler() {
 // ---------------------------------------------------------------------------
 
 describe("LoopbackWebSocket", () => {
-  // -----------------------------------------------------------------------
-  // Initial state
-  // -----------------------------------------------------------------------
-
   describe("initial state", () => {
     it("readyState is CONNECTING (0) immediately after construction", () => {
       const ws = new LoopbackWebSocket("ws://localhost", echoHandler());
@@ -53,10 +49,6 @@ describe("LoopbackWebSocket", () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // Open transition
-  // -----------------------------------------------------------------------
-
   describe("open transition", () => {
     it("readyState becomes OPEN (1) on next microtask", async () => {
       const ws = new LoopbackWebSocket("ws://localhost", echoHandler());
@@ -70,7 +62,7 @@ describe("LoopbackWebSocket", () => {
 
     it("fires onopen callback", async () => {
       const ws = new LoopbackWebSocket("ws://localhost", echoHandler());
-      const onopen = vi.fn();
+      const onopen = vi.fn<(ev: LoopbackOpenEvent) => void>();
       ws.onopen = onopen;
 
       await flushMicrotasks();
@@ -96,7 +88,7 @@ describe("LoopbackWebSocket", () => {
 
     it("does not open if close() was called before microtask fires", async () => {
       const ws = new LoopbackWebSocket("ws://localhost", echoHandler());
-      const onopen = vi.fn();
+      const onopen = vi.fn<(ev: LoopbackOpenEvent) => void>();
       ws.onopen = onopen;
 
       ws.close();
@@ -107,41 +99,32 @@ describe("LoopbackWebSocket", () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // Send / receive
-  // -----------------------------------------------------------------------
-
   describe("send / receive", () => {
     it("send() calls handler and delivers response via onmessage", async () => {
       const handler = echoHandler();
       const ws = new LoopbackWebSocket("ws://localhost", handler);
       await flushMicrotasks();
 
-      const onmessage = vi.fn();
+      const onmessage = vi.fn<(ev: LoopbackMessageEvent) => void>();
       ws.onmessage = onmessage;
 
       ws.send(JSON.stringify({ hello: "world" }));
 
-      // Handler is async so delivery is scheduled on microtask queue
       await flushMicrotasks();
 
       expect(handler).toHaveBeenCalledOnce();
       expect(handler).toHaveBeenCalledWith(JSON.stringify({ hello: "world" }));
 
       expect(onmessage).toHaveBeenCalledOnce();
-      const event = onmessage.mock.calls[0][0];
+      const event = onmessage.mock.calls[0]![0];
       expect(event.type).toBe("message");
-      expect(JSON.parse(event.data)).toEqual({ echo: { hello: "world" } });
+      expect(parse(event.data)).toEqual({ echo: { hello: "world" } });
     });
   });
 
-  // -----------------------------------------------------------------------
-  // Multiple responses
-  // -----------------------------------------------------------------------
-
   describe("multiple responses", () => {
     it("handler returning multiple strings fires onmessage for each", async () => {
-      const handler = vi.fn(async () => [
+      const handler = vi.fn<Handler>(async () => [
         JSON.stringify({ seq: 1 }),
         JSON.stringify({ seq: 2 }),
         JSON.stringify({ seq: 3 }),
@@ -149,50 +132,53 @@ describe("LoopbackWebSocket", () => {
       const ws = new LoopbackWebSocket("ws://localhost", handler);
       await flushMicrotasks();
 
-      const onmessage = vi.fn();
+      const onmessage = vi.fn<(ev: LoopbackMessageEvent) => void>();
       ws.onmessage = onmessage;
 
       ws.send("anything");
-      await settleMicrotasks();
+      await flushMicrotasks(4);
 
       expect(onmessage).toHaveBeenCalledTimes(3);
-      expect(JSON.parse(onmessage.mock.calls[0][0].data)).toEqual({ seq: 1 });
-      expect(JSON.parse(onmessage.mock.calls[1][0].data)).toEqual({ seq: 2 });
-      expect(JSON.parse(onmessage.mock.calls[2][0].data)).toEqual({ seq: 3 });
+      expect(parse(onmessage.mock.calls[0]![0].data)).toEqual({ seq: 1 });
+      expect(parse(onmessage.mock.calls[1]![0].data)).toEqual({ seq: 2 });
+      expect(parse(onmessage.mock.calls[2]![0].data)).toEqual({ seq: 3 });
     });
   });
 
   describe("message ordering", () => {
     it("delivers responses in send order even when handlers resolve out of order", async () => {
-      let first = true;
-      const handler = vi.fn(async (message: string) => {
-        const parsed = JSON.parse(message) as { seq: number };
-        if (first) {
-          first = false;
-          await new Promise((resolve) => setTimeout(resolve, 10));
-        }
-        return [JSON.stringify({ seq: parsed.seq })];
+      await withFakeTimers(async () => {
+        let first = true;
+        const handler = vi.fn<Handler>(async (message: string) => {
+          const { seq } = parse<{ seq: number }>(message);
+          if (first) {
+            first = false;
+            await new Promise((resolve) => setTimeout(resolve, 10));
+          }
+          return [JSON.stringify({ seq })];
+        });
+
+        const ws = new LoopbackWebSocket("ws://localhost", handler);
+        await flushMicrotasks();
+
+        const seen: number[] = [];
+        ws.onmessage = (event) => {
+          seen.push(parse<{ seq: number }>(event.data).seq);
+        };
+
+        ws.send(JSON.stringify({ seq: 1 }));
+        ws.send(JSON.stringify({ seq: 2 }));
+
+        await vi.advanceTimersByTimeAsync(10);
+        await flushMicrotasks(4);
+
+        expect(seen).toEqual([1, 2]);
       });
-
-      const ws = new LoopbackWebSocket("ws://localhost", handler);
-      await flushMicrotasks();
-
-      const seen: number[] = [];
-      ws.onmessage = (event) => {
-        seen.push(JSON.parse(event.data).seq);
-      };
-
-      ws.send(JSON.stringify({ seq: 1 }));
-      ws.send(JSON.stringify({ seq: 2 }));
-
-      await new Promise((resolve) => setTimeout(resolve, 30));
-
-      expect(seen).toEqual([1, 2]);
     });
 
     it("serializes pushed messages behind in-flight send responses", async () => {
       let release!: () => void;
-      const handler = vi.fn(
+      const handler = vi.fn<Handler>(
         () =>
           new Promise<string[]>((resolve) => {
             release = () =>
@@ -205,18 +191,17 @@ describe("LoopbackWebSocket", () => {
 
       const seen: Array<{ type: string; seq: number }> = [];
       ws.onmessage = (event) => {
-        const parsed = JSON.parse(event.data) as { type: string; seq: number };
-        seen.push(parsed);
+        seen.push(parse<{ type: string; seq: number }>(event.data));
       };
 
       ws.send(JSON.stringify({ seq: 1 }));
       ws.deliverMessage(JSON.stringify({ type: "Push", seq: 2 }));
 
-      await Promise.resolve();
+      await flushMicrotasks();
       expect(seen).toEqual([]);
 
       release();
-      await settleMicrotasks();
+      await flushMicrotasks(4);
 
       expect(seen).toEqual([
         { type: "Response", seq: 1 },
@@ -224,10 +209,6 @@ describe("LoopbackWebSocket", () => {
       ]);
     });
   });
-
-  // -----------------------------------------------------------------------
-  // Send before open
-  // -----------------------------------------------------------------------
 
   describe("send before open", () => {
     it("throws 'WebSocket is not open'", () => {
@@ -237,10 +218,6 @@ describe("LoopbackWebSocket", () => {
       expect(() => ws.send("test")).toThrow("WebSocket is not open");
     });
   });
-
-  // -----------------------------------------------------------------------
-  // Close
-  // -----------------------------------------------------------------------
 
   describe("close", () => {
     it("readyState becomes CLOSED (3)", async () => {
@@ -256,7 +233,7 @@ describe("LoopbackWebSocket", () => {
       const ws = new LoopbackWebSocket("ws://localhost", echoHandler());
       await flushMicrotasks();
 
-      const onclose = vi.fn();
+      const onclose = vi.fn<(ev: LoopbackCloseEvent) => void>();
       ws.onclose = onclose;
 
       ws.close();
@@ -271,7 +248,7 @@ describe("LoopbackWebSocket", () => {
       const ws = new LoopbackWebSocket("ws://localhost", echoHandler());
       await flushMicrotasks();
 
-      const onclose = vi.fn();
+      const onclose = vi.fn<(ev: LoopbackCloseEvent) => void>();
       ws.onclose = onclose;
 
       ws.close(4001, "custom reason");
@@ -285,19 +262,15 @@ describe("LoopbackWebSocket", () => {
       const ws = new LoopbackWebSocket("ws://localhost", echoHandler());
       await flushMicrotasks();
 
-      const onclose = vi.fn();
+      const onclose = vi.fn<(ev: LoopbackCloseEvent) => void>();
       ws.onclose = onclose;
 
       ws.close();
-      ws.close(); // second call should be a no-op
+      ws.close();
 
       expect(onclose).toHaveBeenCalledOnce();
     });
   });
-
-  // -----------------------------------------------------------------------
-  // Send after close
-  // -----------------------------------------------------------------------
 
   describe("send after close", () => {
     it("throws because readyState is not OPEN", async () => {
@@ -310,37 +283,30 @@ describe("LoopbackWebSocket", () => {
     });
 
     it("responses are not delivered if socket closes during handler execution", async () => {
-      // Handler that returns after a delay
-      const handler = vi.fn(async () => {
-        return [JSON.stringify({ late: true })];
-      });
+      const handler = vi.fn<Handler>(async () => [
+        JSON.stringify({ late: true }),
+      ]);
       const ws = new LoopbackWebSocket("ws://localhost", handler);
       await flushMicrotasks();
 
-      const onmessage = vi.fn();
+      const onmessage = vi.fn<(ev: LoopbackMessageEvent) => void>();
       ws.onmessage = onmessage;
 
       ws.send("test");
-      // Close before the microtask delivers the response
       ws.close();
 
       await flushMicrotasks();
 
-      // onmessage should not fire because readyState is CLOSED
       expect(onmessage).not.toHaveBeenCalled();
     });
   });
-
-  // -----------------------------------------------------------------------
-  // addEventListener
-  // -----------------------------------------------------------------------
 
   describe("addEventListener", () => {
     it("'message' listeners fire alongside onmessage", async () => {
       const ws = new LoopbackWebSocket("ws://localhost", echoHandler());
       await flushMicrotasks();
 
-      const onmessage = vi.fn();
+      const onmessage = vi.fn<(ev: LoopbackMessageEvent) => void>();
       const listener = vi.fn();
       ws.onmessage = onmessage;
       ws.addEventListener("message", listener);
@@ -351,10 +317,8 @@ describe("LoopbackWebSocket", () => {
       expect(onmessage).toHaveBeenCalledOnce();
       expect(listener).toHaveBeenCalledOnce();
 
-      // Both receive the same event
-      expect(listener.mock.calls[0][0].data).toBe(
-        onmessage.mock.calls[0][0].data,
-      );
+      const listenerEvent = listener.mock.calls[0]![0] as LoopbackMessageEvent;
+      expect(listenerEvent.data).toBe(onmessage.mock.calls[0]![0].data);
     });
 
     it("multiple listeners of the same type all fire", async () => {
@@ -389,10 +353,6 @@ describe("LoopbackWebSocket", () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // removeEventListener
-  // -----------------------------------------------------------------------
-
   describe("removeEventListener", () => {
     it("removed listeners don't fire", async () => {
       const ws = new LoopbackWebSocket("ws://localhost", echoHandler());
@@ -412,29 +372,24 @@ describe("LoopbackWebSocket", () => {
       const ws = new LoopbackWebSocket("ws://localhost", echoHandler());
       const listener = vi.fn();
 
-      // Should not throw
       expect(() => ws.removeEventListener("message", listener)).not.toThrow();
     });
   });
 
-  // -----------------------------------------------------------------------
-  // Error handling
-  // -----------------------------------------------------------------------
-
   describe("error handling", () => {
     it("handler rejection fires onerror", async () => {
       const error = new Error("handler exploded");
-      const handler = vi.fn(async () => {
+      const handler = vi.fn<Handler>(async () => {
         throw error;
       });
       const ws = new LoopbackWebSocket("ws://localhost", handler);
       await flushMicrotasks();
 
-      const onerror = vi.fn();
+      const onerror = vi.fn<(ev: LoopbackErrorEvent) => void>();
       ws.onerror = onerror;
 
       ws.send("test");
-      await settleMicrotasks();
+      await flushMicrotasks(4);
 
       expect(onerror).toHaveBeenCalledOnce();
       expect(onerror).toHaveBeenCalledWith(
@@ -443,7 +398,7 @@ describe("LoopbackWebSocket", () => {
     });
 
     it("handler rejection also fires 'error' event listeners", async () => {
-      const handler = vi.fn(async () => {
+      const handler = vi.fn<Handler>(async () => {
         throw new Error("boom");
       });
       const ws = new LoopbackWebSocket("ws://localhost", handler);
@@ -453,7 +408,7 @@ describe("LoopbackWebSocket", () => {
       ws.addEventListener("error", listener);
 
       ws.send("test");
-      await settleMicrotasks();
+      await flushMicrotasks(4);
 
       expect(listener).toHaveBeenCalledOnce();
       expect(listener).toHaveBeenCalledWith(
@@ -461,10 +416,6 @@ describe("LoopbackWebSocket", () => {
       );
     });
   });
-
-  // -----------------------------------------------------------------------
-  // Static constants
-  // -----------------------------------------------------------------------
 
   describe("static constants", () => {
     it("CONNECTING is 0", () => {
@@ -509,7 +460,7 @@ describe("LoopbackWebSocketConstructor", () => {
     await flushMicrotasks();
     expect(ws.readyState).toBe(1);
 
-    const onmessage = vi.fn();
+    const onmessage = vi.fn<(ev: LoopbackMessageEvent) => void>();
     ws.onmessage = onmessage;
 
     ws.send(JSON.stringify({ test: true }));
@@ -538,7 +489,6 @@ describe("LoopbackWebSocketConstructor", () => {
 
   it("constructor only takes url as an argument", () => {
     const WsClass = LoopbackWebSocketConstructor(echoHandler());
-    // Should work with just a url — no second arg needed
     const ws = new WsClass("ws://localhost");
     expect(ws.url).toBe("ws://localhost");
   });
@@ -549,13 +499,12 @@ describe("LoopbackWebSocketConstructor", () => {
 // ---------------------------------------------------------------------------
 
 describe("createTransport", () => {
-  /** Minimal protocol handler that echoes messages. */
   function stubRuntime() {
     return {
-      handleMessage: vi.fn(async (message: string) => {
-        return [JSON.stringify({ echo: JSON.parse(message) })];
-      }),
-      teardownSession: vi.fn(),
+      handleMessage: vi.fn<Handler>(async (message: string) => [
+        JSON.stringify({ echo: parse(message) }),
+      ]),
+      teardownSession: vi.fn<(sessionId: string) => void>(),
     };
   }
 
@@ -575,7 +524,7 @@ describe("createTransport", () => {
         clientTs: Date.now(),
       }),
     );
-    await settleMicrotasks();
+    await flushMicrotasks(4);
 
     ws.send(
       JSON.stringify({
@@ -585,7 +534,7 @@ describe("createTransport", () => {
         modifications: [],
       }),
     );
-    await settleMicrotasks();
+    await flushMicrotasks(4);
 
     expect(runtime.handleMessage).toHaveBeenLastCalledWith(
       JSON.stringify({
@@ -629,7 +578,7 @@ describe("createTransport", () => {
         clientTs: Date.now(),
       }),
     );
-    await settleMicrotasks();
+    await flushMicrotasks(4);
 
     seen1.length = 0;
     seen2.length = 0;
@@ -638,7 +587,7 @@ describe("createTransport", () => {
       "session-a",
       JSON.stringify({ type: "Transition", target: "a" }),
     );
-    await settleMicrotasks();
+    await flushMicrotasks(4);
 
     expect(seen1).toEqual([
       JSON.stringify({ type: "Transition", target: "a" }),
@@ -672,7 +621,7 @@ describe("createTransport", () => {
         clientTs: Date.now(),
       }),
     );
-    await settleMicrotasks();
+    await flushMicrotasks(4);
 
     ws1.close();
     expect(runtime.teardownSession).not.toHaveBeenCalled();
@@ -683,8 +632,6 @@ describe("createTransport", () => {
   });
 
   describe("closeAll", () => {
-    afterEach(() => vi.useRealTimers());
-
     it("closes all active WebSocket connections", async () => {
       const transport = createTransport(stubRuntime());
 
@@ -707,7 +654,7 @@ describe("createTransport", () => {
       const ws = new transport.webSocketConstructor("ws://a");
       await flushMicrotasks();
 
-      const onclose = vi.fn();
+      const onclose = vi.fn<(ev: LoopbackCloseEvent) => void>();
       ws.onclose = onclose;
 
       transport.closeAll();
@@ -719,24 +666,22 @@ describe("createTransport", () => {
     });
 
     it("clears ping intervals so they don't leak", async () => {
-      vi.useFakeTimers();
-      const transport = createTransport(stubRuntime());
+      await withFakeTimers(async () => {
+        const transport = createTransport(stubRuntime());
 
-      const ws = new transport.webSocketConstructor("ws://a");
-      await flushMicrotasks();
+        const ws = new transport.webSocketConstructor("ws://a");
+        await flushMicrotasks();
 
-      const onmessage = vi.fn();
-      ws.onmessage = onmessage;
+        const onmessage = vi.fn<(ev: LoopbackMessageEvent) => void>();
+        ws.onmessage = onmessage;
 
-      // closeAll should clear the interval
-      transport.closeAll();
-      expect(ws.readyState).toBe(LoopbackWebSocket.CLOSED);
+        transport.closeAll();
+        expect(ws.readyState).toBe(LoopbackWebSocket.CLOSED);
 
-      // Advance time past the ping interval — no ping should fire.
-      vi.advanceTimersByTime(60_000);
+        await vi.advanceTimersByTimeAsync(60_000);
 
-      // onmessage should not have been called (no Ping after close).
-      expect(onmessage).not.toHaveBeenCalled();
+        expect(onmessage).not.toHaveBeenCalled();
+      });
     });
 
     it("is idempotent", async () => {
@@ -746,7 +691,6 @@ describe("createTransport", () => {
       await flushMicrotasks();
 
       transport.closeAll();
-      // Second call should not throw
       transport.closeAll();
 
       expect(ws.readyState).toBe(LoopbackWebSocket.CLOSED);
@@ -759,21 +703,21 @@ describe("createTransport", () => {
       const ws2 = new transport.webSocketConstructor("ws://b");
       await flushMicrotasks();
 
-      // Manually close ws1 before calling closeAll
       ws1.close();
       expect(ws1.readyState).toBe(LoopbackWebSocket.CLOSED);
 
-      const onclose2 = vi.fn();
+      const onclose2 = vi.fn<(ev: LoopbackCloseEvent) => void>();
       ws2.onclose = onclose2;
 
       transport.closeAll();
 
-      // ws2 should have been closed
       expect(ws2.readyState).toBe(LoopbackWebSocket.CLOSED);
       expect(onclose2).toHaveBeenCalledOnce();
     });
 
-    it("does not track sockets created after closeAll", async () => {
+    it("does not track sockets created after closeAll", async ({
+      onTestFinished,
+    }) => {
       const transport = createTransport(stubRuntime());
 
       const ws1 = new transport.webSocketConstructor("ws://a");
@@ -782,13 +726,10 @@ describe("createTransport", () => {
       transport.closeAll();
       expect(ws1.readyState).toBe(LoopbackWebSocket.CLOSED);
 
-      // New socket after closeAll should work independently
       const ws2 = new transport.webSocketConstructor("ws://b");
+      onTestFinished(() => ws2.close());
       await flushMicrotasks();
       expect(ws2.readyState).toBe(LoopbackWebSocket.OPEN);
-
-      // Clean up
-      ws2.close();
     });
   });
 });

@@ -1,11 +1,8 @@
 import { discoverPendingReplayMetadata } from "@resolve/client/replay";
-import { beforeEach, describe, expect, it, vi } from "@tests/testkit";
+import type { ConvexModuleRegistry } from "@resolve/kernel/modules";
+import { describe, expect, it, vi } from "@tests/testkit";
 
 describe("discoverPendingReplayMetadata", () => {
-  beforeEach(() => {
-    vi.restoreAllMocks();
-  });
-
   it("caches replay metadata per module registry", async () => {
     const replayTagged = () => {};
     Object.defineProperty(
@@ -21,7 +18,7 @@ describe("discoverPendingReplayMetadata", () => {
     );
 
     const loadModule = vi.fn(async () => ({ create: replayTagged }));
-    const modules = {
+    const modules: ConvexModuleRegistry = {
       issues: loadModule,
     };
 

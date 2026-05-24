@@ -1,247 +1,191 @@
-import { Database } from "@embedded/runtime/db/database";
+import {
+  Database,
+  type DatabaseCommitResult,
+} from "@embedded/runtime/db/database";
+import type { DocumentId } from "@embedded/runtime/db/types";
 import type { StorageAdapter } from "@embedded/storage/adapter";
 import { OpaqueTestAdapter, mockAdapter } from "@tests/helpers/adapter";
-import { describe, it, expect } from "@tests/testkit";
-import { vi } from "vitest";
+import { describe, expect, it, vi } from "@tests/testkit";
+import type { GenericDocument } from "convex/server";
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/**
- * Create a Database backed by a ephemeralStorage adapter, hydrate it,
- * and return both.
- */
-async function createPersistedDb(storage?: StorageAdapter) {
-  const s = storage ?? new OpaqueTestAdapter();
-  const db = new Database(null, s);
+async function persistedDb(storage: StorageAdapter): Promise<Database> {
+  const db = new Database(null, storage);
   await db.hydrate();
-  return { db, storage: s };
+  return db;
 }
 
-/** Drain a query iterator into yielded values. */
-function* iterateQuery(db: any, queryId: number) {
+function* drainQuery(
+  db: Database,
+  queryId: number,
+): Generator<GenericDocument> {
   let next = db.queryNext(queryId);
   while (!next.done) {
-    yield next.value;
+    if (next.value !== null) {
+      yield next.value;
+    }
     next = db.queryNext(queryId);
   }
 }
 
-/** Insert a document inside a transaction and commit. */
-function insertAndCommit(
+function scanTable(db: Database, tableName: string): GenericDocument[] {
+  db.startTransaction();
+  const queryId = db.startQuery({
+    source: { type: "FullTableScan", tableName, order: null },
+    operators: [],
+  });
+  const rows = Array.from(drainQuery(db, queryId));
+  db.queryCleanup(queryId);
+  db.rollbackWrites();
+  return rows;
+}
+
+async function insertAndCommit(
   db: Database,
   table: string,
   fields: Record<string, unknown> = {},
-) {
+): Promise<{ id: DocumentId; commit: DatabaseCommitResult }> {
   db.startTransaction();
   const id = db.insert(table, fields);
-  const result = db.commit();
-  result.persisted.catch(() => undefined);
-  return { id, ...result };
+  const commit = db.commit();
+  await commit.persisted;
+  return { id, commit };
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 describe("Database storage", () => {
-  // -- Basic round-trip ---------------------------------------------------
-
   describe("round-trip", () => {
-    it("documents survive a simulated restart", async () => {
-      const storage = new OpaqueTestAdapter();
+    it("documents survive a simulated restart", async ({ storage }) => {
+      const session1 = await persistedDb(storage);
+      await insertAndCommit(session1, "tasks", { text: "buy milk" });
+      await insertAndCommit(session1, "tasks", { text: "walk dog" });
 
-      // Session 1: insert documents
-      const { db: db1 } = await createPersistedDb(storage);
-      insertAndCommit(db1, "tasks", { text: "buy milk" });
-      insertAndCommit(db1, "tasks", { text: "walk dog" });
+      const session2 = await persistedDb(storage);
+      const rows = scanTable(session2, "tasks");
 
-      // Wait for fire-and-forget storage writes to settle
-      await new Promise((r) => setTimeout(r, 10));
-
-      // Session 2: create a new Database from the same storage
-      const { db: db2 } = await createPersistedDb(storage);
-
-      // Query documents from the hydrated database
-      db2.startTransaction();
-      const qid = db2.startQuery({
-        source: { type: "FullTableScan", tableName: "tasks", order: null },
-        operators: [],
-      });
-      const results = Array.from(iterateQuery(db2, qid)).filter(Boolean);
-      db2.queryCleanup(qid);
-      db2.rollbackWrites();
-
-      expect(results).toHaveLength(2);
-      expect(results.map((r: any) => r.text)).toContain("buy milk");
-      expect(results.map((r: any) => r.text)).toContain("walk dog");
+      expect(rows).toHaveLength(2);
+      expect(rows.map((row) => row.text)).toEqual(
+        expect.arrayContaining(["buy milk", "walk dog"]),
+      );
     });
 
-    it("metadata counters survive a restart", async () => {
-      const storage = new OpaqueTestAdapter();
+    it("metadata counters survive a restart", async ({ storage }) => {
+      const session1 = await persistedDb(storage);
+      await insertAndCommit(session1, "tasks", { text: "a" });
+      await insertAndCommit(session1, "tasks", { text: "b" });
 
-      const { db: db1 } = await createPersistedDb(storage);
-      insertAndCommit(db1, "tasks", { text: "a" });
-      insertAndCommit(db1, "tasks", { text: "b" });
+      const meta = await storage.getMetadata();
+      expect(meta?.timestamp).toBe(2);
 
-      await new Promise((r) => setTimeout(r, 10));
+      const session2 = await persistedDb(storage);
+      expect(session2.timestamp).toBe(2);
 
-      const meta = await storage.meta();
-      expect(meta).not.toBeNull();
-      expect(meta!.timestamp).toBe(2);
-
-      // Session 2: verify timestamp and IDs continue from where they left off
-      const { db: db2 } = await createPersistedDb(storage);
-      expect(db2.timestamp).toBe(2);
-
-      // A new insert should not collide with previous IDs
-      const { id } = insertAndCommit(db2, "tasks", { text: "c" });
+      const { id } = await insertAndCommit(session2, "tasks", { text: "c" });
       expect(id).toBeDefined();
-      expect(db2.timestamp).toBe(3);
+      expect(session2.timestamp).toBe(3);
     });
   });
 
-  // -- Deletes ------------------------------------------------------------
-
   describe("deletes", () => {
-    it("deleted documents are not restored on hydration", async () => {
-      const storage = new OpaqueTestAdapter();
+    it("deleted documents are not restored on hydration", async ({
+      storage,
+    }) => {
+      const session1 = await persistedDb(storage);
+      const { id } = await insertAndCommit(session1, "tasks", { text: "temp" });
 
-      const { db: db1 } = await createPersistedDb(storage);
-      const { id } = insertAndCommit(db1, "tasks", { text: "temp" });
+      session1.startTransaction();
+      session1.delete("tasks", id);
+      await session1.commit().persisted;
 
-      // Delete it
-      db1.startTransaction();
-      db1.delete("tasks", id);
-      db1.commit();
-
-      await new Promise((r) => setTimeout(r, 10));
-
-      // Session 2
-      const { db: db2 } = await createPersistedDb(storage);
-      db2.startTransaction();
-      const doc = db2.get("tasks", id);
-      db2.rollbackWrites();
+      const session2 = await persistedDb(storage);
+      session2.startTransaction();
+      const doc = session2.get("tasks", id);
+      session2.rollbackWrites();
 
       expect(doc).toBeNull();
     });
   });
 
-  // -- Patch / Replace ----------------------------------------------------
-
   describe("mutations", () => {
-    it("patched documents persist the updated values", async () => {
-      const storage = new OpaqueTestAdapter();
-
-      const { db: db1 } = await createPersistedDb(storage);
-      const { id } = insertAndCommit(db1, "tasks", {
+    it("patched documents persist the updated values", async ({ storage }) => {
+      const session1 = await persistedDb(storage);
+      const { id } = await insertAndCommit(session1, "tasks", {
         text: "original",
         done: false,
       });
 
-      db1.startTransaction();
-      db1.patch("tasks", id, { done: true });
-      db1.commit();
+      session1.startTransaction();
+      session1.patch("tasks", id, { done: true });
+      await session1.commit().persisted;
 
-      await new Promise((r) => setTimeout(r, 10));
-
-      const { db: db2 } = await createPersistedDb(storage);
-      db2.startTransaction();
-      const doc = db2.get("tasks", id);
-      db2.rollbackWrites();
+      const session2 = await persistedDb(storage);
+      session2.startTransaction();
+      const doc = session2.get("tasks", id);
+      session2.rollbackWrites();
 
       expect(doc).not.toBeNull();
-      expect(doc!.done).toBe(true);
-      expect(doc!.text).toBe("original");
+      expect(doc?.done).toBe(true);
+      expect(doc?.text).toBe("original");
     });
   });
 
-  // -- No storage (backward compat) --------------------------------------
-
   describe("no storage", () => {
-    it("Database works without a storage adapter", () => {
-      const db = new Database(null);
-      insertAndCommit(db, "tasks", { text: "ephemeral" });
-
+    it("works without a storage adapter", ({ db }) => {
       db.startTransaction();
-      const qid = db.startQuery({
-        source: { type: "FullTableScan", tableName: "tasks", order: null },
-        operators: [],
-      });
-      const next = db.queryNext(qid);
-      db.queryCleanup(qid);
-      db.rollbackWrites();
+      db.insert("tasks", { text: "ephemeral" });
+      db.commit();
 
-      expect(next.value).not.toBeNull();
-      expect((next.value as any).text).toBe("ephemeral");
+      const rows = scanTable(db, "tasks");
+      expect(rows).toHaveLength(1);
+      expect(rows[0]?.text).toBe("ephemeral");
     });
 
-    it("hydrate is a no-op without storage", async () => {
-      const db = new Database(null);
-      await db.hydrate(); // should not throw
+    it("hydrate is a no-op without storage", async ({ db }) => {
+      await db.hydrate();
       expect(db.timestamp).toBe(0);
     });
   });
 
-  // -- Storage error handling ---------------------------------------------
-
   describe("error handling", () => {
-    it("storage commit failure does not break in-memory state", async () => {
-      // Use mockAdapter so we can override `commit` to fail while sharing the
-      // ephemeral adapter's storage surface. The real `OpaqueTestAdapter`
-      // instance is reused for everything except the commit callback.
-      const storage = new OpaqueTestAdapter();
+    it("storage commit failure does not corrupt in-memory state", async ({
+      track,
+    }) => {
+      const backing = track(new OpaqueTestAdapter());
       const failingStorage = mockAdapter({
         kind: "opaque",
-        listAll: () => storage.listAll(),
-        list: (tableName) => storage.list(tableName),
-        meta: () => storage.meta(),
-        listBlobs: () => storage.listBlobs(),
-        commit: vi.fn().mockRejectedValue(new Error("disk full")),
-        putBlob: (id, blob) => storage.putBlob(id, blob),
-        deleteBlob: (id) => storage.deleteBlob(id),
-        clear: () => storage.clear(),
+        getDocuments: (table, opts) => backing.getDocuments(table, opts),
+        getMetadata: () => backing.getMetadata(),
+        listBlobs: () => backing.listBlobs(),
+        write: vi.fn().mockRejectedValue(new Error("disk full")),
+        putBlob: (id, blob) => backing.putBlob(id, blob),
+        deleteBlob: (id) => backing.deleteBlob(id),
+        clearAll: () => backing.clearAll(),
       });
 
       const db = new Database(null, failingStorage);
+      vi.spyOn(console, "error").mockImplementation(() => {});
 
-      // Suppress the console.error from fire-and-forget
-      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
-
-      insertAndCommit(db, "tasks", { text: "test" });
-
-      // In-memory state should still be correct
       db.startTransaction();
-      const doc = db.get(
-        undefined,
-        db.normalizeId("tasks", (db as any)._documents.keys().next().value)!,
-      );
+      const id = db.insert("tasks", { text: "test" });
+      db.commit().persisted.catch(() => undefined);
+
+      db.startTransaction();
+      const doc = db.get("tasks", id);
       db.rollbackWrites();
 
-      expect(doc).not.toBeNull();
-      expect((doc as any).text).toBe("test");
-
-      spy.mockRestore();
+      expect(doc?.text).toBe("test");
     });
   });
 
-  // -- clear --------------------------------------------------------------
-
   describe("clear via storage", () => {
-    it("clears storage when adapter.clear() is called directly", async () => {
-      const storage = new OpaqueTestAdapter();
+    it("a database built from cleared storage starts empty", async ({
+      storage,
+    }) => {
+      const session1 = await persistedDb(storage);
+      await insertAndCommit(session1, "tasks", { text: "hello" });
 
-      const { db: db1 } = await createPersistedDb(storage);
-      insertAndCommit(db1, "tasks", { text: "hello" });
+      await storage.clearAll();
 
-      await new Promise((r) => setTimeout(r, 10));
-
-      await storage.clear();
-
-      // New database from cleared storage starts empty
-      const { db: db2 } = await createPersistedDb(storage);
-      expect(db2.timestamp).toBe(0);
+      const session2 = await persistedDb(storage);
+      expect(session2.timestamp).toBe(0);
     });
   });
 });

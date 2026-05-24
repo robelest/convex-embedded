@@ -1,6 +1,13 @@
 import { BrowserSessionBroadcast } from "@embedded/browser/session";
-import { afterEach, beforeEach, describe, expect, it } from "@tests/testkit";
-import { vi } from "vitest";
+import type { SessionEvent } from "@embedded/runtime/platform";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "@tests/testkit";
 
 class MockBroadcastChannel {
   static instances: MockBroadcastChannel[] = [];
@@ -34,6 +41,8 @@ class MockBroadcastChannel {
   }
 }
 
+const authChanged: SessionEvent = { type: "authChanged" };
+
 beforeEach(() => {
   MockBroadcastChannel.reset();
   vi.stubGlobal("BroadcastChannel", MockBroadcastChannel);
@@ -45,50 +54,42 @@ afterEach(() => {
 });
 
 describe("BrowserSessionBroadcast", () => {
-  it("does not notify its own callbacks on self notify", () => {
-    const fanout = new BrowserSessionBroadcast();
+  it("does not notify its own callbacks on self notify", ({ track }) => {
+    const fanout = track(new BrowserSessionBroadcast());
     const callback = vi.fn();
 
     fanout.onNotification(callback);
-    fanout.notify({ type: "authChanged" });
+    fanout.notify(authChanged);
 
     expect(callback).not.toHaveBeenCalled();
-
-    fanout.close();
   });
 
-  it("notifies another tab on the same channel", () => {
-    const fanoutA = new BrowserSessionBroadcast("shared-session");
-    const fanoutB = new BrowserSessionBroadcast("shared-session");
+  it("notifies another tab on the same channel", ({ track }) => {
+    const fanoutA = track(new BrowserSessionBroadcast("shared-session"));
+    const fanoutB = track(new BrowserSessionBroadcast("shared-session"));
     const callback = vi.fn();
 
     fanoutA.onNotification(callback);
-    fanoutB.notify({ type: "authChanged" });
+    fanoutB.notify(authChanged);
 
     expect(callback).toHaveBeenCalledOnce();
-    expect(callback).toHaveBeenCalledWith({ type: "authChanged" });
-
-    fanoutA.close();
-    fanoutB.close();
+    expect(callback).toHaveBeenCalledWith(authChanged);
   });
 
-  it("ignores notifications from a different channel", () => {
-    const fanoutA = new BrowserSessionBroadcast("session-a");
-    const fanoutB = new BrowserSessionBroadcast("session-b");
+  it("ignores notifications from a different channel", ({ track }) => {
+    const fanoutA = track(new BrowserSessionBroadcast("session-a"));
+    const fanoutB = track(new BrowserSessionBroadcast("session-b"));
     const callback = vi.fn();
 
     fanoutA.onNotification(callback);
-    fanoutB.notify({ type: "authChanged" });
+    fanoutB.notify(authChanged);
 
     expect(callback).not.toHaveBeenCalled();
-
-    fanoutA.close();
-    fanoutB.close();
   });
 
-  it("unsubscribe removes only that callback", () => {
-    const fanoutA = new BrowserSessionBroadcast("session-unsub");
-    const fanoutB = new BrowserSessionBroadcast("session-unsub");
+  it("unsubscribe removes only that callback", ({ track }) => {
+    const fanoutA = track(new BrowserSessionBroadcast("session-unsub"));
+    const fanoutB = track(new BrowserSessionBroadcast("session-unsub"));
     const callbackA = vi.fn();
     const callbackB = vi.fn();
 
@@ -96,47 +97,44 @@ describe("BrowserSessionBroadcast", () => {
     fanoutA.onNotification(callbackB);
 
     unsubscribeA();
-    fanoutB.notify({ type: "authChanged" });
+    fanoutB.notify(authChanged);
 
     expect(callbackA).not.toHaveBeenCalled();
     expect(callbackB).toHaveBeenCalledOnce();
-
-    fanoutA.close();
-    fanoutB.close();
   });
 
-  it("close() is idempotent and clears callbacks", () => {
-    const fanoutA = new BrowserSessionBroadcast("session-close");
-    const fanoutB = new BrowserSessionBroadcast("session-close");
+  it("close() is idempotent and clears callbacks", ({ track }) => {
+    const fanoutA = track(new BrowserSessionBroadcast("session-close"));
+    const fanoutB = track(new BrowserSessionBroadcast("session-close"));
     const callback = vi.fn();
 
     fanoutA.onNotification(callback);
     fanoutA.close();
     fanoutA.close();
-    fanoutB.notify({ type: "authChanged" });
+    fanoutB.notify(authChanged);
 
     expect(callback).not.toHaveBeenCalled();
-
-    fanoutB.close();
   });
 
-  it("uses unique localStorage fallback payloads for repeated notifications", () => {
+  it("uses unique localStorage fallback payloads for repeated notifications", ({
+    track,
+  }) => {
     vi.stubGlobal(
       "BroadcastChannel",
       undefined as unknown as typeof BroadcastChannel,
     );
     const localStorageMock = { setItem: vi.fn() };
     vi.stubGlobal("localStorage", localStorageMock);
-    const fanout = new BrowserSessionBroadcast("session-storage-fallback");
+    const fanout = track(
+      new BrowserSessionBroadcast("session-storage-fallback"),
+    );
 
-    fanout.notify({ type: "authChanged" });
-    fanout.notify({ type: "authChanged" });
+    fanout.notify(authChanged);
+    fanout.notify(authChanged);
 
     expect(localStorageMock.setItem).toHaveBeenCalledTimes(2);
     expect(localStorageMock.setItem.mock.calls[0]?.[1]).not.toBe(
       localStorageMock.setItem.mock.calls[1]?.[1],
     );
-
-    fanout.close();
   });
 });

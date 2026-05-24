@@ -1,61 +1,71 @@
-import { AuthResolver, getIdentityKey } from "@embedded/auth";
+import {
+  AuthResolver,
+  getIdentityKey,
+  type UserIdentity,
+} from "@embedded/auth";
 import { createTestIdentity } from "@embedded/test";
-import { describe, it, expect } from "@tests/testkit";
+import { describe, expect, it } from "@tests/testkit";
 
 describe("AuthResolver", () => {
-  it("initial state: getUserIdentity returns null", async () => {
+  it("returns null before any identity is set", async () => {
     const auth = new AuthResolver();
 
-    const identity = await auth.getUserIdentity();
-
-    expect(identity).toBeNull();
+    await expect(auth.getUserIdentity()).resolves.toBeNull();
   });
 
-  it("setIdentity: getUserIdentity returns the set identity", async () => {
+  it("returns the identity passed to setIdentity", async () => {
     const auth = new AuthResolver();
     const identity = createTestIdentity();
     auth.setIdentity(identity);
 
-    const result = await auth.getUserIdentity();
-
-    expect(result).toBe(identity);
+    await expect(auth.getUserIdentity()).resolves.toBe(identity);
   });
 
-  it("setIdentity(null): clears the identity", async () => {
+  it("clears the identity when set to null", async () => {
     const auth = new AuthResolver();
     auth.setIdentity(createTestIdentity());
     auth.setIdentity(null);
 
-    const result = await auth.getUserIdentity();
+    await expect(auth.getUserIdentity()).resolves.toBeNull();
+  });
 
-    expect(result).toBeNull();
+  it("exposes the current identity synchronously via peekUserIdentity", () => {
+    const auth = new AuthResolver();
+    const identity = createTestIdentity();
+    auth.setIdentity(identity);
+
+    expect(auth.peekUserIdentity()).toBe(identity);
   });
 });
 
 describe("createTestIdentity", () => {
-  it("defaults: has subject, issuer, tokenIdentifier, name, email", () => {
+  it("populates subject, issuer, tokenIdentifier, name and email by default", () => {
     const identity = createTestIdentity();
 
-    expect(identity.subject).toBe("test-user-1");
-    expect(identity.issuer).toBe("https://embedded.local");
-    expect(identity.tokenIdentifier).toBe("https://embedded.local|test-user-1");
-    expect(identity.name).toBe("Test User");
-    expect(identity.email).toBe("test@embedded.local");
+    expect(identity).toMatchObject({
+      subject: "test-user-1",
+      issuer: "https://embedded.local",
+      tokenIdentifier: "https://embedded.local|test-user-1",
+      name: "Test User",
+      email: "test@embedded.local",
+    });
   });
 
-  it("with overrides: custom subject, name, email override defaults", () => {
+  it("lets overrides replace the default subject, name and email", () => {
     const identity = createTestIdentity({
       subject: "alice",
       name: "Alice",
       email: "alice@test.com",
     });
 
-    expect(identity.subject).toBe("alice");
-    expect(identity.name).toBe("Alice");
-    expect(identity.email).toBe("alice@test.com");
+    expect(identity).toMatchObject({
+      subject: "alice",
+      name: "Alice",
+      email: "alice@test.com",
+    });
   });
 
-  it("tokenIdentifier: auto-generated from issuer|subject", () => {
+  it("derives tokenIdentifier from issuer|subject", () => {
     const identity = createTestIdentity({
       subject: "bob",
       issuer: "https://custom.issuer",
@@ -64,7 +74,7 @@ describe("createTestIdentity", () => {
     expect(identity.tokenIdentifier).toBe("https://custom.issuer|bob");
   });
 
-  it("custom tokenIdentifier: uses provided value", () => {
+  it("keeps an explicitly provided tokenIdentifier", () => {
     const identity = createTestIdentity({
       tokenIdentifier: "custom-token-id",
     });
@@ -72,7 +82,7 @@ describe("createTestIdentity", () => {
     expect(identity.tokenIdentifier).toBe("custom-token-id");
   });
 
-  it("extra fields: additional attrs are spread into result", () => {
+  it("spreads extra attributes onto the result", () => {
     const identity = createTestIdentity({
       pictureUrl: "https://example.com/pic.jpg",
       nickname: "tester",
@@ -86,24 +96,24 @@ describe("createTestIdentity", () => {
 });
 
 describe("getIdentityKey", () => {
-  it("prefers tokenIdentifier", () => {
-    expect(
-      getIdentityKey(
-        createTestIdentity({
-          tokenIdentifier: "issuer|alice",
-          subject: "alice",
-        }),
-      ),
-    ).toBe("issuer|alice");
+  it("prefers tokenIdentifier over subject", () => {
+    const key = getIdentityKey(
+      createTestIdentity({ tokenIdentifier: "issuer|alice", subject: "alice" }),
+    );
+
+    expect(key).toBe("issuer|alice");
   });
 
   it("falls back to subject when tokenIdentifier is missing", () => {
-    expect(getIdentityKey({ subject: "alice", issuer: "issuer" } as any)).toBe(
-      "alice",
-    );
+    const identity = {
+      subject: "alice",
+      issuer: "issuer",
+    } as unknown as UserIdentity;
+
+    expect(getIdentityKey(identity)).toBe("alice");
   });
 
-  it("returns null for null identity", () => {
+  it("returns null for a null identity", () => {
     expect(getIdentityKey(null)).toBeNull();
   });
 });

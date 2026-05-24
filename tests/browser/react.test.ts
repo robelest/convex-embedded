@@ -1,8 +1,13 @@
 import { wrapConvexBrowserClientForReact } from "@resolve/react";
-import { describe, expect, it } from "@tests/testkit";
+import { describe, expect, it, vi, type Mock } from "@tests/testkit";
 import type { ConvexClient } from "convex/browser";
 import { makeFunctionReference } from "convex/server";
-import { vi } from "vitest";
+
+interface QuerySubscriptionHandle<T> {
+  unsubscribe: Mock;
+  getCurrentValue: () => T | undefined;
+  getQueryLogs: () => string[];
+}
 
 function createQuerySubscription<T>(initialValue: T | undefined) {
   let currentValue = initialValue;
@@ -11,12 +16,14 @@ function createQuerySubscription<T>(initialValue: T | undefined) {
   const unsubscribe = vi.fn();
   const logs = ["query log"];
 
+  const subscription: QuerySubscriptionHandle<T> = {
+    unsubscribe,
+    getCurrentValue: () => currentValue,
+    getQueryLogs: () => logs,
+  };
+
   return {
-    subscription: {
-      unsubscribe,
-      getCurrentValue: () => currentValue,
-      getQueryLogs: () => logs,
-    },
+    subscription,
     emit(nextValue: T) {
       currentValue = nextValue;
       onUpdate?.();
@@ -27,9 +34,15 @@ function createQuerySubscription<T>(initialValue: T | undefined) {
     bind(callback: () => void, errorCallback?: (error: Error) => void) {
       onUpdate = callback;
       onError = errorCallback;
-      return this.subscription;
+      return subscription;
     },
   };
+}
+
+interface PaginatedSubscriptionHandle<T> {
+  unsubscribe: Mock;
+  getCurrentValue: () => T | undefined;
+  getQueryLogs: () => string[];
 }
 
 function createPaginatedSubscription<T>(initialValue: T | undefined) {
@@ -38,12 +51,14 @@ function createPaginatedSubscription<T>(initialValue: T | undefined) {
   let onError: ((error: Error) => void) | undefined;
   const unsubscribe = vi.fn();
 
+  const subscription: PaginatedSubscriptionHandle<T> = {
+    unsubscribe,
+    getCurrentValue: () => currentValue,
+    getQueryLogs: () => [],
+  };
+
   return {
-    subscription: {
-      unsubscribe,
-      getCurrentValue: () => currentValue,
-      getQueryLogs: () => [],
-    },
+    subscription,
     emit(nextValue: T) {
       currentValue = nextValue;
       onUpdate?.();
@@ -54,19 +69,38 @@ function createPaginatedSubscription<T>(initialValue: T | undefined) {
     bind(callback: () => void, errorCallback?: (error: Error) => void) {
       onUpdate = callback;
       onError = errorCallback;
-      return this.subscription;
+      return subscription;
     },
   };
+}
+
+interface MockBrowserClient {
+  onUpdate: Mock;
+  onPaginatedUpdate_experimental: Mock;
+  mutation: Mock;
+  action: Mock;
+  query: Mock;
+  setAuth: Mock;
+  clearAuth: Mock;
+  setAdminAuth: Mock;
+  connectionState: Mock;
+  subscribeToConnectionState: Mock;
+  close: Mock;
+}
+
+function asConvexClient(mock: Partial<MockBrowserClient>): ConvexClient {
+  return mock as unknown as ConvexClient;
 }
 
 describe("wrapConvexBrowserClientForReact", () => {
   it("shares a single query subscription across React listeners", async () => {
     const queryRef = makeFunctionReference<"query">("tasks:list");
     const querySubscription = createQuerySubscription([{ _id: "task-1" }]);
-    const client = {
-      onUpdate: vi.fn((_query, _args, callback, onError) =>
-        querySubscription.bind(callback, onError),
-      ),
+    const onUpdate = vi.fn((_query, _args, callback: () => void, onError) =>
+      querySubscription.bind(callback, onError),
+    );
+    const client = asConvexClient({
+      onUpdate,
       onPaginatedUpdate_experimental: vi.fn(),
       mutation: vi.fn(),
       action: vi.fn(),
@@ -74,7 +108,7 @@ describe("wrapConvexBrowserClientForReact", () => {
       connectionState: vi.fn(() => "connected"),
       subscribeToConnectionState: vi.fn(() => () => {}),
       close: vi.fn(async () => {}),
-    } as unknown as ConvexClient;
+    });
 
     const reactClient = wrapConvexBrowserClientForReact(client);
     const watch = reactClient.watchQuery(queryRef, {});
@@ -86,7 +120,7 @@ describe("wrapConvexBrowserClientForReact", () => {
 
     await Promise.resolve();
 
-    expect((client as any).onUpdate).toHaveBeenCalledTimes(1);
+    expect(onUpdate).toHaveBeenCalledTimes(1);
     expect(first).toHaveBeenCalledOnce();
     expect(second).toHaveBeenCalledOnce();
     expect(watch.localQueryResult()).toEqual([{ _id: "task-1" }]);
@@ -112,19 +146,20 @@ describe("wrapConvexBrowserClientForReact", () => {
       status: "CanLoadMore",
       loadMore,
     });
-    const client = {
+    const onPaginatedUpdate = vi.fn(
+      (_query, _args, _options, callback: () => void, onError) =>
+        paginatedSubscription.bind(callback, onError),
+    );
+    const client = asConvexClient({
       onUpdate: vi.fn(),
-      onPaginatedUpdate_experimental: vi.fn(
-        (_query, _args, _options, callback, onError) =>
-          paginatedSubscription.bind(callback, onError),
-      ),
+      onPaginatedUpdate_experimental: onPaginatedUpdate,
       mutation: vi.fn(),
       action: vi.fn(),
       query: vi.fn(),
       connectionState: vi.fn(() => "connected"),
       subscribeToConnectionState: vi.fn(() => () => {}),
       close: vi.fn(async () => {}),
-    } as unknown as ConvexClient;
+    });
 
     const reactClient = wrapConvexBrowserClientForReact(client);
     const watch = reactClient.watchPaginatedQuery(queryRef, {} as never, {
@@ -136,9 +171,7 @@ describe("wrapConvexBrowserClientForReact", () => {
     const unsubscribe = watch.onUpdate(listener);
     await Promise.resolve();
 
-    expect(
-      (client as any).onPaginatedUpdate_experimental,
-    ).toHaveBeenCalledTimes(1);
+    expect(onPaginatedUpdate).toHaveBeenCalledTimes(1);
     expect(listener).toHaveBeenCalledOnce();
     expect(watch.localQueryResult()).toEqual({
       results: [{ _id: "task-1" }],
@@ -171,7 +204,7 @@ describe("wrapConvexBrowserClientForReact", () => {
     const actionRef = makeFunctionReference<"action">("tasks:sync");
     const stateListener = vi.fn();
     const unsubscribeState = vi.fn();
-    const client = {
+    const mock = {
       onUpdate: vi.fn(),
       onPaginatedUpdate_experimental: vi.fn(),
       mutation: vi.fn(async () => ({ ok: true })),
@@ -180,15 +213,13 @@ describe("wrapConvexBrowserClientForReact", () => {
       connectionState: vi.fn(() => "connected"),
       subscribeToConnectionState: vi.fn(() => unsubscribeState),
       close: vi.fn(async () => {}),
-    } as unknown as ConvexClient;
+    } satisfies Partial<MockBrowserClient>;
 
-    const reactClient = wrapConvexBrowserClientForReact(client);
+    const reactClient = wrapConvexBrowserClientForReact(asConvexClient(mock));
 
     await expect(
       reactClient.mutation(mutationRef, { title: "A" }),
-    ).resolves.toEqual({
-      ok: true,
-    });
+    ).resolves.toEqual({ ok: true });
     await expect(reactClient.query(queryRef, {})).resolves.toEqual([
       { _id: "task-1" },
     ]);
@@ -202,21 +233,17 @@ describe("wrapConvexBrowserClientForReact", () => {
 
     await reactClient.close();
 
-    expect((client as any).mutation).toHaveBeenCalledWith(mutationRef, {
-      title: "A",
-    });
-    expect((client as any).query).toHaveBeenCalledWith(queryRef, {});
-    expect((client as any).action).toHaveBeenCalledWith(actionRef, {});
-    expect((client as any).subscribeToConnectionState).toHaveBeenCalledWith(
-      stateListener,
-    );
-    expect((client as any).close).toHaveBeenCalledOnce();
+    expect(mock.mutation).toHaveBeenCalledWith(mutationRef, { title: "A" });
+    expect(mock.query).toHaveBeenCalledWith(queryRef, {});
+    expect(mock.action).toHaveBeenCalledWith(actionRef, {});
+    expect(mock.subscribeToConnectionState).toHaveBeenCalledWith(stateListener);
+    expect(mock.close).toHaveBeenCalledOnce();
   });
 
   it("delegates auth methods to the embedded client", () => {
     const fetchToken = vi.fn(async () => "token");
     const onChange = vi.fn();
-    const client = {
+    const mock = {
       onUpdate: vi.fn(),
       onPaginatedUpdate_experimental: vi.fn(),
       mutation: vi.fn(),
@@ -228,17 +255,17 @@ describe("wrapConvexBrowserClientForReact", () => {
       connectionState: vi.fn(() => "connected"),
       subscribeToConnectionState: vi.fn(() => () => {}),
       close: vi.fn(async () => {}),
-    } as unknown as ConvexClient;
+    } satisfies Partial<MockBrowserClient>;
 
-    const reactClient = wrapConvexBrowserClientForReact(client);
+    const reactClient = wrapConvexBrowserClientForReact(asConvexClient(mock));
 
     reactClient.setAuth(fetchToken, onChange);
     reactClient.clearAuth();
-    (reactClient as any).setAdminAuth("admin-token", { subject: "admin" });
+    reactClient.setAdminAuth("admin-token", { subject: "admin" });
 
-    expect((client as any).setAuth).toHaveBeenCalledWith(fetchToken, onChange);
-    expect((client as any).clearAuth).toHaveBeenCalledOnce();
-    expect((client as any).setAdminAuth).toHaveBeenCalledWith("admin-token", {
+    expect(mock.setAuth).toHaveBeenCalledWith(fetchToken, onChange);
+    expect(mock.clearAuth).toHaveBeenCalledOnce();
+    expect(mock.setAdminAuth).toHaveBeenCalledWith("admin-token", {
       subject: "admin",
     });
   });

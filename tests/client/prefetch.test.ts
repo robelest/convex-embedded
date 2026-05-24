@@ -1,50 +1,91 @@
 import { beforeEach, describe, expect, it } from "@tests/testkit";
-import { vi } from "vitest";
+import {
+  getFunctionName,
+  makeFunctionReference,
+  type FunctionReference,
+} from "convex/server";
 
-const consistentQuery = vi.fn();
-const constructorCalls: Array<{
-  url: string;
-  options?: Record<string, unknown>;
-}> = [];
+interface RecordedQuery {
+  name: string;
+  args: Record<string, unknown>;
+}
+
+const mocks = vi.hoisted(() => ({
+  recordedRefs: [] as Array<{
+    query: FunctionReference<"query">;
+    args: Record<string, unknown>;
+  }>,
+  consistentQuery: vi.fn(),
+  constructorCalls: [] as Array<{
+    url: string;
+    options?: Record<string, unknown>;
+  }>,
+}));
+
+const { recordedRefs, consistentQuery, constructorCalls } = mocks;
 
 vi.mock("convex/browser", () => ({
   ConvexHttpClient: class MockConvexHttpClient {
     constructor(url: string, options?: Record<string, unknown>) {
-      constructorCalls.push({ url, options });
+      mocks.constructorCalls.push({ url, options });
     }
 
-    consistentQuery = consistentQuery;
+    consistentQuery(
+      query: FunctionReference<"query">,
+      args: Record<string, unknown>,
+    ): Promise<unknown> {
+      mocks.recordedRefs.push({ query, args });
+      return mocks.consistentQuery(query, args);
+    }
   },
 }));
 
 import { createEmbeddedPrefetch } from "@resolve/client/index";
 import { EmbeddedRuntime } from "@resolve/index";
 
+function query<TResult>(name: string) {
+  return makeFunctionReference<"query", Record<string, never>, TResult>(name);
+}
+
+function recordedQueries(): RecordedQuery[] {
+  return recordedRefs.map(({ query: ref, args }) => ({
+    name: getFunctionName(ref),
+    args,
+  }));
+}
+
 const api = {
-  workspace: { get: "workspace:get" },
-  tasks: { list: "tasks:list", listMine: "tasks:listMine" },
-  profiles: { list: "profiles:list" },
+  workspace: { get: query<{ name: string }>("workspace:get") },
+  tasks: {
+    list: query<Array<Record<string, unknown>>>("tasks:list"),
+    listMine: query<Array<Record<string, unknown>>>("tasks:listMine"),
+  },
+  profiles: { list: query<Array<Record<string, unknown>>>("profiles:list") },
 } as const;
 
 describe("createEmbeddedPrefetch", () => {
   beforeEach(() => {
     constructorCalls.length = 0;
+    recordedRefs.length = 0;
     consistentQuery.mockReset();
   });
 
   it("builds embedded bootstrap data and raw SSR results from explicit queries", async () => {
-    consistentQuery.mockImplementation(async (query: string) => {
-      if (query === "workspace:get") {
-        return { name: "Acme" };
-      }
-      if (query === "tasks:list") {
-        return [{ _id: "task-1", _creationTime: 1, title: "Write tests" }];
-      }
-      if (query === "profiles:list") {
-        return [{ _id: "profile-1", _creationTime: 2, name: "Taylor" }];
-      }
-      throw new Error(`Unexpected query ${query}`);
-    });
+    consistentQuery.mockImplementation(
+      async (ref: FunctionReference<"query">) => {
+        const name = getFunctionName(ref);
+        if (name === "workspace:get") {
+          return { name: "Acme" };
+        }
+        if (name === "tasks:list") {
+          return [{ _id: "task-1", _creationTime: 1, title: "Write tests" }];
+        }
+        if (name === "profiles:list") {
+          return [{ _id: "profile-1", _creationTime: 2, name: "Taylor" }];
+        }
+        throw new Error(`Unexpected query ${name}`);
+      },
+    );
 
     const prefetched = await createEmbeddedPrefetch({
       url: "https://remote.example.convex.cloud",
@@ -52,16 +93,16 @@ describe("createEmbeddedPrefetch", () => {
       identityKey: "user-1",
       queries: {
         workspace: {
-          query: api.workspace.get as any,
+          query: api.workspace.get,
           args: {},
         },
         tasks: {
-          query: api.tasks.list as any,
+          query: api.tasks.list,
           args: {},
           collection: "tasks",
         },
         profiles: {
-          query: api.profiles.list as any,
+          query: api.profiles.list,
           args: {},
           collection: "profiles",
         },
@@ -74,9 +115,11 @@ describe("createEmbeddedPrefetch", () => {
         options: { auth: "jwt-token", logger: false },
       },
     ]);
-    expect(consistentQuery).toHaveBeenNthCalledWith(1, "workspace:get", {});
-    expect(consistentQuery).toHaveBeenNthCalledWith(2, "tasks:list", {});
-    expect(consistentQuery).toHaveBeenNthCalledWith(3, "profiles:list", {});
+    expect(recordedQueries()).toEqual([
+      { name: "workspace:get", args: {} },
+      { name: "tasks:list", args: {} },
+      { name: "profiles:list", args: {} },
+    ]);
     expect(prefetched).toEqual({
       embedded: {
         identityKey: "user-1",
@@ -99,22 +142,24 @@ describe("createEmbeddedPrefetch", () => {
   });
 
   it("only embeds collections that are explicitly marked", async () => {
-    consistentQuery.mockImplementation(async (query: string) => {
-      if (query === "workspace:get") {
-        return { name: "Acme" };
-      }
-      return [{ _id: "task-1", _creationTime: 1, title: "Write tests" }];
-    });
+    consistentQuery.mockImplementation(
+      async (ref: FunctionReference<"query">) => {
+        if (getFunctionName(ref) === "workspace:get") {
+          return { name: "Acme" };
+        }
+        return [{ _id: "task-1", _creationTime: 1, title: "Write tests" }];
+      },
+    );
 
     const prefetched = await createEmbeddedPrefetch({
       url: "https://remote.example.convex.cloud",
       queries: {
         workspace: {
-          query: api.workspace.get as any,
+          query: api.workspace.get,
           args: {},
         },
         tasks: {
-          query: api.tasks.list as any,
+          query: api.tasks.list,
           args: {},
           collection: "tasks",
         },
@@ -141,7 +186,7 @@ describe("createEmbeddedPrefetch", () => {
       url: "https://remote.example.convex.cloud",
       queries: {
         tasks: {
-          query: api.tasks.list as any,
+          query: api.tasks.list,
           args: {},
           collection: "tasks",
         },
@@ -178,15 +223,16 @@ describe("createEmbeddedPrefetch", () => {
       url: "https://remote.example.convex.cloud",
       queries: {
         tasks: {
-          query: api.tasks.listMine as any,
+          query: api.tasks.listMine,
           args: { owner: "alice" },
           collection: "tasks",
         },
       },
     });
 
-    expect(consistentQuery).toHaveBeenCalledWith("tasks:listMine", {
-      owner: "alice",
+    expect(recordedQueries()).toContainEqual({
+      name: "tasks:listMine",
+      args: { owner: "alice" },
     });
   });
 
@@ -198,7 +244,7 @@ describe("createEmbeddedPrefetch", () => {
         url: "https://remote.example.convex.cloud",
         queries: {
           tasks: {
-            query: api.tasks.list as any,
+            query: api.tasks.list,
             args: {},
             collection: "tasks",
           },
@@ -228,13 +274,16 @@ describe("createEmbeddedPrefetch", () => {
     const prefetched = await createEmbeddedPrefetch({
       url: "https://remote.example.convex.cloud",
       identityKey: "user-1",
-      tables: { tasks: "tasks:bind" as any },
+      tables: { tasks: query("tasks:bind") },
     });
 
-    expect(consistentQuery).toHaveBeenCalledWith("tasks:bind", {
-      collectionSeq: null,
-      documents: [],
-      scopeArgs: undefined,
+    expect(recordedQueries()).toContainEqual({
+      name: "tasks:bind",
+      args: {
+        collectionSeq: null,
+        documents: [],
+        scopeArgs: undefined,
+      },
     });
     expect(prefetched.embedded.tables.tasks).toEqual([
       { _id: "task-1", _creationTime: 1, title: "Alpha" },
@@ -261,14 +310,17 @@ describe("createEmbeddedPrefetch", () => {
 
     await createEmbeddedPrefetch({
       url: "https://remote.example.convex.cloud",
-      tables: { tasks: "tasks:bind" as any },
+      tables: { tasks: query("tasks:bind") },
       scopeArgs: { tasks: { workspaceId: "ws-1" } },
     });
 
-    expect(consistentQuery).toHaveBeenCalledWith("tasks:bind", {
-      collectionSeq: null,
-      documents: [],
-      scopeArgs: { workspaceId: "ws-1" },
+    expect(recordedQueries()).toContainEqual({
+      name: "tasks:bind",
+      args: {
+        collectionSeq: null,
+        documents: [],
+        scopeArgs: { workspaceId: "ws-1" },
+      },
     });
   });
 
@@ -282,7 +334,7 @@ describe("createEmbeddedPrefetch", () => {
     await expect(
       createEmbeddedPrefetch({
         url: "https://remote.example.convex.cloud",
-        tables: { tasks: "tasks:bind" as any },
+        tables: { tasks: query("tasks:bind") },
       }),
     ).rejects.toThrow(/"full" mode/);
   });
@@ -297,7 +349,7 @@ describe("createEmbeddedPrefetch", () => {
     await expect(
       createEmbeddedPrefetch({
         url: "https://remote.example.convex.cloud",
-        tables: { tasks: "tasks:bind" as any },
+        tables: { tasks: query("tasks:bind") },
       }),
     ).rejects.toThrow(/"document" payload/);
   });

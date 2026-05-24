@@ -1,5 +1,4 @@
-import { afterEach, describe, expect, it } from "@tests/testkit";
-import { vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "@tests/testkit";
 
 describe("browser entry SSR imports", () => {
   const originalAllowFunctions = (globalThis as Record<string, unknown>)

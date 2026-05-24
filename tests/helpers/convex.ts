@@ -1,7 +1,9 @@
 import schema from "@convex/schema";
 import type { ConvexModuleRegistry } from "@embedded/kernel/modules";
 import { register as registerResolveComponent } from "@robelest/convex-embedded/test";
+import type { TestConvex } from "convex-test";
 import { convexTest } from "convex-test";
+import type { GenericSchema, SchemaDefinition } from "convex/server";
 import * as Y from "yjs";
 
 export const appModules = {
@@ -17,9 +19,13 @@ export function createAppModules(): ConvexModuleRegistry {
   return appModules;
 }
 
-export function createAppConvexTest() {
+export type AppConvexTest = TestConvex<typeof schema>;
+
+export function createAppConvexTest(): AppConvexTest {
   const t = convexTest(schema, appModules);
-  registerResolveComponent(t as any);
+  registerResolveComponent(
+    t as unknown as TestConvex<SchemaDefinition<GenericSchema, boolean>>,
+  );
   return t;
 }
 
@@ -34,17 +40,24 @@ export function emptyStateVector(): ArrayBuffer {
   return toArrayBuffer(Y.encodeStateVector(doc));
 }
 
+interface RegisterEntry {
+  value: unknown;
+  timestamp?: number;
+}
+
 export function readRegister(fields: Y.Map<unknown>, key: string): unknown {
-  const registerMap = fields.get(key) as Y.Map<unknown>;
+  const registerMap = fields.get(key);
   if (!(registerMap instanceof Y.Map)) {
     return undefined;
   }
 
-  return Array.from(registerMap.values()).reduce<
-    { value: unknown; timestamp: number } | undefined
+  return Array.from(registerMap.values() as Iterable<RegisterEntry>).reduce<
+    RegisterEntry | undefined
   >(
-    (winner, entry: any) =>
-      !winner || (entry.timestamp && entry.timestamp > winner.timestamp)
+    (winner, entry) =>
+      !winner ||
+      (entry.timestamp !== undefined &&
+        entry.timestamp > (winner.timestamp ?? -Infinity))
         ? entry
         : winner,
     undefined,

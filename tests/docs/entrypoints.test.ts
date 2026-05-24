@@ -18,12 +18,13 @@ const entryFiles = [
 ] as const;
 
 describe("public entrypoint docs", () => {
-  for (const relativePath of entryFiles) {
-    it(`${relativePath} includes package documentation`, async () => {
+  it.concurrent.for(entryFiles)(
+    "%s includes package documentation",
+    async (relativePath) => {
       const fileUrl = new URL(`../../${relativePath}`, import.meta.url);
       const source = await readFile(fileUrl, "utf8");
 
       expect(source).toContain("@packageDocumentation");
-    });
-  }
+    },
+  );
 });

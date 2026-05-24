@@ -7,15 +7,23 @@ import {
   vi,
 } from "@tests/testkit";
 
-let openBrowserStorage: ReturnType<typeof vi.fn>;
+type ClearableStorage = {
+  clearAll: () => Promise<void>;
+  close: () => Promise<void>;
+};
+type OpenBrowserStorageMock = (options: {
+  name: string;
+}) => Promise<ClearableStorage>;
+
+let openBrowserStorageMock: ReturnType<typeof vi.fn<OpenBrowserStorageMock>>;
 
 describe("clearBrowserLocalData", () => {
   beforeEach(() => {
     vi.resetModules();
-    openBrowserStorage = vi.fn();
+    openBrowserStorageMock = vi.fn<OpenBrowserStorageMock>();
 
     vi.doMock("@/browser/sqlite/adapter", () => ({
-      openBrowserStorage,
+      openBrowserStorage: openBrowserStorageMock,
     }));
   });
 
@@ -41,13 +49,13 @@ describe("clearBrowserLocalData", () => {
     expect(removeEntry).toHaveBeenNthCalledWith(1, "demo-db");
     expect(removeEntry).toHaveBeenNthCalledWith(2, "demo-db-journal");
     expect(removeEntry).toHaveBeenNthCalledWith(3, "demo-db-wal");
-    expect(openBrowserStorage).not.toHaveBeenCalled();
+    expect(openBrowserStorageMock).not.toHaveBeenCalled();
   });
 
   it("falls back to opening storage when OPFS directory access is unavailable", async () => {
     const clearAll = vi.fn(async () => undefined);
     const close = vi.fn(async () => undefined);
-    openBrowserStorage.mockResolvedValue({ clearAll, close });
+    openBrowserStorageMock.mockResolvedValue({ clearAll, close });
 
     vi.stubGlobal("navigator", {
       storage: {},
@@ -56,7 +64,7 @@ describe("clearBrowserLocalData", () => {
     const { clearBrowserLocalData } = await import("@resolve/browser/platform");
     await clearBrowserLocalData("demo-db");
 
-    expect(openBrowserStorage).toHaveBeenCalledWith({ name: "demo-db" });
+    expect(openBrowserStorageMock).toHaveBeenCalledWith({ name: "demo-db" });
     expect(clearAll).toHaveBeenCalledTimes(1);
     expect(close).toHaveBeenCalledTimes(1);
   });

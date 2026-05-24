@@ -2,19 +2,17 @@ import { Database } from "@embedded/runtime/db/database";
 import { evaluateFieldPath, evaluateFilter } from "@embedded/runtime/db/query";
 import type { ParsedSchema } from "@embedded/runtime/db/schema";
 import type {
+  GenericDocument,
+  QueryId,
+  QueryOperator,
   SerializedQuery,
   VectorSearchExpression,
 } from "@embedded/runtime/db/types";
-import { describe, it, expect } from "@tests/testkit";
+import { describe, expect, it } from "@tests/testkit";
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/** Create a schema-less DB, insert some docs, and commit. */
 function seedDb(
   table: string,
-  docs: Record<string, any>[],
+  docs: ReadonlyArray<Record<string, unknown>>,
   schema: ParsedSchema | null = null,
 ): Database {
   const db = new Database(schema);
@@ -26,24 +24,20 @@ function seedDb(
   return db;
 }
 
-/** Yield all results from a streaming query. */
-function* iterateQuery(db: Database, queryId: number) {
-  let next = db.queryNext(queryId);
-  while (!next.done) {
-    yield next.value;
-    next = db.queryNext(queryId);
+function drainQuery(db: Database, queryId: QueryId): GenericDocument[] {
+  const rows: GenericDocument[] = [];
+  for (;;) {
+    const next = db.queryNext(queryId);
+    if (next.done) break;
+    if (next.value !== null) rows.push(next.value);
   }
+  return rows;
 }
 
-/** Drain all results from a streaming query. */
-const drainQuery = (db: Database, queryId: number): any[] =>
-  Array.from(iterateQuery(db, queryId));
-
-/** Build a FullTableScan query. */
 function fullScan(
   tableName: string,
   order: "asc" | "desc" = "asc",
-  operators: any[] = [],
+  operators: QueryOperator[] = [],
 ): SerializedQuery {
   return {
     source: { type: "FullTableScan", tableName, order },
@@ -51,7 +45,10 @@ function fullScan(
   };
 }
 
-// Schema with an index on "status" for the "tasks" table.
+const eqFilter = (field: string, value: unknown): QueryOperator => ({
+  filter: { $eq: [{ $field: field }, { $literal: value as never }] },
+});
+
 const schemaWithIndex: ParsedSchema = {
   schemaValidation: false,
   tables: new Map([
@@ -96,9 +93,7 @@ const schemaWithVectorIndex: ParsedSchema = {
 };
 
 function vectorEq(fieldPath: string, value: unknown): VectorSearchExpression {
-  return {
-    $eq: [{ $field: fieldPath }, { $literal: value as never }],
-  };
+  return { $eq: [{ $field: fieldPath }, { $literal: value as never }] };
 }
 
 function vectorOr(
@@ -107,119 +102,97 @@ function vectorOr(
   return { $or: expressions };
 }
 
-// ---------------------------------------------------------------------------
-// Full table scan
-// ---------------------------------------------------------------------------
-
-describe("QueryEngine — full table scan", () => {
-  it("returns all docs in a table, sorted by _creationTime asc", () => {
+describe.concurrent("QueryEngine — full table scan", () => {
+  it("returns all docs sorted by _creationTime ascending", () => {
     const db = seedDb("tasks", [
       { title: "first" },
       { title: "second" },
       { title: "third" },
     ]);
+
     db.startTransaction();
-    const qId = db.startQuery(fullScan("tasks", "asc"));
-    const results = drainQuery(db, qId);
+    const results = drainQuery(db, db.startQuery(fullScan("tasks", "asc")));
     db.commit();
 
-    expect(results).toHaveLength(3);
-    expect(results[0].title).toBe("first");
-    expect(results[1].title).toBe("second");
-    expect(results[2].title).toBe("third");
+    expect(results.map((doc) => doc.title)).toEqual([
+      "first",
+      "second",
+      "third",
+    ]);
   });
 
-  it("returns empty array for an empty table", () => {
+  it("returns an empty array for an empty table", () => {
     const db = new Database(null);
+
     db.startTransaction();
-    const qId = db.startQuery(fullScan("tasks", "asc"));
-    const results = drainQuery(db, qId);
+    const results = drainQuery(db, db.startQuery(fullScan("tasks", "asc")));
     db.commit();
 
     expect(results).toHaveLength(0);
   });
-});
 
-// ---------------------------------------------------------------------------
-// Full table scan descending
-// ---------------------------------------------------------------------------
-
-describe("QueryEngine — full table scan desc", () => {
-  it('order "desc" reverses the result order', () => {
+  it("reverses the order when desc is requested", () => {
     const db = seedDb("tasks", [
       { title: "first" },
       { title: "second" },
       { title: "third" },
     ]);
+
     db.startTransaction();
-    const qId = db.startQuery(fullScan("tasks", "desc"));
-    const results = drainQuery(db, qId);
+    const results = drainQuery(db, db.startQuery(fullScan("tasks", "desc")));
     db.commit();
 
-    expect(results).toHaveLength(3);
-    expect(results[0].title).toBe("third");
-    expect(results[1].title).toBe("second");
-    expect(results[2].title).toBe("first");
+    expect(results.map((doc) => doc.title)).toEqual([
+      "third",
+      "second",
+      "first",
+    ]);
   });
 });
 
-// ---------------------------------------------------------------------------
-// Filter operator
-// ---------------------------------------------------------------------------
-
-describe("QueryEngine — filter operator", () => {
-  it("$eq filter selects matching docs", () => {
+describe.concurrent("QueryEngine — filter operator", () => {
+  it("$eq selects matching docs", () => {
     const db = seedDb("tasks", [
       { title: "a", status: "active" },
       { title: "b", status: "done" },
       { title: "c", status: "active" },
     ]);
+
     db.startTransaction();
-    const qId = db.startQuery(
-      fullScan("tasks", "asc", [
-        {
-          filter: {
-            $eq: [{ $field: "status" }, { $literal: "active" }],
-          },
-        },
-      ]),
+    const results = drainQuery(
+      db,
+      db.startQuery(fullScan("tasks", "asc", [eqFilter("status", "active")])),
     );
-    const results = drainQuery(db, qId);
     db.commit();
 
     expect(results).toHaveLength(2);
-    expect(results.every((d: any) => d.status === "active")).toBe(true);
+    expect(results.every((doc) => doc.status === "active")).toBe(true);
   });
 
-  it("$neq filter excludes matching docs", () => {
+  it("$neq excludes matching docs", () => {
     const db = seedDb("tasks", [
       { title: "a", status: "active" },
       { title: "b", status: "done" },
     ]);
+
     db.startTransaction();
-    const qId = db.startQuery(
-      fullScan("tasks", "asc", [
-        {
-          filter: {
-            $neq: [{ $field: "status" }, { $literal: "done" }],
-          },
-        },
-      ]),
+    const results = drainQuery(
+      db,
+      db.startQuery(
+        fullScan("tasks", "asc", [
+          { filter: { $neq: [{ $field: "status" }, { $literal: "done" }] } },
+        ]),
+      ),
     );
-    const results = drainQuery(db, qId);
     db.commit();
 
     expect(results).toHaveLength(1);
-    expect(results[0].status).toBe("active");
+    expect(results[0]?.status).toBe("active");
   });
 });
 
-// ---------------------------------------------------------------------------
-// Limit operator
-// ---------------------------------------------------------------------------
-
-describe("QueryEngine — limit operator", () => {
-  it("limit caps the number of results", () => {
+describe.concurrent("QueryEngine — limit operator", () => {
+  it("caps the number of results", () => {
     const db = seedDb("tasks", [
       { title: "a" },
       { title: "b" },
@@ -227,23 +200,18 @@ describe("QueryEngine — limit operator", () => {
       { title: "d" },
       { title: "e" },
     ]);
+
     db.startTransaction();
-    const qId = db.startQuery(fullScan("tasks", "asc", [{ limit: 3 }]));
-    const results = drainQuery(db, qId);
+    const results = drainQuery(
+      db,
+      db.startQuery(fullScan("tasks", "asc", [{ limit: 3 }])),
+    );
     db.commit();
 
-    expect(results).toHaveLength(3);
-    expect(results[0].title).toBe("a");
-    expect(results[2].title).toBe("c");
+    expect(results.map((doc) => doc.title)).toEqual(["a", "b", "c"]);
   });
-});
 
-// ---------------------------------------------------------------------------
-// Combined filter + limit
-// ---------------------------------------------------------------------------
-
-describe("QueryEngine — filter + limit", () => {
-  it("filter is applied before limit", () => {
+  it("applies the filter before the limit", () => {
     const db = seedDb("tasks", [
       { title: "a", status: "active" },
       { title: "b", status: "done" },
@@ -251,31 +219,21 @@ describe("QueryEngine — filter + limit", () => {
       { title: "d", status: "active" },
       { title: "e", status: "active" },
     ]);
+
     db.startTransaction();
-    const qId = db.startQuery(
-      fullScan("tasks", "asc", [
-        {
-          filter: {
-            $eq: [{ $field: "status" }, { $literal: "active" }],
-          },
-        },
-        { limit: 2 },
-      ]),
+    const results = drainQuery(
+      db,
+      db.startQuery(
+        fullScan("tasks", "asc", [eqFilter("status", "active"), { limit: 2 }]),
+      ),
     );
-    const results = drainQuery(db, qId);
     db.commit();
 
-    expect(results).toHaveLength(2);
-    expect(results[0].title).toBe("a");
-    expect(results[1].title).toBe("c");
+    expect(results.map((doc) => doc.title)).toEqual(["a", "c"]);
   });
 });
 
-// ---------------------------------------------------------------------------
-// Vector search
-// ---------------------------------------------------------------------------
-
-describe("QueryEngine — vector search", () => {
+describe.concurrent("QueryEngine — vector search", () => {
   it("applies equality filters before scoring", () => {
     const db = seedDb(
       "tasks",
@@ -300,7 +258,7 @@ describe("QueryEngine — vector search", () => {
     );
 
     expect(results).toHaveLength(2);
-    expect(results[0]._score).toBeGreaterThanOrEqual(results[1]._score);
+    expect(results[0]?._score).toBeGreaterThanOrEqual(results[1]?._score ?? 0);
   });
 
   it("supports or filters across multiple filter fields", () => {
@@ -322,10 +280,9 @@ describe("QueryEngine — vector search", () => {
     );
 
     expect(results).toHaveLength(2);
-    expect(results.map((result) => result._id)).toHaveLength(2);
   });
 
-  it("breaks ties by _id ascending", () => {
+  it("breaks score ties by _id ascending", () => {
     const db = new Database(schemaWithVectorIndex);
     db.startTransaction();
     db.putDocument("tasks", {
@@ -438,7 +395,7 @@ describe("QueryEngine — vector search", () => {
     expect(results).toHaveLength(1);
   });
 
-  it("falls back to pending writes so read-your-own-writes still works", () => {
+  it("includes pending writes so read-your-own-writes works", () => {
     const db = seedDb(
       "tasks",
       [{ title: "committed", status: "done", priority: 1, embedding: [0, 1] }],
@@ -452,25 +409,20 @@ describe("QueryEngine — vector search", () => {
       priority: 2,
       embedding: [1, 0],
     });
-
     const results = db.vectorSearch(
       "tasks.by_embedding",
       [1, 0],
       vectorEq("status", "active"),
       5,
     );
+    db.rollbackWrites();
 
     expect(results).toHaveLength(1);
-    db.rollbackWrites();
   });
 });
 
-// ---------------------------------------------------------------------------
-// Index range scan
-// ---------------------------------------------------------------------------
-
-describe("QueryEngine — index range scan", () => {
-  it("Eq range expression filters on the indexed field", () => {
+describe.concurrent("QueryEngine — index range scan", () => {
+  it("Eq range filters on the indexed field", () => {
     const db = seedDb(
       "tasks",
       [
@@ -480,24 +432,27 @@ describe("QueryEngine — index range scan", () => {
       ],
       schemaWithIndex,
     );
+
     db.startTransaction();
-    const qId = db.startQuery({
-      source: {
-        type: "IndexRange",
-        indexName: "tasks.by_status",
-        range: [{ type: "Eq", fieldPath: "status", value: "active" }],
-        order: "asc",
-      },
-      operators: [],
-    });
-    const results = drainQuery(db, qId);
+    const results = drainQuery(
+      db,
+      db.startQuery({
+        source: {
+          type: "IndexRange",
+          indexName: "tasks.by_status",
+          range: [{ type: "Eq", fieldPath: "status", value: "active" }],
+          order: "asc",
+        },
+        operators: [],
+      }),
+    );
     db.commit();
 
     expect(results).toHaveLength(2);
-    expect(results.every((d: any) => d.status === "active")).toBe(true);
+    expect(results.every((doc) => doc.status === "active")).toBe(true);
   });
 
-  it("Gt range expression filters correctly", () => {
+  it("Gt range filters on the indexed field", () => {
     const db = seedDb(
       "tasks",
       [
@@ -507,30 +462,41 @@ describe("QueryEngine — index range scan", () => {
       ],
       schemaWithIndex,
     );
+
     db.startTransaction();
-    const qId = db.startQuery({
-      source: {
-        type: "IndexRange",
-        indexName: "tasks.by_status",
-        range: [{ type: "Gt", fieldPath: "status", value: "beta" }],
-        order: "asc",
-      },
-      operators: [],
-    });
-    const results = drainQuery(db, qId);
+    const results = drainQuery(
+      db,
+      db.startQuery({
+        source: {
+          type: "IndexRange",
+          indexName: "tasks.by_status",
+          range: [{ type: "Gt", fieldPath: "status", value: "beta" }],
+          order: "asc",
+        },
+        operators: [],
+      }),
+    );
     db.commit();
 
     expect(results).toHaveLength(1);
-    expect(results[0].status).toBe("gamma");
+    expect(results[0]?.status).toBe("gamma");
   });
 });
 
-// ---------------------------------------------------------------------------
-// Search
-// ---------------------------------------------------------------------------
+describe.concurrent("QueryEngine — search", () => {
+  function searchQuery(
+    filters: Array<
+      | { type: "Search"; fieldPath: string; value: string }
+      | { type: "Eq"; fieldPath: string; value: string }
+    >,
+  ): SerializedQuery {
+    return {
+      source: { type: "Search", indexName: "tasks.search_body", filters },
+      operators: [],
+    };
+  }
 
-describe("QueryEngine — search", () => {
-  it("text search matches documents with prefix matching", () => {
+  it("matches documents with prefix matching on the final term", () => {
     const db = seedDb(
       "tasks",
       [
@@ -540,27 +506,24 @@ describe("QueryEngine — search", () => {
       ],
       schemaWithIndex,
     );
+
     db.startTransaction();
-    const qId = db.startQuery({
-      source: {
-        type: "Search",
-        indexName: "tasks.search_body",
-        filters: [{ type: "Search", fieldPath: "body", value: "hel" }],
-      },
-      operators: [],
-    });
-    const results = drainQuery(db, qId);
+    const results = drainQuery(
+      db,
+      db.startQuery(
+        searchQuery([{ type: "Search", fieldPath: "body", value: "hel" }]),
+      ),
+    );
     db.commit();
 
-    // "hello world" and "help me please" both have words starting with "hel"
-    expect(results).toHaveLength(2);
     const titles = results
-      .map((d: any) => d.title)
+      .map((doc) => doc.title)
+      .filter((title): title is string => typeof title === "string")
       .sort((a, b) => a.localeCompare(b));
     expect(titles).toEqual(["a", "b"]);
   });
 
-  it("only applies prefix matching to the final query term", () => {
+  it("only prefix-matches the final query term", () => {
     const db = seedDb(
       "tasks",
       [
@@ -569,16 +532,14 @@ describe("QueryEngine — search", () => {
       ],
       schemaWithIndex,
     );
+
     db.startTransaction();
-    const qId = db.startQuery({
-      source: {
-        type: "Search",
-        indexName: "tasks.search_body",
-        filters: [{ type: "Search", fieldPath: "body", value: "qui fo" }],
-      },
-      operators: [],
-    });
-    const results = drainQuery(db, qId);
+    const results = drainQuery(
+      db,
+      db.startQuery(
+        searchQuery([{ type: "Search", fieldPath: "body", value: "qui fo" }]),
+      ),
+    );
     db.commit();
 
     expect(results).toHaveLength(0);
@@ -593,23 +554,23 @@ describe("QueryEngine — search", () => {
       ],
       schemaWithIndex,
     );
+
     db.startTransaction();
-    const qId = db.startQuery({
-      source: {
-        type: "Search",
-        indexName: "tasks.search_body",
-        filters: [{ type: "Search", fieldPath: "body", value: "hello wor" }],
-      },
-      operators: [],
-    });
-    const results = drainQuery(db, qId);
+    const results = drainQuery(
+      db,
+      db.startQuery(
+        searchQuery([
+          { type: "Search", fieldPath: "body", value: "hello wor" },
+        ]),
+      ),
+    );
     db.commit();
 
     expect(results).toHaveLength(1);
-    expect(results[0].title).toBe("a");
+    expect(results[0]?.title).toBe("a");
   });
 
-  it("orders equal-scoring matches by newest document first", () => {
+  it("orders equal-scoring matches newest first", () => {
     const db = seedDb(
       "tasks",
       [
@@ -618,24 +579,22 @@ describe("QueryEngine — search", () => {
       ],
       schemaWithIndex,
     );
+
     db.startTransaction();
-    const qId = db.startQuery({
-      source: {
-        type: "Search",
-        indexName: "tasks.search_body",
-        filters: [{ type: "Search", fieldPath: "body", value: "quick fox" }],
-      },
-      operators: [],
-    });
-    const results = drainQuery(db, qId);
+    const results = drainQuery(
+      db,
+      db.startQuery(
+        searchQuery([
+          { type: "Search", fieldPath: "body", value: "quick fox" },
+        ]),
+      ),
+    );
     db.commit();
 
-    expect(results).toHaveLength(2);
-    expect(results[0].title).toBe("newer");
-    expect(results[1].title).toBe("older");
+    expect(results.map((doc) => doc.title)).toEqual(["newer", "older"]);
   });
 
-  it("search with Eq filter narrows results", () => {
+  it("narrows search results with an Eq filter", () => {
     const db = seedDb(
       "tasks",
       [
@@ -644,42 +603,35 @@ describe("QueryEngine — search", () => {
       ],
       schemaWithIndex,
     );
+
     db.startTransaction();
-    const qId = db.startQuery({
-      source: {
-        type: "Search",
-        indexName: "tasks.search_body",
-        filters: [
+    const results = drainQuery(
+      db,
+      db.startQuery(
+        searchQuery([
           { type: "Search", fieldPath: "body", value: "hello" },
           { type: "Eq", fieldPath: "status", value: "active" },
-        ],
-      },
-      operators: [],
-    });
-    const results = drainQuery(db, qId);
+        ]),
+      ),
+    );
     db.commit();
 
     expect(results).toHaveLength(1);
-    expect(results[0].title).toBe("a");
+    expect(results[0]?.title).toBe("a");
   });
 
-  it("throws when searching on the wrong field for the search index", () => {
+  it("throws when searching on the wrong field for the index", () => {
     const db = seedDb(
       "tasks",
       [{ title: "a", body: "hello world", status: "active" }],
       schemaWithIndex,
     );
-    db.startTransaction();
 
+    db.startTransaction();
     expect(() =>
-      db.startQuery({
-        source: {
-          type: "Search",
-          indexName: "tasks.search_body",
-          filters: [{ type: "Search", fieldPath: "title", value: "hello" }],
-        },
-        operators: [],
-      }),
+      db.startQuery(
+        searchQuery([{ type: "Search", fieldPath: "title", value: "hello" }]),
+      ),
     ).toThrow(/expects searchField "body"/);
     db.rollbackWrites();
   });
@@ -690,31 +642,22 @@ describe("QueryEngine — search", () => {
       [{ title: "a", body: "hello world", status: "active" }],
       schemaWithIndex,
     );
-    db.startTransaction();
 
+    db.startTransaction();
     expect(() =>
-      db.startQuery({
-        source: {
-          type: "Search",
-          indexName: "tasks.search_body",
-          filters: [
-            { type: "Search", fieldPath: "body", value: "hello" },
-            { type: "Eq", fieldPath: "title", value: "a" },
-          ],
-        },
-        operators: [],
-      }),
+      db.startQuery(
+        searchQuery([
+          { type: "Search", fieldPath: "body", value: "hello" },
+          { type: "Eq", fieldPath: "title", value: "a" },
+        ]),
+      ),
     ).toThrow(/does not allow equality filter on "title"/);
     db.rollbackWrites();
   });
 });
 
-// ---------------------------------------------------------------------------
-// Pagination
-// ---------------------------------------------------------------------------
-
-describe("QueryEngine — pagination", () => {
-  it("returns a page of results with cursor-based pagination", () => {
+describe.concurrent("QueryEngine — pagination", () => {
+  it("walks pages with cursor-based pagination", () => {
     const db = seedDb("tasks", [
       { title: "a" },
       { title: "b" },
@@ -724,41 +667,33 @@ describe("QueryEngine — pagination", () => {
     ]);
     db.startTransaction();
 
-    // First page.
     const page1 = db.paginate({
       query: fullScan("tasks", "asc"),
       cursor: null,
       pageSize: 2,
     });
-    expect(page1.page).toHaveLength(2);
-    expect(page1.page[0].title).toBe("a");
-    expect(page1.page[1].title).toBe("b");
+    expect(page1.page.map((doc) => doc.title)).toEqual(["a", "b"]);
     expect(page1.isDone).toBe(false);
 
-    // Second page — use continueCursor from first page.
     const page2 = db.paginate({
       query: fullScan("tasks", "asc"),
       cursor: page1.continueCursor,
       pageSize: 2,
     });
-    expect(page2.page).toHaveLength(2);
-    expect(page2.page[0].title).toBe("c");
-    expect(page2.page[1].title).toBe("d");
+    expect(page2.page.map((doc) => doc.title)).toEqual(["c", "d"]);
 
-    // Third page.
     const page3 = db.paginate({
       query: fullScan("tasks", "asc"),
       cursor: page2.continueCursor,
       pageSize: 2,
     });
-    expect(page3.page).toHaveLength(1);
-    expect(page3.page[0].title).toBe("e");
+    expect(page3.page.map((doc) => doc.title)).toEqual(["e"]);
     expect(page3.isDone).toBe(true);
 
     db.commit();
   });
 
-  it("returns all results in one page when pageSize >= doc count", () => {
+  it("returns all results in one page when pageSize covers the table", () => {
     const db = seedDb("tasks", [{ title: "a" }, { title: "b" }]);
     db.startTransaction();
 
@@ -767,83 +702,72 @@ describe("QueryEngine — pagination", () => {
       cursor: null,
       pageSize: 10,
     });
+    db.commit();
+
     expect(result.page).toHaveLength(2);
     expect(result.isDone).toBe(true);
-    db.commit();
   });
 });
 
-// ---------------------------------------------------------------------------
-// Count
-// ---------------------------------------------------------------------------
-
-describe("QueryEngine — count", () => {
-  it("returns document count for a table", () => {
+describe.concurrent("QueryEngine — count", () => {
+  it("returns the document count for a table", () => {
     const db = seedDb("tasks", [
       { title: "a" },
       { title: "b" },
       { title: "c" },
     ]);
+
     db.startTransaction();
-    expect(db.count("tasks")).toBe(3);
+    const count = db.count("tasks");
     db.commit();
+
+    expect(count).toBe(3);
   });
 
   it("returns 0 for an empty table", () => {
     const db = new Database(null);
+
     db.startTransaction();
-    expect(db.count("tasks")).toBe(0);
+    const count = db.count("tasks");
     db.commit();
+
+    expect(count).toBe(0);
   });
 });
 
-// ---------------------------------------------------------------------------
-// Ordering
-// ---------------------------------------------------------------------------
-
-describe("QueryEngine — ordering", () => {
-  it("ascending order returns docs by _creationTime asc", () => {
+describe.concurrent("QueryEngine — ordering", () => {
+  it("ascending order is monotonically non-decreasing by _creationTime", () => {
     const db = seedDb("tasks", [
       { title: "first" },
       { title: "second" },
       { title: "third" },
     ]);
+
     db.startTransaction();
-    const qId = db.startQuery(fullScan("tasks", "asc"));
-    const results = drainQuery(db, qId);
+    const results = drainQuery(db, db.startQuery(fullScan("tasks", "asc")));
     db.commit();
 
-    for (let i = 1; i < results.length; i++) {
-      expect(results[i]._creationTime).toBeGreaterThanOrEqual(
-        results[i - 1]._creationTime,
-      );
-    }
+    const times = results.map((doc) => doc._creationTime);
+    expect(times).toEqual([...times].sort((a, b) => Number(a) - Number(b)));
   });
 
-  it("descending order returns docs by _creationTime desc", () => {
+  it("descending order is monotonically non-increasing by _creationTime", () => {
     const db = seedDb("tasks", [
       { title: "first" },
       { title: "second" },
       { title: "third" },
     ]);
+
     db.startTransaction();
-    const qId = db.startQuery(fullScan("tasks", "desc"));
-    const results = drainQuery(db, qId);
+    const results = drainQuery(db, db.startQuery(fullScan("tasks", "desc")));
     db.commit();
 
-    for (let i = 1; i < results.length; i++) {
-      expect(results[i]._creationTime).toBeLessThanOrEqual(
-        results[i - 1]._creationTime,
-      );
-    }
+    const times = results.map((doc) => doc._creationTime);
+    expect(times).toEqual([...times].sort((a, b) => Number(b) - Number(a)));
   });
 });
 
-// ---------------------------------------------------------------------------
-// evaluateFieldPath
-// ---------------------------------------------------------------------------
-
-describe("evaluateFieldPath", () => {
+describe.concurrent("evaluateFieldPath", () => {
   it("resolves a top-level field", () => {
     expect(evaluateFieldPath("name", { name: "alice" })).toBe("alice");
   });
@@ -871,12 +795,8 @@ describe("evaluateFieldPath", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// evaluateFilter
-// ---------------------------------------------------------------------------
-
-describe("evaluateFilter", () => {
-  const doc = { name: "alice", age: 30, active: true };
+describe.concurrent("evaluateFilter", () => {
+  const doc: GenericDocument = { name: "alice", age: 30, active: true };
 
   describe("$field", () => {
     it("extracts a field value", () => {
@@ -885,7 +805,7 @@ describe("evaluateFilter", () => {
   });
 
   describe("$literal", () => {
-    it("returns a literal value", () => {
+    it("returns a literal number", () => {
       expect(evaluateFilter(doc, { $literal: 42 })).toBe(42);
     });
 
@@ -909,9 +829,7 @@ describe("evaluateFilter", () => {
 
     it("returns false for non-equal values", () => {
       expect(
-        evaluateFilter(doc, {
-          $eq: [{ $field: "name" }, { $literal: "bob" }],
-        }),
+        evaluateFilter(doc, { $eq: [{ $field: "name" }, { $literal: "bob" }] }),
       ).toBe(false);
     });
 
@@ -919,9 +837,7 @@ describe("evaluateFilter", () => {
       expect(
         evaluateFilter(
           { name: "alice", nickname: null },
-          {
-            $eq: [{ $field: "nickname" }, { $literal: null }],
-          },
+          { $eq: [{ $field: "nickname" }, { $literal: null }] },
         ),
       ).toBe(true);
     });
@@ -945,80 +861,61 @@ describe("evaluateFilter", () => {
     });
   });
 
-  describe("$gt", () => {
-    it("returns true when left > right", () => {
-      expect(
-        evaluateFilter(doc, {
-          $gt: [{ $field: "age" }, { $literal: 20 }],
-        }),
-      ).toBe(true);
-    });
+  describe("comparison operators", () => {
+    const cases: ReadonlyArray<{
+      label: string;
+      filter: Parameters<typeof evaluateFilter>[1];
+      expected: boolean;
+    }> = [
+      {
+        label: "$gt true when left > right",
+        filter: { $gt: [{ $field: "age" }, { $literal: 20 }] },
+        expected: true,
+      },
+      {
+        label: "$gt false when left <= right",
+        filter: { $gt: [{ $field: "age" }, { $literal: 30 }] },
+        expected: false,
+      },
+      {
+        label: "$lt true when left < right",
+        filter: { $lt: [{ $field: "age" }, { $literal: 40 }] },
+        expected: true,
+      },
+      {
+        label: "$lt false when left >= right",
+        filter: { $lt: [{ $field: "age" }, { $literal: 30 }] },
+        expected: false,
+      },
+      {
+        label: "$gte true when equal",
+        filter: { $gte: [{ $field: "age" }, { $literal: 30 }] },
+        expected: true,
+      },
+      {
+        label: "$gte true when greater",
+        filter: { $gte: [{ $field: "age" }, { $literal: 20 }] },
+        expected: true,
+      },
+      {
+        label: "$lte true when equal",
+        filter: { $lte: [{ $field: "age" }, { $literal: 30 }] },
+        expected: true,
+      },
+      {
+        label: "$lte false when greater",
+        filter: { $lte: [{ $field: "age" }, { $literal: 20 }] },
+        expected: false,
+      },
+    ];
 
-    it("returns false when left <= right", () => {
-      expect(
-        evaluateFilter(doc, {
-          $gt: [{ $field: "age" }, { $literal: 30 }],
-        }),
-      ).toBe(false);
-    });
-  });
-
-  describe("$lt", () => {
-    it("returns true when left < right", () => {
-      expect(
-        evaluateFilter(doc, {
-          $lt: [{ $field: "age" }, { $literal: 40 }],
-        }),
-      ).toBe(true);
-    });
-
-    it("returns false when left >= right", () => {
-      expect(
-        evaluateFilter(doc, {
-          $lt: [{ $field: "age" }, { $literal: 30 }],
-        }),
-      ).toBe(false);
-    });
-  });
-
-  describe("$gte", () => {
-    it("returns true when left >= right (equal)", () => {
-      expect(
-        evaluateFilter(doc, {
-          $gte: [{ $field: "age" }, { $literal: 30 }],
-        }),
-      ).toBe(true);
-    });
-
-    it("returns true when left > right", () => {
-      expect(
-        evaluateFilter(doc, {
-          $gte: [{ $field: "age" }, { $literal: 20 }],
-        }),
-      ).toBe(true);
-    });
-  });
-
-  describe("$lte", () => {
-    it("returns true when left <= right (equal)", () => {
-      expect(
-        evaluateFilter(doc, {
-          $lte: [{ $field: "age" }, { $literal: 30 }],
-        }),
-      ).toBe(true);
-    });
-
-    it("returns false when left > right", () => {
-      expect(
-        evaluateFilter(doc, {
-          $lte: [{ $field: "age" }, { $literal: 20 }],
-        }),
-      ).toBe(false);
+    it.for(cases)("$label", ({ filter, expected }) => {
+      expect(evaluateFilter(doc, filter)).toBe(expected);
     });
   });
 
   describe("$and", () => {
-    it("returns true when all conditions are true", () => {
+    it("returns true when all conditions hold", () => {
       expect(
         evaluateFilter(doc, {
           $and: [
@@ -1029,7 +926,7 @@ describe("evaluateFilter", () => {
       ).toBe(true);
     });
 
-    it("returns false when one condition is false", () => {
+    it("returns false when one condition fails", () => {
       expect(
         evaluateFilter(doc, {
           $and: [
@@ -1042,7 +939,7 @@ describe("evaluateFilter", () => {
   });
 
   describe("$or", () => {
-    it("returns true when at least one condition is true", () => {
+    it("returns true when at least one condition holds", () => {
       expect(
         evaluateFilter(doc, {
           $or: [
@@ -1053,7 +950,7 @@ describe("evaluateFilter", () => {
       ).toBe(true);
     });
 
-    it("returns false when no conditions are true", () => {
+    it("returns false when no condition holds", () => {
       expect(
         evaluateFilter(doc, {
           $or: [
@@ -1067,7 +964,6 @@ describe("evaluateFilter", () => {
 
   describe("$not", () => {
     it("negates a true condition to false", () => {
-      // name === "alice" is true, so $not makes it false
       expect(
         evaluateFilter(doc, {
           $not: { $eq: [{ $field: "name" }, { $literal: "alice" }] },
@@ -1076,7 +972,6 @@ describe("evaluateFilter", () => {
     });
 
     it("negates a false condition to true", () => {
-      // name === "bob" is false, so $not makes it true
       expect(
         evaluateFilter(doc, {
           $not: { $eq: [{ $field: "name" }, { $literal: "bob" }] },
@@ -1086,44 +981,40 @@ describe("evaluateFilter", () => {
   });
 
   describe("arithmetic operators", () => {
-    it("$add adds two values", () => {
-      expect(
-        evaluateFilter(doc, {
-          $add: [{ $field: "age" }, { $literal: 10 }],
-        }),
-      ).toBe(40);
-    });
+    const cases: ReadonlyArray<{
+      label: string;
+      filter: Parameters<typeof evaluateFilter>[1];
+      expected: number;
+    }> = [
+      {
+        label: "$add",
+        filter: { $add: [{ $field: "age" }, { $literal: 10 }] },
+        expected: 40,
+      },
+      {
+        label: "$sub",
+        filter: { $sub: [{ $field: "age" }, { $literal: 5 }] },
+        expected: 25,
+      },
+      {
+        label: "$mul",
+        filter: { $mul: [{ $field: "age" }, { $literal: 2 }] },
+        expected: 60,
+      },
+      {
+        label: "$div",
+        filter: { $div: [{ $field: "age" }, { $literal: 3 }] },
+        expected: 10,
+      },
+      {
+        label: "$mod",
+        filter: { $mod: [{ $field: "age" }, { $literal: 7 }] },
+        expected: 2,
+      },
+    ];
 
-    it("$sub subtracts two values", () => {
-      expect(
-        evaluateFilter(doc, {
-          $sub: [{ $field: "age" }, { $literal: 5 }],
-        }),
-      ).toBe(25);
-    });
-
-    it("$mul multiplies two values", () => {
-      expect(
-        evaluateFilter(doc, {
-          $mul: [{ $field: "age" }, { $literal: 2 }],
-        }),
-      ).toBe(60);
-    });
-
-    it("$div divides two values", () => {
-      expect(
-        evaluateFilter(doc, {
-          $div: [{ $field: "age" }, { $literal: 3 }],
-        }),
-      ).toBe(10);
-    });
-
-    it("$mod computes the modulus", () => {
-      expect(
-        evaluateFilter(doc, {
-          $mod: [{ $field: "age" }, { $literal: 7 }],
-        }),
-      ).toBe(2); // 30 % 7 = 2
+    it.for(cases)("$label computes the result", ({ filter, expected }) => {
+      expect(evaluateFilter(doc, filter)).toBe(expected);
     });
   });
 });

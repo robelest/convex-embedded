@@ -1,23 +1,58 @@
 import {
-  TransactionManager,
-  OccTransaction,
-  OccConflictError,
   OCC_MAX_RETRIES,
+  OccConflictError,
+  OccTransaction,
+  TransactionManager,
+  type TransactionDatabase,
 } from "@embedded/kernel/transaction";
-import { describe, it, expect, beforeEach, afterEach } from "@tests/testkit";
-import { vi } from "vitest";
+import type { DocumentId, Timestamp } from "@embedded/runtime/db/types";
+import { flushMicrotasks } from "@tests/helpers/time";
+import { describe, expect, it, vi, type Mock } from "@tests/testkit";
 
-// ---------------------------------------------------------------------------
-// TransactionManager
-// ---------------------------------------------------------------------------
+function docId(value: string): DocumentId {
+  return value as unknown as DocumentId;
+}
+
+interface MockTransactionDb {
+  readonly timestamp: Timestamp;
+  startTransaction: Mock<TransactionDatabase["startTransaction"]>;
+  commitAsync: Mock<TransactionDatabase["commitAsync"]>;
+  rollbackWrites: Mock<TransactionDatabase["rollbackWrites"]>;
+  getDocumentTimestamp: Mock<TransactionDatabase["getDocumentTimestamp"]>;
+  getTableLastWriteTimestamp: Mock<
+    TransactionDatabase["getTableLastWriteTimestamp"]
+  >;
+  getTableForId: Mock<TransactionDatabase["getTableForId"]>;
+}
+
+function createMockDb(): MockTransactionDb {
+  return {
+    timestamp: 0,
+    startTransaction: vi.fn<TransactionDatabase["startTransaction"]>(),
+    commitAsync: vi.fn<TransactionDatabase["commitAsync"]>(
+      async () => undefined,
+    ),
+    rollbackWrites: vi.fn<TransactionDatabase["rollbackWrites"]>(),
+    getDocumentTimestamp: vi
+      .fn<TransactionDatabase["getDocumentTimestamp"]>()
+      .mockReturnValue(1),
+    getTableLastWriteTimestamp: vi
+      .fn<TransactionDatabase["getTableLastWriteTimestamp"]>()
+      .mockReturnValue(null),
+    getTableForId: vi
+      .fn<TransactionDatabase["getTableForId"]>()
+      .mockReturnValue("messages"),
+  };
+}
 
 describe("TransactionManager", () => {
   it("isInTransaction() returns false initially", () => {
     const tm = new TransactionManager();
+
     expect(tm.isInTransaction()).toBe(false);
   });
 
-  it("isInTransaction() returns true after begin, false after commit", async () => {
+  it("isInTransaction() flips true after begin and false after commit", async () => {
     const tm = new TransactionManager();
 
     await tm.begin(false);
@@ -31,46 +66,38 @@ describe("TransactionManager", () => {
     const tm = new TransactionManager();
     const order: string[] = [];
 
-    // First transaction acquires the lock
-    const t1 = (async () => {
-      await tm.begin(false);
-      order.push("t1-begin");
-      // Simulate async work
-      await new Promise((r) => setTimeout(r, 50));
-      order.push("t1-commit");
-      tm.commit(false);
-    })();
+    await tm.begin(false);
+    order.push("t1-begin");
 
-    // Second transaction starts after t1 begins, should wait
     const t2 = (async () => {
-      // Small delay to ensure t1 starts first
-      await new Promise((r) => setTimeout(r, 10));
       await tm.begin(false);
       order.push("t2-begin");
       tm.commit(false);
     })();
 
-    await Promise.all([t1, t2]);
+    await flushMicrotasks();
+    expect(order).toEqual(["t1-begin"]);
 
-    // t2 must have started after t1 committed
+    order.push("t1-commit");
+    tm.commit(false);
+
+    await t2;
+
     expect(order).toEqual(["t1-begin", "t1-commit", "t2-begin"]);
   });
 
-  it("nested begin(true) does not block", async () => {
+  it("nested begin(true) does not block or release the lock", async () => {
     const tm = new TransactionManager();
 
     await tm.begin(false);
     expect(tm.isInTransaction()).toBe(true);
 
-    // Nested begin should pass through immediately
     await tm.begin(true);
     expect(tm.isInTransaction()).toBe(true);
 
-    // Nested commit should NOT release the lock
     tm.commit(true);
     expect(tm.isInTransaction()).toBe(true);
 
-    // Top-level commit releases
     tm.commit(false);
     expect(tm.isInTransaction()).toBe(false);
   });
@@ -79,21 +106,22 @@ describe("TransactionManager", () => {
     const tm = new TransactionManager();
     const order: string[] = [];
 
-    const t1 = (async () => {
-      await tm.begin(false);
-      order.push("t1-begin");
-      tm.rollback(false);
-      order.push("t1-rollback");
-    })();
+    await tm.begin(false);
+    order.push("t1-begin");
 
     const t2 = (async () => {
-      await new Promise((r) => setTimeout(r, 10));
       await tm.begin(false);
       order.push("t2-begin");
       tm.commit(false);
     })();
 
-    await Promise.all([t1, t2]);
+    await flushMicrotasks();
+    expect(order).toEqual(["t1-begin"]);
+
+    order.push("t1-rollback");
+    tm.rollback(false);
+
+    await t2;
 
     expect(order).toEqual(["t1-begin", "t1-rollback", "t2-begin"]);
   });
@@ -111,57 +139,24 @@ describe("TransactionManager", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// OccConflictError
-// ---------------------------------------------------------------------------
-
-describe("OccConflictError", () => {
-  it("is an instance of Error", () => {
+describe.concurrent("OccConflictError", () => {
+  it("is an instance of Error and OccConflictError", () => {
     const err = new OccConflictError("test conflict");
+
     expect(err).toBeInstanceOf(Error);
     expect(err).toBeInstanceOf(OccConflictError);
   });
 
   it('has name set to "OccConflictError"', () => {
-    const err = new OccConflictError("msg");
-    expect(err.name).toBe("OccConflictError");
+    expect(new OccConflictError("msg").name).toBe("OccConflictError");
   });
 
   it("carries the conflict message", () => {
-    const err = new OccConflictError("doc changed");
-    expect(err.message).toBe("doc changed");
+    expect(new OccConflictError("doc changed").message).toBe("doc changed");
   });
 });
 
-// ---------------------------------------------------------------------------
-// OccTransaction
-// ---------------------------------------------------------------------------
-
-function createMockDb() {
-  return {
-    timestamp: 0,
-    startTransaction: vi.fn(),
-    commit: vi.fn(),
-    commitAsync: vi.fn(async () => undefined),
-    rollbackWrites: vi.fn(),
-    getDocumentTimestamp: vi.fn().mockReturnValue(1),
-    getTableLastWriteTimestamp: vi.fn().mockReturnValue(null),
-    getTableForId: vi.fn().mockImplementation((_: string) => {
-      // Return "messages" for any ID passed in tests
-      return "messages";
-    }),
-  };
-}
-
 describe("OccTransaction", () => {
-  beforeEach(() => {
-    vi.useFakeTimers();
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
   it("executes the function and returns its result", async () => {
     const db = createMockDb();
     const tx = new OccTransaction({ db });
@@ -179,7 +174,9 @@ describe("OccTransaction", () => {
     const tx = new OccTransaction({ db });
     const callOrder: string[] = [];
 
-    db.startTransaction.mockImplementation(() => callOrder.push("start"));
+    db.startTransaction.mockImplementation(() => {
+      callOrder.push("start");
+    });
     db.commitAsync.mockImplementation(async () => {
       callOrder.push("commit");
     });
@@ -192,29 +189,25 @@ describe("OccTransaction", () => {
     expect(callOrder).toEqual(["start", "fn", "commit"]);
   });
 
-  it("tracks document reads via addRead", async () => {
+  it("commits when a tracked document read is unchanged", async () => {
     const db = createMockDb();
     const tx = new OccTransaction({ db });
-
-    // getDocumentTimestamp returns the same ts we recorded → no conflict
     db.getDocumentTimestamp.mockReturnValue(100);
 
     await tx.execute(async () => {
-      tx.addRead("aaaaaaaa-0000-4000-8000-000000000001" as any, 100);
+      tx.addRead(docId("aaaaaaaa-0000-4000-8000-000000000001"), 100);
       return null;
     });
 
     expect(db.getDocumentTimestamp).toHaveBeenCalledWith(
-      "aaaaaaaa-0000-4000-8000-000000000001",
+      docId("aaaaaaaa-0000-4000-8000-000000000001"),
     );
     expect(db.commitAsync).toHaveBeenCalledOnce();
   });
 
-  it("tracks table reads via addTableRead", async () => {
+  it("commits when a tracked table read has no later writes", async () => {
     const db = createMockDb();
     const tx = new OccTransaction({ db });
-
-    // No table write timestamp → no conflict
     db.getTableLastWriteTimestamp.mockReturnValue(null);
 
     await tx.execute(async () => {
@@ -226,16 +219,14 @@ describe("OccTransaction", () => {
     expect(db.commitAsync).toHaveBeenCalledOnce();
   });
 
-  it("throws OccConflictError when document timestamp differs", async () => {
+  it("throws OccConflictError when a read document's timestamp differs", async () => {
     const db = createMockDb();
     const tx = new OccTransaction({ db, maxRetries: 0 });
-
-    // Document was read at ts=1, but current is ts=2 → conflict
     db.getDocumentTimestamp.mockReturnValue(2);
 
     await expect(
       tx.execute(async () => {
-        tx.addRead("aaaaaaaa-0000-4000-8000-000000000001" as any, 1);
+        tx.addRead(docId("aaaaaaaa-0000-4000-8000-000000000001"), 1);
         return null;
       }),
     ).rejects.toThrow(/OCC conflict/);
@@ -243,16 +234,14 @@ describe("OccTransaction", () => {
     expect(db.rollbackWrites).toHaveBeenCalled();
   });
 
-  it("throws OccConflictError when document was deleted", async () => {
+  it("throws OccConflictError when a read document was deleted", async () => {
     const db = createMockDb();
     const tx = new OccTransaction({ db, maxRetries: 0 });
-
-    // Document was deleted → getDocumentTimestamp returns null
     db.getDocumentTimestamp.mockReturnValue(null);
 
     await expect(
       tx.execute(async () => {
-        tx.addRead("aaaaaaaa-0000-4000-8000-000000000001" as any, 1);
+        tx.addRead(docId("aaaaaaaa-0000-4000-8000-000000000001"), 1);
         return null;
       }),
     ).rejects.toThrow(/OCC conflict/);
@@ -260,61 +249,9 @@ describe("OccTransaction", () => {
     expect(db.rollbackWrites).toHaveBeenCalled();
   });
 
-  it("propagates non-OccConflictError immediately without retrying", async () => {
-    const db = createMockDb();
-    const tx = new OccTransaction({ db, maxRetries: 5 });
-    let attempts = 0;
-
-    await expect(
-      tx.execute(async () => {
-        attempts++;
-        throw new TypeError("something broke");
-      }),
-    ).rejects.toThrow(TypeError);
-
-    expect(attempts).toBe(1); // no retry
-    expect(db.rollbackWrites).toHaveBeenCalledOnce();
-    expect(db.commitAsync).not.toHaveBeenCalled();
-  });
-
-  it("resets read set between retry attempts", async () => {
-    const db = createMockDb();
-    const tx = new OccTransaction({ db, maxRetries: 2 });
-
-    let attempt = 0;
-    const readTimestampsPerAttempt: number[][] = [];
-
-    // Always conflict so we can observe reads being reset each attempt
-    db.getDocumentTimestamp.mockReturnValue(999);
-
-    const executePromise = tx.execute(async () => {
-      attempt++;
-      readTimestampsPerAttempt.push([attempt]);
-      tx.addRead(`aaaaaaaa-0000-4000-8000-00000000000${attempt}` as any, 5);
-      return "ok";
-    });
-    // Prevent unhandled rejection warning while timers advance
-    executePromise.catch(() => {});
-
-    // Advance timers for backoff between retries
-    for (let i = 0; i < 10; i++) {
-      await vi.advanceTimersByTimeAsync(10_000);
-    }
-
-    // maxRetries=2, so 3 attempts total, all conflict → fails
-    await expect(executePromise).rejects.toThrow(/OCC conflict/);
-
-    // All 3 attempts ran
-    expect(attempt).toBe(3);
-    // Each attempt added its own read, confirming the read set was cleared
-    expect(readTimestampsPerAttempt).toHaveLength(3);
-  });
-
-  it("detects table-level conflict when table was written after scan", async () => {
+  it("detects a table-level conflict when the table was written after a scan", async () => {
     const db = createMockDb();
     const tx = new OccTransaction({ db, maxRetries: 0 });
-
-    // Table has writes and scan returned no rows → phantom conflict
     db.getTableLastWriteTimestamp.mockReturnValue(10);
 
     await expect(
@@ -327,12 +264,56 @@ describe("OccTransaction", () => {
     expect(db.rollbackWrites).toHaveBeenCalled();
   });
 
-  it("uses default OCC_MAX_RETRIES when maxRetries is not specified", () => {
+  it("propagates a non-OccConflictError immediately without retrying", async () => {
     const db = createMockDb();
-    const _tx = new OccTransaction({ db });
+    const tx = new OccTransaction({ db, maxRetries: 5 });
+    let attempts = 0;
 
-    // We can't directly inspect _maxRetries, but we can verify OCC_MAX_RETRIES
-    // is exported and has a reasonable value
+    await expect(
+      tx.execute(async () => {
+        attempts += 1;
+        throw new TypeError("something broke");
+      }),
+    ).rejects.toThrow(TypeError);
+
+    expect(attempts).toBe(1);
+    expect(db.rollbackWrites).toHaveBeenCalledOnce();
+    expect(db.commitAsync).not.toHaveBeenCalled();
+  });
+
+  it("resets the read set between retry attempts", async () => {
+    vi.useFakeTimers();
+    try {
+      const db = createMockDb();
+      const tx = new OccTransaction({ db, maxRetries: 2 });
+      db.getDocumentTimestamp.mockReturnValue(999);
+
+      let attempt = 0;
+      const readsPerAttempt: number[] = [];
+
+      const settled = expect(
+        tx.execute(async () => {
+          attempt += 1;
+          readsPerAttempt.push(attempt);
+          tx.addRead(docId(`aaaaaaaa-0000-4000-8000-00000000000${attempt}`), 5);
+          return "ok";
+        }),
+      ).rejects.toThrow(/OCC conflict/);
+
+      await vi.runAllTimersAsync();
+      await settled;
+
+      expect(attempt).toBe(3);
+      expect(readsPerAttempt).toEqual([1, 2, 3]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("defaults maxRetries to OCC_MAX_RETRIES", () => {
+    const db = createMockDb();
+
+    expect(() => new OccTransaction({ db })).not.toThrow();
     expect(OCC_MAX_RETRIES).toBe(5);
   });
 });

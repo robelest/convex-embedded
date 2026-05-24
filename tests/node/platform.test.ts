@@ -1,34 +1,38 @@
-import { afterEach, describe, expect, it } from "@tests/testkit";
+import { describe, expect, it } from "@tests/testkit";
+import type { TestFixtures } from "@tests/testkit";
 
 import { api } from "../../convex/_generated/api";
-import schema from "../../convex/schema";
 import { GROUP_ID } from "../../convex/access";
+import schema from "../../convex/schema";
 import { getEmbeddedClientEntry } from "../../packages/convex-embedded/src/client/entry";
 import { createConvexClient } from "../../packages/convex-embedded/src/node/index";
 import { openNodeStorage } from "../../packages/convex-embedded/src/node/sqlite/adapter";
 import { createAppModules } from "../helpers/convex";
 import { temporaryDatabasePath, uniqueSuffix } from "../helpers/storage";
 
-const clientsToClose: Array<{ close(): Promise<void> }> = [];
-
-afterEach(async () => {
-  for (const client of clientsToClose.splice(0)) {
-    await client.close();
-  }
-});
+function makeClient(
+  track: TestFixtures["track"],
+  name: string,
+  databasePath: string,
+): ReturnType<typeof createConvexClient> {
+  const client = createConvexClient({
+    convex: { modules: createAppModules() },
+    schema,
+    name,
+    databasePath,
+  });
+  track({ close: () => client.close() });
+  return client;
+}
 
 describe("node platform storage", () => {
-  it("persists local runtime state across client restarts", async () => {
+  it("persists local runtime state across client restarts", async ({
+    track,
+  }) => {
     const name = uniqueSuffix("node-persist");
     const databasePath = temporaryDatabasePath(name);
 
-    const firstClient = createConvexClient({
-      convex: { modules: createAppModules() },
-      schema,
-      name,
-      databasePath,
-    });
-    clientsToClose.push(firstClient as { close(): Promise<void> });
+    const firstClient = makeClient(track, name, databasePath);
 
     await firstClient.query(api.projects.list, {});
 
@@ -43,15 +47,8 @@ describe("node platform storage", () => {
     });
 
     await firstClient.close();
-    clientsToClose.length = 0;
 
-    const secondClient = createConvexClient({
-      convex: { modules: createAppModules() },
-      schema,
-      name,
-      databasePath,
-    });
-    clientsToClose.push(secondClient as { close(): Promise<void> });
+    const secondClient = makeClient(track, name, databasePath);
 
     const issues = (await secondClient.query(api.issues.allForProject, {
       projectId,
@@ -59,26 +56,19 @@ describe("node platform storage", () => {
 
     expect(issues).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({
-          _id: issueId,
-          title: `Issue ${name}`,
-        }),
+        expect.objectContaining({ _id: issueId, title: `Issue ${name}` }),
       ]),
     );
   });
 
-  it("reloads a larger persisted local dataset after restart", async () => {
+  it("reloads a larger persisted local dataset after restart", async ({
+    track,
+  }) => {
     const name = uniqueSuffix("node-volume");
     const databasePath = temporaryDatabasePath(name);
     const projectCount = 100;
 
-    const firstClient = createConvexClient({
-      convex: { modules: createAppModules() },
-      schema,
-      name,
-      databasePath,
-    });
-    clientsToClose.push(firstClient as { close(): Promise<void> });
+    const firstClient = makeClient(track, name, databasePath);
 
     for (let index = 0; index < projectCount; index += 1) {
       await firstClient.mutation(api.projects.create, {
@@ -89,15 +79,8 @@ describe("node platform storage", () => {
     }
 
     await firstClient.close();
-    clientsToClose.length = 0;
 
-    const secondClient = createConvexClient({
-      convex: { modules: createAppModules() },
-      schema,
-      name,
-      databasePath,
-    });
-    clientsToClose.push(secondClient as { close(): Promise<void> });
+    const secondClient = makeClient(track, name, databasePath);
 
     const runtime = getEmbeddedClientEntry(secondClient)?.runtime;
     if (!runtime) {
@@ -108,7 +91,6 @@ describe("node platform storage", () => {
     const hydratedProjects = await runtime.getDocumentsForTable("projects");
     const userTableSpecs = runtime.getUserTableSpecs() ?? undefined;
     await secondClient.close();
-    clientsToClose.length = 0;
 
     const storage = await openNodeStorage({
       filename: databasePath,
@@ -118,30 +100,17 @@ describe("node platform storage", () => {
       Record<string, unknown>
     >;
     await storage.close();
-    expect(
-      hydratedProjects
-        .filter(
-          (entry) =>
-            (entry as { groupId?: string }).groupId === GROUP_ID,
-        )
-        .filter((entry) =>
-          String((entry as { name?: string }).name).startsWith(
-            `Node Volume ${name}-`,
-          ),
-        ).length,
-    ).toBeGreaterThan(0);
-    expect(
-      persistedProjects
-        .filter(
-          (entry) =>
-            (entry as { groupId?: string }).groupId === GROUP_ID,
-        )
-        .filter((entry) =>
-          String((entry as { name?: string }).name).startsWith(
-            `Node Volume ${name}-`,
-          ),
-        ).length,
-    ).toBeGreaterThanOrEqual(projectCount - 2);
+
+    const matchesName = (entry: Record<string, unknown>): boolean =>
+      (entry as { groupId?: string }).groupId === GROUP_ID &&
+      String((entry as { name?: string }).name).startsWith(
+        `Node Volume ${name}-`,
+      );
+
+    expect(hydratedProjects.filter(matchesName).length).toBeGreaterThan(0);
+    expect(persistedProjects.filter(matchesName).length).toBeGreaterThanOrEqual(
+      projectCount - 2,
+    );
     expect(persistedProjects).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
@@ -152,17 +121,13 @@ describe("node platform storage", () => {
     );
   });
 
-  it("does not duplicate projects in list after issue creation updates the project", async () => {
+  it("does not duplicate projects in list after issue creation updates the project", async ({
+    track,
+  }) => {
     const name = uniqueSuffix("node-project-dedupe");
     const databasePath = temporaryDatabasePath(name);
 
-    const client = createConvexClient({
-      convex: { modules: createAppModules() },
-      schema,
-      name,
-      databasePath,
-    });
-    clientsToClose.push(client as { close(): Promise<void> });
+    const client = makeClient(track, name, databasePath);
 
     const projectId = await client.mutation(api.projects.create, {
       name: `Node Project ${name}`,
@@ -182,8 +147,7 @@ describe("node platform storage", () => {
     }>;
 
     const matchingProjects = projects.filter(
-      (project) =>
-        project.groupId === GROUP_ID && project._id === projectId,
+      (project) => project.groupId === GROUP_ID && project._id === projectId,
     );
     expect(matchingProjects).toHaveLength(1);
     expect(matchingProjects[0]?.openIssueCount).toBe(1);

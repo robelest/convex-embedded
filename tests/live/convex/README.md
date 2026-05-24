@@ -2,19 +2,19 @@
 
 These tests (`reconnect`, `restart`, `multiclient`) drive the embedded client
 against a **real** Convex backend to exercise sync, reconnect, and offline
-replay. They're skipped unless both `CONVEX_URL` and `RUN_CONVEX_E2E=1` are set
+replay. They're skipped unless both `CONVEX_URL` and `RUN_CONVEX_LIVE=1` are set
 (see the gate at the top of each `*.test.ts`).
 
 ## Recommended: run against an ephemeral preview deployment
 
 `pnpm test:live` deploys the `convex/` functions to an isolated, throwaway
-**Convex preview deployment** named `embedded-e2e`, then runs the suite with
+**Convex preview deployment** named `embedded-live`, then runs the suite with
 `CONVEX_URL` pointed at that preview:
 
 ```
-vp exec convex deploy --preview-create=embedded-e2e \
+vp exec convex deploy --preview-create=embedded-live \
   --cmd-url-env-var-name CONVEX_URL \
-  --cmd 'RUN_CONVEX_E2E=1 vp test --run tests/e2e/convex'
+  --cmd 'RUN_CONVEX_LIVE=1 vp test --run tests/live/convex'
 ```
 
 The preview is **wiped and recreated** on every run, so each run starts from
@@ -51,10 +51,10 @@ test data accumulates on that deployment across runs.
 
 ## CI
 
-`.github/workflows/e2e-live.yml` runs `pnpm test:live` on pull requests and
-pushes to `main`. It needs a `CONVEX_DEPLOY_KEY` repo secret set to a Preview
-Deploy Key. A workflow-level `concurrency` group serializes runs so overlapping
-PRs don't clobber the shared `embedded-e2e` preview mid-test.
+`.github/workflows/live.yml` runs `pnpm test:live` on pull requests and pushes
+to `main`. It needs a `CONVEX_DEPLOY_KEY` repo secret set to a Preview Deploy
+Key. A workflow-level `concurrency` group serializes runs so overlapping PRs
+don't clobber the shared `embedded-live` preview mid-test.
 
 ## Caveats
 
@@ -64,5 +64,5 @@ PRs don't clobber the shared `embedded-e2e` preview mid-test.
   the preview first:
 
   ```
-  vp exec convex env set OPENROUTER_API_KEY '<key>' --preview-name embedded-e2e
+  vp exec convex env set OPENROUTER_API_KEY '<key>' --preview-name embedded-live
   ```

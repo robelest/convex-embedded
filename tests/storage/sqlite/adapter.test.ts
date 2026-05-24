@@ -1,72 +1,97 @@
 import type { TableSchema } from "@embedded/runtime/db/schema";
+import type { DocumentId } from "@embedded/runtime/db/types";
+import type {
+  SqliteDriver,
+  SqliteStatement,
+} from "@embedded/storage/sqlite/driver";
 import {
   buildUserTableSpec,
   createSqliteStorage,
 } from "@embedded/storage/sqlite/factory";
-import { describe, expect, it, vi } from "@tests/testkit";
+import { describe, expect, it, vi, type Mock } from "@tests/testkit";
 
 const ADAPTER_META_TABLE = "_convex_sqlite_adapter_meta";
 const TABLE_ROUTING_TABLE = "_convex_sqlite_table_routing";
 
+type QueryRow = Record<string, unknown>;
+type QueryMock = Mock<
+  (sql: string, params?: readonly unknown[]) => Promise<QueryRow[]>
+>;
+type ExecuteBatchMock = Mock<
+  (statements: readonly SqliteStatement[]) => Promise<void>
+>;
+
+interface MockDriver {
+  driver: SqliteDriver;
+  query: QueryMock;
+  executeBatch: ExecuteBatchMock;
+}
+
 function createMockDriver(options?: {
   existingTables?: string[];
   routes?: Record<string, string>;
-  customQuery?: (sql: string, params?: unknown[]) => Promise<unknown[]>;
-}) {
+  customQuery?: (
+    sql: string,
+    params?: readonly unknown[],
+  ) => Promise<QueryRow[]>;
+}): MockDriver {
   const existingTables = new Set(options?.existingTables ?? []);
   const routes = new Map(Object.entries(options?.routes ?? {}));
 
-  const query = vi.fn(async (sql: string, params?: unknown[]) => {
-    if (
-      sql === "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?"
-    ) {
-      const tableName = String(params?.[0]);
-      return existingTables.has(tableName) ? [{ name: tableName }] : [];
-    }
-    if (
-      sql === `SELECT schema_version FROM ${ADAPTER_META_TABLE} WHERE id = 1`
-    ) {
-      return [];
-    }
-    if (sql === "PRAGMA table_info(documents)") {
-      return [
-        { name: "id" },
-        { name: "table_name" },
-        { name: "creation_time" },
-        { name: "identity_key" },
-        { name: "data" },
-      ];
-    }
-    if (
-      sql ===
-      `SELECT physical_table_name FROM ${TABLE_ROUTING_TABLE} WHERE table_name = ?`
-    ) {
-      const route = routes.get(String(params?.[0]));
-      return route ? [{ physical_table_name: route }] : [];
-    }
-    if (
-      sql ===
-      `SELECT table_name, physical_table_name FROM ${TABLE_ROUTING_TABLE}`
-    ) {
-      return Array.from(routes.entries()).map(
-        ([table_name, physical_table_name]) => ({
-          table_name,
-          physical_table_name,
-        }),
-      );
-    }
-    if (
-      sql ===
-      "SELECT DISTINCT table_name FROM documents WHERE table_name IS NOT NULL AND table_name != ''"
-    ) {
-      return [];
-    }
-    return (await options?.customQuery?.(sql, params)) ?? [];
-  });
+  const query: QueryMock = vi.fn(
+    async (sql: string, params?: readonly unknown[]): Promise<QueryRow[]> => {
+      if (
+        sql ===
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?"
+      ) {
+        const tableName = String(params?.[0]);
+        return existingTables.has(tableName) ? [{ name: tableName }] : [];
+      }
+      if (
+        sql === `SELECT schema_version FROM ${ADAPTER_META_TABLE} WHERE id = 1`
+      ) {
+        return [];
+      }
+      if (sql === "PRAGMA table_info(documents)") {
+        return [
+          { name: "id" },
+          { name: "table_name" },
+          { name: "creation_time" },
+          { name: "identity_key" },
+          { name: "data" },
+        ];
+      }
+      if (
+        sql ===
+        `SELECT physical_table_name FROM ${TABLE_ROUTING_TABLE} WHERE table_name = ?`
+      ) {
+        const route = routes.get(String(params?.[0]));
+        return route ? [{ physical_table_name: route }] : [];
+      }
+      if (
+        sql ===
+        `SELECT table_name, physical_table_name FROM ${TABLE_ROUTING_TABLE}`
+      ) {
+        return Array.from(routes.entries()).map(
+          ([table_name, physical_table_name]) => ({
+            table_name,
+            physical_table_name,
+          }),
+        );
+      }
+      if (
+        sql ===
+        "SELECT DISTINCT table_name FROM documents WHERE table_name IS NOT NULL AND table_name != ''"
+      ) {
+        return [];
+      }
+      return (await options?.customQuery?.(sql, params)) ?? [];
+    },
+  );
 
-  const execute = vi.fn(async () => undefined);
-  const executeBatch = vi.fn(
-    async (statements: Array<{ sql: string; params?: unknown[] }>) => {
+  const execute = vi.fn(async (): Promise<void> => undefined);
+  const executeBatch: ExecuteBatchMock = vi.fn(
+    async (statements: readonly SqliteStatement[]): Promise<void> => {
       for (const statement of statements) {
         if (
           statement.sql.includes(
@@ -82,11 +107,26 @@ function createMockDriver(options?: {
     },
   );
 
-  return {
-    driver: { query, execute, executeBatch },
-    query,
+  const driver: SqliteDriver = {
+    query: query as unknown as SqliteDriver["query"],
+    execute,
     executeBatch,
   };
+
+  return { driver, query, executeBatch };
+}
+
+function statementsAt(
+  executeBatch: ExecuteBatchMock,
+  callIndex: number,
+): readonly SqliteStatement[] {
+  return executeBatch.mock.calls[callIndex]?.[0] ?? [];
+}
+
+function allStatements(
+  executeBatch: ExecuteBatchMock,
+): readonly SqliteStatement[] {
+  return executeBatch.mock.calls.flatMap((call) => call[0]);
 }
 
 function tasksTableSchema(): TableSchema {
@@ -125,7 +165,7 @@ describe("createSqliteStorage", () => {
         {
           tableName: "tasks",
           doc: {
-            _id: "task-1" as any,
+            _id: "task-1" as DocumentId,
             _creationTime: 42,
             __identityKey: "user-1",
             title: "hello",
@@ -136,19 +176,13 @@ describe("createSqliteStorage", () => {
       meta: { timestamp: 1, lastCreationTime: 42 },
     });
 
-    const migrationStatements = executeBatch.mock.calls[1]?.[0] as Array<{
-      sql: string;
-      params?: unknown[];
-    }>;
+    const migrationStatements = statementsAt(executeBatch, 1);
     expect(migrationStatements[0]?.sql).toContain(
       'CREATE TABLE IF NOT EXISTS "documents__tasks"',
     );
     expect(migrationStatements[3]?.sql).toContain(TABLE_ROUTING_TABLE);
 
-    const writeStatements = executeBatch.mock.calls[2]?.[0] as Array<{
-      sql: string;
-      params?: unknown[];
-    }>;
+    const writeStatements = statementsAt(executeBatch, 2);
     expect(writeStatements[0]?.sql).toContain(
       'INSERT OR REPLACE INTO "documents__tasks" (id, creation_time, identity_key, data)',
     );
@@ -211,11 +245,11 @@ describe("createSqliteStorage", () => {
       __identityKey: "user-1",
       title: "hello",
     };
-    const seen: Array<{ sql: string; params?: unknown[] }> = [];
+    const seen: Array<{ sql: string; params?: readonly unknown[] }> = [];
     const { driver } = createMockDriver({
       existingTables: [ADAPTER_META_TABLE, "documents", "meta", "blobs"],
       routes: { tasks: "documents__tasks" },
-      customQuery: async (sql: string, params?: unknown[]) => {
+      customQuery: async (sql: string, params?: readonly unknown[]) => {
         seen.push({ sql, params });
         if (sql.startsWith('SELECT data FROM "documents__tasks"')) {
           return [{ data: JSON.stringify(taskDoc) }];
@@ -273,23 +307,14 @@ describe("createSqliteStorage", () => {
       meta: { timestamp: 2, lastCreationTime: 42 },
     });
 
-    const statements = executeBatch.mock.calls.at(-1)?.[0] as Array<{
-      sql: string;
-      params?: unknown[];
-    }>;
-    const allStatements = executeBatch.mock.calls.flatMap(
-      (call) =>
-        call[0] as Array<{
-          sql: string;
-          params?: unknown[];
-        }>,
-    );
     expect(
-      allStatements.some((statement) =>
+      allStatements(executeBatch).some((statement) =>
         statement.sql.includes('CREATE TABLE IF NOT EXISTS "documents__tasks"'),
       ),
     ).toBe(true);
-    expect(statements).toContainEqual({
+    expect(
+      statementsAt(executeBatch, executeBatch.mock.calls.length - 1),
+    ).toContainEqual({
       sql: 'DELETE FROM "documents__tasks" WHERE id = ?',
       params: ["task-1"],
     });
@@ -304,11 +329,11 @@ describe("createSqliteStorage", () => {
       embedding: [1, 0],
     };
     let lastSql = "";
-    let lastParams: unknown[] | undefined;
+    let lastParams: readonly unknown[] | undefined;
     const { driver } = createMockDriver({
       existingTables: [ADAPTER_META_TABLE, "documents", "meta", "blobs"],
       routes: { tasks: "documents__tasks" },
-      customQuery: async (sql: string, params?: unknown[]) => {
+      customQuery: async (sql: string, params?: readonly unknown[]) => {
         if (sql.startsWith('SELECT data FROM "documents__tasks" WHERE')) {
           lastSql = sql;
           lastParams = params;
@@ -353,7 +378,7 @@ describe("createSqliteStorage", () => {
           {
             tableName: "tasks",
             doc: {
-              _id: "task-1" as any,
+              _id: "task-1" as DocumentId,
               _creationTime: 42,
               __identityKey: "user-1",
               title: "hello world",
@@ -378,22 +403,16 @@ describe("createSqliteStorage", () => {
       },
     );
 
-    const allWriteStatements = executeBatch.mock.calls.flatMap(
-      (call) =>
-        call[0] as Array<{
-          sql: string;
-          params?: unknown[];
-        }>,
-    );
+    const statements = allStatements(executeBatch);
     expect(
-      allWriteStatements.some((statement) =>
+      statements.some((statement) =>
         statement.sql.includes(
           'INSERT OR REPLACE INTO "internal__search_entries"',
         ),
       ),
     ).toBe(true);
     expect(
-      allWriteStatements.some((statement) =>
+      statements.some((statement) =>
         statement.sql.includes(
           'INSERT OR REPLACE INTO "internal__search_filter_buckets"',
         ),
@@ -411,7 +430,7 @@ describe("createSqliteStorage", () => {
           {
             tableName: "tasks",
             doc: {
-              _id: "task-1" as any,
+              _id: "task-1" as DocumentId,
               _creationTime: 42,
               status: "active",
               priority: 2,
@@ -437,22 +456,16 @@ describe("createSqliteStorage", () => {
       },
     );
 
-    const allWriteStatements = executeBatch.mock.calls.flatMap(
-      (call) =>
-        call[0] as Array<{
-          sql: string;
-          params?: unknown[];
-        }>,
-    );
+    const statements = allStatements(executeBatch);
     expect(
-      allWriteStatements.some((statement) =>
+      statements.some((statement) =>
         statement.sql.includes(
           'INSERT OR REPLACE INTO "internal__vector_entries"',
         ),
       ),
     ).toBe(true);
     expect(
-      allWriteStatements.some((statement) =>
+      statements.some((statement) =>
         statement.sql.includes(
           'INSERT OR REPLACE INTO "internal__vector_filter_buckets"',
         ),
@@ -472,7 +485,7 @@ describe("createSqliteStorage", () => {
         {
           tableName: "tasks",
           doc: {
-            _id: "task-1" as any,
+            _id: "task-1" as DocumentId,
             _creationTime: 42,
             __identityKey: "user-1",
             title: "ship it",
@@ -486,18 +499,10 @@ describe("createSqliteStorage", () => {
       meta: { timestamp: 1, lastCreationTime: 42 },
     });
 
-    const allWriteStatements = executeBatch.mock.calls.flatMap(
-      (call) =>
-        call[0] as Array<{
-          sql: string;
-          params?: unknown[];
-        }>,
-    );
-
-    const insertStatement = allWriteStatements.find((statement) =>
+    const statements = allStatements(executeBatch);
+    const insertStatement = statements.find((statement) =>
       statement.sql.includes('INSERT OR REPLACE INTO "documents__tasks"'),
     );
-    expect(insertStatement).toBeDefined();
     expect(insertStatement?.sql).toBe(
       'INSERT OR REPLACE INTO "documents__tasks" ("id", "creation_time", "title", "priority", "tags", "meta", "identity_key") VALUES (?, ?, ?, ?, ?, ?, ?)',
     );
@@ -512,7 +517,7 @@ describe("createSqliteStorage", () => {
     ]);
 
     expect(
-      allWriteStatements.some((statement) =>
+      statements.some((statement) =>
         statement.sql.includes(
           'INSERT OR REPLACE INTO "documents__tasks" (id, creation_time, identity_key, data)',
         ),

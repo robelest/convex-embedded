@@ -1,202 +1,261 @@
 /**
- * Lightweight test harness for the embedded Convex runtime.
+ * Typed test harness for the embedded Convex runtime — the primary test
+ * vehicle for the SDK's own runtime (the convex-test port).
  *
- * Provides an `embeddedTest()` factory that spins up a Database, ModuleLoader,
- * and UdfExecutor wired together — without requiring `import.meta.glob` or
- * `_generated` codegen files.
+ * `embeddedTest({ modules })` wires a {@link Database}, {@link ModuleLoader},
+ * and {@link UdfExecutor} together so `query` / `mutation` / `action` calls go
+ * through the same pipeline as the real `EmbeddedRuntime` — global patching,
+ * syscall installation, and transaction management.
  *
- * There are two ways to define functions:
+ * Define functions with the {@link testQuery} / {@link testMutation} /
+ * {@link testAction} wrappers. They wrap the real Convex generic builders, so
+ * the handler receives a real `ctx` (db, auth, scheduler, storage via syscalls)
+ * and the per-path argument / return types flow through to the call site:
  *
- * 1. **Convex SDK wrappers** (full integration — ctx.db, ctx.auth, etc. work):
- *    Pass real `query()` / `mutation()` / `action()` objects from `convex/server`.
- *    The UdfExecutor patches `globalThis.Convex` with syscalls, so the SDK's
- *    internal ctx builder wires everything up automatically.
- *
- * 2. **Simple test wrappers** (unit-style — ctx is the raw object from UdfExecutor):
- *    Use the exported `testQuery()` / `testMutation()` / `testAction()` helpers
- *    which create minimal function descriptors that pass `getHandler` resolution.
- *    The handler receives an empty `{}` ctx; useful when you only want to test
- *    database logic via the syscall layer or don't need ctx at all.
- *
- * @example
  * ```ts
- * import { embeddedTest, testMutation, testQuery } from "./test-helpers.js";
- *
  * const t = embeddedTest({
  *   modules: {
- *     "messages:send": testMutation(async (_ctx, { body, author }) => {
- *       // Direct DB access via the test context
- *     }),
- *     "messages:list": testQuery(async (_ctx) => {
- *       return [];
- *     }),
+ *     "messages:send": testMutation(
+ *       async (ctx, args: { body: string }) => ctx.db.insert("messages", args),
+ *     ),
+ *     "messages:list": testQuery(async (ctx) => ctx.db.query("messages").collect()),
  *   },
  * });
  *
- * await t.mutation("messages:send", { body: "hello", author: "alice" });
- * const msgs = await t.query("messages:list");
+ * const id = await t.mutation("messages:send", { body: "hi" }); // typed args
+ * const all = await t.query("messages:list"); // typed return
  * ```
  *
- * @packageDocumentation
+ * Real Convex SDK functions (from `query()` / `mutation()` / `action()`) are
+ * also accepted as module values; their kind is inferred but their args/return
+ * fall back to the generic defaults.
  */
 
 import {
   ModuleLoader,
   resolveFunctionPath,
+  type ConvexModule,
+  type ConvexModuleRegistry,
   type FunctionPath,
-} from "../../packages/convex-embedded/src/kernel/modules";
-import { UdfExecutor } from "../../packages/convex-embedded/src/kernel/udf";
-import { createAmbientCryptoProvider } from "../../packages/convex-embedded/src/runtime/crypto";
-import { Database } from "../../packages/convex-embedded/src/runtime/db/database";
-import type { ParsedSchema } from "../../packages/convex-embedded/src/runtime/db/schema";
+} from "@embedded/kernel/modules";
+import { UdfExecutor } from "@embedded/kernel/udf";
+import { createAmbientCryptoProvider } from "@embedded/runtime/crypto";
+import { Database } from "@embedded/runtime/db/database";
+import type { ParsedSchema } from "@embedded/runtime/db/schema";
+import type {
+  DefaultFunctionArgs,
+  FunctionVisibility,
+  GenericActionCtx,
+  GenericDataModel,
+  GenericMutationCtx,
+  GenericQueryCtx,
+  RegisteredAction,
+  RegisteredMutation,
+  RegisteredQuery,
+} from "convex/server";
+import { actionGeneric, mutationGeneric, queryGeneric } from "convex/server";
 
 // ---------------------------------------------------------------------------
-// Simple test function wrappers
+// Function descriptors
 // ---------------------------------------------------------------------------
+
+type FnKind = "query" | "mutation" | "action";
+
+/** Phantom brand key carrying a test function's kind / args / return types. */
+declare const TEST_FN: unique symbol;
+
+interface TestFnBrand<
+  Kind extends FnKind,
+  Args extends DefaultFunctionArgs,
+  Return,
+> {
+  readonly kind: Kind;
+  readonly args: (args: Args) => void;
+  readonly return: () => Return;
+}
+
+type RegisteredFor<
+  Kind extends FnKind,
+  Args extends DefaultFunctionArgs,
+  Return,
+> = Kind extends "query"
+  ? RegisteredQuery<"public", Args, Promise<Return>>
+  : Kind extends "mutation"
+    ? RegisteredMutation<"public", Args, Promise<Return>>
+    : RegisteredAction<"public", Args, Promise<Return>>;
 
 /**
- * Minimal function descriptor recognised by the UdfExecutor's `getHandler`.
- *
- * Carries `isQuery` / `isMutation` / `isAction` flags so that the executor's
- * type-checking logic (when it exists) can validate the call.
+ * A test function descriptor produced by {@link testQuery} / {@link testMutation}
+ * / {@link testAction}. It is a real registered Convex function (so the executor
+ * builds a full `ctx`), branded with its kind/args/return for per-path inference.
  */
-export interface TestFunctionDescriptor {
-  _handler: (ctx: any, args: any) => any;
-  isQuery: boolean;
-  isMutation: boolean;
-  isAction: boolean;
+export type TestFunction<
+  Kind extends FnKind = FnKind,
+  Args extends DefaultFunctionArgs = DefaultFunctionArgs,
+  Return = unknown,
+> = RegisteredFor<Kind, Args, Return> & {
+  readonly [TEST_FN]: TestFnBrand<Kind, Args, Return>;
+};
+
+/** Any module value accepted by {@link embeddedTest}. */
+export type ModuleValue =
+  | TestFunction
+  | RegisteredQuery<FunctionVisibility, DefaultFunctionArgs, unknown>
+  | RegisteredMutation<FunctionVisibility, DefaultFunctionArgs, unknown>
+  | RegisteredAction<FunctionVisibility, DefaultFunctionArgs, unknown>;
+
+type QueryCtx = GenericQueryCtx<GenericDataModel>;
+type MutationCtx = GenericMutationCtx<GenericDataModel>;
+type ActionCtx = GenericActionCtx<GenericDataModel>;
+
+/** Wrap a handler as a query — receives a real read `ctx`. */
+export function testQuery<
+  Args extends DefaultFunctionArgs = DefaultFunctionArgs,
+  Return = unknown,
+>(
+  handler: (ctx: QueryCtx, args: Args) => Return | Promise<Return>,
+): TestFunction<"query", Args, Awaited<Return>> {
+  return queryGeneric({
+    handler: handler as (ctx: QueryCtx, args: DefaultFunctionArgs) => unknown,
+  }) as unknown as TestFunction<"query", Args, Awaited<Return>>;
 }
 
-/** Wrap a handler as a query-typed function descriptor. */
-export function testQuery(
-  handler: (ctx: any, args: any) => any,
-): TestFunctionDescriptor {
-  return {
-    _handler: handler,
-    isQuery: true,
-    isMutation: false,
-    isAction: false,
-  };
+/** Wrap a handler as a mutation — receives a real read/write `ctx`. */
+export function testMutation<
+  Args extends DefaultFunctionArgs = DefaultFunctionArgs,
+  Return = unknown,
+>(
+  handler: (ctx: MutationCtx, args: Args) => Return | Promise<Return>,
+): TestFunction<"mutation", Args, Awaited<Return>> {
+  return mutationGeneric({
+    handler: handler as (
+      ctx: MutationCtx,
+      args: DefaultFunctionArgs,
+    ) => unknown,
+  }) as unknown as TestFunction<"mutation", Args, Awaited<Return>>;
 }
 
-/** Wrap a handler as a mutation-typed function descriptor. */
-export function testMutation(
-  handler: (ctx: any, args: any) => any,
-): TestFunctionDescriptor {
-  return {
-    _handler: handler,
-    isQuery: false,
-    isMutation: true,
-    isAction: false,
-  };
-}
-
-/** Wrap a handler as an action-typed function descriptor. */
-export function testAction(
-  handler: (ctx: any, args: any) => any,
-): TestFunctionDescriptor {
-  return {
-    _handler: handler,
-    isQuery: false,
-    isMutation: false,
-    isAction: true,
-  };
+/** Wrap a handler as an action — receives a real action `ctx`. */
+export function testAction<
+  Args extends DefaultFunctionArgs = DefaultFunctionArgs,
+  Return = unknown,
+>(
+  handler: (ctx: ActionCtx, args: Args) => Return | Promise<Return>,
+): TestFunction<"action", Args, Awaited<Return>> {
+  return actionGeneric({
+    handler: handler as (ctx: ActionCtx, args: DefaultFunctionArgs) => unknown,
+  }) as unknown as TestFunction<"action", Args, Awaited<Return>>;
 }
 
 // ---------------------------------------------------------------------------
-// EmbeddedTest types
+// Per-path type inference
 // ---------------------------------------------------------------------------
 
-export interface EmbeddedTestOptions {
-  /**
-   * Parsed schema definition. Pass `null` (or omit) for schema-less mode.
-   */
-  schema?: ParsedSchema | null;
-
-  /**
-   * Inline module map keyed by `"moduleName:exportName"`.
-   *
-   * Values can be:
-   * - A {@link TestFunctionDescriptor} from `testQuery` / `testMutation` / `testAction`
-   * - A real Convex SDK function object returned by `query()` / `mutation()` / `action()`
-   * - A plain async function (will be used as-is; `getHandler` accepts bare functions)
-   */
-  modules: Record<string, any>;
+type KindOf<T> = T extends {
+  readonly [TEST_FN]: TestFnBrand<infer K, never, unknown>;
 }
+  ? K
+  : T extends { isAction: true }
+    ? "action"
+    : T extends { isMutation: true }
+      ? "mutation"
+      : T extends { isQuery: true }
+        ? "query"
+        : never;
 
-export interface EmbeddedTestContext {
-  /** Execute a query by UDF path (e.g. `"messages:list"`). */
-  query(path: string, args?: any): Promise<any>;
-  /** Execute a mutation by UDF path. */
-  mutation(path: string, args?: any): Promise<any>;
-  /** Execute an action by UDF path. */
-  action(path: string, args?: any): Promise<any>;
-  /** Direct access to the underlying Database for low-level assertions. */
-  db: Database;
+type ArgsOf<T> = T extends {
+  readonly [TEST_FN]: TestFnBrand<FnKind, infer A, unknown>;
 }
+  ? A
+  : DefaultFunctionArgs;
+
+type ReturnOf<T> = T extends {
+  readonly [TEST_FN]: TestFnBrand<FnKind, never, infer R>;
+}
+  ? R
+  : unknown;
+
+type KeysOfKind<M, Kind extends FnKind> = {
+  [K in keyof M]: KindOf<M[K]> extends Kind ? K : never;
+}[keyof M] &
+  string;
+
+/** Args become an optional parameter when the function takes no required args. */
+type ArgsParam<T> =
+  Record<string, never> extends ArgsOf<T>
+    ? [args?: ArgsOf<T>]
+    : [args: ArgsOf<T>];
 
 // ---------------------------------------------------------------------------
 // embeddedTest
 // ---------------------------------------------------------------------------
 
+export interface EmbeddedTestOptions<M extends Record<string, ModuleValue>> {
+  /** Parsed schema definition. Omit (or pass `null`) for schema-less mode. */
+  schema?: ParsedSchema | null;
+  /**
+   * Inline module map keyed by `"moduleName:exportName"`. Values come from
+   * {@link testQuery} / {@link testMutation} / {@link testAction} (or real
+   * Convex SDK function objects).
+   */
+  modules: M;
+}
+
+export interface EmbeddedTestContext<M extends Record<string, ModuleValue>> {
+  /** Execute a query by path (e.g. `"messages:list"`). */
+  query<K extends KeysOfKind<M, "query">>(
+    path: K,
+    ...args: ArgsParam<M[K]>
+  ): Promise<ReturnOf<M[K]>>;
+  /** Execute a mutation by path. */
+  mutation<K extends KeysOfKind<M, "mutation">>(
+    path: K,
+    ...args: ArgsParam<M[K]>
+  ): Promise<ReturnOf<M[K]>>;
+  /** Execute an action by path. */
+  action<K extends KeysOfKind<M, "action">>(
+    path: K,
+    ...args: ArgsParam<M[K]>
+  ): Promise<ReturnOf<M[K]>>;
+  /** Direct access to the underlying {@link Database} for low-level assertions. */
+  readonly db: Database;
+}
+
 /**
- * Create an isolated test runtime with inline function definitions.
- *
- * Internally wires up a {@link Database}, {@link ModuleLoader}, and
- * {@link UdfExecutor} so that `query` / `mutation` / `action` calls go
- * through the same execution pipeline as the real `EmbeddedRuntime` —
- * including global patching, syscall installation, and transaction
- * management.
+ * Create an isolated embedded runtime with inline function definitions.
  */
-export function embeddedTest(
-  options: EmbeddedTestOptions,
-): EmbeddedTestContext {
-  const schema = options.schema ?? null;
-  const db = new Database(schema);
+export function embeddedTest<M extends Record<string, ModuleValue>>(
+  options: EmbeddedTestOptions<M>,
+): EmbeddedTestContext<M> {
+  const db = new Database(options.schema ?? null);
 
-  // ---- Build lazy module registry from inline modules ----
-  //
-  // The ModuleLoader expects keys to be canonical Convex module ids
-  // (the part before ":") and values to be lazy loaders.
-
-  const modulesByPath = new Map<string, Record<string, any>>();
-
+  const modulesByPath = new Map<string, ConvexModule>();
   for (const [key, fn] of Object.entries(options.modules)) {
     const colonIdx = key.indexOf(":");
     const modulePath = colonIdx === -1 ? key : key.slice(0, colonIdx);
     const exportName = colonIdx === -1 ? "default" : key.slice(colonIdx + 1);
-
-    if (!modulesByPath.has(modulePath)) {
-      modulesByPath.set(modulePath, {});
-    }
-    modulesByPath.get(modulePath)![exportName] = fn;
+    const exports = modulesByPath.get(modulePath) ?? {};
+    exports[exportName] = fn;
+    modulesByPath.set(modulePath, exports);
   }
 
-  const moduleRegistry: Record<string, () => Promise<any>> = {};
-
+  const moduleRegistry: ConvexModuleRegistry = {};
   for (const [modulePath, exports] of modulesByPath) {
     moduleRegistry[modulePath] = () => Promise.resolve(exports);
   }
 
   const moduleLoader = new ModuleLoader(moduleRegistry);
 
-  // ---- Create executor ----
-  //
-  // The `runUdf` callback dispatches back into the executor so that
-  // nested calls (e.g. ctx.runQuery inside an action) work.
-
   const runUdf = async (
-    type: "query" | "mutation" | "action",
+    type: FnKind,
     path: FunctionPath,
-    args: any,
-  ): Promise<any> => {
+    args: Record<string, unknown>,
+  ): Promise<unknown> => {
     switch (type) {
       case "query":
         return executor.executeQuery(path, args);
-      case "mutation": {
-        const { result } = await executor.executeMutation(path, args);
-        return result;
-      }
+      case "mutation":
+        return (await executor.executeMutation(path, args)).result;
       case "action":
         return executor.executeAction(path, args);
     }
@@ -209,28 +268,32 @@ export function embeddedTest(
     runUdf,
   });
 
-  // ---- Public API ----
+  const toArgs = (
+    args: DefaultFunctionArgs | undefined,
+  ): Record<string, unknown> => (args ?? {}) as Record<string, unknown>;
 
   return {
-    async query(path: string, args?: any): Promise<any> {
-      const functionPath = resolveFunctionPath({ name: path });
-      return executor.executeQuery(functionPath, args ?? {});
-    },
-
-    async mutation(path: string, args?: any): Promise<any> {
-      const functionPath = resolveFunctionPath({ name: path });
-      const { result } = await executor.executeMutation(
-        functionPath,
-        args ?? {},
+    async query(path, ...args) {
+      const result = await executor.executeQuery(
+        resolveFunctionPath({ name: path }),
+        toArgs(args[0]),
       );
-      return result;
+      return result as ReturnOf<M[typeof path]>;
     },
-
-    async action(path: string, args?: any): Promise<any> {
-      const functionPath = resolveFunctionPath({ name: path });
-      return executor.executeAction(functionPath, args ?? {});
+    async mutation(path, ...args) {
+      const { result } = await executor.executeMutation(
+        resolveFunctionPath({ name: path }),
+        toArgs(args[0]),
+      );
+      return result as ReturnOf<M[typeof path]>;
     },
-
+    async action(path, ...args) {
+      const result = await executor.executeAction(
+        resolveFunctionPath({ name: path }),
+        toArgs(args[0]),
+      );
+      return result as ReturnOf<M[typeof path]>;
+    },
     db,
   };
 }

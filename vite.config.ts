@@ -14,6 +14,29 @@ const testsRoot = path.resolve(import.meta.dirname, "tests");
 const convexApp = path.resolve(import.meta.dirname, "convex");
 const convexPackage = path.resolve(import.meta.dirname, "node_modules/convex");
 
+// Public surface: validated against the built package or documented entry
+// points. The same globs are excluded from `core` so every test runs in exactly
+// one project (no test dropped, none run twice).
+const packageInclude = [
+  "package/**/*.test.ts",
+  "**/*.types.test.ts",
+  "docs/**/*.test.ts",
+];
+
+// Live suite: runs against a real Convex preview, gated by RUN_CONVEX_LIVE.
+const liveInclude = ["live/**/*.test.ts"];
+
+const sharedTestOptions = {
+  globals: true,
+  clearMocks: true,
+  mockReset: true,
+  restoreMocks: true,
+  unstubGlobals: true,
+  unstubEnvs: true,
+  setupFiles: [path.resolve(testsRoot, "setup.ts")],
+  testTimeout: 15_000,
+};
+
 export default defineConfig({
   staged: {
     "*": "vp check --fix",
@@ -65,6 +88,33 @@ export default defineConfig({
           "typescript/no-explicit-any": "error",
           "typescript/no-empty-object-type": "error",
           "typescript/no-unused-expressions": "error",
+          "no-console": "error",
+        },
+      },
+      {
+        files: [
+          "packages/convex-embedded/src/shared/logger.ts",
+          "packages/convex-embedded/src/unplugin.ts",
+          "packages/convex-embedded/src/vite.ts",
+          "packages/convex-embedded/src/next.ts",
+          "packages/convex-embedded/src/nitro.ts",
+          "packages/convex-embedded/src/codegen/**/*.ts",
+        ],
+        rules: {
+          "no-console": "off",
+        },
+      },
+      {
+        files: ["tests/**/*.ts"],
+        rules: {
+          "typescript/no-explicit-any": "error",
+          "no-empty-pattern": "off",
+        },
+      },
+      {
+        files: ["benchmarks/**/*.ts"],
+        rules: {
+          "typescript/no-explicit-any": "error",
         },
       },
     ],
@@ -114,6 +164,24 @@ export default defineConfig({
           "!**/dist/**",
           "!**/_generated/**",
           "convex/embedded.modules.ts",
+        ],
+      },
+      "cache:typecheck": {
+        command:
+          "vp run --filter @robelest/convex-embedded build && vp run --filter @robelest/convex-embedded typecheck && vp exec tsgo --noEmit -p convex/tsconfig.json && vp exec tsgo --noEmit -p tests/tsconfig.json && vp exec tsgo --noEmit -p benchmarks/tsconfig.json",
+        cache: true,
+        input: [
+          "convex/**",
+          "packages/**",
+          "tests/**",
+          "benchmarks/**",
+          "package.json",
+          "pnpm-lock.yaml",
+          "pnpm-workspace.yaml",
+          "tsconfig*.json",
+          "vite.config.ts",
+          "!**/dist/**",
+          "!**/node_modules/**",
         ],
       },
       "cache:test": {
@@ -188,12 +256,53 @@ export default defineConfig({
     },
   },
   test: {
-    globals: true,
-    include: ["**/*.test.ts"],
-    testTimeout: 10_000,
     coverage: {
       reporter: ["text", "html"],
-      exclude: ["tests/**", "convex/_generated/**", "demos/**"],
+      exclude: [
+        "tests/**",
+        "benchmarks/**",
+        "convex/_generated/**",
+        "demos/**",
+      ],
     },
+    projects: [
+      {
+        extends: true,
+        test: {
+          ...sharedTestOptions,
+          name: "core",
+          root: testsRoot,
+          environment: "node",
+          include: ["**/*.test.ts"],
+          exclude: [
+            ...packageInclude,
+            ...liveInclude,
+            "**/node_modules/**",
+            "**/dist/**",
+          ],
+        },
+      },
+      {
+        extends: true,
+        test: {
+          ...sharedTestOptions,
+          name: "package",
+          root: testsRoot,
+          environment: "node",
+          include: packageInclude,
+        },
+      },
+      {
+        extends: true,
+        test: {
+          ...sharedTestOptions,
+          name: "live",
+          root: testsRoot,
+          environment: "node",
+          include: liveInclude,
+          testTimeout: 30_000,
+        },
+      },
+    ],
   },
 });

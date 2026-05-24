@@ -1,28 +1,30 @@
 import { PendingUploadQueue } from "@resolve/client/pending/uploads";
-import { beforeEach, describe, expect, it } from "@tests/testkit";
-import { vi } from "vitest";
+import type { PendingUploadEntry } from "@resolve/client/pending/uploads";
+import { describe, expect, it, vi } from "@tests/testkit";
+import type { ConvexClient } from "convex/browser";
 
-const mockClient = {
-  query: vi.fn(),
-  mutation: vi.fn(),
-};
+interface MockSystemClient {
+  query: ReturnType<typeof vi.fn>;
+  mutation: ReturnType<typeof vi.fn>;
+}
 
-let queue: PendingUploadQueue;
-let identityKey: string | null;
-
-beforeEach(() => {
-  vi.clearAllMocks();
-  identityKey = null;
-  queue = new PendingUploadQueue(
-    mockClient as any,
+function createQueue(identityKey: string | null = null) {
+  const mockClient: MockSystemClient = {
+    query: vi.fn(),
+    mutation: vi.fn(),
+  };
+  const queue = new PendingUploadQueue(
+    mockClient as unknown as ConvexClient,
     undefined,
     undefined,
     () => identityKey,
   );
-});
+  return { queue, mockClient };
+}
 
 describe("PendingUploadQueue.hydrate", () => {
   it("loads rows from _system:pendingUploadGetAll", async () => {
+    const { queue, mockClient } = createQueue();
     mockClient.query.mockResolvedValue([
       {
         _id: "row-1",
@@ -46,14 +48,18 @@ describe("PendingUploadQueue.hydrate", () => {
   });
 
   it("recovers gracefully when the query throws", async () => {
+    const { queue, mockClient } = createQueue();
     mockClient.query.mockRejectedValue(new Error("offline"));
+
     await queue.hydrate();
+
     expect(queue.length).toBe(0);
   });
 });
 
 describe("PendingUploadQueue.push", () => {
   it("persists via pendingUploadPush and tracks in memory", async () => {
+    const { queue, mockClient } = createQueue();
     mockClient.mutation.mockResolvedValue("row-99");
 
     await queue.push({
@@ -78,7 +84,9 @@ describe("PendingUploadQueue.push", () => {
   });
 
   it("dedups by localStorageId (in-memory check before persistence)", async () => {
+    const { queue, mockClient } = createQueue();
     mockClient.mutation.mockResolvedValue("row-1");
+
     await queue.push({
       localStorageId: "blob-1",
       sha256: "x",
@@ -91,18 +99,22 @@ describe("PendingUploadQueue.push", () => {
       size: 1,
       contentType: "x",
     });
+
     expect(mockClient.mutation).toHaveBeenCalledTimes(1);
     expect(queue.length).toBe(1);
   });
 
   it("falls back to ephemeral entry when persistence fails", async () => {
+    const { queue, mockClient } = createQueue();
     mockClient.mutation.mockRejectedValue(new Error("disk full"));
+
     await queue.push({
       localStorageId: "blob-2",
       sha256: "y",
       size: 1,
       contentType: "y",
     });
+
     expect(queue.length).toBe(1);
     expect(queue.entries()[0]?._id.startsWith("ephemeral_")).toBe(true);
   });
@@ -110,6 +122,7 @@ describe("PendingUploadQueue.push", () => {
 
 describe("PendingUploadQueue.claimNext / remove", () => {
   it("claim returns the persisted row and remove deletes it", async () => {
+    const { queue, mockClient } = createQueue();
     mockClient.mutation
       .mockResolvedValueOnce({
         _id: "row-1",
@@ -141,15 +154,20 @@ describe("PendingUploadQueue.claimNext / remove", () => {
   });
 
   it("claim returns undefined when there is nothing to drain", async () => {
+    const { queue, mockClient } = createQueue();
     mockClient.mutation.mockResolvedValueOnce(null);
+
     const claimed = await queue.claimNext("proc-A");
+
     expect(claimed).toBeUndefined();
   });
 });
 
 describe("PendingUploadQueue.release / renewLease", () => {
   it("release patches the row back to pending state", async () => {
+    const { queue, mockClient } = createQueue();
     mockClient.mutation.mockResolvedValueOnce(null);
+
     await queue.release(
       {
         _id: "row-1",
@@ -162,6 +180,7 @@ describe("PendingUploadQueue.release / renewLease", () => {
       },
       "proc-A",
     );
+
     expect(mockClient.mutation).toHaveBeenCalledWith(
       "_system:pendingUploadRelease",
       { id: "row-1", owner: "proc-A" },
@@ -169,17 +188,20 @@ describe("PendingUploadQueue.release / renewLease", () => {
   });
 
   it("renewLease forwards to the system mutation and refreshes the local view", async () => {
+    const { queue, mockClient } = createQueue();
     mockClient.mutation.mockResolvedValueOnce(true);
-    const entry = {
+    const entry: PendingUploadEntry = {
       _id: "row-1",
       localStorageId: "blob-1",
       sha256: "x",
       size: 1,
       contentType: "x",
-      state: "processing" as const,
+      state: "processing",
       owner: "proc-A",
     };
+
     const ok = await queue.renewLease(entry, "proc-A", 5_000);
+
     expect(ok).toBe(true);
     expect(entry.leaseExpiresAt).toBeGreaterThan(0);
     expect(mockClient.mutation).toHaveBeenCalledWith(
@@ -189,15 +211,18 @@ describe("PendingUploadQueue.release / renewLease", () => {
   });
 
   it("renewLease returns true for ephemeral entries without a server call", async () => {
-    const entry = {
+    const { queue, mockClient } = createQueue();
+    const entry: PendingUploadEntry = {
       _id: "ephemeral_1",
       localStorageId: "blob-1",
       sha256: "x",
       size: 1,
       contentType: "x",
-      state: "processing" as const,
+      state: "processing",
     };
+
     const ok = await queue.renewLease(entry, "proc-A");
+
     expect(ok).toBe(true);
     expect(mockClient.mutation).not.toHaveBeenCalled();
   });

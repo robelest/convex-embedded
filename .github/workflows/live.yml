@@ -1,4 +1,4 @@
-name: e2e-live
+name: live
 
 on:
   pull_request:
@@ -6,10 +6,10 @@ on:
     branches: [main]
 
 # The live suite deploys to a single fixed-name Convex preview
-# (embedded-e2e). Only one run may own it at a time, so serialize rather
+# (embedded-live). Only one run may own it at a time, so serialize rather
 # than cancel — a queued run still executes after the active one finishes.
 concurrency:
-  group: convex-e2e-preview
+  group: convex-live-preview
   cancel-in-progress: false
 
 jobs:
@@ -26,9 +26,9 @@ jobs:
 
       - run: vp install
 
-      # `test:live` runs `convex deploy --preview-create=embedded-e2e`,
+      # `test:live` runs `convex deploy --preview-create=embedded-live`,
       # which creates/recreates an isolated preview, deploys convex/, and
-      # runs the e2e suite with CONVEX_URL pointed at the preview.
+      # runs the live suite with CONVEX_URL pointed at the preview.
       # CONVEX_DEPLOY_KEY must be a Preview Deploy Key (repo secret).
       - run: vp run test:live
         env:

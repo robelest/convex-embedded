@@ -8,22 +8,30 @@ import { describe, expect, it } from "@tests/testkit";
 
 const T = (iso: string): number => Date.parse(iso);
 
-describe("scheduler/cron — nextFireMs", () => {
+describe.concurrent("scheduler/cron — nextFireMs", () => {
   describe("interval", () => {
-    it("first fire schedules one period from now when no last-fire", () => {
+    it("schedules one second-period from now when no last-fire", () => {
       const now = T("2026-05-06T12:00:00Z");
       expect(nextFireMs({ type: "interval", seconds: 30 }, now)).toBe(
         now + 30_000,
       );
+    });
+
+    it("schedules one minute-period from now when no last-fire", () => {
+      const now = T("2026-05-06T12:00:00Z");
       expect(nextFireMs({ type: "interval", minutes: 5 }, now)).toBe(
         now + 5 * 60_000,
       );
+    });
+
+    it("schedules one hour-period from now when no last-fire", () => {
+      const now = T("2026-05-06T12:00:00Z");
       expect(nextFireMs({ type: "interval", hours: 2 }, now)).toBe(
         now + 2 * 3_600_000,
       );
     });
 
-    it("subsequent fires anchor on lastFireMs", () => {
+    it("anchors subsequent fires on lastFireMs", () => {
       const last = T("2026-05-06T12:00:00Z");
       const now = T("2026-05-06T12:00:10Z");
       expect(nextFireMs({ type: "interval", seconds: 30 }, now, last)).toBe(
@@ -31,7 +39,7 @@ describe("scheduler/cron — nextFireMs", () => {
       );
     });
 
-    it("catches up when many intervals were missed", () => {
+    it("catches up to the next future fire when many intervals were missed", () => {
       const last = T("2026-05-06T12:00:00Z");
       const now = T("2026-05-06T12:05:00Z");
       const next = nextFireMs({ type: "interval", seconds: 30 }, now, last);
@@ -39,7 +47,7 @@ describe("scheduler/cron — nextFireMs", () => {
       expect(next - now).toBeLessThanOrEqual(30_000);
     });
 
-    it("intervalMs computes the right period", () => {
+    it("computes the period in ms for seconds, minutes, and hours", () => {
       expect(intervalMs({ type: "interval", seconds: 45 })).toBe(45_000);
       expect(intervalMs({ type: "interval", minutes: 3 })).toBe(180_000);
       expect(intervalMs({ type: "interval", hours: 1 })).toBe(3_600_000);
@@ -47,11 +55,15 @@ describe("scheduler/cron — nextFireMs", () => {
   });
 
   describe("hourly", () => {
-    it("returns next occurrence of minuteUTC within the current or next hour", () => {
+    it("returns the next minuteUTC within the current hour", () => {
       const now = T("2026-05-06T12:30:00Z");
       expect(nextFireMs({ type: "hourly", minuteUTC: 45 }, now)).toBe(
         T("2026-05-06T12:45:00Z"),
       );
+    });
+
+    it("rolls into the next hour when the minute already passed", () => {
+      const now = T("2026-05-06T12:30:00Z");
       expect(nextFireMs({ type: "hourly", minuteUTC: 15 }, now)).toBe(
         T("2026-05-06T13:15:00Z"),
       );
@@ -66,14 +78,14 @@ describe("scheduler/cron — nextFireMs", () => {
   });
 
   describe("daily", () => {
-    it("returns the same day if scheduled time hasn't passed yet", () => {
+    it("returns the same day when the scheduled time has not passed", () => {
       const now = T("2026-05-06T08:00:00Z");
       expect(
         nextFireMs({ type: "daily", hourUTC: 12, minuteUTC: 30 }, now),
       ).toBe(T("2026-05-06T12:30:00Z"));
     });
 
-    it("rolls to tomorrow if scheduled time already passed", () => {
+    it("rolls to tomorrow when the scheduled time already passed", () => {
       const now = T("2026-05-06T13:00:00Z");
       expect(
         nextFireMs({ type: "daily", hourUTC: 12, minuteUTC: 30 }, now),
@@ -82,7 +94,7 @@ describe("scheduler/cron — nextFireMs", () => {
   });
 
   describe("weekly", () => {
-    it("fires on the requested day this week if not yet passed", () => {
+    it("fires on the requested day this week when not yet passed", () => {
       // 2026-05-06 is a Wednesday (UTC).
       const now = T("2026-05-06T08:00:00Z");
       const friday: CronSchedule = {
@@ -94,7 +106,7 @@ describe("scheduler/cron — nextFireMs", () => {
       expect(nextFireMs(friday, now)).toBe(T("2026-05-08T17:00:00Z"));
     });
 
-    it("rolls to next week if today's scheduled time passed", () => {
+    it("rolls to next week when today's scheduled time passed", () => {
       const now = T("2026-05-06T18:00:00Z");
       const wed: CronSchedule = {
         type: "weekly",
@@ -107,14 +119,14 @@ describe("scheduler/cron — nextFireMs", () => {
   });
 
   describe("monthly", () => {
-    it("returns same month if day is in the future", () => {
+    it("returns the same month when the day is in the future", () => {
       const now = T("2026-05-06T12:00:00Z");
       expect(
         nextFireMs({ type: "monthly", day: 15, hourUTC: 9, minuteUTC: 0 }, now),
       ).toBe(T("2026-05-15T09:00:00Z"));
     });
 
-    it("rolls to next month if day already passed", () => {
+    it("rolls to next month when the day already passed", () => {
       const now = T("2026-05-20T12:00:00Z");
       expect(
         nextFireMs({ type: "monthly", day: 15, hourUTC: 9, minuteUTC: 0 }, now),
@@ -144,35 +156,38 @@ describe("scheduler/cron — nextFireMs", () => {
       expect(parsed.daysOfWeek).toEqual([1, 2, 3, 4, 5]);
     });
 
-    it("handles wildcards", () => {
+    it("expands step wildcards", () => {
       const parsed = parseCronExpression("*/15 * * * *");
       expect(parsed.minutes).toEqual([0, 15, 30, 45]);
     });
 
-    it("handles month aliases", () => {
+    it("resolves month aliases", () => {
       const parsed = parseCronExpression("0 0 1 jan,jul *");
       expect(parsed.months).toEqual([1, 7]);
     });
 
-    it("rejects malformed expressions", () => {
+    it("rejects expressions with too few fields", () => {
       expect(() => parseCronExpression("0 0 * *")).toThrow();
+    });
+
+    it("rejects out-of-range field values", () => {
       expect(() => parseCronExpression("99 0 * * *")).toThrow();
     });
 
-    it("computes next fire for weekday-only schedule", () => {
+    it("computes next fire for a weekday-only schedule", () => {
       const now = T("2026-05-08T10:00:00Z"); // Friday
       // Every weekday at 9am UTC.
       const next = nextFireMs({ type: "cron", cron: "0 9 * * 1-5" }, now);
       expect(next).toBe(T("2026-05-11T09:00:00Z")); // Monday
     });
 
-    it("computes next fire for every-15-minutes", () => {
+    it("computes next fire for an every-15-minutes schedule", () => {
       const now = T("2026-05-06T12:07:30Z");
       const next = nextFireMs({ type: "cron", cron: "*/15 * * * *" }, now);
       expect(next).toBe(T("2026-05-06T12:15:00Z"));
     });
 
-    it("DOM and DOW are OR'd when both restricted", () => {
+    it("OR's day-of-month and day-of-week when both are restricted", () => {
       // First of month OR Sunday at midnight.
       const now = T("2026-04-30T12:00:00Z");
       const next = nextFireMs({ type: "cron", cron: "0 0 1 * 0" }, now);

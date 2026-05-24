@@ -7,13 +7,9 @@
     "test": "vp exec vitest",
     "test:once": "vp exec vitest --run",
     "test:coverage": "vp exec vitest --run --coverage",
-    "test:consumer": "vp run --filter @robelest/convex-embedded build && vp exec vitest --run tests/package/consumer.test.ts",
-    "bench": "vp exec vitest bench tests/benchmarks",
-    "bench:component-storage": "vp exec vitest bench tests/benchmarks/component-storage.bench.ts",
-    "test:embedded": "vp exec vitest --run embedded",
-    "test:resolve": "vp exec vitest --run resolve",
-    "test:integration": "vp exec vitest --run integration",
-    "test:live": "RUN_CONVEX_E2E=1 vp exec vitest --run tests/e2e/convex"
+    "test:core": "vp exec vitest --run --project core",
+    "test:package": "vp run --filter @robelest/convex-embedded build && vp exec vitest --run --project package",
+    "test:live": "RUN_CONVEX_LIVE=1 vp exec vitest --run --project live"
   },
   "devDependencies": {
     "@edge-runtime/vm": "^5.0.0",

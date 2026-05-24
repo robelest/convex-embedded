@@ -3,14 +3,11 @@ import {
   createFunctionHandle,
   getFunctionFromHandle,
   resolveFunctionPath,
+  type ConvexModuleRegistry,
 } from "@embedded/kernel/modules";
-import { describe, it, expect } from "@tests/testkit";
+import { describe, expect, it } from "@tests/testkit";
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function createMockModules(): Record<string, () => Promise<any>> {
+function createMockModules(): ConvexModuleRegistry {
   return {
     messages: () => Promise.resolve({ list: "listFn", send: "sendFn" }),
     "lib/utils": () => Promise.resolve({ helper: "helperFn" }),
@@ -18,7 +15,7 @@ function createMockModules(): Record<string, () => Promise<any>> {
   };
 }
 
-function createLegacyMockModules(): Record<string, () => Promise<any>> {
+function createLegacyMockModules(): ConvexModuleRegistry {
   return {
     "_generated/api": () => Promise.resolve({ default: {} }),
     messages: () => Promise.resolve({ list: "listFn", send: "sendFn" }),
@@ -27,20 +24,18 @@ function createLegacyMockModules(): Record<string, () => Promise<any>> {
   };
 }
 
-// ---------------------------------------------------------------------------
-// ModuleLoader
-// ---------------------------------------------------------------------------
-
-describe("ModuleLoader", () => {
+describe.concurrent("ModuleLoader", () => {
   it("loads canonical registry keys directly", async () => {
     const loader = new ModuleLoader(createMockModules());
 
     const mod = await loader.load("messages");
+
     expect(mod).toEqual({ list: "listFn", send: "sendFn" });
   });
 
   it("loads a top-level module by name", async () => {
     const loader = new ModuleLoader(createMockModules());
+
     const mod = await loader.load("messages");
 
     expect(mod.list).toBe("listFn");
@@ -49,6 +44,7 @@ describe("ModuleLoader", () => {
 
   it("loads a nested module by path", async () => {
     const loader = new ModuleLoader(createMockModules());
+
     const mod = await loader.load("lib/utils");
 
     expect(mod.helper).toBe("helperFn");
@@ -56,18 +52,23 @@ describe("ModuleLoader", () => {
 
   it("normalizes legacy glob-style keys", async () => {
     const loader = new ModuleLoader(createLegacyMockModules());
+
     const mod = await loader.load("auth");
 
     expect(mod.login).toBe("loginFn");
   });
 
-  it("throws with a helpful error when module is not found", async () => {
+  it("throws a helpful error naming the missing module", async () => {
     const loader = new ModuleLoader(createMockModules());
 
     await expect(loader.load("nonexistent")).rejects.toThrow(
       /Could not find module for: "nonexistent"/,
     );
-    // The error should list available modules
+  });
+
+  it("lists available modules in the not-found error", async () => {
+    const loader = new ModuleLoader(createMockModules());
+
     await expect(loader.load("nonexistent")).rejects.toThrow(/messages/);
   });
 
@@ -81,11 +82,7 @@ describe("ModuleLoader", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// createFunctionHandle / getFunctionFromHandle
-// ---------------------------------------------------------------------------
-
-describe("createFunctionHandle", () => {
+describe.concurrent("createFunctionHandle", () => {
   it('returns a "function://<componentPath>;<udfPath>" string', () => {
     const handle = createFunctionHandle({
       componentPath: "",
@@ -105,33 +102,25 @@ describe("createFunctionHandle", () => {
   });
 });
 
-describe("getFunctionFromHandle", () => {
+describe.concurrent("getFunctionFromHandle", () => {
   it("round-trips with createFunctionHandle", () => {
     const original = { componentPath: "comp", udfPath: "mod:fn" };
-    const handle = createFunctionHandle(original);
-    const resolved = getFunctionFromHandle(handle);
+
+    const resolved = getFunctionFromHandle(createFunctionHandle(original));
 
     expect(resolved).toEqual(original);
   });
 
-  it("parses a handle string that was not created in this process", () => {
-    const handle = "function://other;path:export";
-    const result = getFunctionFromHandle(handle);
+  it("parses a handle string not created in this process", () => {
+    const result = getFunctionFromHandle("function://other;path:export");
 
-    expect(result).toEqual({
-      componentPath: "other",
-      udfPath: "path:export",
-    });
+    expect(result).toEqual({ componentPath: "other", udfPath: "path:export" });
   });
 
-  it("parses a handle with empty componentPath", () => {
-    const handle = "function://;messages:send";
-    const result = getFunctionFromHandle(handle);
+  it("parses a handle with an empty componentPath", () => {
+    const result = getFunctionFromHandle("function://;messages:send");
 
-    expect(result).toEqual({
-      componentPath: "",
-      udfPath: "messages:send",
-    });
+    expect(result).toEqual({ componentPath: "", udfPath: "messages:send" });
   });
 
   it("throws on a handle without the function:// prefix", () => {
@@ -147,18 +136,11 @@ describe("getFunctionFromHandle", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// resolveFunctionPath
-// ---------------------------------------------------------------------------
-
-describe("resolveFunctionPath", () => {
-  it('resolves { name } to a FunctionPath with currentComponentPath as ""', () => {
+describe.concurrent("resolveFunctionPath", () => {
+  it('resolves { name } with currentComponentPath defaulting to ""', () => {
     const result = resolveFunctionPath({ name: "messages:list" });
 
-    expect(result).toEqual({
-      componentPath: "",
-      udfPath: "messages:list",
-    });
+    expect(result).toEqual({ componentPath: "", udfPath: "messages:list" });
   });
 
   it("resolves { name } using the provided currentComponentPath", () => {
@@ -196,7 +178,7 @@ describe("resolveFunctionPath", () => {
     });
   });
 
-  it("resolves { functionHandle } by delegating to getFunctionFromHandle", () => {
+  it("resolves { functionHandle } via getFunctionFromHandle", () => {
     const handle = createFunctionHandle({
       componentPath: "comp",
       udfPath: "mod:fn",
@@ -204,10 +186,7 @@ describe("resolveFunctionPath", () => {
 
     const result = resolveFunctionPath({ functionHandle: handle });
 
-    expect(result).toEqual({
-      componentPath: "comp",
-      udfPath: "mod:fn",
-    });
+    expect(result).toEqual({ componentPath: "comp", udfPath: "mod:fn" });
   });
 
   it("throws when no address field is provided", () => {
@@ -227,8 +206,9 @@ describe("resolveFunctionPath", () => {
       name: "name:fn",
     });
 
-    // functionHandle is checked first in the source
-    expect(result.componentPath).toBe("fromHandle");
-    expect(result.udfPath).toBe("handle:fn");
+    expect(result).toEqual({
+      componentPath: "fromHandle",
+      udfPath: "handle:fn",
+    });
   });
 });

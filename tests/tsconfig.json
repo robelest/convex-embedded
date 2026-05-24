@@ -18,6 +18,12 @@
       "@tests/*": ["./*"]
     }
   },
-  "include": ["**/*.test.ts", "helpers/**/*.ts", "testkit.ts"],
+  "include": [
+    "**/*.test.ts",
+    "helpers/**/*.ts",
+    "testkit.ts",
+    "setup.ts",
+    "vitest.d.ts"
+  ],
   "exclude": ["node_modules"]
 }

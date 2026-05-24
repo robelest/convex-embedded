@@ -4,32 +4,79 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { afterEach, beforeEach, describe, expect, it } from "@tests/testkit";
+import type { TestFixtures } from "@tests/testkit";
+import { describe, expect, it } from "@tests/testkit";
+
+interface MetroResolution {
+  filePath: string;
+  type: "sourceFile";
+}
+
+interface MetroResolveContext {
+  resolveRequest: (
+    context: MetroResolveContext,
+    moduleName: string,
+    platform: string | null,
+  ) => MetroResolution;
+  originModulePath?: string;
+}
+
+interface MetroConfig {
+  resolver: {
+    resolveRequest?: (
+      context: MetroResolveContext,
+      moduleName: string,
+      platform: string | null,
+    ) => MetroResolution;
+    extraNodeModules?: Record<string, string>;
+  };
+}
+
+interface MetroPluginOptions {
+  packageRoot: string;
+  projectRoot: string;
+  convexDir: string;
+  out: string;
+  watch: boolean;
+  aliases?: Record<string, string>;
+}
+
+type WithConvexEmbeddedExpoMetro = (
+  config: MetroConfig,
+  options?: MetroPluginOptions,
+) => MetroConfig;
 
 const require = createRequire(import.meta.url);
 const { withConvexEmbeddedExpoMetro } =
   require("../../packages/convex-embedded/src/expo/metro.cjs") as {
-    withConvexEmbeddedExpoMetro: (config: any, options?: any) => any;
+    withConvexEmbeddedExpoMetro: WithConvexEmbeddedExpoMetro;
   };
 
-let workDir: string;
+function makeWorkDir(track: TestFixtures["track"]): string {
+  const workDir = mkdtempSync(
+    path.join(tmpdir(), "convex-embedded-expo-metro-"),
+  );
+  track({
+    close: () => {
+      try {
+        rmSync(workDir, { recursive: true, force: true });
+      } catch {
+        // best-effort cleanup
+      }
+    },
+  });
+  return workDir;
+}
 
-beforeEach(() => {
-  workDir = mkdtempSync(path.join(tmpdir(), "convex-embedded-expo-metro-"));
-});
-
-afterEach(() => {
-  try {
-    rmSync(workDir, { recursive: true, force: true });
-  } catch {}
-});
-
-async function writeFileEnsured(filePath: string, contents: string) {
+async function writeFileEnsured(
+  filePath: string,
+  contents: string,
+): Promise<void> {
   await mkdir(path.dirname(filePath), { recursive: true });
   await writeFile(filePath, contents, "utf8");
 }
 
-async function createFakePackageRoot(): Promise<string> {
+async function createFakePackageRoot(workDir: string): Promise<string> {
   const packageRoot = path.join(workDir, "package");
   await writeFileEnsured(
     path.join(packageRoot, "package.json"),
@@ -59,8 +106,11 @@ export async function generateEmbeddedRegistry(input) {
 }
 
 describe("withConvexEmbeddedExpoMetro", () => {
-  it("runs codegen synchronously before returning the config", async () => {
-    const packageRoot = await createFakePackageRoot();
+  it("runs codegen synchronously before returning the config", async ({
+    track,
+  }) => {
+    const workDir = makeWorkDir(track);
+    const packageRoot = await createFakePackageRoot(workDir);
     await mkdir(path.join(workDir, "convex"), { recursive: true });
 
     withConvexEmbeddedExpoMetro(
@@ -79,8 +129,11 @@ describe("withConvexEmbeddedExpoMetro", () => {
     ).resolves.toBe("1");
   });
 
-  it("regenerates before resolving the generated registry alias", async () => {
-    const packageRoot = await createFakePackageRoot();
+  it("regenerates before resolving the generated registry alias", async ({
+    track,
+  }) => {
+    const workDir = makeWorkDir(track);
+    const packageRoot = await createFakePackageRoot(workDir);
     const generated = path.join(workDir, "generated/embedded.ts");
     await mkdir(path.join(workDir, "convex"), { recursive: true });
 
@@ -98,8 +151,10 @@ describe("withConvexEmbeddedExpoMetro", () => {
       },
     );
 
-    const resolved = config.resolver.resolveRequest(
-      { resolveRequest: () => ({ filePath: "fallback", type: "sourceFile" }) },
+    const resolved = config.resolver.resolveRequest?.(
+      {
+        resolveRequest: () => ({ filePath: "fallback", type: "sourceFile" }),
+      },
       "$convex/_generated/embedded",
       "ios",
     );

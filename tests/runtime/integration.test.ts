@@ -1,19 +1,21 @@
-import { Database } from "@embedded/runtime/db/database";
-import type { ParsedSchema } from "@embedded/runtime/db/schema";
-import type {
-  DocumentId,
-  SerializedQuery,
-  VectorSearchExpression,
-} from "@embedded/runtime/db/types";
-import { SubscriptionManager } from "@embedded/sync/subscriptions";
 /**
  * Integration tests for the embedded Convex runtime.
  *
  * Exercises the Database, QueryEngine, UdfExecutor, Syscalls, and
  * SubscriptionManager layers working together end-to-end.
  */
-import { describe, it, expect } from "@tests/testkit";
-import { vi } from "vitest";
+import { Database } from "@embedded/runtime/db/database";
+import type { ParsedSchema } from "@embedded/runtime/db/schema";
+import type {
+  DocumentId,
+  GenericDocument,
+  SerializedQuery,
+  VectorSearchExpression,
+} from "@embedded/runtime/db/types";
+import { SubscriptionManager } from "@embedded/sync/subscriptions";
+import { describe, expect, it, vi } from "@tests/testkit";
+
+const MISSING_ID = "00000000-0000-4000-8000-000000000000" as DocumentId;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -26,17 +28,22 @@ function freshDb(): Database {
   return db;
 }
 
-/** Yield values from a streaming query until done. */
-function* iterateQuery(db: Database, queryId: number) {
+/** Yield non-null values from a streaming query until done. */
+function* iterateQuery(
+  db: Database,
+  queryId: number,
+): Generator<GenericDocument> {
   let next = db.queryNext(queryId);
   while (!next.done) {
-    yield next.value;
+    if (next.value !== null) {
+      yield next.value;
+    }
     next = db.queryNext(queryId);
   }
 }
 
 /** Collect all results from a streaming query. */
-function collectQuery(db: Database, query: SerializedQuery): any[] {
+function collectQuery(db: Database, query: SerializedQuery): GenericDocument[] {
   const queryId = db.startQuery(query);
   return Array.from(iterateQuery(db, queryId));
 }
@@ -157,7 +164,6 @@ describe("Integration: Database CRUD", () => {
     const doc = db.get("tasks", id)!;
     expect(doc.title).toBe("new");
     expect(doc.priority).toBeUndefined();
-    // System fields survive replace.
     expect(doc._id).toBe(id);
     expect(doc._creationTime).toBeTypeOf("number");
     db.commit();
@@ -186,7 +192,6 @@ describe("Integration: Database CRUD", () => {
     }
     db.commit();
 
-    // Verify they survived commit.
     db.startTransaction();
     for (const id of ids) {
       expect(db.get("items", id)).not.toBeNull();
@@ -230,9 +235,9 @@ describe("Integration: Query Pipeline", () => {
     db.startTransaction();
     const results = collectQuery(db, fullScan("messages"));
     expect(results).toHaveLength(3);
-    expect(results[0].body).toBe("first");
-    expect(results[1].body).toBe("second");
-    expect(results[2].body).toBe("third");
+    expect(results[0]!.body).toBe("first");
+    expect(results[1]!.body).toBe("second");
+    expect(results[2]!.body).toBe("third");
     db.rollbackWrites();
   });
 
@@ -249,8 +254,8 @@ describe("Integration: Query Pipeline", () => {
       operators: [],
     });
     expect(results).toHaveLength(3);
-    expect(results[0].body).toBe("C");
-    expect(results[2].body).toBe("A");
+    expect(results[0]!.body).toBe("C");
+    expect(results[2]!.body).toBe("A");
     db.rollbackWrites();
   });
 
@@ -265,15 +270,11 @@ describe("Integration: Query Pipeline", () => {
     const results = collectQuery(db, {
       source: { type: "FullTableScan", tableName: "items", order: "asc" },
       operators: [
-        {
-          filter: {
-            $eq: [{ $field: "kind" }, { $literal: "apple" }],
-          },
-        },
+        { filter: { $eq: [{ $field: "kind" }, { $literal: "apple" }] } },
       ],
     });
     expect(results).toHaveLength(2);
-    expect(results.every((r: any) => r.kind === "apple")).toBe(true);
+    expect(results.every((r) => r.kind === "apple")).toBe(true);
     db.rollbackWrites();
   });
 
@@ -309,7 +310,7 @@ describe("Integration: Query Pipeline", () => {
       ],
     });
     expect(results).toHaveLength(2);
-    expect(results.every((r: any) => r.even === true)).toBe(true);
+    expect(results.every((r) => r.even === true)).toBe(true);
     db.rollbackWrites();
   });
 
@@ -379,7 +380,6 @@ describe("Integration: Schema Validation", () => {
     const db = new Database(messagesSchema());
     db.startTransaction();
     const id = db.insert("messages", { body: "hi", author: "alice" });
-    // Patching body to a number should fail.
     expect(() => db.patch("messages", id, { body: 42 })).toThrow(
       /Validator error/,
     );
@@ -389,7 +389,6 @@ describe("Integration: Schema Validation", () => {
     const db = new Database(messagesSchema());
     db.startTransaction();
     const id = db.insert("messages", { body: "hi", author: "alice" });
-    // Replace with missing required field.
     expect(() => db.replace("messages", id, { body: "new" })).toThrow(
       /Missing required field/,
     );
@@ -443,7 +442,7 @@ describe("Integration: Index Range Queries", () => {
     });
 
     expect(results).toHaveLength(2);
-    expect(results.every((r: any) => r.author === "alice")).toBe(true);
+    expect(results.every((r) => r.author === "alice")).toBe(true);
     db.rollbackWrites();
   });
 
@@ -480,9 +479,8 @@ describe("Integration: Index Range Queries", () => {
     });
 
     expect(results).toHaveLength(2);
-    // Descending — latest two.
-    expect(results[0].author).toBe("charlie");
-    expect(results[1].author).toBe("alice");
+    expect(results[0]!.author).toBe("charlie");
+    expect(results[1]!.author).toBe("alice");
     db.rollbackWrites();
   });
 
@@ -500,7 +498,6 @@ describe("Integration: Index Range Queries", () => {
       operators: [],
     });
 
-    // All four documents should come back.
     expect(results).toHaveLength(4);
     db.rollbackWrites();
   });
@@ -570,8 +567,7 @@ describe("Integration: Pagination", () => {
     });
 
     expect(page2.page).toHaveLength(2);
-    // page2 items should be different from page1 items.
-    const page1Ids = new Set(page1.page.map((d: any) => d._id));
+    const page1Ids = new Set(page1.page.map((d) => d._id));
     for (const doc of page2.page) {
       expect(page1Ids.has(doc._id)).toBe(false);
     }
@@ -644,7 +640,11 @@ describe("Integration: Search Queries", () => {
     });
 
     expect(results).toHaveLength(2);
-    expect(results.every((r: any) => r.body.includes("quick"))).toBe(true);
+    expect(
+      results.every(
+        (r) => typeof r.body === "string" && r.body.includes("quick"),
+      ),
+    ).toBe(true);
     db.rollbackWrites();
   });
 
@@ -665,7 +665,7 @@ describe("Integration: Search Queries", () => {
     });
 
     expect(results).toHaveLength(2);
-    expect(results.every((r: any) => r.author === "alice")).toBe(true);
+    expect(results.every((r) => r.author === "alice")).toBe(true);
     db.rollbackWrites();
   });
 
@@ -724,7 +724,6 @@ describe("Integration: Search Queries", () => {
       operators: [],
     });
 
-    // "qui" should prefix-match "quick".
     expect(results).toHaveLength(2);
     db.rollbackWrites();
   });
@@ -772,7 +771,7 @@ describe("Integration: Search Queries", () => {
     });
 
     expect(results).toHaveLength(3);
-    expect(results.some((r: any) => r._id === target._id)).toBe(true);
+    expect(results.some((r) => r._id === target._id)).toBe(true);
     db.rollbackWrites();
   });
 
@@ -893,14 +892,11 @@ describe("Integration: Transaction Rollback", () => {
     const id = db.insert("tasks", { title: "before-error" });
     db.commit();
 
-    // Start a new transaction that will fail.
     db.startTransaction();
     db.insert("tasks", { title: "should-not-persist" });
     db.patch("tasks", id, { title: "mutated" });
-    // Simulate a failure: rollback instead of commit.
     db.rollbackWrites();
 
-    // Verify original state is intact.
     db.startTransaction();
     const doc = db.get("tasks", id)!;
     expect(doc.title).toBe("before-error");
@@ -915,19 +911,18 @@ describe("Integration: Transaction Rollback", () => {
 
     const parentId = db.insert("tasks", { title: "parent" });
 
-    db.startTransaction(); // child
+    db.startTransaction();
     db.insert("tasks", { title: "child-will-fail" });
-    db.rollbackWrites(); // child dies
+    db.rollbackWrites();
 
-    // Parent write should still be visible.
     expect(db.get("tasks", parentId)).not.toBeNull();
 
-    db.commit(); // parent commit
+    db.commit();
 
     db.startTransaction();
     const all = collectQuery(db, fullScan("tasks"));
     expect(all).toHaveLength(1);
-    expect(all[0].title).toBe("parent");
+    expect(all[0]!.title).toBe("parent");
     db.rollbackWrites();
   });
 
@@ -936,11 +931,11 @@ describe("Integration: Transaction Rollback", () => {
 
     const id1 = db.insert("tasks", { title: "parent" });
 
-    db.startTransaction(); // child
+    db.startTransaction();
     const id2 = db.insert("tasks", { title: "child" });
-    db.commit(); // child merges into parent
+    db.commit();
 
-    db.commit(); // parent commit
+    db.commit();
 
     db.startTransaction();
     expect(db.get("tasks", id1)).not.toBeNull();
@@ -978,7 +973,6 @@ describe("Integration: MVCC Timestamps", () => {
     expect(db.timestamp).toBe(1);
 
     db.startTransaction();
-    // Read-only: no inserts.
     db.commit();
     expect(db.timestamp).toBe(1);
   });
@@ -1025,12 +1019,10 @@ describe("Integration: Subscription Invalidation", () => {
     subs.subscribe("q-users", new Set(["users"]), usersCallback);
     subs.subscribe("q-other", new Set(["other"]), unrelatedCallback);
 
-    // Perform a mutation that writes to "messages".
     db.startTransaction();
     db.insert("messages", { body: "hello", author: "alice" });
     const { tablesWritten } = db.commit();
 
-    // Drive invalidation.
     subs.invalidate(tablesWritten);
 
     expect(messagesCallback).toHaveBeenCalledOnce();
@@ -1054,7 +1046,6 @@ describe("Integration: Subscription Invalidation", () => {
     const { tablesWritten } = db.commit();
     subs.invalidate(tablesWritten);
 
-    // Both should fire (cb1 overlaps on both tables, cb2 on "users").
     expect(cb1).toHaveBeenCalledOnce();
     expect(cb2).toHaveBeenCalledOnce();
   });
@@ -1068,7 +1059,6 @@ describe("Integration: Subscription Invalidation", () => {
     db.startTransaction();
     db.insert("tasks", { title: "will-be-rolled-back" });
     db.rollbackWrites();
-    // No commit → no tablesWritten → no invalidation to drive.
 
     expect(cb).not.toHaveBeenCalled();
   });
@@ -1126,8 +1116,8 @@ describe("Integration: Complex Filters", () => {
       ],
     });
     expect(results).toHaveLength(1);
-    expect(results[0].kind).toBe("fruit");
-    expect(results[0].color).toBe("green");
+    expect(results[0]!.kind).toBe("fruit");
+    expect(results[0]!.color).toBe("green");
     db.rollbackWrites();
   });
 
@@ -1174,7 +1164,7 @@ describe("Integration: Complex Filters", () => {
       ],
     });
     expect(results).toHaveLength(1);
-    expect(results[0].kind).toBe("banana");
+    expect(results[0]!.kind).toBe("banana");
     db.rollbackWrites();
   });
 
@@ -1188,14 +1178,10 @@ describe("Integration: Complex Filters", () => {
     db.startTransaction();
     const results = collectQuery(db, {
       source: { type: "FullTableScan", tableName: "items", order: "asc" },
-      operators: [
-        {
-          filter: { $neq: [{ $field: "n" }, { $literal: 2 }] },
-        },
-      ],
+      operators: [{ filter: { $neq: [{ $field: "n" }, { $literal: 2 }] } }],
     });
     expect(results).toHaveLength(2);
-    expect(results.map((r: any) => r.n)).toEqual([1, 3]);
+    expect(results.map((r) => r.n)).toEqual([1, 3]);
     db.rollbackWrites();
   });
 
@@ -1208,28 +1194,24 @@ describe("Integration: Complex Filters", () => {
 
     db.startTransaction();
 
-    // $gt 3 → 4, 5
     const gt = collectQuery(db, {
       source: { type: "FullTableScan", tableName: "items", order: "asc" },
       operators: [{ filter: { $gt: [{ $field: "n" }, { $literal: 3 }] } }],
     });
     expect(gt).toHaveLength(2);
 
-    // $gte 3 → 3, 4, 5
     const gte = collectQuery(db, {
       source: { type: "FullTableScan", tableName: "items", order: "asc" },
       operators: [{ filter: { $gte: [{ $field: "n" }, { $literal: 3 }] } }],
     });
     expect(gte).toHaveLength(3);
 
-    // $lt 3 → 1, 2
     const lt = collectQuery(db, {
       source: { type: "FullTableScan", tableName: "items", order: "asc" },
       operators: [{ filter: { $lt: [{ $field: "n" }, { $literal: 3 }] } }],
     });
     expect(lt).toHaveLength(2);
 
-    // $lte 3 → 1, 2, 3
     const lte = collectQuery(db, {
       source: { type: "FullTableScan", tableName: "items", order: "asc" },
       operators: [{ filter: { $lte: [{ $field: "n" }, { $literal: 3 }] } }],
@@ -1270,7 +1252,6 @@ describe("Integration: Snapshot Isolation", () => {
     db.insert("items", { n: 1 });
     db.insert("items", { n: 2 });
 
-    // Query before commit should still see the two docs.
     const results = collectQuery(db, fullScan("items"));
     expect(results).toHaveLength(2);
     db.commit();
@@ -1284,7 +1265,6 @@ describe("Integration: Snapshot Isolation", () => {
     db.startTransaction();
     db.delete("tasks", id);
 
-    // Query should NOT see the deleted doc.
     const results = collectQuery(db, fullScan("tasks"));
     expect(results).toHaveLength(0);
     db.commit();
@@ -1317,38 +1297,32 @@ describe("Integration: Error Cases", () => {
 
   it("patch on non-existent document throws", () => {
     const db = freshDb();
-    expect(() =>
-      db.patch("tasks", "00000000-0000-4000-8000-000000000000" as any, {
-        x: 1,
-      }),
-    ).toThrow(/non-existent/);
+    expect(() => db.patch("tasks", MISSING_ID, { x: 1 })).toThrow(
+      /non-existent/,
+    );
     db.rollbackWrites();
   });
 
   it("delete on non-existent document throws", () => {
     const db = freshDb();
-    expect(() =>
-      db.delete("tasks", "00000000-0000-4000-8000-000000000000" as any),
-    ).toThrow(/non-existent/);
+    expect(() => db.delete("tasks", MISSING_ID)).toThrow(/non-existent/);
     db.rollbackWrites();
   });
 
   it("replace on non-existent document throws", () => {
     const db = freshDb();
-    expect(() =>
-      db.replace("tasks", "00000000-0000-4000-8000-000000000000" as any, {
-        title: "new",
-      }),
-    ).toThrow(/non-existent/);
+    expect(() => db.replace("tasks", MISSING_ID, { title: "new" })).toThrow(
+      /non-existent/,
+    );
     db.rollbackWrites();
   });
 
   it("patch with mismatched _id throws", () => {
     const db = freshDb();
     const id = db.insert("tasks", { title: "a" });
-    expect(() =>
-      db.patch("tasks", id, { _id: "00000000-0000-4000-8000-000000000000" }),
-    ).toThrow(/does not match/);
+    expect(() => db.patch("tasks", id, { _id: MISSING_ID })).toThrow(
+      /does not match/,
+    );
     db.rollbackWrites();
   });
 
@@ -1356,10 +1330,7 @@ describe("Integration: Error Cases", () => {
     const db = freshDb();
     const id = db.insert("tasks", { title: "a" });
     expect(() =>
-      db.replace("tasks", id, {
-        _id: "00000000-0000-4000-8000-000000000000",
-        title: "b",
-      }),
+      db.replace("tasks", id, { _id: MISSING_ID, title: "b" }),
     ).toThrow(/does not match/);
     db.rollbackWrites();
   });
@@ -1392,7 +1363,7 @@ describe("Integration: _creationTime", () => {
 
     const times = ids.map((id) => db.get("items", id)!._creationTime);
     for (let i = 1; i < times.length; i++) {
-      expect(times[i]).toBeGreaterThan(times[i - 1]);
+      expect(times[i]!).toBeGreaterThan(times[i - 1]!);
     }
     db.commit();
   });

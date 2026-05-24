@@ -1,46 +1,45 @@
 import { openNodeStorage } from "@embedded/node/sqlite/adapter";
 import { Database } from "@embedded/runtime/db/database";
+import type {
+  DocumentId,
+  SerializedQuery,
+  SerializedRangeExpression,
+} from "@embedded/runtime/db/types";
 import { embeddedTable } from "@embedded/server";
 import { register } from "@embedded/server/fields";
 import { runMigrations } from "@embedded/server/migration";
-import {
-  type MigrationRuntimeAdapter,
-  type SystemIndexRange,
+import type {
+  MigrationRuntimeAdapter,
+  SystemIndexRange,
 } from "@embedded/shared/migrations/migrate";
-import { afterEach, describe, expect, it } from "@tests/testkit";
+import type { SqliteAdapter } from "@embedded/storage/sqlite/adapter";
+import { temporaryDatabasePath, uniqueSuffix } from "@tests/helpers/storage";
+import { describe, expect, it, type TestFixtures } from "@tests/testkit";
 import { v } from "convex/values";
-
-import { temporaryDatabasePath, uniqueSuffix } from "../../helpers/storage";
-
-const adaptersToClose: Array<{ close(): Promise<void> }> = [];
-
-afterEach(async () => {
-  for (const adapter of adaptersToClose.splice(0)) {
-    await adapter.close();
-  }
-});
 
 async function readRowsByIndex(
   db: Database,
   input: { tableName: string; indexName: string; range: SystemIndexRange[] },
 ): Promise<Array<Record<string, unknown>>> {
-  const qid = db.startQueryAsync({
+  const range: SerializedRangeExpression[] = input.range.map((entry) => ({
+    type: "Eq",
+    fieldPath: entry.fieldPath,
+    value: entry.value as SerializedRangeExpression["value"],
+  }));
+  const query: SerializedQuery = {
     source: {
       type: "IndexRange",
       indexName: `${input.tableName}.${input.indexName}`,
-      range: input.range.map((entry) => ({
-        type: "Eq",
-        fieldPath: entry.fieldPath,
-        value: entry.value,
-      })),
+      range,
       order: "asc",
-    } as never,
+    },
     operators: [],
-  });
+  };
+  const qid = db.startQueryAsync(query);
 
   const rows: Array<Record<string, unknown>> = [];
   try {
-    while (true) {
+    for (;;) {
       const next = await db.queryNextAsync(qid);
       if (next.done) return rows;
       rows.push(next.value as Record<string, unknown>);
@@ -52,9 +51,7 @@ async function readRowsByIndex(
 
 function createSqliteMigrationAdapter(
   db: Database,
-  storage: {
-    applySchemaOps?: (t: string, ops: readonly never[]) => Promise<void>;
-  },
+  storage: SqliteAdapter,
 ): MigrationRuntimeAdapter {
   const txWrite = async <T>(work: () => Promise<T>): Promise<T> => {
     db.startTransaction();
@@ -75,99 +72,99 @@ function createSqliteMigrationAdapter(
         indexName: input.indexName,
         range: input.range,
       }),
-    systemInsert: (table, doc) =>
-      txWrite(async () => db.insert(table, doc) as unknown as string),
+    systemInsert: (table, doc) => txWrite(async () => db.insert(table, doc)),
     systemPatch: (id, fields) =>
       txWrite(async () => {
-        db.patch(undefined, id as never, fields);
+        db.patch(undefined, id as DocumentId, fields);
       }),
     systemDelete: (id) =>
       txWrite(async () => {
-        db.delete(undefined, id as never);
+        db.delete(undefined, id as DocumentId);
       }),
     tableList: (table) => db.listDocumentsAsync(table),
     tableGet: async (table, id) => {
       const docs = await db.listDocumentsAsync(table);
-      return (
-        (docs as Array<Record<string, unknown>>).find(
-          (doc) => doc._id === id,
-        ) ?? null
-      );
+      return docs.find((doc) => doc._id === id) ?? null;
     },
-    tableInsert: (table, doc) =>
-      txWrite(async () => db.insert(table, doc) as unknown as string),
+    tableInsert: (table, doc) => txWrite(async () => db.insert(table, doc)),
     tablePatch: (_table, id, fields) =>
       txWrite(async () => {
-        db.patch(undefined, id as never, fields);
+        db.patch(undefined, id as DocumentId, fields);
       }),
     tableReplace: (_table, id, fields) =>
       txWrite(async () => {
-        db.replace(undefined, id as never, fields);
+        db.replace(undefined, id as DocumentId, fields);
       }),
     tableDelete: (_table, id) =>
       txWrite(async () => {
-        db.delete(undefined, id as never);
+        db.delete(undefined, id as DocumentId);
       }),
-    applySchemaOps: async (table, ops) => {
-      if (typeof storage.applySchemaOps === "function") {
-        await storage.applySchemaOps(table, ops as readonly never[]);
-      }
-    },
+    applySchemaOps: (table, ops) => storage.applySchemaOps(table, ops),
   };
 }
 
+async function openTrackedDatabase(
+  track: TestFixtures["track"],
+  dbPath: string,
+): Promise<{ db: Database; storage: SqliteAdapter }> {
+  const storage = track(await openNodeStorage({ filename: dbPath }));
+  const db = new Database(null);
+  db.setStorage(storage);
+  await db.hydrate();
+  return { db, storage };
+}
+
+const tasks = embeddedTable(
+  "tasks_v2",
+  {
+    title: register(v.string()),
+  },
+  {
+    migrations: {
+      2: async ({ db }) => {
+        await db.patchMissing({ priority: "medium" });
+      },
+    },
+  },
+);
+
 describe("Phase 2 migrations end-to-end with SQLite", () => {
-  it("advances stored version and persists across restart", async () => {
-    const dbPath = temporaryDatabasePath(uniqueSuffix("p2-version-restart"));
+  it("advances the stored version on first run", async ({ track }) => {
+    const dbPath = temporaryDatabasePath(uniqueSuffix("p2-version-advance"));
+    const { db, storage } = await openTrackedDatabase(track, dbPath);
 
-    const tasks = embeddedTable(
-      "tasks_v2",
-      {
-        title: register(v.string()),
-      },
-      {
-        migrations: {
-          2: async ({ db }) => {
-            await db.patchMissing({ priority: "medium" });
-          },
-        },
-      },
-    );
+    const result = await runMigrations({
+      table: "tasks_v2",
+      schema: tasks.schema,
+      adapter: createSqliteMigrationAdapter(db, storage),
+    });
 
-    {
-      const storage = await openNodeStorage({ filename: dbPath });
-      const db = new Database(null);
-      db.setStorage(storage);
-      await db.hydrate();
-
-      const adapter = createSqliteMigrationAdapter(db, storage);
-      const result = await runMigrations({
-        table: "tasks_v2",
-        schema: (tasks as unknown as { schema: any }).schema,
-        adapter,
-      });
-      expect(result).toBe(true);
-
-      await db.waitForPersistence();
-      await storage.close();
-    }
-
-    {
-      const storage = await openNodeStorage({ filename: dbPath });
-      adaptersToClose.push(storage);
-      const db = new Database(null);
-      db.setStorage(storage);
-      await db.hydrate();
-
-      const adapter = createSqliteMigrationAdapter(db, storage);
-      const result = await runMigrations({
-        table: "tasks_v2",
-        schema: (tasks as unknown as { schema: any }).schema,
-        adapter,
-      });
-      expect(result).toBe(false);
-      await db.waitForPersistence();
-    }
+    expect(result).toBe(true);
+    await db.waitForPersistence();
   });
 
+  it("skips migration after the version persists across a restart", async ({
+    track,
+  }) => {
+    const dbPath = temporaryDatabasePath(uniqueSuffix("p2-version-restart"));
+
+    const first = await openTrackedDatabase(track, dbPath);
+    await runMigrations({
+      table: "tasks_v2",
+      schema: tasks.schema,
+      adapter: createSqliteMigrationAdapter(first.db, first.storage),
+    });
+    await first.db.waitForPersistence();
+    await first.storage.close();
+
+    const second = await openTrackedDatabase(track, dbPath);
+    const result = await runMigrations({
+      table: "tasks_v2",
+      schema: tasks.schema,
+      adapter: createSqliteMigrationAdapter(second.db, second.storage),
+    });
+
+    expect(result).toBe(false);
+    await second.db.waitForPersistence();
+  });
 });

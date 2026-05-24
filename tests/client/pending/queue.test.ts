@@ -3,38 +3,32 @@ import {
   PendingQueueStorageError,
 } from "@resolve/client/pending/queue";
 import { migratePendingEntries } from "@resolve/runtime/migrations/pending";
-import { describe, it, expect, beforeEach } from "@tests/testkit";
-import { vi } from "vitest";
+import type { PendingReplayMeta } from "@resolve/shared/symbols";
+import { describe, expect, it, vi } from "@tests/testkit";
+import type { ConvexClient } from "convex/browser";
 
-// ---------------------------------------------------------------------------
-// Mock client
-// ---------------------------------------------------------------------------
+interface MockSystemClient {
+  query: ReturnType<typeof vi.fn>;
+  mutation: ReturnType<typeof vi.fn>;
+}
 
-const mockClient = {
-  query: vi.fn(),
-  mutation: vi.fn(),
-};
-
-let queue: PendingQueue;
-let activeIdentityKey: string | null;
-
-beforeEach(() => {
-  vi.clearAllMocks();
-  activeIdentityKey = null;
-  queue = new PendingQueue(
-    mockClient as any,
+function createQueue(identityKey: string | null = null) {
+  const mockClient: MockSystemClient = {
+    query: vi.fn(),
+    mutation: vi.fn(),
+  };
+  const queue = new PendingQueue(
+    mockClient as unknown as ConvexClient,
     undefined,
     undefined,
-    () => activeIdentityKey,
+    () => identityKey,
   );
-});
-
-// ---------------------------------------------------------------------------
-// Hydration
-// ---------------------------------------------------------------------------
+  return { queue, mockClient };
+}
 
 describe("hydrate()", () => {
   it("loads entries from client query", async () => {
+    const { queue, mockClient } = createQueue();
     mockClient.query.mockResolvedValue([
       {
         _id: "doc-1",
@@ -54,6 +48,7 @@ describe("hydrate()", () => {
   });
 
   it("handles empty result", async () => {
+    const { queue, mockClient } = createQueue();
     mockClient.query.mockResolvedValue([]);
 
     await queue.hydrate();
@@ -63,6 +58,7 @@ describe("hydrate()", () => {
   });
 
   it("recovers gracefully on error (queue stays empty)", async () => {
+    const { queue, mockClient } = createQueue();
     mockClient.query.mockRejectedValue(new Error("DB unavailable"));
 
     await queue.hydrate();
@@ -72,6 +68,7 @@ describe("hydrate()", () => {
   });
 
   it("after hydration, length and peek() reflect loaded data", async () => {
+    const { queue, mockClient } = createQueue();
     mockClient.query.mockResolvedValue([
       {
         _id: "doc-1",
@@ -101,14 +98,10 @@ describe("hydrate()", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Push
-// ---------------------------------------------------------------------------
-
 describe("push()", () => {
   it("stores function name string and JSON-serializes args/localResult", async () => {
+    const { queue, mockClient } = createQueue("user:alice");
     mockClient.mutation.mockResolvedValue("doc-1");
-    activeIdentityKey = "user:alice";
 
     await queue.push("tasks:create", { title: "test" }, "uuid-1", "tasks");
 
@@ -124,6 +117,7 @@ describe("push()", () => {
   });
 
   it("increments length", async () => {
+    const { queue, mockClient } = createQueue();
     mockClient.mutation.mockResolvedValue("doc-1");
 
     expect(queue.length).toBe(0);
@@ -132,6 +126,7 @@ describe("push()", () => {
   });
 
   it("entries appear in peek()", async () => {
+    const { queue, mockClient } = createQueue();
     mockClient.mutation.mockResolvedValue("doc-1");
 
     await queue.push("tasks:create", { title: "test" }, "uuid-1", "tasks");
@@ -146,6 +141,7 @@ describe("push()", () => {
   });
 
   it("multiple pushes maintain FIFO order", async () => {
+    const { queue, mockClient } = createQueue();
     mockClient.mutation
       .mockResolvedValueOnce("doc-1")
       .mockResolvedValueOnce("doc-2")
@@ -161,6 +157,7 @@ describe("push()", () => {
   });
 
   it("surfaces storage failure while still keeping an ephemeral entry", async () => {
+    const { queue, mockClient } = createQueue();
     mockClient.mutation.mockRejectedValue(new Error("write failed"));
 
     await expect(
@@ -193,6 +190,22 @@ describe("migratePendingEntries()", () => {
 
     const patches: Array<{ id: string; fields: Record<string, unknown> }> = [];
 
+    const replayMetadata = new Map<string, PendingReplayMeta>([
+      [
+        "tasks:create",
+        {
+          __brand: "convex-embedded:pendingReplayMeta",
+          version: 2,
+          migrate: {
+            2: async ({ args, localResult }) => ({
+              args: { ...args, priority: "medium" },
+              localResult,
+            }),
+          },
+        },
+      ],
+    ]);
+
     await migratePendingEntries(
       {
         async transaction<T>(work: () => Promise<T> | T): Promise<T> {
@@ -208,21 +221,7 @@ describe("migratePendingEntries()", () => {
         },
       },
       "user:alice",
-      new Map([
-        [
-          "tasks:create",
-          {
-            __brand: "convex-embedded:pendingReplayMeta" as const,
-            version: 2,
-            migrate: {
-              2: async ({ args, localResult }) => ({
-                args: { ...args, priority: "medium" },
-                localResult,
-              }),
-            },
-          },
-        ],
-      ]),
+      replayMetadata,
     );
 
     expect(patches).toEqual([
@@ -238,16 +237,14 @@ describe("migratePendingEntries()", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Peek
-// ---------------------------------------------------------------------------
-
 describe("peek()", () => {
   it("returns undefined on empty queue", () => {
+    const { queue } = createQueue();
     expect(queue.peek()).toBeUndefined();
   });
 
   it("returns first entry without removing it", async () => {
+    const { queue, mockClient } = createQueue();
     mockClient.mutation.mockResolvedValue("doc-1");
 
     await queue.push("tasks:create", { title: "test" }, "uuid-1", "tasks");
@@ -262,12 +259,9 @@ describe("peek()", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Remove
-// ---------------------------------------------------------------------------
-
 describe("remove()", () => {
   it("removes first entry and returns it", async () => {
+    const { queue, mockClient } = createQueue();
     mockClient.mutation
       .mockResolvedValueOnce("doc-1") // push
       .mockResolvedValueOnce(null); // remove
@@ -283,6 +277,7 @@ describe("remove()", () => {
   });
 
   it("calls client mutation to remove from DB", async () => {
+    const { queue, mockClient } = createQueue();
     mockClient.mutation
       .mockResolvedValueOnce("doc-1") // push
       .mockResolvedValueOnce(null); // remove
@@ -299,11 +294,13 @@ describe("remove()", () => {
   });
 
   it("returns undefined on empty queue", async () => {
+    const { queue } = createQueue();
     const entry = await queue.remove();
     expect(entry).toBeUndefined();
   });
 
   it("decrements length", async () => {
+    const { queue, mockClient } = createQueue();
     mockClient.mutation
       .mockResolvedValueOnce("doc-1") // push 1
       .mockResolvedValueOnce("doc-2") // push 2
@@ -318,6 +315,7 @@ describe("remove()", () => {
   });
 
   it("skips the remove call for ephemeral entries", async () => {
+    const { queue, mockClient } = createQueue();
     mockClient.mutation.mockRejectedValueOnce(new Error("write failed"));
 
     await expect(
@@ -335,6 +333,7 @@ describe("remove()", () => {
   });
 
   it("keeps persisted entries queued when removal fails", async () => {
+    const { queue, mockClient } = createQueue();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     mockClient.mutation
       .mockResolvedValueOnce("doc-1")
@@ -355,6 +354,7 @@ describe("remove()", () => {
 
 describe("claimNext() / renewLease() / release()", () => {
   it("claims the next pending entry with owner and lease", async () => {
+    const { queue, mockClient } = createQueue();
     mockClient.query.mockResolvedValue([
       {
         _id: "doc-1",
@@ -393,6 +393,7 @@ describe("claimNext() / renewLease() / release()", () => {
   });
 
   it("does not claim a stale in-memory entry when storage returns null", async () => {
+    const { queue, mockClient } = createQueue();
     mockClient.query
       .mockResolvedValueOnce([
         {
@@ -413,6 +414,7 @@ describe("claimNext() / renewLease() / release()", () => {
   });
 
   it("renews an owned lease", async () => {
+    const { queue, mockClient } = createQueue();
     mockClient.query.mockResolvedValue([
       {
         _id: "doc-1",
@@ -446,20 +448,19 @@ describe("claimNext() / renewLease() / release()", () => {
   });
 
   it("returns false when lease renewal fails and the entry cannot be reacquired", async () => {
-    mockClient.query
-      .mockResolvedValueOnce([
-        {
-          _id: "doc-1",
-          ref: "tasks:create",
-          args: '{"title":"hello"}',
-          localResult: '"uuid-1"',
-          table: "tasks",
-          state: "processing",
-          owner: "processor-a",
-          leaseExpiresAt: 123,
-        },
-      ])
-      .mockResolvedValueOnce([]);
+    const { queue, mockClient } = createQueue();
+    mockClient.query.mockResolvedValue([
+      {
+        _id: "doc-1",
+        ref: "tasks:create",
+        args: '{"title":"hello"}',
+        localResult: '"uuid-1"',
+        table: "tasks",
+        state: "processing",
+        owner: "processor-a",
+        leaseExpiresAt: 123,
+      },
+    ]);
     mockClient.mutation
       .mockResolvedValueOnce(false)
       .mockResolvedValueOnce(null);
@@ -474,6 +475,7 @@ describe("claimNext() / renewLease() / release()", () => {
   });
 
   it("releases a claimed entry back to pending", async () => {
+    const { queue, mockClient } = createQueue();
     mockClient.query.mockResolvedValue([
       {
         _id: "doc-1",
@@ -502,12 +504,9 @@ describe("claimNext() / renewLease() / release()", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Clear
-// ---------------------------------------------------------------------------
-
 describe("clear()", () => {
   it("removes all entries", async () => {
+    const { queue, mockClient } = createQueue();
     mockClient.mutation
       .mockResolvedValueOnce("doc-1")
       .mockResolvedValueOnce("doc-2")
@@ -524,6 +523,7 @@ describe("clear()", () => {
   });
 
   it("calls client mutation", async () => {
+    const { queue, mockClient } = createQueue();
     mockClient.mutation
       .mockResolvedValueOnce("doc-1") // push
       .mockResolvedValueOnce(null); // clear call
@@ -540,6 +540,7 @@ describe("clear()", () => {
   });
 
   it("on empty queue is safe", async () => {
+    const { queue, mockClient } = createQueue();
     mockClient.mutation.mockResolvedValue(null);
 
     await queue.clear();
@@ -549,16 +550,14 @@ describe("clear()", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Length / isEmpty
-// ---------------------------------------------------------------------------
-
 describe("length and isEmpty", () => {
   it("isEmpty is true initially", () => {
+    const { queue } = createQueue();
     expect(queue.isEmpty).toBe(true);
   });
 
   it("isEmpty is false after push", async () => {
+    const { queue, mockClient } = createQueue();
     mockClient.mutation.mockResolvedValue("doc-1");
 
     await queue.push("tasks:create", { title: "test" }, "uuid-1", "tasks");
@@ -567,10 +566,12 @@ describe("length and isEmpty", () => {
   });
 
   it("length is 0 initially", () => {
+    const { queue } = createQueue();
     expect(queue.length).toBe(0);
   });
 
   it("length increments on push, decrements on shift", async () => {
+    const { queue, mockClient } = createQueue();
     mockClient.mutation
       .mockResolvedValueOnce("doc-1") // push
       .mockResolvedValueOnce("doc-2") // push

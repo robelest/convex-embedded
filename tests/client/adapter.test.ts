@@ -1,25 +1,22 @@
 import { patchRoutedConvexClient } from "@resolve/client/adapter";
+import type { EmbeddedRuntime } from "@resolve/index";
 import { describe, expect, it, vi } from "@tests/testkit";
+import type { ConvexClient } from "convex/browser";
 
-function createDuplicateIssuesResult() {
-  return {
-    issues: [
-      {
-        _id: "local-issue-1",
-        identifier: "PROJ-1",
-        title: "Optimistic local issue",
-        status: "todo",
-        priority: "medium",
-      },
-      {
-        _id: "remote-issue-1",
-        identifier: "PROJ-1",
-        title: "Canonical remote issue",
-        status: "todo",
-        priority: "medium",
-      },
-    ],
-  };
+interface RoutedQueryClient {
+  query(refName: string, args: Record<string, unknown>): Promise<unknown>;
+}
+
+interface IssueRow {
+  _id: string;
+  identifier: string;
+  title: string;
+  status: string;
+  priority: string;
+}
+
+interface IssuesResult {
+  issues: IssueRow[];
 }
 
 function translateLocalIssueIds<T>(value: T): T {
@@ -50,7 +47,7 @@ function translateLocalIssueIds<T>(value: T): T {
   return translate(value) as T;
 }
 
-function createPatchedClient(result = createDuplicateIssuesResult()) {
+function createPatchedClient(result: IssuesResult) {
   const watch = {
     onUpdate: vi.fn((callback: () => void) => {
       callback();
@@ -64,7 +61,7 @@ function createPatchedClient(result = createDuplicateIssuesResult()) {
     executeLocal: vi.fn(async () => result),
     watchLocalQuery: vi.fn(() => watch),
     watchLocalPaginatedQuery: vi.fn(() => watch),
-  } as any;
+  } as unknown as EmbeddedRuntime;
 
   const client = {
     query: vi.fn(),
@@ -76,7 +73,7 @@ function createPatchedClient(result = createDuplicateIssuesResult()) {
       localQueryResult: vi.fn(),
       localQueryLogs: vi.fn(() => []),
     },
-  } as any;
+  } as unknown as ConvexClient;
 
   patchRoutedConvexClient({
     client,
@@ -91,10 +88,14 @@ function createPatchedClient(result = createDuplicateIssuesResult()) {
     translateLocalResultToClient: translateLocalIssueIds,
   });
 
-  return { client, runtime, watch };
+  return {
+    client: client as unknown as RoutedQueryClient,
+    runtime,
+    watch,
+  };
 }
 
-function createExistingDuplicateIssuesResult() {
+function createExistingDuplicateIssuesResult(): IssuesResult {
   return {
     issues: [
       {

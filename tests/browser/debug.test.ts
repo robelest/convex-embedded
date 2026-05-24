@@ -1,4 +1,8 @@
 import {
+  getBrowserDebugApi,
+  unregisterBrowserDebugClient,
+} from "@embedded/browser/debug";
+import {
   afterEach,
   beforeEach,
   describe,
@@ -7,13 +11,23 @@ import {
   vi,
 } from "@tests/testkit";
 
-let clearBrowserLocalData: ReturnType<typeof vi.fn>;
-let createEmbeddedClient: ReturnType<typeof vi.fn>;
+type DebugTestClient = { close: () => Promise<void> };
+
+let clearBrowserLocalData: ReturnType<
+  typeof vi.fn<(name: string) => Promise<void>>
+>;
+let createEmbeddedClient: ReturnType<typeof vi.fn<() => DebugTestClient>>;
+
+function debugApi() {
+  const api = getBrowserDebugApi();
+  expect(api).not.toBeNull();
+  return api!;
+}
 
 beforeEach(() => {
   vi.resetModules();
   clearBrowserLocalData = vi.fn(async () => undefined);
-  createEmbeddedClient = vi.fn();
+  createEmbeddedClient = vi.fn<() => DebugTestClient>();
 
   vi.doMock("@/browser/platform", () => ({
     createBrowserPlatformAdapter: vi.fn(() => ({
@@ -26,11 +40,12 @@ beforeEach(() => {
     createEmbeddedClient,
   }));
 
-  delete (globalThis as any).__convexEmbedded;
+  for (const name of debugApi().listClientNames()) {
+    unregisterBrowserDebugClient(name);
+  }
 });
 
 afterEach(() => {
-  delete (globalThis as any).__convexEmbedded;
   vi.resetModules();
 });
 
@@ -42,8 +57,7 @@ describe("browser debug console hook", () => {
     const { createConvexClient } = await import("@resolve/browser/index");
     createConvexClient({ convex: { modules: {} }, name: "test-db" });
 
-    const api = (globalThis as any).__convexEmbedded;
-    expect(api).toBeDefined();
+    const api = debugApi();
     expect(api.listClientNames()).toEqual(["test-db"]);
 
     await api.clearLocalData();
@@ -60,11 +74,10 @@ describe("browser debug console hook", () => {
     const client = createConvexClient({
       convex: { modules: {} },
       name: "test-db",
-    }) as any;
+    });
 
     await client.close();
 
-    const api = (globalThis as any).__convexEmbedded;
-    expect(api.listClientNames()).toEqual([]);
+    expect(debugApi().listClientNames()).toEqual([]);
   });
 });

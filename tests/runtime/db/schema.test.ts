@@ -1,233 +1,205 @@
 import {
-  validateValidator,
   isValidIdentifier,
+  parseSchema,
   tableNameFromId,
   validateFieldNames,
-  parseSchema,
   validateSchemaDefinition,
+  validateValidator,
+  type ParsedSchema,
+  type SchemaExport,
+  type TableSchema,
+  type ValidatorJSON,
 } from "@embedded/runtime/db/schema";
-import type { ValidatorJSON } from "@embedded/runtime/db/schema";
-import { describe, it, expect } from "@tests/testkit";
+import { describe, expect, it } from "@tests/testkit";
+import type { Value } from "convex/values";
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/** Shorthand for building an object validator. */
 function objectValidator(
   fields: Record<string, { fieldType: ValidatorJSON; optional: boolean }>,
 ): ValidatorJSON {
   return { type: "object", value: fields };
 }
 
-describe("validateValidator", () => {
-  // -----------------------------------------------------------------------
-  // null validator
-  // -----------------------------------------------------------------------
+function tableSchema(table: Partial<TableSchema> = {}): TableSchema {
+  return {
+    indexes: [],
+    vectorIndexes: [],
+    searchIndexes: [],
+    documentType: { type: "any" },
+    ...table,
+  };
+}
 
-  describe("null validator", () => {
-    const validator: ValidatorJSON = { type: "null" };
+describe.concurrent("validateValidator", () => {
+  describe("scalar validators", () => {
+    const accepts: ReadonlyArray<{
+      label: string;
+      validator: ValidatorJSON;
+      value: Value;
+    }> = [
+      { label: "null accepts null", validator: { type: "null" }, value: null },
+      { label: "number accepts 42", validator: { type: "number" }, value: 42 },
+      { label: "number accepts 0", validator: { type: "number" }, value: 0 },
+      {
+        label: "number accepts negatives",
+        validator: { type: "number" },
+        value: -3.14,
+      },
+      { label: "bigint accepts 1n", validator: { type: "bigint" }, value: 1n },
+      { label: "bigint accepts 0n", validator: { type: "bigint" }, value: 0n },
+      {
+        label: "boolean accepts true",
+        validator: { type: "boolean" },
+        value: true,
+      },
+      {
+        label: "boolean accepts false",
+        validator: { type: "boolean" },
+        value: false,
+      },
+      {
+        label: 'string accepts "hello"',
+        validator: { type: "string" },
+        value: "hello",
+      },
+      {
+        label: "string accepts empty",
+        validator: { type: "string" },
+        value: "",
+      },
+      {
+        label: "bytes accepts ArrayBuffer",
+        validator: { type: "bytes" },
+        value: new ArrayBuffer(8),
+      },
+    ];
 
-    it("accepts null", () => {
-      expect(() => validateValidator(validator, null)).not.toThrow();
+    it.for(accepts)("$label", ({ validator, value }) => {
+      expect(() => validateValidator(validator, value)).not.toThrow();
     });
 
-    it("rejects a number", () => {
-      expect(() => validateValidator(validator, 42)).toThrow(/null/);
-    });
+    const rejects: ReadonlyArray<{
+      label: string;
+      validator: ValidatorJSON;
+      value: Value;
+      message: RegExp;
+    }> = [
+      {
+        label: "null rejects a number",
+        validator: { type: "null" },
+        value: 42,
+        message: /null/,
+      },
+      {
+        label: "null rejects a string",
+        validator: { type: "null" },
+        value: "hello",
+        message: /null/,
+      },
+      {
+        label: "number rejects a string",
+        validator: { type: "number" },
+        value: "42",
+        message: /number/,
+      },
+      {
+        label: "bigint rejects a number",
+        validator: { type: "bigint" },
+        value: 1,
+        message: /bigint/,
+      },
+      {
+        label: "boolean rejects a number",
+        validator: { type: "boolean" },
+        value: 1,
+        message: /boolean/,
+      },
+      {
+        label: "string rejects a number",
+        validator: { type: "string" },
+        value: 99,
+        message: /string/,
+      },
+      {
+        label: "bytes rejects a string",
+        validator: { type: "bytes" },
+        value: "bytes",
+        message: /ArrayBuffer/,
+      },
+    ];
 
-    it("rejects a string", () => {
-      expect(() => validateValidator(validator, "hello")).toThrow(/null/);
-    });
-  });
-
-  // -----------------------------------------------------------------------
-  // number validator
-  // -----------------------------------------------------------------------
-
-  describe("number validator", () => {
-    const validator: ValidatorJSON = { type: "number" };
-
-    it("accepts 42", () => {
-      expect(() => validateValidator(validator, 42)).not.toThrow();
-    });
-
-    it("accepts 0", () => {
-      expect(() => validateValidator(validator, 0)).not.toThrow();
-    });
-
-    it("accepts negative numbers", () => {
-      expect(() => validateValidator(validator, -3.14)).not.toThrow();
-    });
-
-    it("rejects a string", () => {
-      expect(() => validateValidator(validator, "42")).toThrow(/number/);
-    });
-  });
-
-  // -----------------------------------------------------------------------
-  // bigint validator
-  // -----------------------------------------------------------------------
-
-  describe("bigint validator", () => {
-    const validator: ValidatorJSON = { type: "bigint" };
-
-    it("accepts 1n", () => {
-      expect(() => validateValidator(validator, 1n)).not.toThrow();
-    });
-
-    it("accepts 0n", () => {
-      expect(() => validateValidator(validator, 0n)).not.toThrow();
-    });
-
-    it("rejects a number", () => {
-      expect(() => validateValidator(validator, 1)).toThrow(/bigint/);
-    });
-  });
-
-  // -----------------------------------------------------------------------
-  // boolean validator
-  // -----------------------------------------------------------------------
-
-  describe("boolean validator", () => {
-    const validator: ValidatorJSON = { type: "boolean" };
-
-    it("accepts true", () => {
-      expect(() => validateValidator(validator, true)).not.toThrow();
-    });
-
-    it("accepts false", () => {
-      expect(() => validateValidator(validator, false)).not.toThrow();
-    });
-
-    it("rejects a number", () => {
-      expect(() => validateValidator(validator, 1)).toThrow(/boolean/);
-    });
-  });
-
-  // -----------------------------------------------------------------------
-  // string validator
-  // -----------------------------------------------------------------------
-
-  describe("string validator", () => {
-    const validator: ValidatorJSON = { type: "string" };
-
-    it('accepts "hello"', () => {
-      expect(() => validateValidator(validator, "hello")).not.toThrow();
-    });
-
-    it("accepts empty string", () => {
-      expect(() => validateValidator(validator, "")).not.toThrow();
-    });
-
-    it("rejects a number", () => {
-      expect(() => validateValidator(validator, 99)).toThrow(/string/);
-    });
-  });
-
-  // -----------------------------------------------------------------------
-  // bytes validator
-  // -----------------------------------------------------------------------
-
-  describe("bytes validator", () => {
-    const validator: ValidatorJSON = { type: "bytes" };
-
-    it("accepts ArrayBuffer", () => {
-      expect(() =>
-        validateValidator(validator, new ArrayBuffer(8)),
-      ).not.toThrow();
-    });
-
-    it("rejects a string", () => {
-      expect(() => validateValidator(validator, "bytes")).toThrow(
-        /ArrayBuffer/,
-      );
+    it.for(rejects)("$label", ({ validator, value, message }) => {
+      expect(() => validateValidator(validator, value)).toThrow(message);
     });
   });
-
-  // -----------------------------------------------------------------------
-  // any validator
-  // -----------------------------------------------------------------------
 
   describe("any validator", () => {
     const validator: ValidatorJSON = { type: "any" };
+    const values: ReadonlyArray<{ label: string; value: Value }> = [
+      { label: "null", value: null },
+      { label: "number", value: 42 },
+      { label: "string", value: "hello" },
+      { label: "object", value: { x: 1 } },
+      { label: "array", value: [1, 2] },
+    ];
 
-    it("accepts null", () => {
-      expect(() => validateValidator(validator, null)).not.toThrow();
-    });
-
-    it("accepts a number", () => {
-      expect(() => validateValidator(validator, 42)).not.toThrow();
-    });
-
-    it("accepts a string", () => {
-      expect(() => validateValidator(validator, "hello")).not.toThrow();
-    });
-
-    it("accepts an object", () => {
-      expect(() => validateValidator(validator, { x: 1 })).not.toThrow();
-    });
-
-    it("accepts an array", () => {
-      expect(() => validateValidator(validator, [1, 2])).not.toThrow();
+    it.for(values)("accepts $label", ({ value }) => {
+      expect(() => validateValidator(validator, value)).not.toThrow();
     });
   });
 
-  // -----------------------------------------------------------------------
-  // literal validator
-  // -----------------------------------------------------------------------
-
   describe("literal validator", () => {
-    it("accepts the exact matching value (string)", () => {
-      const validator: ValidatorJSON = { type: "literal", value: "active" };
-      expect(() => validateValidator(validator, "active")).not.toThrow();
+    it("accepts the exact matching string", () => {
+      expect(() =>
+        validateValidator({ type: "literal", value: "active" }, "active"),
+      ).not.toThrow();
     });
 
     it("rejects a non-matching string", () => {
-      const validator: ValidatorJSON = { type: "literal", value: "active" };
-      expect(() => validateValidator(validator, "inactive")).toThrow(
-        /Expected/,
-      );
+      expect(() =>
+        validateValidator({ type: "literal", value: "active" }, "inactive"),
+      ).toThrow(/Expected/);
     });
 
-    it("accepts the exact matching value (number)", () => {
-      const validator: ValidatorJSON = { type: "literal", value: 42 };
-      expect(() => validateValidator(validator, 42)).not.toThrow();
+    it("accepts the exact matching number", () => {
+      expect(() =>
+        validateValidator({ type: "literal", value: 42 }, 42),
+      ).not.toThrow();
     });
 
     it("rejects a different number", () => {
-      const validator: ValidatorJSON = { type: "literal", value: 42 };
-      expect(() => validateValidator(validator, 43)).toThrow(/Expected/);
+      expect(() =>
+        validateValidator({ type: "literal", value: 42 }, 43),
+      ).toThrow(/Expected/);
     });
 
-    it("accepts the exact matching value (boolean)", () => {
-      const validator: ValidatorJSON = { type: "literal", value: true };
-      expect(() => validateValidator(validator, true)).not.toThrow();
+    it("accepts the exact matching boolean", () => {
+      expect(() =>
+        validateValidator({ type: "literal", value: true }, true),
+      ).not.toThrow();
     });
 
-    it("rejects false when literal is true", () => {
-      const validator: ValidatorJSON = { type: "literal", value: true };
-      expect(() => validateValidator(validator, false)).toThrow(/Expected/);
+    it("rejects false when the literal is true", () => {
+      expect(() =>
+        validateValidator({ type: "literal", value: true }, false),
+      ).toThrow(/Expected/);
     });
   });
-
-  // -----------------------------------------------------------------------
-  // id validator
-  // -----------------------------------------------------------------------
 
   describe("id validator", () => {
     const validator: ValidatorJSON = { type: "id", tableName: "messages" };
 
-    it("accepts a valid id when lookup resolves to the correct table", () => {
+    it("accepts an id whose lookup resolves to the matching table", () => {
       const lookup = (id: string) =>
         id === "test-uuid" ? "messages" : undefined;
+
       expect(() =>
         validateValidator(validator, "test-uuid", lookup),
       ).not.toThrow();
     });
 
-    it("rejects an id for the wrong table", () => {
+    it("rejects an id that resolves to a different table", () => {
       const lookup = (id: string) => (id === "test-uuid" ? "users" : undefined);
+
       expect(() => validateValidator(validator, "test-uuid", lookup)).toThrow(
         /Expected ID for table/,
       );
@@ -238,16 +210,11 @@ describe("validateValidator", () => {
     });
 
     it("rejects a string with no lookup match", () => {
-      const lookup = () => undefined;
-      expect(() => validateValidator(validator, "abc", lookup)).toThrow(
-        /Expected ID for table/,
-      );
+      expect(() =>
+        validateValidator(validator, "abc", () => undefined),
+      ).toThrow(/Expected ID for table/);
     });
   });
-
-  // -----------------------------------------------------------------------
-  // array validator
-  // -----------------------------------------------------------------------
 
   describe("array validator", () => {
     const validator: ValidatorJSON = {
@@ -255,7 +222,7 @@ describe("validateValidator", () => {
       value: { type: "number" },
     };
 
-    it("accepts an array of matching type", () => {
+    it("accepts an array of the element type", () => {
       expect(() => validateValidator(validator, [1, 2, 3])).not.toThrow();
     });
 
@@ -269,16 +236,12 @@ describe("validateValidator", () => {
       );
     });
 
-    it("rejects an array with wrong element types", () => {
+    it("rejects wrong element types", () => {
       expect(() => validateValidator(validator, [1, "two", 3])).toThrow(
         /number/,
       );
     });
   });
-
-  // -----------------------------------------------------------------------
-  // union validator
-  // -----------------------------------------------------------------------
 
   describe("union validator", () => {
     const validator: ValidatorJSON = {
@@ -286,11 +249,11 @@ describe("validateValidator", () => {
       value: [{ type: "string" }, { type: "number" }],
     };
 
-    it("accepts a string (first variant)", () => {
+    it("accepts the first variant", () => {
       expect(() => validateValidator(validator, "hello")).not.toThrow();
     });
 
-    it("accepts a number (second variant)", () => {
+    it("accepts the second variant", () => {
       expect(() => validateValidator(validator, 42)).not.toThrow();
     });
 
@@ -301,12 +264,8 @@ describe("validateValidator", () => {
     });
   });
 
-  // -----------------------------------------------------------------------
-  // object validator
-  // -----------------------------------------------------------------------
-
   describe("object validator", () => {
-    const validator: ValidatorJSON = objectValidator({
+    const validator = objectValidator({
       name: { fieldType: { type: "string" }, optional: false },
       age: { fieldType: { type: "number" }, optional: false },
     });
@@ -317,7 +276,7 @@ describe("validateValidator", () => {
       ).not.toThrow();
     });
 
-    it("rejects missing required field", () => {
+    it("rejects a missing required field", () => {
       expect(() => validateValidator(validator, { name: "alice" })).toThrow(
         /Missing required field.*age/,
       );
@@ -329,13 +288,13 @@ describe("validateValidator", () => {
       ).toThrow(/Unexpected field.*extra/);
     });
 
-    it("rejects wrong field type", () => {
+    it("rejects a wrong field type", () => {
       expect(() =>
         validateValidator(validator, { name: "alice", age: "thirty" }),
       ).toThrow(/number/);
     });
 
-    it("rejects non-object", () => {
+    it("rejects a non-object", () => {
       expect(() => validateValidator(validator, "not an object")).toThrow(
         /object/,
       );
@@ -343,24 +302,24 @@ describe("validateValidator", () => {
   });
 
   describe("object validator with optional fields", () => {
-    const validator: ValidatorJSON = objectValidator({
+    const validator = objectValidator({
       name: { fieldType: { type: "string" }, optional: false },
       nickname: { fieldType: { type: "string" }, optional: true },
     });
 
-    it("accepts an object with the optional field present", () => {
+    it("accepts the optional field when present", () => {
       expect(() =>
         validateValidator(validator, { name: "alice", nickname: "al" }),
       ).not.toThrow();
     });
 
-    it("accepts an object with the optional field missing", () => {
+    it("accepts the optional field when missing", () => {
       expect(() =>
         validateValidator(validator, { name: "alice" }),
       ).not.toThrow();
     });
 
-    it("rejects if optional field has wrong type", () => {
+    it("rejects the optional field with a wrong type", () => {
       expect(() =>
         validateValidator(validator, { name: "alice", nickname: 123 }),
       ).toThrow(/string/);
@@ -368,99 +327,61 @@ describe("validateValidator", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// isValidIdentifier
-// ---------------------------------------------------------------------------
+describe.concurrent("isValidIdentifier", () => {
+  const cases: ReadonlyArray<{ name: string; valid: boolean; why: string }> = [
+    { name: "_id", valid: true, why: "_id reserved field" },
+    { name: "_creationTime", valid: true, why: "_creationTime reserved field" },
+    { name: "validName", valid: true, why: "plain identifier" },
+    { name: "name123", valid: true, why: "trailing digits" },
+    { name: "myField_name", valid: true, why: "underscores in body" },
+    { name: "123invalid", valid: false, why: "leading digit" },
+    { name: "no-dashes", valid: false, why: "contains dash" },
+    { name: "", valid: false, why: "empty string" },
+    { name: "has spaces", valid: false, why: "contains space" },
+    { name: "_other", valid: false, why: "leading underscore not reserved" },
+  ];
 
-describe("isValidIdentifier", () => {
-  it('"_id" is valid', () => {
-    expect(isValidIdentifier("_id")).toBe(true);
-  });
-
-  it('"_creationTime" is valid', () => {
-    expect(isValidIdentifier("_creationTime")).toBe(true);
-  });
-
-  it('"validName" is valid', () => {
-    expect(isValidIdentifier("validName")).toBe(true);
-  });
-
-  it('"name123" is valid', () => {
-    expect(isValidIdentifier("name123")).toBe(true);
-  });
-
-  it('"myField_name" is valid (underscores allowed in body)', () => {
-    expect(isValidIdentifier("myField_name")).toBe(true);
-  });
-
-  it('"123invalid" is invalid (starts with digit)', () => {
-    expect(isValidIdentifier("123invalid")).toBe(false);
-  });
-
-  it('"no-dashes" is invalid (contains dash)', () => {
-    expect(isValidIdentifier("no-dashes")).toBe(false);
-  });
-
-  it('"" is invalid (empty string)', () => {
-    expect(isValidIdentifier("")).toBe(false);
-  });
-
-  it('"has spaces" is invalid', () => {
-    expect(isValidIdentifier("has spaces")).toBe(false);
-  });
-
-  it('"_other" is invalid (leading underscore but not _id or _creationTime)', () => {
-    expect(isValidIdentifier("_other")).toBe(false);
+  it.for(cases)("$why: $name -> $valid", ({ name, valid }) => {
+    expect(isValidIdentifier(name)).toBe(valid);
   });
 });
 
-// ---------------------------------------------------------------------------
-// tableNameFromId
-// ---------------------------------------------------------------------------
+describe.concurrent("tableNameFromId", () => {
+  const lookup = (id: string): string | undefined =>
+    ({ "uuid-1": "messages", "uuid-2": "users" })[id];
 
-describe("tableNameFromId", () => {
-  const lookup = (id: string) => {
-    const map: Record<string, string> = {
-      "uuid-1": "messages",
-      "uuid-2": "users",
-    };
-    return map[id];
-  };
-
-  it("returns table name when lookup matches", () => {
+  it("returns the table name when the lookup matches", () => {
     expect(tableNameFromId("uuid-1", lookup)).toBe("messages");
   });
 
-  it("returns null when no lookup provided", () => {
-    expect(tableNameFromId("anything")).toBe(null);
+  it("returns null when no lookup is provided", () => {
+    expect(tableNameFromId("anything")).toBeNull();
   });
 
-  it("returns null when lookup returns undefined", () => {
-    expect(tableNameFromId("unknown-id", lookup)).toBe(null);
+  it("returns null when the lookup returns undefined", () => {
+    expect(tableNameFromId("unknown-id", lookup)).toBeNull();
   });
 
-  it("returns correct table for different IDs", () => {
+  it("resolves different IDs to their tables", () => {
     expect(tableNameFromId("uuid-2", lookup)).toBe("users");
   });
 });
 
-// ---------------------------------------------------------------------------
-// validateFieldNames
-// ---------------------------------------------------------------------------
-
-describe("validateFieldNames", () => {
-  it("validates field names in an object validator — valid names pass", () => {
-    const validator: ValidatorJSON = objectValidator({
+describe.concurrent("validateFieldNames", () => {
+  it("passes valid field names in an object validator", () => {
+    const validator = objectValidator({
       name: { fieldType: { type: "string" }, optional: false },
       age: { fieldType: { type: "number" }, optional: false },
     });
+
     expect(() => validateFieldNames(validator)).not.toThrow();
   });
 
   it("throws for invalid field names in an object validator", () => {
-    const validator: ValidatorJSON = objectValidator({
+    const validator = objectValidator({
       "invalid-name": { fieldType: { type: "string" }, optional: false },
     });
+
     expect(() => validateFieldNames(validator)).toThrow(/valid identifiers/);
   });
 
@@ -476,30 +397,27 @@ describe("validateFieldNames", () => {
         }),
       ],
     };
+
     expect(() => validateFieldNames(validator)).toThrow(/valid identifiers/);
   });
 
   it("does not throw for non-object validators", () => {
-    const validator: ValidatorJSON = { type: "string" };
-    expect(() => validateFieldNames(validator)).not.toThrow();
+    expect(() => validateFieldNames({ type: "string" })).not.toThrow();
   });
 
   it("allows _id and _creationTime as field names", () => {
-    const validator: ValidatorJSON = objectValidator({
+    const validator = objectValidator({
       _id: { fieldType: { type: "string" }, optional: false },
       _creationTime: { fieldType: { type: "number" }, optional: false },
     });
+
     expect(() => validateFieldNames(validator)).not.toThrow();
   });
 });
 
-// ---------------------------------------------------------------------------
-// parseSchema
-// ---------------------------------------------------------------------------
-
-describe("parseSchema", () => {
-  it("parses a schema object with .export() on table definitions", () => {
-    const fakeSchema = {
+describe.concurrent("parseSchema", () => {
+  it("parses a schema by calling .export() on each table", () => {
+    const fakeSchema: SchemaExport = {
       schemaValidation: true,
       tables: {
         messages: {
@@ -512,15 +430,15 @@ describe("parseSchema", () => {
       },
     };
 
-    const parsed = parseSchema(fakeSchema as any);
+    const parsed = parseSchema(fakeSchema);
+
     expect(parsed.schemaValidation).toBe(true);
     expect(parsed.tables).toBeInstanceOf(Map);
-    expect(parsed.tables.has("messages")).toBe(true);
-    expect(parsed.tables.get("messages")!.indexes).toEqual([]);
+    expect(parsed.tables.get("messages")?.indexes).toEqual([]);
   });
 
-  it("handles multiple tables", () => {
-    const fakeSchema = {
+  it("parses multiple tables", () => {
+    const fakeSchema: SchemaExport = {
       schemaValidation: false,
       tables: {
         messages: {
@@ -540,89 +458,58 @@ describe("parseSchema", () => {
       },
     };
 
-    const parsed = parseSchema(fakeSchema as any);
+    const parsed = parseSchema(fakeSchema);
+
     expect(parsed.schemaValidation).toBe(false);
     expect(parsed.tables.size).toBe(2);
-    expect(parsed.tables.get("users")!.indexes).toHaveLength(1);
+    expect(parsed.tables.get("users")?.indexes).toHaveLength(1);
   });
 });
 
-describe("validateSchemaDefinition", () => {
-  it("accepts valid vector index definitions", () => {
+describe.concurrent("validateSchemaDefinition", () => {
+  const withVectorIndex = (
+    vectorIndex: TableSchema["vectorIndexes"][number],
+  ): ParsedSchema => ({
+    schemaValidation: false,
+    tables: new Map([["tasks", tableSchema({ vectorIndexes: [vectorIndex] })]]),
+  });
+
+  it("accepts a valid vector index definition", () => {
     expect(() =>
-      validateSchemaDefinition({
-        schemaValidation: false,
-        tables: new Map([
-          [
-            "tasks",
-            {
-              indexes: [],
-              vectorIndexes: [
-                {
-                  indexDescriptor: "by_embedding",
-                  vectorField: "embedding",
-                  dimensions: 128,
-                  filterFields: ["status", "properties.kind"],
-                },
-              ],
-              searchIndexes: [],
-              documentType: { type: "any" },
-            },
-          ],
-        ]),
-      }),
+      validateSchemaDefinition(
+        withVectorIndex({
+          indexDescriptor: "by_embedding",
+          vectorField: "embedding",
+          dimensions: 128,
+          filterFields: ["status", "properties.kind"],
+        }),
+      ),
     ).not.toThrow();
   });
 
-  it("rejects invalid vector index dimensions", () => {
+  it("rejects vector index dimensions out of range", () => {
     expect(() =>
-      validateSchemaDefinition({
-        schemaValidation: false,
-        tables: new Map([
-          [
-            "tasks",
-            {
-              indexes: [],
-              vectorIndexes: [
-                {
-                  indexDescriptor: "by_embedding",
-                  vectorField: "embedding",
-                  dimensions: 1,
-                  filterFields: [],
-                },
-              ],
-              searchIndexes: [],
-              documentType: { type: "any" },
-            },
-          ],
-        ]),
-      }),
+      validateSchemaDefinition(
+        withVectorIndex({
+          indexDescriptor: "by_embedding",
+          vectorField: "embedding",
+          dimensions: 1,
+          filterFields: [],
+        }),
+      ),
     ).toThrow(/between 2 and 4096/);
   });
 
   it("rejects invalid vector filter field names", () => {
     expect(() =>
-      validateSchemaDefinition({
-        schemaValidation: false,
-        tables: new Map([
-          [
-            "tasks",
-            {
-              indexes: [],
-              vectorIndexes: [
-                {
-                  indexDescriptor: "by_embedding",
-                  vectorField: "embedding",
-                  dimensions: 2,
-                  filterFields: ["bad-field"],
-                },
-              ],
-              searchIndexes: [],
-              documentType: { type: "any" },
-            },
-          ],
-        ]),
-      }),
+      validateSchemaDefinition(
+        withVectorIndex({
+          indexDescriptor: "by_embedding",
+          vectorField: "embedding",
+          dimensions: 2,
+          filterFields: ["bad-field"],
+        }),
+      ),
     ).toThrow(/Vector filter field names/);
   });
 });

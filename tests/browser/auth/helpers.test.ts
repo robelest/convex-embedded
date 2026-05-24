@@ -11,23 +11,37 @@ import {
 } from "@resolve/browser/index";
 import { afterEach, beforeEach, describe, expect, it } from "@tests/testkit";
 import { ConvexClient } from "convex/browser";
-import { vi } from "vitest";
+
+type AuthFetcher = (args: {
+  forceRefreshToken: boolean;
+}) => Promise<string | null>;
+
+interface MockConvexClientInstance {
+  url: string;
+  authFetcher: AuthFetcher | null;
+  clearAuth: ReturnType<typeof vi.fn>;
+}
+
+interface MockBrowserModule {
+  __mock: {
+    reset: () => void;
+    instances: () => MockConvexClientInstance[];
+  };
+}
 
 vi.mock("convex/browser", () => {
   class MockConvexClient {
     static instances: MockConvexClient[] = [];
 
     url: string;
-    authFetcher:
-      | ((args: { forceRefreshToken: boolean }) => Promise<any>)
-      | null = null;
+    authFetcher: AuthFetcher | null = null;
 
     mutation = vi.fn(async () => undefined);
     query = vi.fn(async () => undefined);
     action = vi.fn(async () => undefined);
-    onUpdate = vi.fn(() => (() => {}) as any);
+    onUpdate = vi.fn(() => () => {});
     close = vi.fn(() => undefined);
-    setAuth = vi.fn((fetchToken: typeof this.authFetcher) => {
+    setAuth = vi.fn((fetchToken: AuthFetcher | null) => {
       this.authFetcher = fetchToken;
     });
     clearAuth = vi.fn(() => undefined);
@@ -89,29 +103,20 @@ function createModules() {
   };
 }
 
-async function settle(): Promise<void> {
-  await Promise.resolve();
-  await new Promise((resolve) => setTimeout(resolve, 0));
+async function mockBrowserModule(): Promise<MockBrowserModule> {
+  return (await vi.importMock("convex/browser")) as MockBrowserModule;
 }
 
 describe("auth state accessors", () => {
-  const clientsToClose: Array<{ close: () => Promise<void> | void }> = [];
-
   beforeEach(async () => {
-    const convexBrowser = (await vi.importMock("convex/browser")) as {
-      __mock: { reset: () => void };
-    };
-    convexBrowser.__mock.reset();
+    (await mockBrowserModule()).__mock.reset();
     MockBroadcastChannel.reset();
     vi.stubGlobal("BroadcastChannel", MockBroadcastChannel);
   });
 
-  afterEach(async () => {
+  afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
-    for (const client of clientsToClose.splice(0)) {
-      await client.close();
-    }
   });
 
   it("returns idle and a no-op unsubscribe for non-embedded clients", () => {
@@ -126,21 +131,22 @@ describe("auth state accessors", () => {
     expect(callback).not.toHaveBeenCalled();
   });
 
-  it("hydrates local auth state from getUserIdentity on create", async () => {
+  it("hydrates local auth state from getUserIdentity on create", async ({
+    track,
+  }) => {
     const identity = createTestIdentity({ subject: "alice" });
     const setIdentitySpy = vi.spyOn(EmbeddedRuntime.prototype, "setIdentity");
 
-    const client = createConvexClient({
-      convex: { modules: createModules() },
-      auth: {
-        getUserIdentity: vi.fn(async () => identity),
-      },
+    const client = track(
+      createConvexClient({
+        convex: { modules: createModules() },
+        auth: { getUserIdentity: vi.fn(async () => identity) },
+      }),
+    );
+
+    await vi.waitFor(() => {
+      expect(setIdentitySpy).toHaveBeenCalledWith(identity);
     });
-    clientsToClose.push(client as any);
-
-    await settle();
-
-    expect(setIdentitySpy).toHaveBeenCalledWith(identity);
     expect(getAuthState(client)).toEqual({
       status: "authenticated",
       identity,
@@ -148,28 +154,25 @@ describe("auth state accessors", () => {
     });
   });
 
-  it("wraps fetchToken and updates local identity when auth succeeds", async () => {
+  it("wraps fetchToken and updates local identity when auth succeeds", async ({
+    track,
+  }) => {
     const identity = createTestIdentity({ subject: "bob" });
     const setIdentitySpy = vi.spyOn(EmbeddedRuntime.prototype, "setIdentity");
     const fetchToken = vi.fn(async () => "token");
 
-    const client = createConvexClient({
-      convex: { modules: createModules() },
-      auth: {
-        fetchToken,
-        getUserIdentity: vi.fn(async () => identity),
-      },
-    });
-    clientsToClose.push(client as any);
+    const client = track(
+      createConvexClient({
+        convex: { modules: createModules() },
+        auth: { fetchToken, getUserIdentity: vi.fn(async () => identity) },
+      }),
+    );
 
-    const convexBrowser = (await vi.importMock("convex/browser")) as {
-      __mock: { instances: () => Array<any> };
-    };
-    const embeddedClient = convexBrowser.__mock.instances()[0];
+    const embeddedClient = (await mockBrowserModule()).__mock.instances()[0]!;
 
     expect(getAuthState(client)).toEqual({ status: "idle" });
 
-    const token = await embeddedClient.authFetcher({
+    const token = await embeddedClient.authFetcher!({
       forceRefreshToken: false,
     });
 
@@ -183,104 +186,112 @@ describe("auth state accessors", () => {
     });
   });
 
-  it("clears local identity when fetchToken returns null", async () => {
+  it("clears local identity when fetchToken returns null", async ({
+    track,
+  }) => {
     const setIdentitySpy = vi.spyOn(EmbeddedRuntime.prototype, "setIdentity");
 
-    const client = createConvexClient({
-      convex: { modules: createModules() },
-      auth: {
-        fetchToken: vi.fn(async () => null),
-        getUserIdentity: vi.fn(async () => createTestIdentity()),
-      },
+    const client = track(
+      createConvexClient({
+        convex: { modules: createModules() },
+        auth: {
+          fetchToken: vi.fn(async () => null),
+          getUserIdentity: vi.fn(async () => createTestIdentity()),
+        },
+      }),
+    );
+
+    const embeddedClient = (await mockBrowserModule()).__mock.instances()[0]!;
+
+    const token = await embeddedClient.authFetcher!({
+      forceRefreshToken: true,
     });
-    clientsToClose.push(client as any);
-
-    const convexBrowser = (await vi.importMock("convex/browser")) as {
-      __mock: { instances: () => Array<any> };
-    };
-    const embeddedClient = convexBrowser.__mock.instances()[0];
-
-    const token = await embeddedClient.authFetcher({ forceRefreshToken: true });
 
     expect(token).toBeNull();
     expect(setIdentitySpy).toHaveBeenLastCalledWith(null);
     expect(getAuthState(client)).toEqual({ status: "unauthenticated" });
   });
 
-  it("supports custom identity keys", async () => {
+  it("supports custom identity keys", async ({ track }) => {
     const identity = createTestIdentity({ subject: "carol" });
     const setActiveIdentityKeySpy = vi.spyOn(
       EmbeddedRuntime.prototype,
       "setActiveIdentityKey",
     );
 
-    const client = createConvexClient({
-      convex: { modules: createModules() },
-      auth: {
-        getUserIdentity: vi.fn(async () => identity),
-        getIdentityKey: (current) =>
-          current ? `workspace:${current.subject}` : null,
-      },
+    const client = track(
+      createConvexClient({
+        convex: { modules: createModules() },
+        auth: {
+          getUserIdentity: vi.fn(async () => identity),
+          getIdentityKey: (current) =>
+            current ? `workspace:${current.subject}` : null,
+        },
+      }),
+    );
+
+    await vi.waitFor(() => {
+      expect(setActiveIdentityKeySpy).toHaveBeenCalledWith("workspace:carol");
     });
-    clientsToClose.push(client as any);
-
-    await settle();
-
     expect(getAuthState(client)).toEqual({
       status: "authenticated",
       identity,
       identityKey: "workspace:carol",
     });
-    expect(setActiveIdentityKeySpy).toHaveBeenCalledWith("workspace:carol");
   });
 
-  it("exposes the active embedded identity", async () => {
+  it("exposes the active embedded identity", async ({ track }) => {
     const identity = createTestIdentity({ subject: "dana" });
 
-    const client = createConvexClient({
-      convex: { modules: createModules() },
-      auth: {
-        getUserIdentity: vi.fn(async () => identity),
-      },
+    const client = track(
+      createConvexClient({
+        convex: { modules: createModules() },
+        auth: { getUserIdentity: vi.fn(async () => identity) },
+      }),
+    );
+
+    await vi.waitFor(() => {
+      expect(getAuthIdentity(client)).toEqual(identity);
     });
-    clientsToClose.push(client as any);
-
-    await settle();
-
-    expect(getAuthIdentity(client)).toEqual(identity);
   });
 
-  it("logout clears embedded identity without deleting local state", async () => {
+  it("logout clears embedded identity without deleting local state", async ({
+    track,
+  }) => {
     const identity = createTestIdentity({ subject: "erin" });
 
-    const client = createConvexClient({
-      convex: { modules: createModules() },
-      auth: {
-        getUserIdentity: vi.fn(async () => identity),
-      },
-    });
-    clientsToClose.push(client as any);
+    const client = track(
+      createConvexClient({
+        convex: { modules: createModules() },
+        auth: { getUserIdentity: vi.fn(async () => identity) },
+      }),
+    );
 
-    await settle();
+    await vi.waitFor(() => {
+      expect(getAuthIdentity(client)).toEqual(identity);
+    });
     await logout(client);
 
     expect(getAuthIdentity(client)).toBeNull();
     expect(getAuthState(client)).toEqual({ status: "unauthenticated" });
   });
 
-  it("switchIdentity updates the active embedded identity", async () => {
+  it("switchIdentity updates the active embedded identity", async ({
+    track,
+  }) => {
     const alice = createTestIdentity({ subject: "alice" });
     const bob = createTestIdentity({ subject: "bob" });
 
-    const client = createConvexClient({
-      convex: { modules: createModules() },
-      auth: {
-        getUserIdentity: vi.fn(async () => alice),
-      },
-    });
-    clientsToClose.push(client as any);
+    const client = track(
+      createConvexClient({
+        convex: { modules: createModules() },
+        auth: { getUserIdentity: vi.fn(async () => alice) },
+      }),
+    );
 
-    await settle();
+    await vi.waitFor(() => {
+      expect(getAuthIdentity(client)).toEqual(alice);
+    });
     await switchIdentity(client, bob);
 
     expect(getAuthIdentity(client)).toEqual(bob);
@@ -291,91 +302,101 @@ describe("auth state accessors", () => {
     });
   });
 
-  it("reauthenticate forces a token refresh", async () => {
+  it("reauthenticate forces a token refresh", async ({ track }) => {
     const identity = createTestIdentity({ subject: "frank" });
     const fetchToken = vi.fn(async () => "token");
 
-    const client = createConvexClient({
-      convex: { modules: createModules() },
-      auth: {
-        fetchToken,
-        getUserIdentity: async () => identity,
-      },
-    });
-    clientsToClose.push(client as any);
+    const client = track(
+      createConvexClient({
+        convex: { modules: createModules() },
+        auth: { fetchToken, getUserIdentity: async () => identity },
+      }),
+    );
 
     await reauthenticate(client);
 
     expect(fetchToken).toHaveBeenCalledWith({ forceRefreshToken: true });
   });
 
-  it("clearAuth resets local auth state and forwards to the remote client", async () => {
+  it("clearAuth resets local auth state and forwards to the remote client", async ({
+    track,
+  }) => {
     const identity = createTestIdentity({ subject: "grace" });
 
-    const client = createConvexClient({
-      convex: { modules: createModules() },
-      remote: { url: "https://remote.example.convex.cloud" },
-      auth: {
-        getUserIdentity: vi.fn(async () => identity),
-      },
+    const client = track(
+      createConvexClient({
+        convex: { modules: createModules() },
+        remote: { url: "https://remote.example.convex.cloud" },
+        auth: { getUserIdentity: vi.fn(async () => identity) },
+      }),
+    );
+
+    await vi.waitFor(() => {
+      expect(getAuthIdentity(client)).toEqual(identity);
     });
-    clientsToClose.push(client as any);
 
-    await settle();
+    const [, remoteClient] = (await mockBrowserModule()).__mock.instances();
 
-    const convexBrowser = (await vi.importMock("convex/browser")) as {
-      __mock: { instances: () => Array<any> };
-    };
-    const [, remoteClient] = convexBrowser.__mock.instances();
+    (client as ConvexClient & { clearAuth: () => void }).clearAuth();
+    await vi.waitFor(() => {
+      expect(getAuthState(client)).toEqual({ status: "unauthenticated" });
+    });
 
-    (client as any).clearAuth();
-    await settle();
-
-    expect(remoteClient.clearAuth).toHaveBeenCalledOnce();
+    expect(remoteClient!.clearAuth).toHaveBeenCalledOnce();
     expect(getAuthIdentity(client)).toBeNull();
-    expect(getAuthState(client)).toEqual({ status: "unauthenticated" });
   });
 
-  it("propagates auth changes across tabs when getUserIdentity is configured", async () => {
+  it("propagates auth changes across tabs when getUserIdentity is configured", async ({
+    track,
+  }) => {
     let currentIdentity = createTestIdentity({ subject: "alice" });
 
-    const clientA = createConvexClient({
-      convex: { modules: createModules() },
-      name: "shared-app",
-      auth: { getUserIdentity: async () => currentIdentity },
-    });
-    const clientB = createConvexClient({
-      convex: { modules: createModules() },
-      name: "shared-app",
-      auth: { getUserIdentity: async () => currentIdentity },
-    });
-    clientsToClose.push(clientA as any, clientB as any);
+    const clientA = track(
+      createConvexClient({
+        convex: { modules: createModules() },
+        name: "shared-app",
+        auth: { getUserIdentity: async () => currentIdentity },
+      }),
+    );
+    const clientB = track(
+      createConvexClient({
+        convex: { modules: createModules() },
+        name: "shared-app",
+        auth: { getUserIdentity: async () => currentIdentity },
+      }),
+    );
 
-    await settle();
+    await vi.waitFor(() => {
+      expect(getAuthState(clientA).status).toBe("authenticated");
+    });
     currentIdentity = createTestIdentity({ subject: "bob" });
     await switchIdentity(clientA, currentIdentity);
-    await settle();
 
-    expect(getAuthState(clientB)).toEqual({
-      status: "authenticated",
-      identity: currentIdentity,
-      identityKey: currentIdentity.tokenIdentifier,
+    await vi.waitFor(() => {
+      expect(getAuthState(clientB)).toEqual({
+        status: "authenticated",
+        identity: currentIdentity,
+        identityKey: currentIdentity.tokenIdentifier,
+      });
     });
   });
 
-  it("delivers auth updates in order and isolates listener exceptions", async () => {
+  it("delivers auth updates in order and isolates listener exceptions", async ({
+    track,
+  }) => {
     const alice = createTestIdentity({ subject: "alice" });
     const bob = createTestIdentity({ subject: "bob" });
 
-    const client = createConvexClient({
-      convex: { modules: createModules() },
-      auth: {
-        getUserIdentity: vi.fn(async () => alice),
-      },
-    });
-    clientsToClose.push(client as any);
+    const client = track(
+      createConvexClient({
+        convex: { modules: createModules() },
+        auth: { getUserIdentity: vi.fn(async () => alice) },
+      }),
+    );
 
-    await settle();
+    await vi.waitFor(() => {
+      expect(getAuthState(client).status).toBe("authenticated");
+    });
 
     const noisyListener = vi.fn(() => {
       throw new Error("listener boom");
@@ -387,9 +408,7 @@ describe("auth state accessors", () => {
     });
 
     await switchIdentity(client, bob);
-    await settle();
     await logout(client);
-    await settle();
 
     unsubscribeNoisy();
     unsubscribeObserved();
@@ -398,29 +417,28 @@ describe("auth state accessors", () => {
     expect(observedStates).toEqual(["authenticated", "unauthenticated"]);
   });
 
-  it("stops delivering auth updates after unsubscribe", async () => {
+  it("stops delivering auth updates after unsubscribe", async ({ track }) => {
     const alice = createTestIdentity({ subject: "alice" });
     const bob = createTestIdentity({ subject: "bob" });
 
-    const client = createConvexClient({
-      convex: { modules: createModules() },
-      auth: {
-        getUserIdentity: vi.fn(async () => alice),
-      },
-    });
-    clientsToClose.push(client as any);
+    const client = track(
+      createConvexClient({
+        convex: { modules: createModules() },
+        auth: { getUserIdentity: vi.fn(async () => alice) },
+      }),
+    );
 
-    await settle();
+    await vi.waitFor(() => {
+      expect(getAuthState(client).status).toBe("authenticated");
+    });
 
     const callback = vi.fn();
     const unsubscribe = subscribeAuthState(client, callback);
 
     await switchIdentity(client, bob);
-    await settle();
     unsubscribe();
 
     await logout(client);
-    await settle();
 
     expect(callback).toHaveBeenCalledTimes(1);
     expect(callback).toHaveBeenLastCalledWith({

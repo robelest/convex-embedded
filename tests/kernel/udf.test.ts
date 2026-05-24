@@ -1,82 +1,136 @@
-import type { ModuleLoader } from "@embedded/kernel/modules";
+import {
+  ModuleLoader,
+  type ConvexModule,
+  type FunctionPath,
+} from "@embedded/kernel/modules";
+import type { RunUdfFn } from "@embedded/kernel/syscalls";
 import { UdfExecutor } from "@embedded/kernel/udf";
+import type { EmbeddedCryptoProvider } from "@embedded/runtime/crypto";
+import {
+  Database,
+  type CommitInvalidationBatch,
+  type DatabaseCommitResult,
+} from "@embedded/runtime/db/database";
 import { remoteOnly } from "@embedded/server/table";
-import { describe, it, expect } from "@tests/testkit";
+import { describe, expect, it, vi, type MockInstance } from "@tests/testkit";
 import { ConvexError } from "convex/values";
-import { vi } from "vitest";
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+type HandlerFn = (
+  ctx: Record<string, unknown>,
+  args: Record<string, unknown>,
+) => unknown;
 
-function createMockDb() {
-  const commitResult = {
-    timestamp: 1,
-    tablesWritten: new Set(["messages"]),
-    persisted: Promise.resolve(),
+interface TestDescriptor {
+  isQuery?: boolean;
+  isMutation?: boolean;
+  isAction?: boolean;
+  handler?: HandlerFn;
+  invokeQuery?: (argsStr: string) => Promise<string>;
+  invokeMutation?: (argsStr: string) => Promise<string>;
+  invokeAction?: (requestId: string, argsStr: string) => Promise<string>;
+}
+
+type TestModules = Record<string, Record<string, TestDescriptor>>;
+
+interface MockDb {
+  db: Database;
+  startTransaction: MockInstance<Database["startTransaction"]>;
+  rollbackWrites: MockInstance<Database["rollbackWrites"]>;
+  commit: MockInstance<Database["commit"]>;
+  commitAsync: MockInstance<Database["commitAsync"]>;
+}
+
+function makeCommitResult(
+  overrides: Partial<DatabaseCommitResult> = {},
+): DatabaseCommitResult {
+  const invalidation: CommitInvalidationBatch = {
+    tables: new Set(),
+    changes: [],
   };
   return {
-    startTransaction: vi.fn(),
-    commit: vi.fn().mockReturnValue(commitResult),
-    commitAsync: vi.fn().mockResolvedValue(commitResult),
-    rollbackWrites: vi.fn(),
-  } as any;
+    timestamp: 1,
+    tablesWritten: new Set(["messages"]),
+    invalidation,
+    persisted: Promise.resolve(),
+    ...overrides,
+  };
 }
 
-function createMockCrypto() {
+function createMockDb(): MockDb {
+  const db = new Database(null);
+  const commitResult = makeCommitResult();
   return {
-    randomUUID: vi.fn(() => "00000000-0000-4000-8000-000000000000"),
-    getRandomValues: vi.fn((bytes: Uint8Array) => bytes),
-    sha256: vi.fn(async () => new Uint8Array()),
-    encryptAesGcm: vi.fn(async () => new Uint8Array()),
-    decryptAesGcm: vi.fn(async () => new Uint8Array()),
-  } as any;
+    db,
+    startTransaction: vi
+      .spyOn(db, "startTransaction")
+      .mockImplementation(() => {}),
+    rollbackWrites: vi.spyOn(db, "rollbackWrites").mockImplementation(() => {}),
+    commit: vi.spyOn(db, "commit").mockReturnValue(commitResult),
+    commitAsync: vi.spyOn(db, "commitAsync").mockResolvedValue(commitResult),
+  };
 }
 
-function createMockModuleLoader(
-  modules: Record<string, Record<string, any>>,
-): ModuleLoader {
+function createMockCrypto(): EmbeddedCryptoProvider {
   return {
-    load: vi
-      .fn()
-      .mockImplementation((path: string) =>
-        Promise.resolve(modules[path] ?? {}),
-      ),
-  } as any;
+    randomUUID: vi.fn<EmbeddedCryptoProvider["randomUUID"]>(
+      () => "00000000-0000-4000-8000-000000000000",
+    ),
+    getRandomValues: vi.fn<EmbeddedCryptoProvider["getRandomValues"]>(
+      (bytes) => bytes,
+    ),
+    sha256: vi.fn<EmbeddedCryptoProvider["sha256"]>(
+      async () => new Uint8Array(),
+    ),
+    encryptAesGcm: vi.fn<EmbeddedCryptoProvider["encryptAesGcm"]>(
+      async () => new Uint8Array(),
+    ),
+    decryptAesGcm: vi.fn<EmbeddedCryptoProvider["decryptAesGcm"]>(
+      async () => new Uint8Array(),
+    ),
+  };
 }
 
-const mockRunUdf = vi.fn();
+function moduleLoaderFor(modules: TestModules): ModuleLoader {
+  const registry: Record<string, () => Promise<ConvexModule>> = {};
+  for (const [path, exports] of Object.entries(modules)) {
+    registry[path] = () => Promise.resolve(exports as ConvexModule);
+  }
+  return new ModuleLoader(registry);
+}
 
-function fp(udfPath: string) {
+const mockRunUdf = vi.fn<RunUdfFn>();
+
+function fp(udfPath: string): FunctionPath {
   return { componentPath: "", udfPath };
 }
 
-function componentFp(componentPath: string, udfPath: string) {
+function componentFp(componentPath: string, udfPath: string): FunctionPath {
   return { componentPath, udfPath };
 }
 
 function makeExecutor(
-  modules: Record<string, Record<string, any>>,
-  db = createMockDb(),
-) {
+  modules: TestModules,
+  mockDb: MockDb = createMockDb(),
+): { executor: UdfExecutor; db: MockDb } {
   return {
     executor: new UdfExecutor({
-      db,
+      db: mockDb.db,
       crypto: createMockCrypto(),
-      moduleLoader: createMockModuleLoader(modules),
+      moduleLoader: moduleLoaderFor(modules),
       runUdf: mockRunUdf,
     }),
-    db,
+    db: mockDb,
   };
 }
 
-// ---------------------------------------------------------------------------
-// executeQuery
-// ---------------------------------------------------------------------------
+function errorData(error: unknown): { code: string } {
+  expect(error).toBeInstanceOf(ConvexError);
+  return (error as ConvexError<{ code: string }>).data;
+}
 
 describe("executeQuery", () => {
   it("runs a handler function and returns the result", async () => {
-    const handler = vi.fn(async (_ctx: any, args: any) => args.x * 2);
+    const handler = vi.fn<HandlerFn>((_ctx, args) => Number(args.x) * 2);
     const { executor } = makeExecutor({
       messages: { list: { isQuery: true, handler } },
     });
@@ -87,8 +141,8 @@ describe("executeQuery", () => {
     expect(handler).toHaveBeenCalledOnce();
   });
 
-  it("runs invokeQuery SDK path and deserializes result", async () => {
-    const invokeQuery = vi.fn(async (_argsStr: string) => JSON.stringify(42));
+  it("runs the invokeQuery SDK path and deserializes the result", async () => {
+    const invokeQuery = vi.fn(async () => JSON.stringify(42));
     const { executor } = makeExecutor({
       messages: { list: { isQuery: true, invokeQuery } },
     });
@@ -100,12 +154,10 @@ describe("executeQuery", () => {
   });
 
   it("always rolls back writes after query execution", async () => {
-    const handler = vi.fn(async () => "ok");
-    const db = createMockDb();
-    const { executor } = makeExecutor(
-      { mod: { default: { isQuery: true, handler } } },
-      db,
-    );
+    const handler = vi.fn<HandlerFn>(async () => "ok");
+    const { executor, db } = makeExecutor({
+      mod: { default: { isQuery: true, handler } },
+    });
 
     await executor.executeQuery(fp("mod"), {});
 
@@ -114,7 +166,7 @@ describe("executeQuery", () => {
     expect(db.commit).not.toHaveBeenCalled();
   });
 
-  it("throws when export does not exist", async () => {
+  it("throws when the export does not exist", async () => {
     const { executor } = makeExecutor({ messages: {} });
 
     await expect(
@@ -124,7 +176,7 @@ describe("executeQuery", () => {
 
   it("throws when calling a mutation as a query", async () => {
     const { executor } = makeExecutor({
-      messages: { send: { isMutation: true, handler: vi.fn() } },
+      messages: { send: { isMutation: true, handler: vi.fn<HandlerFn>() } },
     });
 
     await expect(
@@ -133,55 +185,41 @@ describe("executeQuery", () => {
   });
 
   it("rejects local execution for remoteOnly() exports", async () => {
-    const handler = vi.fn(async () => "should-not-run");
+    const handler = vi.fn<HandlerFn>(async () => "should-not-run");
     const { executor } = makeExecutor({
-      messages: {
-        list: remoteOnly({ isQuery: true, handler }),
-      },
+      messages: { list: remoteOnly({ isQuery: true, handler }) },
     });
 
     const error = await executor
       .executeQuery(fp("messages:list"), {})
       .catch((err: unknown) => err);
-    expect(error).toBeInstanceOf(ConvexError);
-    expect((error as ConvexError<any>).data.code).toBe(
-      "ROUTE_REMOTE_LOCAL_UNSUPPORTED",
-    );
+
+    expect(errorData(error).code).toBe("ROUTE_REMOTE_LOCAL_UNSUPPORTED");
     expect((error as Error).message).toMatch(/remoteOnly\(\)/);
     expect(handler).not.toHaveBeenCalled();
   });
 
   it("rejects nested component queries during local execution", async () => {
-    const handler = vi.fn(async () => "should-not-run");
+    const handler = vi.fn<HandlerFn>(async () => "should-not-run");
     const { executor } = makeExecutor({
-      messages: {
-        list: { isQuery: true, handler },
-      },
+      messages: { list: { isQuery: true, handler } },
     });
 
     const error = await executor
       .executeQuery(componentFp("embedded", "messages:list"), {})
       .catch((err: unknown) => err);
-    expect(error).toBeInstanceOf(ConvexError);
-    expect((error as ConvexError<any>).data.code).toBe(
-      "NESTED_COMPONENT_LOCAL_UNSUPPORTED",
-    );
+
+    expect(errorData(error).code).toBe("NESTED_COMPONENT_LOCAL_UNSUPPORTED");
     expect((error as Error).message).toMatch(/component function/);
   });
 });
 
-// ---------------------------------------------------------------------------
-// executeMutation
-// ---------------------------------------------------------------------------
-
 describe("executeMutation", () => {
-  it("runs a handler function, commits, and returns result with tablesWritten", async () => {
-    const handler = vi.fn(async (_ctx: any, args: any) => args.text);
-    const db = createMockDb();
-    const { executor } = makeExecutor(
-      { messages: { send: { isMutation: true, handler } } },
-      db,
-    );
+  it("runs a handler, commits, and returns the result with tablesWritten", async () => {
+    const handler = vi.fn<HandlerFn>(async (_ctx, args) => args.text);
+    const { executor, db } = makeExecutor({
+      messages: { send: { isMutation: true, handler } },
+    });
 
     const { result, commit } = await executor.executeMutation(
       fp("messages:send"),
@@ -194,10 +232,8 @@ describe("executeMutation", () => {
     expect(db.rollbackWrites).not.toHaveBeenCalled();
   });
 
-  it("runs invokeMutation SDK path", async () => {
-    const invokeMutation = vi.fn(async (_argsStr: string) =>
-      JSON.stringify("created"),
-    );
+  it("runs the invokeMutation SDK path", async () => {
+    const invokeMutation = vi.fn(async () => JSON.stringify("created"));
     const { executor } = makeExecutor({
       messages: { send: { isMutation: true, invokeMutation } },
     });
@@ -209,14 +245,12 @@ describe("executeMutation", () => {
   });
 
   it("rolls back writes on handler error", async () => {
-    const handler = vi.fn(async () => {
+    const handler = vi.fn<HandlerFn>(async () => {
       throw new Error("mutation failed");
     });
-    const db = createMockDb();
-    const { executor } = makeExecutor(
-      { messages: { send: { isMutation: true, handler } } },
-      db,
-    );
+    const { executor, db } = makeExecutor({
+      messages: { send: { isMutation: true, handler } },
+    });
 
     await expect(
       executor.executeMutation(fp("messages:send"), {}),
@@ -228,7 +262,7 @@ describe("executeMutation", () => {
 
   it("throws when calling a query as a mutation", async () => {
     const { executor } = makeExecutor({
-      messages: { list: { isQuery: true, handler: vi.fn() } },
+      messages: { list: { isQuery: true, handler: vi.fn<HandlerFn>() } },
     });
 
     await expect(
@@ -244,26 +278,18 @@ describe("executeMutation", () => {
     const error = await executor
       .executeMutation(componentFp("embedded", "messages:send"), {})
       .catch((err: unknown) => err);
-    expect(error).toBeInstanceOf(ConvexError);
-    expect((error as ConvexError<any>).data.code).toBe(
-      "NESTED_COMPONENT_LOCAL_UNSUPPORTED",
-    );
+
+    expect(errorData(error).code).toBe("NESTED_COMPONENT_LOCAL_UNSUPPORTED");
     expect((error as Error).message).toMatch(/component function/);
   });
 });
 
-// ---------------------------------------------------------------------------
-// executeAction
-// ---------------------------------------------------------------------------
-
 describe("executeAction", () => {
   it("runs a handler function without a transaction", async () => {
-    const handler = vi.fn(async (_ctx: any, args: any) => args.url);
-    const db = createMockDb();
-    const { executor } = makeExecutor(
-      { api: { fetch: { isAction: true, handler } } },
-      db,
-    );
+    const handler = vi.fn<HandlerFn>(async (_ctx, args) => args.url);
+    const { executor, db } = makeExecutor({
+      api: { fetch: { isAction: true, handler } },
+    });
 
     const result = await executor.executeAction(fp("api:fetch"), {
       url: "https://example.com",
@@ -274,10 +300,8 @@ describe("executeAction", () => {
     expect(db.commit).not.toHaveBeenCalled();
   });
 
-  it("runs invokeAction SDK path", async () => {
-    const invokeAction = vi.fn(async (_requestId: string, _argsStr: string) =>
-      JSON.stringify("fetched"),
-    );
+  it("runs the invokeAction SDK path", async () => {
+    const invokeAction = vi.fn(async () => JSON.stringify("fetched"));
     const { executor } = makeExecutor({
       api: { fetch: { isAction: true, invokeAction } },
     });
@@ -288,10 +312,8 @@ describe("executeAction", () => {
     expect(invokeAction).toHaveBeenCalledOnce();
   });
 
-  it("throws when no handler found", async () => {
-    const { executor } = makeExecutor({
-      api: { fetch: { isAction: true } },
-    });
+  it("throws when no handler is found", async () => {
+    const { executor } = makeExecutor({ api: { fetch: { isAction: true } } });
 
     await expect(executor.executeAction(fp("api:fetch"), {})).rejects.toThrow(
       /could not extract a handler/,
@@ -304,24 +326,17 @@ describe("executeAction", () => {
     const error = await executor
       .executeAction(componentFp("embedded", "api:fetch"), {})
       .catch((err: unknown) => err);
-    expect(error).toBeInstanceOf(ConvexError);
-    expect((error as ConvexError<any>).data.code).toBe(
-      "NESTED_COMPONENT_LOCAL_UNSUPPORTED",
-    );
+
+    expect(errorData(error).code).toBe("NESTED_COMPONENT_LOCAL_UNSUPPORTED");
     expect((error as Error).message).toMatch(/component function/);
   });
 });
 
-// ---------------------------------------------------------------------------
-// Global patching
-// ---------------------------------------------------------------------------
-
-describe("Global patching", () => {
-  it("installs globalThis.Convex during execution and restores after", async () => {
+describe("global patching", () => {
+  it("installs globalThis.Convex during execution and restores it after", async () => {
     const originalConvex = globalThis.Convex;
     let capturedConvex: typeof globalThis.Convex;
-
-    const handler = vi.fn(async () => {
+    const handler = vi.fn<HandlerFn>(async () => {
       capturedConvex = globalThis.Convex;
       return "done";
     });
@@ -331,10 +346,10 @@ describe("Global patching", () => {
 
     await executor.executeQuery(fp("mod"), {});
 
-    expect(capturedConvex!).toBeDefined();
-    expect(typeof capturedConvex!.syscall).toBe("function");
-    expect(typeof capturedConvex!.asyncSyscall).toBe("function");
-    expect(typeof capturedConvex!.jsSyscall).toBe("function");
+    expect(capturedConvex).toBeDefined();
+    expect(typeof capturedConvex?.syscall).toBe("function");
+    expect(typeof capturedConvex?.asyncSyscall).toBe("function");
+    expect(typeof capturedConvex?.jsSyscall).toBe("function");
     expect(globalThis.Convex).toBe(originalConvex);
   });
 
@@ -342,8 +357,7 @@ describe("Global patching", () => {
     const originalConvex = globalThis.Convex;
     const originalMathRandom = Math.random;
     const originalDateNow = Date.now;
-
-    const handler = vi.fn(async () => {
+    const handler = vi.fn<HandlerFn>(async () => {
       throw new Error("boom");
     });
     const { executor } = makeExecutor({

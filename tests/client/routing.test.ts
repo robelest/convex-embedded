@@ -6,6 +6,16 @@ import {
 import { afterEach, beforeEach, describe, expect, it } from "@tests/testkit";
 import { ConvexError } from "convex/values";
 
+type RoutingErrorData = {
+  code: string;
+  message: string;
+};
+
+function expectRoutingError(error: unknown): ConvexError<RoutingErrorData> {
+  expect(error).toBeInstanceOf(ConvexError);
+  return error as ConvexError<RoutingErrorData>;
+}
+
 describe("routing plan guardrails", () => {
   let originalNavigator: Navigator | undefined;
 
@@ -54,18 +64,12 @@ describe("routing plan guardrails", () => {
     });
 
     expect(plan.kind).toBe("error");
-    expect((plan as { kind: "error"; error: Error }).error).toBeInstanceOf(
-      ConvexError,
-    );
-    expect(
-      (
-        (plan as { kind: "error"; error: ConvexError<any> })
-          .error as ConvexError<any>
-      ).data.code,
-    ).toBe("ROUTE_LOCAL_UNSUPPORTED");
-    expect((plan as { kind: "error"; error: Error }).error.message).toMatch(
-      /cannot run locally in alpha/,
-    );
+    if (plan.kind !== "error") {
+      throw new Error("expected an error plan");
+    }
+    const error = expectRoutingError(plan.error);
+    expect(error.data.code).toBe("ROUTE_LOCAL_UNSUPPORTED");
+    expect(error.message).toMatch(/cannot run locally in alpha/);
   });
 
   it("preserves explicit remote routes", () => {
@@ -83,6 +87,7 @@ describe("routing plan guardrails", () => {
   });
 
   it("fails remote plans immediately when offline", () => {
+    let thrown: unknown;
     try {
       assertRemotePlanOnline(
         {
@@ -93,13 +98,12 @@ describe("routing plan guardrails", () => {
           isOnline: () => false,
         },
       );
-      throw new Error("expected offline routing guardrail to throw");
     } catch (error) {
-      expect(error).toBeInstanceOf(ConvexError);
-      expect((error as ConvexError<any>).data.code).toBe(
-        "ROUTE_REMOTE_OFFLINE",
-      );
-      expect((error as Error).message).toMatch(/cannot run while offline/);
+      thrown = error;
     }
+
+    const error = expectRoutingError(thrown);
+    expect(error.data.code).toBe("ROUTE_REMOTE_OFFLINE");
+    expect(error.message).toMatch(/cannot run while offline/);
   });
 });

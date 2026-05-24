@@ -8,11 +8,15 @@ import {
 import { describe, expect, it, vi } from "@tests/testkit";
 import { v } from "convex/values";
 
-function createInMemoryAdapter(): MigrationRuntimeAdapter & {
-  rows: Record<string, Array<Record<string, unknown>>>;
+type AdapterRows = Record<string, Array<Record<string, unknown>>>;
+
+interface InMemoryAdapter extends MigrationRuntimeAdapter {
+  rows: AdapterRows;
   schemaOps: Array<{ table: string; ops: unknown[] }>;
-} {
-  const rows: Record<string, Array<Record<string, unknown>>> = {};
+}
+
+function createInMemoryAdapter(): InMemoryAdapter {
+  const rows: AdapterRows = {};
   const schemaOps: Array<{ table: string; ops: unknown[] }> = [];
   let nextId = 1;
   const allocId = () => `id_${nextId++}`;
@@ -80,16 +84,15 @@ describe("migration constants", () => {
 });
 
 describe("embeddedTable migrations option", () => {
-  it("derives version 1 when no migrations provided", () => {
+  it("derives version 1 when no migrations are provided", () => {
     const tasks = embeddedTable("tasks_v1", {
       title: register(v.string()),
     });
-    expect(
-      (tasks as unknown as { schema: { version: number } }).schema.version,
-    ).toBe(1);
+
+    expect(tasks.schema.version).toBe(1);
   });
 
-  it("derives version from max migration key", () => {
+  it("derives version from the max migration key", () => {
     const tasks = embeddedTable(
       "tasks_v3",
       {
@@ -102,14 +105,13 @@ describe("embeddedTable migrations option", () => {
         },
       },
     );
-    expect(
-      (tasks as unknown as { schema: { version: number } }).schema.version,
-    ).toBe(3);
+
+    expect(tasks.schema.version).toBe(3);
   });
 });
 
 describe("runMigrations", () => {
-  it("returns false when already at target version", async () => {
+  it("returns false when already at the target version", async () => {
     const adapter = createInMemoryAdapter();
     adapter.rows["_resolve_schema_versions"] = [
       { _id: "v1", _creationTime: 0, table: "tasks", version: 1 },
@@ -121,7 +123,7 @@ describe("runMigrations", () => {
 
     const result = await runMigrations({
       table: "tasks",
-      schema: (tasks as unknown as { schema: any }).schema,
+      schema: tasks.schema,
       adapter,
     });
 
@@ -136,7 +138,7 @@ describe("runMigrations", () => {
 
     const result = await runMigrations({
       table: "tasks",
-      schema: (tasks as unknown as { schema: any }).schema,
+      schema: tasks.schema,
       adapter,
     });
 
@@ -146,7 +148,7 @@ describe("runMigrations", () => {
     expect(versionRows[0]?.version).toBe(1);
   });
 
-  it("runs each version step in sequence with the new ctx shape", async () => {
+  it("runs each version step in sequence with the migration ctx shape", async () => {
     const adapter = createInMemoryAdapter();
     adapter.rows["_resolve_schema_versions"] = [
       { _id: "v1", _creationTime: 0, table: "tasks", version: 1 },
@@ -177,7 +179,7 @@ describe("runMigrations", () => {
 
     await runMigrations({
       table: "tasks",
-      schema: (tasks as unknown as { schema: any }).schema,
+      schema: tasks.schema,
       adapter,
     });
 
@@ -208,7 +210,7 @@ describe("runMigrations", () => {
 
     await runMigrations({
       table: "tasks",
-      schema: (tasks as unknown as { schema: any }).schema,
+      schema: tasks.schema,
       adapter,
     });
 
@@ -237,7 +239,7 @@ describe("runMigrations", () => {
     });
   });
 
-  it("throws when stored version exceeds target", async () => {
+  it("throws when the stored version exceeds the target", async () => {
     const adapter = createInMemoryAdapter();
     adapter.rows["_resolve_schema_versions"] = [
       { _id: "v1", _creationTime: 0, table: "tasks", version: 5 },
@@ -250,7 +252,7 @@ describe("runMigrations", () => {
     await expect(
       runMigrations({
         table: "tasks",
-        schema: (tasks as unknown as { schema: any }).schema,
+        schema: tasks.schema,
         adapter,
       }),
     ).rejects.toThrow("Forward-only");
@@ -280,7 +282,7 @@ describe("runMigrations", () => {
 
     await runMigrations({
       table: "tasks",
-      schema: (tasks as unknown as { schema: any }).schema,
+      schema: tasks.schema,
       adapter,
     });
 
@@ -313,7 +315,7 @@ describe("runMigrations", () => {
 
     const result = await runMigrations({
       table: "tasks",
-      schema: (tasks as unknown as { schema: any }).schema,
+      schema: tasks.schema,
       adapter,
       onMigrationError: async (_error, ctx) => {
         expect(ctx.currentVersion).toBe(1);
@@ -327,7 +329,7 @@ describe("runMigrations", () => {
     expect(adapter.rows["_resolve_schema_versions"]?.[0]?.version).toBe(2);
   });
 
-  it("handleRecovery action=retry leaves stored version unchanged", async () => {
+  it("handleRecovery action=retry leaves the stored version unchanged", async () => {
     const adapter = createInMemoryAdapter();
     adapter.rows["_resolve_schema_versions"] = [
       { _id: "v1", _creationTime: 0, table: "tasks", version: 1 },
@@ -347,7 +349,7 @@ describe("runMigrations", () => {
 
     await runMigrations({
       table: "tasks",
-      schema: (tasks as unknown as { schema: any }).schema,
+      schema: tasks.schema,
       adapter,
       onMigrationError: async () => ({ action: "retry" }),
     });
@@ -376,7 +378,7 @@ describe("runMigrations", () => {
 
     await runMigrations({
       table: "tasks",
-      schema: (tasks as unknown as { schema: any }).schema,
+      schema: tasks.schema,
       adapter,
       onMigrationError: async () => ({
         action: "custom",
@@ -407,7 +409,7 @@ describe("runMigrations", () => {
 
     await runMigrations({
       table: "tasks",
-      schema: (tasks as unknown as { schema: any }).schema,
+      schema: tasks.schema,
       adapter,
     });
 

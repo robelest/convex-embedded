@@ -2,49 +2,57 @@ import {
   planMutationExecution,
   planReadExecution,
 } from "@embedded/client/routing/plan";
+import type {
+  ConvexModuleRegistry,
+  FunctionPath,
+} from "@embedded/kernel/modules";
 import { resolveFunctionPath } from "@embedded/kernel/modules";
 import { EmbeddedRuntime } from "@embedded/runtime/embedded";
 import { describe, expect, it } from "@tests/testkit";
+import { ConvexError } from "convex/values";
 
-const STUB_MODULES: Record<string, () => Promise<unknown>> = {
+const STUB_MODULES: ConvexModuleRegistry = {
   "_generated/api": () => Promise.resolve({}),
 };
 
-// ---------------------------------------------------------------------------
-// resolveFunctionPath — direct UDF names stay local (componentPath empty)
-// ---------------------------------------------------------------------------
+interface RunUdfRuntime {
+  _runUdf(
+    type: "query" | "mutation" | "action",
+    path: FunctionPath,
+    args: Record<string, unknown>,
+  ): Promise<unknown>;
+}
 
-describe("component path resolution", () => {
+describe.concurrent("component path resolution", () => {
   it("leaves componentPath empty for direct UDF names", () => {
     const path = resolveFunctionPath({ name: "messages:send" });
+
     expect(path.componentPath).toBe("");
     expect(path.udfPath).toBe("messages:send");
   });
 });
 
-// ---------------------------------------------------------------------------
-// Routing — component refs are remote-routed with cause "component-routed"
-// ---------------------------------------------------------------------------
-
-describe("routing for component functions", () => {
-  it("planMutationExecution routes component refs remote with component-routed cause", () => {
+describe.concurrent("routing for component functions", () => {
+  it("routes component mutation refs remote with a component-routed cause", () => {
     const plan = planMutationExecution({
       refName: "embedded:messages.send",
       refPath: { componentPath: "embedded", udfPath: "messages:send" },
       routeMode: null,
     });
+
     expect(plan.kind).toBe("remote");
     if (plan.kind === "remote") {
       expect(plan.cause).toBe("component-routed");
     }
   });
 
-  it("planReadExecution routes component refs remote with component-routed cause", () => {
+  it("routes component read refs remote with a component-routed cause", () => {
     const plan = planReadExecution({
       refName: "embedded:messages.list",
       refPath: { componentPath: "embedded", udfPath: "messages:list" },
       routeMode: null,
     });
+
     expect(plan.kind).toBe("remote");
     if (plan.kind === "remote") {
       expect(plan.cause).toBe("component-routed");
@@ -57,6 +65,7 @@ describe("routing for component functions", () => {
       refPath: { componentPath: "embedded", udfPath: "messages:send" },
       routeMode: "local",
     });
+
     expect(plan.kind).toBe("error");
     if (plan.kind === "error") {
       expect(plan.error.message).toMatch(
@@ -65,12 +74,13 @@ describe("routing for component functions", () => {
     }
   });
 
-  it("non-component refs route locally by default (mirror)", () => {
+  it("routes non-component refs locally by default (mirror)", () => {
     const plan = planMutationExecution({
       refName: "messages:send",
       refPath: { componentPath: "", udfPath: "messages:send" },
       routeMode: null,
     });
+
     expect(plan.kind).toBe("local");
     if (plan.kind === "local") {
       expect(plan.enqueueForReplay).toBe(true);
@@ -78,32 +88,30 @@ describe("routing for component functions", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Runtime — _runUdf throws cleanly when reached for a component function
-// ---------------------------------------------------------------------------
-
 describe("EmbeddedRuntime component dispatch (alpha guard)", () => {
-  it("throws NESTED_COMPONENT_LOCAL_UNSUPPORTED when invoked with a component path", async () => {
+  it("throws NESTED_COMPONENT_LOCAL_UNSUPPORTED when invoked with a component path", async ({
+    track,
+  }) => {
     const runtime = new EmbeddedRuntime({ convex: { modules: STUB_MODULES } });
+    track({ close: () => runtime.shutdown() });
     await runtime.hydrate();
-    try {
-      const path = {
-        componentPath: "embedded",
-        udfPath: "messages:send",
-      };
-      // _runUdf is private but reachable for tests; this is the path the
-      // protocol takes when a component function arrives via 1.0/runUdf.
-      const error = await (runtime as any)
-        ._runUdf("mutation", path, {})
-        .catch((err: unknown) => err);
-      expect(error).toBeInstanceOf(Error);
-      const data = (error as { data?: { code?: string } }).data ?? {};
+
+    const runUdf = runtime as unknown as RunUdfRuntime;
+    const error = await runUdf
+      ._runUdf(
+        "mutation",
+        { componentPath: "embedded", udfPath: "messages:send" },
+        {},
+      )
+      .catch((err: unknown) => err);
+
+    expect(error).toBeInstanceOf(ConvexError);
+    if (error instanceof ConvexError) {
+      const data = error.data as { code?: string };
       expect(data.code).toBe("NESTED_COMPONENT_LOCAL_UNSUPPORTED");
-      expect((error as Error).message).toMatch(
+      expect(error.message).toMatch(
         /Component refs are remote-routed in alpha/,
       );
-    } finally {
-      runtime.shutdown();
     }
   });
 });

@@ -4,34 +4,32 @@
   "workspaces": [
     "packages/*",
     "tests",
+    "benchmarks",
     "demos/*"
   ],
   "type": "module",
   "scripts": {
     "test": "vp run cache:test",
     "test:coverage": "vp test --run --coverage",
-    "bench": "vp test bench tests/benchmarks",
-    "bench:query-engine": "vp test bench tests/benchmarks/query-engine.bench.ts",
-    "bench:platform": "vp test bench tests/benchmarks/platform.bench.ts",
-    "bench:reactivity": "vp test bench tests/benchmarks/reactivity.bench.ts",
-    "bench:component-storage": "vp test bench tests/benchmarks/component-storage.bench.ts",
+    "test:package": "vp run --filter tests test:package",
+    "bench": "vp run --filter benchmarks bench",
     "build": "vp run cache:build",
     "build:embedded": "vp exec convex codegen --component-dir ./packages/convex-embedded/src/component && vp run --filter @robelest/convex-embedded build",
     "build:demo": "vp run --filter demo-svelte build",
     "publish:embedded": "vp pm publish --filter @robelest/convex-embedded --access public",
-    "typecheck": "vp run --filter @robelest/convex-embedded typecheck",
+    "typecheck": "vp run cache:typecheck",
     "typecheck:embedded": "vp run --filter @robelest/convex-embedded typecheck",
     "lint": "vp lint",
     "deploy:docs": "vp run --filter docs build && vpx wrangler pages deploy ./docs/build --project-name=convex-embedded",
     "lint:fix": "vp lint --fix",
     "fmt": "vp fmt .",
     "fmt:check": "vp fmt --check .",
-    "check": "vp run cache:check",
+    "check": "vp run cache:check cache:typecheck",
     "deploy:demo": "vp exec convex deploy --cmd 'vp run build:demo' --cmd-url-env-var-name CONVEX_URL && vp run --filter demo-svelte deploy",
     "dev:convex": "vp exec convex dev",
     "dev:svelte": "vp run --filter demo-svelte dev",
-    "test:live": "vp exec convex deploy --preview-create=embedded-e2e --cmd-url-env-var-name CONVEX_URL --cmd 'RUN_CONVEX_E2E=1 vp test --run tests/e2e/convex'",
-    "test:live:url": "RUN_CONVEX_E2E=1 vp test --run tests/e2e/convex",
+    "test:live": "vp exec convex deploy --preview-create=embedded-live --cmd-url-env-var-name CONVEX_URL --cmd 'RUN_CONVEX_LIVE=1 vp test --run --project live'",
+    "test:live:url": "RUN_CONVEX_LIVE=1 vp test --run --project live",
     "prepare": "vp config"
   },
   "dependencies": {
@@ -54,7 +52,8 @@
       "react": "19.1.0",
       "react-dom": "19.2.0",
       "vite": "catalog:",
-      "vitest": "catalog:"
+      "vitest": "catalog:",
+      "@tiptap/core": "3.22.2"
     },
     "peerDependencyRules": {
       "allowAny": [

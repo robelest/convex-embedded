@@ -1,20 +1,23 @@
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { beforeEach, describe, expect, it } from "@tests/testkit";
+import { collectRemoteManifest } from "@embedded/codegen/manifest";
+import { describe, expect, it as base } from "@tests/testkit";
 
-import { collectRemoteManifest } from "../../packages/convex-embedded/src/codegen/manifest";
+const it = base.extend<{ convexRoot: string }>({
+  convexRoot: async ({ onTestFinished }, use) => {
+    const root = await mkdtemp(path.join(tmpdir(), "convex-embedded-cli-"));
+    await mkdir(path.join(root, "nested"), { recursive: true });
+    onTestFinished(() => rm(root, { recursive: true, force: true }));
+    await use(root);
+  },
+});
 
 describe("codegen manifest generation", () => {
-  let convexRoot: string;
-
-  beforeEach(async () => {
-    convexRoot = await mkdtemp(path.join(tmpdir(), "convex-embedded-cli-"));
-    await mkdir(path.join(convexRoot, "nested"), { recursive: true });
-  });
-
-  it("preserves nested relative schema imports and actual embedded table names", async () => {
+  it("preserves nested relative schema imports and actual embedded table names", async ({
+    convexRoot,
+  }) => {
     await writeFile(
       path.join(convexRoot, "nested", "schema.ts"),
       `
@@ -45,7 +48,9 @@ export const list = taskBinding.query({ args: {}, handler: async () => [] });
     });
   });
 
-  it("emits a resolve-only entry even when multiple table queries are defined", async () => {
+  it("emits a single resolve-only entry even with multiple table queries", async ({
+    convexRoot,
+  }) => {
     await writeFile(
       path.join(convexRoot, "schema.ts"),
       `

@@ -29,13 +29,17 @@ const importableSpecifiers = [
 
 const resolveOnlySpecifiers = ["@robelest/convex-embedded/expo"] as const;
 
+const resolvableSpecifiers = [
+  ...importableSpecifiers,
+  ...resolveOnlySpecifiers,
+];
+
 async function resolveSpecifier(specifier: string): Promise<string> {
   const resolved = import.meta.resolve(specifier);
 
   expect(resolved.startsWith("file://")).toBe(true);
 
-  const filePath = fileURLToPath(resolved);
-  await access(filePath);
+  await access(fileURLToPath(resolved));
 
   return resolved;
 }
@@ -43,24 +47,23 @@ async function resolveSpecifier(specifier: string): Promise<string> {
 (hasBuildArtifacts ? describe : describe.skip)(
   "package consumer exports",
   () => {
-    it("resolves each public export via Node package resolution", async () => {
-      for (const specifier of [
-        ...importableSpecifiers,
-        ...resolveOnlySpecifiers,
-      ]) {
+    it.for(resolvableSpecifiers)(
+      "resolves %s via Node package resolution",
+      async (specifier) => {
         await resolveSpecifier(specifier);
-      }
-    });
+      },
+    );
 
-    it("imports consumer-facing exports from resolved files", async () => {
-      for (const specifier of importableSpecifiers) {
+    it.for(importableSpecifiers)(
+      "imports %s from its resolved file",
+      async (specifier) => {
         const resolved = await resolveSpecifier(specifier);
-        const module = await import(resolved);
-        expect(module).toBeDefined();
-      }
-    });
+        const imported: unknown = await import(resolved);
+        expect(imported).toBeDefined();
+      },
+    );
 
-    it("keeps the browser sqlite worker co-located with the emitted chunk that loads it", async () => {
+    it("co-locates the browser sqlite worker with the chunk that loads it", async () => {
       const workerPath = fileURLToPath(
         new URL(
           "../../packages/convex-embedded/dist/worker.js",
@@ -74,17 +77,16 @@ async function resolveSpecifier(specifier: string): Promise<string> {
       const topLevelJsFiles = (await readdir(distDir)).filter((entry) =>
         entry.endsWith(".js"),
       );
-      let referencingFile: string | null = null;
+      const contents = await Promise.all(
+        topLevelJsFiles.map((fileName) =>
+          readFile(join(distDir, fileName), "utf8"),
+        ),
+      );
+      const referencingFile = topLevelJsFiles.find((_fileName, index) =>
+        contents[index]?.includes('new URL("./worker.js", import.meta.url)'),
+      );
 
-      for (const fileName of topLevelJsFiles) {
-        const content = await readFile(join(distDir, fileName), "utf8");
-        if (content.includes('new URL("./worker.js", import.meta.url)')) {
-          referencingFile = fileName;
-          break;
-        }
-      }
-
-      expect(referencingFile).not.toBeNull();
+      expect(referencingFile).toBeDefined();
     });
   },
 );

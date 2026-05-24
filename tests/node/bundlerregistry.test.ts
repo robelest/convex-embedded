@@ -1,17 +1,16 @@
 import { mkdirSync, rmSync } from "node:fs";
 import path from "node:path";
 
-import { afterAll, beforeAll, describe, expect, it } from "@tests/testkit";
+import type { ConvexInput } from "@embedded/kernel/modules";
+import type { InternalTableSpec } from "@embedded/storage/sqlite/factory";
+import { afterAll, beforeAll, describe, expect, it, vi } from "@tests/testkit";
 
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
 import * as schema from "../../convex/schema";
-import { generateEmbeddedRegistry } from "../../packages/convex-embedded/src/codegen/index";
 import { getEmbeddedClientEntry } from "../../packages/convex-embedded/src/client/entry";
-import {
-  getRemoteState,
-  subscribeRemoteState,
-} from "../../packages/convex-embedded/src/client/remote";
+import { getRemoteState } from "../../packages/convex-embedded/src/client/remote";
+import { generateEmbeddedRegistry } from "../../packages/convex-embedded/src/codegen/index";
 import { createConvexClient } from "../../packages/convex-embedded/src/node/index";
 import { openNodeStorage } from "../../packages/convex-embedded/src/node/sqlite/adapter";
 import { extractEmbeddedTableDefinitions } from "../../packages/convex-embedded/src/shared/schema";
@@ -20,50 +19,38 @@ import { temporaryDatabasePath, uniqueSuffix } from "../helpers/storage";
 const PROJECT_ROOT = path.resolve(import.meta.dirname, "../..");
 const CONVEX_URL = process.env.CONVEX_URL;
 
-function waitForResolved(
-  client: Parameters<typeof getRemoteState>[0],
-  timeoutMs = 20_000,
-): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const current = getRemoteState(client);
-    if (current.status === "resolved") {
-      resolve();
-      return;
-    }
+type ConvexClientLike = Parameters<typeof getRemoteState>[0];
+type EmbeddedClient = ReturnType<typeof createConvexClient>;
 
-    const timeout = setTimeout(() => {
-      unsubscribe();
-      reject(
-        new Error(
-          `Timed out waiting for resolved. Last status: ${getRemoteState(client).status}`,
-        ),
-      );
-    }, timeoutMs);
-
-    const unsubscribe = subscribeRemoteState(client, (status) => {
-      if (status.status !== "resolved") return;
-      clearTimeout(timeout);
-      unsubscribe();
-      resolve();
-    });
-  });
+async function waitForResolved(client: ConvexClientLike): Promise<void> {
+  await vi.waitFor(
+    () => {
+      const { status } = getRemoteState(client);
+      if (status !== "resolved") {
+        throw new Error(`not resolved yet, last status: ${status}`);
+      }
+    },
+    { timeout: 20_000, interval: 100 },
+  );
 }
 
 async function pollLocalTable(
-  client: ReturnType<typeof createConvexClient>,
+  client: EmbeddedClient,
   tableName: string,
-  timeoutMs = 15_000,
 ): Promise<Array<Record<string, unknown>>> {
   const entry = getEmbeddedClientEntry(client);
   if (!entry) throw new Error("missing embedded runtime entry");
 
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const docs = await entry.runtime.getDocumentsForTable(tableName);
-    if (docs.length > 0) return docs as Array<Record<string, unknown>>;
-    await new Promise((r) => setTimeout(r, 200));
-  }
-  return [];
+  return vi.waitFor(
+    async () => {
+      const docs = (await entry.runtime.getDocumentsForTable(
+        tableName,
+      )) as Array<Record<string, unknown>>;
+      if (docs.length === 0) throw new Error(`no rows in ${tableName} yet`);
+      return docs;
+    },
+    { timeout: 15_000, interval: 200 },
+  );
 }
 
 const runWhenRemote = CONVEX_URL ? describe : describe.skip;
@@ -88,30 +75,22 @@ describe("codegen manifest", () => {
     if (outDir) {
       try {
         rmSync(outDir, { recursive: true, force: true });
-      } catch {}
+      } catch {
+        // best-effort cleanup
+      }
     }
   });
 
   it("produces a manifest with tables and routeModes", async () => {
-    const { convex } = (await import(outFile)) as {
-      convex: {
-        modules: Record<string, () => Promise<unknown>>;
-        manifest?: {
-          remote?: {
-            routeModes?: Record<string, string>;
-            tables?: Record<string, unknown>;
-          };
-        };
-      };
-    };
+    const { convex } = (await import(outFile)) as { convex: ConvexInput };
 
-    expect(convex.manifest?.remote?.tables).toBeDefined();
-    const tables = Object.keys(convex.manifest!.remote!.tables!);
-    expect(tables).toEqual(
+    const tablesManifest = convex.manifest?.remote?.tables;
+    expect(tablesManifest).toBeDefined();
+    expect(Object.keys(tablesManifest ?? {})).toEqual(
       expect.arrayContaining(["projects", "issues", "comments"]),
     );
 
-    const routeModes = convex.manifest!.remote!.routeModes!;
+    const routeModes = convex.manifest?.remote?.routeModes ?? {};
     expect(routeModes["agent:summarizeIssue"]).toBe("remote");
     expect(routeModes["agent:summarizeProject"]).toBe("remote");
   });
@@ -134,8 +113,8 @@ describe("codegen manifest", () => {
 runWhenRemote("bundler registry syncs remote data into local sqlite", () => {
   let outDir: string;
   let databasePath: string;
-  let convexInput: any;
-  let userTableSpecs: Map<string, any> | undefined;
+  let convexInput: ConvexInput;
+  let userTableSpecs: Map<string, InternalTableSpec> | undefined;
 
   beforeAll(async () => {
     const name = uniqueSuffix("bundler-live");
@@ -150,7 +129,7 @@ runWhenRemote("bundler registry syncs remote data into local sqlite", () => {
       cwd: PROJECT_ROOT,
     });
 
-    const { convex } = (await import(outFile)) as { convex: any };
+    const { convex } = (await import(outFile)) as { convex: ConvexInput };
     convexInput = convex;
 
     const client = createConvexClient({
@@ -162,42 +141,43 @@ runWhenRemote("bundler registry syncs remote data into local sqlite", () => {
     });
 
     await waitForResolved(client);
-
     await pollLocalTable(client, "projects");
 
     const projects = (await client.query(api.projects.list, {})) as Array<{
       _id: Id<"projects">;
     }>;
 
-    const projectsToLoad = projects.slice(0, 2);
-    for (const project of projectsToLoad) {
-      await client.query(api.issues.allForProject, {
-        projectId: project._id,
-      });
+    for (const project of projects.slice(0, 2)) {
+      await client.query(api.issues.allForProject, { projectId: project._id });
 
       const entry = getEmbeddedClientEntry(client)!;
-      const deadline = Date.now() + 15_000;
-      while (Date.now() < deadline) {
-        const docs = (await entry.runtime.getDocumentsForTable(
-          "issues",
-        )) as Array<Record<string, unknown>>;
-        const forProject = docs.filter((d) => d.projectId === project._id);
-        if (forProject.length > 0) break;
-        await new Promise((r) => setTimeout(r, 200));
-      }
+      await vi.waitFor(
+        async () => {
+          const docs = (await entry.runtime.getDocumentsForTable(
+            "issues",
+          )) as Array<Record<string, unknown>>;
+          const forProject = docs.filter((d) => d.projectId === project._id);
+          if (forProject.length === 0) {
+            throw new Error("issues for project not synced yet");
+          }
+        },
+        { timeout: 15_000, interval: 200 },
+      );
     }
 
-    const entry = getEmbeddedClientEntry(client);
-    userTableSpecs = entry?.runtime.getUserTableSpecs() ?? undefined;
+    userTableSpecs =
+      getEmbeddedClientEntry(client)?.runtime.getUserTableSpecs() ?? undefined;
 
-    await (client as { close(): Promise<void> }).close();
+    await client.close();
   }, 60_000);
 
   afterAll(() => {
     if (outDir) {
       try {
         rmSync(outDir, { recursive: true, force: true });
-      } catch {}
+      } catch {
+        // best-effort cleanup
+      }
     }
   });
 
@@ -232,7 +212,7 @@ runWhenRemote("bundler registry syncs remote data into local sqlite", () => {
     expect(docs[0]).toHaveProperty("title");
   });
 
-  it("a fresh client reads from sqlite without remote", async () => {
+  it("a fresh client reads from sqlite without remote", async ({ track }) => {
     const name = uniqueSuffix("bundler-offline-read");
 
     const offlineClient = createConvexClient({
@@ -241,6 +221,7 @@ runWhenRemote("bundler registry syncs remote data into local sqlite", () => {
       name,
       databasePath,
     });
+    track({ close: () => offlineClient.close() });
 
     const projects = (await offlineClient.query(
       api.projects.list,
@@ -261,7 +242,5 @@ runWhenRemote("bundler registry syncs remote data into local sqlite", () => {
       totalIssues += issues.length;
     }
     expect(totalIssues).toBeGreaterThan(0);
-
-    await (offlineClient as { close(): Promise<void> }).close();
   });
 });

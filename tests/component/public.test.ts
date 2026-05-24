@@ -6,18 +6,8 @@ import {
   recordDelete,
   recordUpdate,
 } from "@resolve/component/public";
-import { beforeEach, describe, expect, it } from "@tests/testkit";
-import { vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "@tests/testkit";
 import * as Y from "yjs";
-
-const recordUpdateHandler = (recordUpdate as any)._handler as Function;
-const recordDeleteHandler = (recordDelete as any)._handler as Function;
-const getCollectionChangesHandler = (getCollectionChanges as any)
-  ._handler as Function;
-const getLiveStateHandler = (getLiveState as any)._handler as Function;
-const getLiveStatesHandler = (getLiveStates as any)._handler as Function;
-const getLiveStatesPageHandler = (getLiveStatesPage as any)
-  ._handler as Function;
 
 type TableName =
   | "collectionHeads"
@@ -25,12 +15,148 @@ type TableName =
   | "liveStates"
   | "deltaTail";
 
+type Row = Record<string, unknown> & { _id: string };
+
+interface RangeFilter {
+  field: string;
+  op: "eq" | "gt" | "gte" | "lt" | "lte";
+  value: unknown;
+}
+
+interface IndexFilterBuilder {
+  eq(field: string, value: unknown): IndexFilterBuilder;
+  gt(field: string, value: unknown): IndexFilterBuilder;
+  gte(field: string, value: unknown): IndexFilterBuilder;
+  lt(field: string, value: unknown): IndexFilterBuilder;
+  lte(field: string, value: unknown): IndexFilterBuilder;
+}
+
+interface PaginateResult {
+  page: Row[];
+  isDone: boolean;
+  continueCursor: string | null;
+}
+
+interface QueryChain {
+  unique(): Promise<Row | null>;
+  first(): Promise<Row | null>;
+  collect(): Promise<Row[]>;
+  take(count: number): Promise<Row[]>;
+  paginate(opts: {
+    cursor: string | null;
+    numItems: number;
+  }): Promise<PaginateResult>;
+  order(direction: "asc" | "desc"): QueryChain;
+  filter(predicate: (row: Row) => boolean): QueryChain;
+}
+
+interface QueryTable extends QueryChain {
+  withIndex(
+    indexName: string,
+    builder: (q: IndexFilterBuilder) => IndexFilterBuilder,
+  ): QueryChain;
+}
+
+interface MockDb {
+  query(tableName: string): QueryTable;
+  insert(tableName: string, value: Record<string, unknown>): Promise<string>;
+  patch(id: string, fields: Record<string, unknown>): Promise<void>;
+  delete(id: string): Promise<void>;
+}
+
+interface MockCtx {
+  db: MockDb;
+  tables: Record<TableName, Row[]>;
+}
+
+/** A registered Convex function exposes its handler under `_handler` at runtime. */
+type HandlerOf<Args, Result> = {
+  _handler: (ctx: MockCtx, args: Args) => Promise<Result>;
+};
+
+function handlerOf<Args, Result>(
+  fn: unknown,
+): (ctx: MockCtx, args: Args) => Promise<Result> {
+  return (fn as HandlerOf<Args, Result>)._handler;
+}
+
+interface RecordUpdateArgs {
+  collection: string;
+  docId: string;
+  update: ArrayBuffer;
+  docCreationTime: number;
+  keepTailCount?: number;
+  keepCollectionTailCount?: number;
+  tailByteLimit?: number;
+}
+
+interface RecordDeleteArgs {
+  collection: string;
+  docId: string;
+  keepCollectionTailCount?: number;
+}
+
+interface LiveStateResult {
+  update: ArrayBuffer;
+  seq: number;
+  docCreationTime?: number;
+}
+
+interface LiveStatesEntry {
+  docId: string;
+  update: ArrayBuffer;
+  seq: number;
+  docCreationTime?: number;
+}
+
+interface CollectionChange {
+  docId: string;
+  kind: "upsert" | "delete";
+}
+
+interface CollectionChangesResult {
+  mode: "full" | "incremental";
+  collectionSeq: number;
+  isGapDetected: boolean;
+  changes: CollectionChange[];
+}
+
+interface LiveStatesPageResult {
+  page: LiveStatesEntry[];
+  continueCursor: string | null;
+  isDone: boolean;
+}
+
+const recordUpdateHandler = handlerOf<RecordUpdateArgs, unknown>(recordUpdate);
+const recordDeleteHandler = handlerOf<RecordDeleteArgs, unknown>(recordDelete);
+const getCollectionChangesHandler = handlerOf<
+  { collection: string; sinceSeq: number | null },
+  CollectionChangesResult
+>(getCollectionChanges);
+const getLiveStateHandler = handlerOf<
+  { collection: string; docId: string },
+  LiveStateResult | null
+>(getLiveState);
+const getLiveStatesHandler = handlerOf<
+  { collection: string; docIds?: string[] },
+  Array<LiveStatesEntry | null>
+>(getLiveStates);
+const getLiveStatesPageHandler = handlerOf<
+  { collection: string; cursor?: string | null; limit?: number },
+  LiveStatesPageResult
+>(getLiveStatesPage);
+
 function clone<T>(value: T): T {
   return structuredClone(value);
 }
 
-function createMockCtx() {
-  const tables: Record<TableName, Array<any>> = {
+function numericField(row: Row, field: string): number {
+  const value = row[field];
+  return typeof value === "number" ? value : 0;
+}
+
+function createMockCtx(): MockCtx {
+  const tables: Record<TableName, Row[]> = {
     collectionHeads: [],
     collectionTail: [],
     liveStates: [],
@@ -38,19 +164,19 @@ function createMockCtx() {
   };
   let idCounter = 0;
 
-  function terminalMethods(rows: any[], tableName: string) {
+  function terminalMethods(rows: Row[]): QueryChain {
     return {
       unique: async () => {
         if (rows.length > 1) {
-          throw new Error(`Expected unique result for ${tableName}`);
+          throw new Error("Expected unique result");
         }
         return clone(rows[0] ?? null);
       },
       first: async () => clone(rows[0] ?? null),
       collect: async () => clone(rows),
-      take: async (count: number) => clone(rows.slice(0, count)),
-      paginate: async (opts: { cursor: string | null; numItems: number }) => {
-        const start = opts.cursor ? parseInt(opts.cursor, 10) : 0;
+      take: async (count) => clone(rows.slice(0, count)),
+      paginate: async (opts) => {
+        const start = opts.cursor ? Number.parseInt(opts.cursor, 10) : 0;
         const end = start + opts.numItems;
         return {
           page: clone(rows.slice(start, end)),
@@ -58,110 +184,113 @@ function createMockCtx() {
           continueCursor: end < rows.length ? String(end) : null,
         };
       },
-      order: (direction: "asc" | "desc") => {
+      order: (direction) => {
         const sorted = [...rows].sort((a, b) => {
-          const orderField =
-            "_creationTime" in a ? "_creationTime" : "seq";
-          const aVal = a[orderField] ?? 0;
-          const bVal = b[orderField] ?? 0;
-          return direction === "desc" ? bVal - aVal : aVal - bVal;
+          const field = "_creationTime" in a ? "_creationTime" : "seq";
+          const delta = numericField(a, field) - numericField(b, field);
+          return direction === "desc" ? -delta : delta;
         });
-        return terminalMethods(sorted, tableName);
+        return terminalMethods(sorted);
       },
-      filter: (predicate: (q: any) => any) => {
-        const filtered = rows.filter((row) => predicate(row));
-        return terminalMethods(filtered, tableName);
-      },
+      filter: (predicate) => terminalMethods(rows.filter(predicate)),
     };
   }
 
-  function applyFilters(tableName: TableName, filters: Record<string, unknown>) {
+  function compare(a: unknown, b: unknown): number {
+    if (typeof a === "number" && typeof b === "number") return a - b;
+    return String(a) < String(b) ? -1 : String(a) > String(b) ? 1 : 0;
+  }
+
+  function applyFilters(tableName: TableName, filters: RangeFilter[]): Row[] {
     return tables[tableName].filter((row) =>
-      Object.entries(filters).every(([key, value]) => {
-        const currentRow = row as Record<string, any>;
-        if (value && typeof value === "object") {
-          const op = value as Record<string, any>;
-          if ("$gt" in op) return currentRow[key] > op.$gt;
-          if ("$gte" in op) return currentRow[key] >= op.$gte;
-          if ("$lt" in op) return currentRow[key] < op.$lt;
-          if ("$lte" in op) return currentRow[key] <= op.$lte;
+      filters.every(({ field, op, value }) => {
+        const current = row[field];
+        switch (op) {
+          case "gt":
+            return compare(current, value) > 0;
+          case "gte":
+            return compare(current, value) >= 0;
+          case "lt":
+            return compare(current, value) < 0;
+          case "lte":
+            return compare(current, value) <= 0;
+          default:
+            return current === value;
         }
-        return currentRow[key] === value;
       }),
     );
   }
 
-  function indexFilterBuilder() {
-    const filters: Record<string, unknown> = {};
-    const self: any = {
-      eq: (field: string, value: unknown) => {
-        filters[field] = value;
-        return self;
+  function indexFilterBuilder(): {
+    proxy: IndexFilterBuilder;
+    filters: RangeFilter[];
+  } {
+    const filters: RangeFilter[] = [];
+    const proxy: IndexFilterBuilder = {
+      eq: (field, value) => {
+        filters.push({ field, op: "eq", value });
+        return proxy;
       },
-      gt: (field: string, value: unknown) => {
-        filters[field] = { $gt: value };
-        return self;
+      gt: (field, value) => {
+        filters.push({ field, op: "gt", value });
+        return proxy;
       },
-      gte: (field: string, value: unknown) => {
-        filters[field] = { $gte: value };
-        return self;
+      gte: (field, value) => {
+        filters.push({ field, op: "gte", value });
+        return proxy;
       },
-      lt: (field: string, value: unknown) => {
-        filters[field] = { $lt: value };
-        return self;
+      lt: (field, value) => {
+        filters.push({ field, op: "lt", value });
+        return proxy;
       },
-      lte: (field: string, value: unknown) => {
-        filters[field] = { $lte: value };
-        return self;
+      lte: (field, value) => {
+        filters.push({ field, op: "lte", value });
+        return proxy;
       },
     };
-    return { proxy: self, filters };
+    return { proxy, filters };
   }
 
-  const queryTable = (tableName: TableName) => ({
-    ...terminalMethods([...tables[tableName]], tableName),
-    withIndex: (_indexName: string, builder: (q: any) => any) => {
+  const queryTable = (tableName: TableName): QueryTable => ({
+    ...terminalMethods([...tables[tableName]]),
+    withIndex: (_indexName, builder) => {
       const { proxy, filters } = indexFilterBuilder();
       builder(proxy);
-      const rows = applyFilters(tableName, filters);
-      return terminalMethods(rows, tableName);
+      return terminalMethods(applyFilters(tableName, filters));
     },
   });
 
-  return {
-    db: {
-      query: (tableName: string) => queryTable(tableName as TableName),
-      insert: vi.fn(
-        async (tableName: string, value: Record<string, unknown>) => {
-          const id = `${tableName}:${++idCounter}`;
-          tables[tableName as TableName].push({ _id: id, ...clone(value) });
-          return id;
-        },
-      ),
-      patch: vi.fn(async (id: string, fields: Record<string, unknown>) => {
-        for (const table of Object.values(tables)) {
-          const row = table.find((entry) => entry._id === id);
-          if (row) {
-            Object.assign(row, clone(fields));
-            return;
-          }
+  const db: MockDb = {
+    query: (tableName) => queryTable(tableName as TableName),
+    insert: vi.fn(async (tableName: string, value: Record<string, unknown>) => {
+      const id = `${tableName}:${++idCounter}`;
+      tables[tableName as TableName].push({ _id: id, ...clone(value) });
+      return id;
+    }),
+    patch: vi.fn(async (id: string, fields: Record<string, unknown>) => {
+      for (const table of Object.values(tables)) {
+        const row = table.find((entry) => entry._id === id);
+        if (row) {
+          Object.assign(row, clone(fields));
+          return;
         }
-      }),
-      delete: vi.fn(async (id: string) => {
-        for (const table of Object.values(tables)) {
-          const index = table.findIndex((entry) => entry._id === id);
-          if (index >= 0) {
-            table.splice(index, 1);
-            return;
-          }
+      }
+    }),
+    delete: vi.fn(async (id: string) => {
+      for (const table of Object.values(tables)) {
+        const index = table.findIndex((entry) => entry._id === id);
+        if (index >= 0) {
+          table.splice(index, 1);
+          return;
         }
-      }),
-    },
-    tables,
+      }
+    }),
   };
+
+  return { db, tables };
 }
 
-function yUpdate(content: string) {
+function yUpdate(content: string): ArrayBuffer {
   const doc = new Y.Doc();
   doc.getText("content").insert(0, content);
   const update = Y.encodeStateAsUpdateV2(doc);
@@ -171,84 +300,81 @@ function yUpdate(content: string) {
   return buffer;
 }
 
+function seqsOf(rows: Row[]): number[] {
+  return rows.map((row) => numericField(row, "seq"));
+}
+
 describe("component public API", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-04-06T12:00:00Z"));
   });
 
-  it("records live state and trims delta tail by count", async () => {
+  it("records live state and trims the delta tail by count", async () => {
     const ctx = createMockCtx();
-
-    const update1 = yUpdate("a");
-    const update2 = yUpdate("ab");
     const update3 = yUpdate("abc");
+    for (const update of [yUpdate("a"), yUpdate("ab"), update3]) {
+      await recordUpdateHandler(ctx, {
+        collection: "tasks",
+        docId: "doc1",
+        update,
+        keepTailCount: 2,
+        tailByteLimit: 1024,
+        docCreationTime: 1,
+      });
+    }
 
-    await recordUpdateHandler(ctx as any, {
+    const liveState = await getLiveStateHandler(ctx, {
       collection: "tasks",
       docId: "doc1",
-      update: update1,
-      keepTailCount: 2,
-      tailByteLimit: 1024,
-      docCreationTime: 1,
-    });
-    await recordUpdateHandler(ctx as any, {
-      collection: "tasks",
-      docId: "doc1",
-      update: update2,
-      keepTailCount: 2,
-      tailByteLimit: 1024,
-      docCreationTime: 1,
-    });
-    await recordUpdateHandler(ctx as any, {
-      collection: "tasks",
-      docId: "doc1",
-      update: update3,
-      keepTailCount: 2,
-      tailByteLimit: 1024,
-      docCreationTime: 1,
-    });
-
-    const liveState = await getLiveStateHandler(ctx as any, {
-      collection: "tasks",
-      docId: "doc1",
-    });
-    const liveStates = await getLiveStatesHandler(ctx as any, {
-      collection: "tasks",
-      docIds: ["doc1", "missing"],
-    });
-    const allLiveStates = await getLiveStatesHandler(ctx as any, {
-      collection: "tasks",
     });
 
     expect(liveState).toMatchObject({ seq: 2 });
     expect(new Uint8Array(liveState!.update)).toEqual(new Uint8Array(update3));
+    expect(ctx.tables.deltaTail).toHaveLength(2);
+    expect(seqsOf(ctx.tables.deltaTail)).toEqual([1, 2]);
+  });
+
+  it("returns the latest state for requested and missing doc ids", async () => {
+    const ctx = createMockCtx();
+    await recordUpdateHandler(ctx, {
+      collection: "tasks",
+      docId: "doc1",
+      update: yUpdate("abc"),
+      keepTailCount: 2,
+      tailByteLimit: 1024,
+      docCreationTime: 1,
+    });
+
+    const liveStates = await getLiveStatesHandler(ctx, {
+      collection: "tasks",
+      docIds: ["doc1", "missing"],
+    });
+    const allLiveStates = await getLiveStatesHandler(ctx, {
+      collection: "tasks",
+    });
+
     expect(liveStates).toEqual([
-      expect.objectContaining({ docId: "doc1", seq: 2 }),
+      expect.objectContaining({ docId: "doc1", seq: 0 }),
       null,
     ]);
     expect(allLiveStates).toEqual([
-      expect.objectContaining({ docId: "doc1", seq: 2, docCreationTime: 1 }),
+      expect.objectContaining({ docId: "doc1", seq: 0, docCreationTime: 1 }),
     ]);
-    expect(ctx.tables.deltaTail).toHaveLength(2);
-    expect(ctx.tables.deltaTail.map((entry) => entry.seq)).toEqual([1, 2]);
   });
 
-  it("trims delta tail by byte budget", async () => {
+  it("trims the delta tail by byte budget", async () => {
     const ctx = createMockCtx();
-
-    const update1 = yUpdate("abcd");
     const update2 = yUpdate("abcdefgh");
-
-    await recordUpdateHandler(ctx as any, {
+    await recordUpdateHandler(ctx, {
       collection: "tasks",
       docId: "doc2",
-      update: update1,
+      update: yUpdate("abcd"),
       keepTailCount: 10,
       tailByteLimit: update2.byteLength,
       docCreationTime: 2,
     });
-    await recordUpdateHandler(ctx as any, {
+    await recordUpdateHandler(ctx, {
       collection: "tasks",
       docId: "doc2",
       update: update2,
@@ -258,76 +384,47 @@ describe("component public API", () => {
     });
 
     expect(ctx.tables.deltaTail).toHaveLength(1);
-    expect(ctx.tables.deltaTail[0].seq).toBe(1);
+    expect(numericField(ctx.tables.deltaTail[0]!, "seq")).toBe(1);
   });
 
   it("tracks per-document sequence numbers independently across interleaved updates", async () => {
     const ctx = createMockCtx();
+    const updates: Array<{ docId: string; content: string; ct: number }> = [
+      { docId: "docA", content: "a1", ct: 1 },
+      { docId: "docB", content: "b1", ct: 2 },
+      { docId: "docA", content: "a2", ct: 1 },
+      { docId: "docB", content: "b2", ct: 2 },
+      { docId: "docA", content: "a3", ct: 1 },
+    ];
+    for (const { docId, content, ct } of updates) {
+      await recordUpdateHandler(ctx, {
+        collection: "tasks",
+        docId,
+        update: yUpdate(content),
+        keepTailCount: 8,
+        tailByteLimit: 8192,
+        docCreationTime: ct,
+      });
+    }
 
-    await recordUpdateHandler(ctx as any, {
-      collection: "tasks",
-      docId: "docA",
-      update: yUpdate("a1"),
-      keepTailCount: 8,
-      tailByteLimit: 8192,
-      docCreationTime: 1,
-    });
-    await recordUpdateHandler(ctx as any, {
-      collection: "tasks",
-      docId: "docB",
-      update: yUpdate("b1"),
-      keepTailCount: 8,
-      tailByteLimit: 8192,
-      docCreationTime: 2,
-    });
-    await recordUpdateHandler(ctx as any, {
-      collection: "tasks",
-      docId: "docA",
-      update: yUpdate("a2"),
-      keepTailCount: 8,
-      tailByteLimit: 8192,
-      docCreationTime: 1,
-    });
-    await recordUpdateHandler(ctx as any, {
-      collection: "tasks",
-      docId: "docB",
-      update: yUpdate("b2"),
-      keepTailCount: 8,
-      tailByteLimit: 8192,
-      docCreationTime: 2,
-    });
-    await recordUpdateHandler(ctx as any, {
-      collection: "tasks",
-      docId: "docA",
-      update: yUpdate("a3"),
-      keepTailCount: 8,
-      tailByteLimit: 8192,
-      docCreationTime: 1,
-    });
-
-    const allLiveStates = await getLiveStatesHandler(ctx as any, {
+    const allLiveStates = await getLiveStatesHandler(ctx, {
       collection: "tasks",
     });
-    const docATail = ctx.tables.deltaTail
-      .filter((entry) => entry.docId === "docA")
-      .map((entry) => entry.seq);
-    const docBTail = ctx.tables.deltaTail
-      .filter((entry) => entry.docId === "docB")
-      .map((entry) => entry.seq);
+    const tailSeqs = (docId: string): number[] =>
+      seqsOf(ctx.tables.deltaTail.filter((entry) => entry.docId === docId));
 
     expect(allLiveStates).toEqual([
       expect.objectContaining({ docId: "docA", seq: 2 }),
       expect.objectContaining({ docId: "docB", seq: 1 }),
     ]);
-    expect(docATail).toEqual([0, 1, 2]);
-    expect(docBTail).toEqual([0, 1]);
+    expect(tailSeqs("docA")).toEqual([0, 1, 2]);
+    expect(tailSeqs("docB")).toEqual([0, 1]);
   });
 
   it("keeps a monotonic tail for many updates to the same document", async () => {
     const ctx = createMockCtx();
-
     for (let index = 0; index < 12; index += 1) {
-      await recordUpdateHandler(ctx as any, {
+      await recordUpdateHandler(ctx, {
         collection: "issues",
         docId: "same-doc",
         update: yUpdate(`value-${index}`),
@@ -337,22 +434,21 @@ describe("component public API", () => {
       });
     }
 
-    const liveState = await getLiveStateHandler(ctx as any, {
+    const liveState = await getLiveStateHandler(ctx, {
       collection: "issues",
       docId: "same-doc",
     });
 
     expect(liveState).toMatchObject({ seq: 11 });
-    expect(ctx.tables.deltaTail.map((entry) => entry.seq)).toEqual(
+    expect(seqsOf(ctx.tables.deltaTail)).toEqual(
       Array.from({ length: 12 }, (_, index) => index),
     );
   });
 
-  it("falls back to full mode when collection tail no longer covers the requested sequence", async () => {
+  it("falls back to full mode when the collection tail no longer covers the requested sequence", async () => {
     const ctx = createMockCtx();
-
     for (let index = 0; index < 4; index += 1) {
-      await recordUpdateHandler(ctx as any, {
+      await recordUpdateHandler(ctx, {
         collection: "tasks",
         docId: `doc${index}`,
         update: yUpdate(`value-${index}`),
@@ -363,12 +459,12 @@ describe("component public API", () => {
       });
     }
 
-    const result = await getCollectionChangesHandler(ctx as any, {
+    const result = await getCollectionChangesHandler(ctx, {
       collection: "tasks",
       sinceSeq: 0,
     });
 
-    expect(ctx.tables.collectionTail.map((entry) => entry.seq)).toEqual([2, 3]);
+    expect(seqsOf(ctx.tables.collectionTail)).toEqual([2, 3]);
     expect(result).toMatchObject({
       mode: "full",
       collectionSeq: 3,
@@ -379,9 +475,8 @@ describe("component public API", () => {
 
   it("returns incremental changes when the retained collection tail is contiguous", async () => {
     const ctx = createMockCtx();
-
     for (let index = 0; index < 4; index += 1) {
-      await recordUpdateHandler(ctx as any, {
+      await recordUpdateHandler(ctx, {
         collection: "tasks",
         docId: `doc${index}`,
         update: yUpdate(`value-${index}`),
@@ -392,7 +487,7 @@ describe("component public API", () => {
       });
     }
 
-    const result = await getCollectionChangesHandler(ctx as any, {
+    const result = await getCollectionChangesHandler(ctx, {
       collection: "tasks",
       sinceSeq: 1,
     });
@@ -410,8 +505,7 @@ describe("component public API", () => {
 
   it("includes delete markers in incremental collection changes", async () => {
     const ctx = createMockCtx();
-
-    await recordUpdateHandler(ctx as any, {
+    await recordUpdateHandler(ctx, {
       collection: "tasks",
       docId: "doc1",
       update: yUpdate("value"),
@@ -420,13 +514,13 @@ describe("component public API", () => {
       tailByteLimit: 8192,
       docCreationTime: 1,
     });
-    await recordDeleteHandler(ctx as any, {
+    await recordDeleteHandler(ctx, {
       collection: "tasks",
       docId: "doc1",
       keepCollectionTailCount: 8,
     });
 
-    const result = await getCollectionChangesHandler(ctx as any, {
+    const result = await getCollectionChangesHandler(ctx, {
       collection: "tasks",
       sinceSeq: 0,
     });
@@ -441,9 +535,8 @@ describe("component public API", () => {
 
   it("pages live states by doc id cursor", async () => {
     const ctx = createMockCtx();
-
     for (const [index, docId] of ["doc1", "doc2", "doc3"].entries()) {
-      await recordUpdateHandler(ctx as any, {
+      await recordUpdateHandler(ctx, {
         collection: "tasks",
         docId,
         update: yUpdate(`value-${index}`),
@@ -453,11 +546,11 @@ describe("component public API", () => {
       });
     }
 
-    const firstPage = await getLiveStatesPageHandler(ctx as any, {
+    const firstPage = await getLiveStatesPageHandler(ctx, {
       collection: "tasks",
       limit: 2,
     });
-    const secondPage = await getLiveStatesPageHandler(ctx as any, {
+    const secondPage = await getLiveStatesPageHandler(ctx, {
       collection: "tasks",
       limit: 2,
       cursor: firstPage.continueCursor,

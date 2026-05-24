@@ -17,11 +17,20 @@ import {
 
 const CONVEX_URL = process.env.CONVEX_URL;
 const maybeDescribe =
-  CONVEX_URL && process.env.RUN_CONVEX_E2E === "1" ? describe : describe.skip;
+  CONVEX_URL && process.env.RUN_CONVEX_LIVE === "1" ? describe : describe.skip;
 
 type LiveClient = Awaited<ReturnType<typeof createLiveClient>>["client"] & {
   close(): Promise<void>;
 };
+
+interface RichTextNode {
+  content?: ReadonlyArray<RichTextNode>;
+  text?: string;
+}
+
+function firstRichText(body: unknown): string | undefined {
+  return (body as RichTextNode | undefined)?.content?.[0]?.content?.[0]?.text;
+}
 
 async function runLocalSystemMutation(
   client: LiveClient,
@@ -321,11 +330,7 @@ maybeDescribe("live persisted restart", () => {
       JSON.parse(String(entry.localResult)),
     );
     const matchingLocalComments = localCommentsBeforeRestart.filter((comment) =>
-      commentBodies.includes(
-        ((comment.body as any)?.content?.[0]?.content?.[0]?.text as
-          | string
-          | undefined) ?? "__missing__",
-      ),
+      commentBodies.includes(firstRichText(comment.body) ?? "__missing__"),
     );
 
     expect(new Set(pendingCreateLocalIds).size).toBe(commentBodies.length);

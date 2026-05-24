@@ -1,13 +1,47 @@
 import { createConvexClient } from "@resolve/browser/index";
 import { localOnly, remoteOnly } from "@resolve/server/table";
-import { afterEach, beforeEach, describe, expect, it } from "@tests/testkit";
-import { makeFunctionReference } from "convex/server";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  type Mock,
+} from "@tests/testkit";
+import type { ConvexClient } from "convex/browser";
+import { makeFunctionReference, type FunctionReference } from "convex/server";
 import { ConvexError } from "convex/values";
-import { vi } from "vitest";
+
+type AnyRef =
+  | FunctionReference<"query" | "mutation" | "action">
+  | {
+      reference: string;
+    };
+
+interface MockRemoteInstance {
+  url: string;
+  mutation: Mock;
+  query: Mock;
+  action: Mock;
+  onUpdate: Mock;
+  onPaginatedUpdate_experimental: Mock;
+  setAuth: Mock;
+  close: Mock;
+}
+
+interface MockBrowserModule {
+  __mock: {
+    reset: () => void;
+    instances: () => MockRemoteInstance[];
+  };
+}
 
 vi.mock("convex/browser", () => {
   function makeUnsubscribe() {
-    const unsub = (() => {}) as any;
+    const unsub = (() => {}) as (() => void) & {
+      unsubscribe: () => void;
+      getCurrentValue: () => unknown;
+    };
     unsub.unsubscribe = unsub;
     unsub.getCurrentValue = () => undefined;
     return unsub;
@@ -63,20 +97,24 @@ vi.mock("convex/browser", () => {
   };
 });
 
-const mockEngineInstances: Array<{
-  mutation: ReturnType<typeof vi.fn>;
-  on: ReturnType<typeof vi.fn>;
-  start: ReturnType<typeof vi.fn>;
-  stop: ReturnType<typeof vi.fn>;
-  idMap: {
-    translateLocalIdsToRemote: ReturnType<typeof vi.fn>;
-    translateClientIdsToRuntime: ReturnType<typeof vi.fn>;
-    translateResult: ReturnType<typeof vi.fn>;
-  };
-}> = [];
+interface MockIdMap {
+  translateLocalIdsToRemote: Mock;
+  translateClientIdsToRuntime: Mock;
+  translateResult: Mock;
+}
+
+interface MockEngineInstance {
+  mutation: Mock;
+  on: Mock;
+  start: Mock;
+  stop: Mock;
+  idMap: MockIdMap;
+}
+
+const mockEngineInstances: MockEngineInstance[] = [];
 const mockEngineFactory = {
-  create: vi.fn(() => {
-    const instance = {
+  create: vi.fn<() => MockEngineInstance>(() => {
+    const instance: MockEngineInstance = {
       mutation: vi.fn(),
       on: vi.fn(),
       start: vi.fn(),
@@ -116,13 +154,17 @@ const nestedRemotePublishRef = makeFunctionReference<"mutation">(
 );
 const componentMutationRef = {
   reference: "_reference/childComponent/embedded/messages/publish",
-} as any;
+};
 const componentQueryRef = {
   reference: "_reference/childComponent/embedded/messages/fetch",
-} as any;
+};
 const componentActionRef = {
   reference: "_reference/childComponent/embedded/messages/run",
-} as any;
+};
+
+interface PaginationArgs {
+  paginationOpts?: { cursor: string | null; numItems?: number; id?: number };
+}
 
 function createModules() {
   return {
@@ -137,7 +179,7 @@ function createModules() {
     local: async () => ({
       create: () => "ok",
       watch: () => ({ source: "local" }),
-      paginatedWatch: (_ctx: unknown, args: any) => ({
+      paginatedWatch: (_ctx: unknown, args: PaginationArgs) => ({
         page: [
           { source: "local", cursor: args.paginationOpts?.cursor ?? null },
         ],
@@ -298,14 +340,76 @@ function createSyncModulesWithFailure() {
   };
 }
 
-async function settle(): Promise<void> {
-  await Promise.resolve();
-  await new Promise((resolve) => setTimeout(resolve, 0));
+function asRoutedClient(client: ConvexClient): RoutedClient {
+  return client as unknown as RoutedClient;
+}
+
+interface RoutedUnsubscribe {
+  (): void;
+  unsubscribe: () => void;
+  getCurrentValue: () => unknown;
+}
+
+interface RoutedClient {
+  mutation(ref: AnyRef, args: Record<string, unknown>): Promise<unknown>;
+  query(ref: AnyRef, args: Record<string, unknown>): Promise<unknown>;
+  action(ref: AnyRef, args: Record<string, unknown>): Promise<unknown>;
+  onUpdate(
+    ref: AnyRef,
+    args: Record<string, unknown>,
+    callback: (...args: unknown[]) => void,
+    onError: (error: Error) => void,
+  ): RoutedUnsubscribe;
+  onPaginatedUpdate_experimental(
+    ref: AnyRef,
+    args: Record<string, unknown>,
+    options: { initialNumItems: number },
+    callback: (...args: unknown[]) => void,
+    onError: (error: Error) => void,
+  ): RoutedUnsubscribe;
+  setAuth(
+    fetchToken: (args: {
+      forceRefreshToken: boolean;
+    }) => Promise<string | null>,
+  ): void;
+  close(): Promise<void>;
+}
+
+function callUrl(result: unknown): string | undefined {
+  return (result as { url?: string }).url;
+}
+
+function routeErrorCode(error: unknown): string | undefined {
+  return error instanceof ConvexError
+    ? (error.data as { code?: string }).code
+    : undefined;
+}
+
+async function remoteInstance(): Promise<MockRemoteInstance> {
+  const convexBrowser = (await vi.importMock(
+    "convex/browser",
+  )) as MockBrowserModule;
+  const remote = convexBrowser.__mock
+    .instances()
+    .find((instance) => instance.url === REMOTE_URL);
+  expect(remote).toBeDefined();
+  return remote!;
+}
+
+function calledWithRef(mock: Mock, ref: AnyRef): boolean {
+  return mock.mock.calls.some((call) => call[0] === ref);
 }
 
 describe("remoteOnly routing", () => {
   let originalNavigator: Navigator | undefined;
-  const clientsToClose: Array<{ close: () => Promise<void> }> = [];
+
+  function goOffline(): void {
+    Object.defineProperty(globalThis, "navigator", {
+      value: { onLine: false },
+      writable: true,
+      configurable: true,
+    });
+  }
 
   beforeEach(async () => {
     originalNavigator = globalThis.navigator;
@@ -315,19 +419,15 @@ describe("remoteOnly routing", () => {
       configurable: true,
     });
 
-    const convexBrowser = (await vi.importMock("convex/browser")) as {
-      __mock: { reset: () => void };
-    };
+    const convexBrowser = (await vi.importMock(
+      "convex/browser",
+    )) as MockBrowserModule;
     convexBrowser.__mock.reset();
     mockEngineInstances.length = 0;
     mockEngineFactory.create.mockClear();
   });
 
-  afterEach(async () => {
-    for (const client of clientsToClose.splice(0)) {
-      await client.close();
-    }
-
+  afterEach(() => {
     Object.defineProperty(globalThis, "navigator", {
       value: originalNavigator,
       writable: true,
@@ -335,195 +435,191 @@ describe("remoteOnly routing", () => {
     });
   });
 
-  it("routes remoteOnly mutations to remote client", async () => {
-    const client = createConvexClient({
-      convex: { modules: createModules() },
-      remote: { url: REMOTE_URL },
-    }) as any;
-    clientsToClose.push(client);
+  it("routes remoteOnly mutations to remote client", async ({ track }) => {
+    const client = asRoutedClient(
+      track(
+        createConvexClient({
+          convex: { modules: createModules() },
+          remote: { url: REMOTE_URL },
+        }),
+      ),
+    );
 
     const result = await client.mutation(remotePublishRef, { title: "hello" });
 
-    const convexBrowser = (await vi.importMock("convex/browser")) as any;
-    const instances = convexBrowser.__mock.instances() as Array<any>;
-    const remote = instances.find((c) => c.url === REMOTE_URL)!;
-
-    expect(result.url).toBe(REMOTE_URL);
+    const remote = await remoteInstance();
+    expect(callUrl(result)).toBe(REMOTE_URL);
     expect(remote.mutation).toHaveBeenCalledWith(remotePublishRef, {
       title: "hello",
     });
   });
 
-  it("routes remoteOnly mutations to remote client", async () => {
-    const client = createConvexClient({
-      convex: { modules: createModules() },
-      remote: { url: REMOTE_URL },
-    }) as any;
-    clientsToClose.push(client);
+  it("routes forced remoteOnly mutations to remote client", async ({
+    track,
+  }) => {
+    const client = asRoutedClient(
+      track(
+        createConvexClient({
+          convex: { modules: createModules() },
+          remote: { url: REMOTE_URL },
+        }),
+      ),
+    );
 
     const forcedRemoteRef = makeFunctionReference<"mutation">("forced:publish");
     const result = await client.mutation(forcedRemoteRef, { title: "hello" });
 
-    const convexBrowser = (await vi.importMock("convex/browser")) as any;
-    const instances = convexBrowser.__mock.instances() as Array<any>;
-    const remote = instances.find((c) => c.url === REMOTE_URL)!;
-
-    expect(result.url).toBe(REMOTE_URL);
+    const remote = await remoteInstance();
+    expect(callUrl(result)).toBe(REMOTE_URL);
     expect(remote.mutation).toHaveBeenCalledWith(forcedRemoteRef, {
       title: "hello",
     });
   });
 
-  it("keeps non-remote mutations on local client", async () => {
-    const client = createConvexClient({
-      convex: { modules: createModules() },
-      remote: { url: REMOTE_URL },
-    }) as any;
-    clientsToClose.push(client);
+  it("keeps non-remote mutations on local client", async ({ track }) => {
+    const client = asRoutedClient(
+      track(
+        createConvexClient({
+          convex: { modules: createModules() },
+          remote: { url: REMOTE_URL },
+        }),
+      ),
+    );
 
     const result = await client.mutation(localCreateRef, { title: "local" });
 
-    const convexBrowser = (await vi.importMock("convex/browser")) as any;
-    const instances = convexBrowser.__mock.instances() as Array<any>;
-    const remote = instances.find((c) => c.url === REMOTE_URL)!;
-
-    expect(result.url).not.toBe(REMOTE_URL);
-    expect(
-      remote.mutation.mock.calls.some(
-        (call: any[]) => call[0] === localCreateRef,
-      ),
-    ).toBe(false);
+    const remote = await remoteInstance();
+    expect(callUrl(result)).not.toBe(REMOTE_URL);
+    expect(calledWithRef(remote.mutation, localCreateRef)).toBe(false);
   });
 
-  it("keeps localOnly mutations on the unified local path", async () => {
-    const client = createConvexClient({
-      convex: { modules: createModules() },
-      remote: { url: REMOTE_URL },
-    }) as any;
-    clientsToClose.push(client);
+  it("keeps localOnly mutations on the unified local path", async ({
+    track,
+  }) => {
+    const client = asRoutedClient(
+      track(
+        createConvexClient({
+          convex: { modules: createModules() },
+          remote: { url: REMOTE_URL },
+        }),
+      ),
+    );
 
     const result = await client.mutation(localOnlyCreateRef, {
       title: "local-only",
     });
 
-    const convexBrowser = (await vi.importMock("convex/browser")) as any;
-    const instances = convexBrowser.__mock.instances() as Array<any>;
-    const remote = instances.find((c) => c.url === REMOTE_URL)!;
-
-    expect(result.url).not.toBe(REMOTE_URL);
-    expect(
-      remote.mutation.mock.calls.some(
-        (call: any[]) => call[0] === localOnlyCreateRef,
-      ),
-    ).toBe(false);
+    const remote = await remoteInstance();
+    expect(callUrl(result)).not.toBe(REMOTE_URL);
+    expect(calledWithRef(remote.mutation, localOnlyCreateRef)).toBe(false);
   });
 
-  it("throws immediately when remoteOnly mutation is called offline", async () => {
-    const client = createConvexClient({
-      convex: { modules: createModules() },
-      remote: { url: REMOTE_URL },
-    }) as any;
-    clientsToClose.push(client);
+  it("throws immediately when remoteOnly mutation is called offline", async ({
+    track,
+  }) => {
+    const client = asRoutedClient(
+      track(
+        createConvexClient({
+          convex: { modules: createModules() },
+          remote: { url: REMOTE_URL },
+        }),
+      ),
+    );
 
-    Object.defineProperty(globalThis, "navigator", {
-      value: { onLine: false },
-      writable: true,
-      configurable: true,
-    });
+    goOffline();
 
     const error = await client
       .mutation(remotePublishRef, {})
       .catch((err: unknown) => err);
     expect(error).toBeInstanceOf(ConvexError);
-    expect((error as ConvexError<any>).data.code).toBe("ROUTE_REMOTE_OFFLINE");
+    expect(routeErrorCode(error)).toBe("ROUTE_REMOTE_OFFLINE");
     expect((error as Error).message).toMatch(/cannot run while offline/);
 
-    const convexBrowser = (await vi.importMock("convex/browser")) as any;
-    const instances = convexBrowser.__mock.instances() as Array<any>;
-    const remote = instances.find((c) => c.url === REMOTE_URL)!;
-
-    expect(
-      remote.mutation.mock.calls.some(
-        (call: any[]) => call[0] === remotePublishRef,
-      ),
-    ).toBe(false);
+    const remote = await remoteInstance();
+    expect(calledWithRef(remote.mutation, remotePublishRef)).toBe(false);
   });
 
-  it("throws immediately when remoteOnly query is called offline", async () => {
-    const client = createConvexClient({
-      convex: { modules: createModules() },
-      remote: { url: REMOTE_URL },
-    }) as any;
-    clientsToClose.push(client);
+  it("throws immediately when remoteOnly query is called offline", async ({
+    track,
+  }) => {
+    const client = asRoutedClient(
+      track(
+        createConvexClient({
+          convex: { modules: createModules() },
+          remote: { url: REMOTE_URL },
+        }),
+      ),
+    );
 
-    Object.defineProperty(globalThis, "navigator", {
-      value: { onLine: false },
-      writable: true,
-      configurable: true,
-    });
+    goOffline();
 
     const error = await client
       .query(remoteFetchRef, { id: "1" })
       .catch((err: unknown) => err);
     expect(error).toBeInstanceOf(ConvexError);
-    expect((error as ConvexError<any>).data.code).toBe("ROUTE_REMOTE_OFFLINE");
+    expect(routeErrorCode(error)).toBe("ROUTE_REMOTE_OFFLINE");
     expect((error as Error).message).toMatch(/cannot run while offline/);
   });
 
-  it("throws immediately when remoteOnly action is called offline", async () => {
-    const client = createConvexClient({
-      convex: { modules: createModules() },
-      remote: { url: REMOTE_URL },
-    }) as any;
-    clientsToClose.push(client);
+  it("throws immediately when remoteOnly action is called offline", async ({
+    track,
+  }) => {
+    const client = asRoutedClient(
+      track(
+        createConvexClient({
+          convex: { modules: createModules() },
+          remote: { url: REMOTE_URL },
+        }),
+      ),
+    );
 
-    Object.defineProperty(globalThis, "navigator", {
-      value: { onLine: false },
-      writable: true,
-      configurable: true,
-    });
+    goOffline();
 
     const error = await client
       .action(remoteRunRef, { id: "1" })
       .catch((err: unknown) => err);
     expect(error).toBeInstanceOf(ConvexError);
-    expect((error as ConvexError<any>).data.code).toBe("ROUTE_REMOTE_OFFLINE");
+    expect(routeErrorCode(error)).toBe("ROUTE_REMOTE_OFFLINE");
     expect((error as Error).message).toMatch(/cannot run while offline/);
   });
 
-  it("routes remoteOnly query and onUpdate subscription to remote", async () => {
-    const client = createConvexClient({
-      convex: { modules: createModules() },
-      remote: { url: REMOTE_URL },
-    }) as any;
-    clientsToClose.push(client);
+  it("routes remoteOnly query and onUpdate subscription to remote", async ({
+    track,
+  }) => {
+    const client = asRoutedClient(
+      track(
+        createConvexClient({
+          convex: { modules: createModules() },
+          remote: { url: REMOTE_URL },
+        }),
+      ),
+    );
 
     const result = await client.query(remoteFetchRef, { id: "1" });
 
     const onError = vi.fn();
     const unsubscribe = client.onUpdate(remoteWatchRef, {}, vi.fn(), onError);
-    await settle();
+    await vi.waitFor(async () => {
+      expect((await remoteInstance()).onUpdate).toHaveBeenCalledWith(
+        remoteWatchRef,
+        {},
+        expect.any(Function),
+        onError,
+      );
+    });
 
-    const convexBrowser = (await vi.importMock("convex/browser")) as any;
-    const instances = convexBrowser.__mock.instances() as Array<any>;
-    const remote = instances.find((c) => c.url === REMOTE_URL)!;
-
-    expect(result.url).toBe(REMOTE_URL);
+    const remote = await remoteInstance();
+    expect(callUrl(result)).toBe(REMOTE_URL);
     expect(remote.query).toHaveBeenCalledWith(remoteFetchRef, { id: "1" });
-
-    expect(remote.onUpdate).toHaveBeenCalledWith(
-      remoteWatchRef,
-      {},
-      expect.any(Function),
-      onError,
-    );
     expect(onError).not.toHaveBeenCalled();
     unsubscribe();
   });
 
-  it("translates local ids before remote-routed query subscriptions", async () => {
+  it("translates local ids before remote-routed query subscriptions", async ({
+    track,
+  }) => {
     mockEngineFactory.create.mockImplementationOnce(() => {
-      const instance = {
+      const instance: MockEngineInstance = {
         mutation: vi.fn(),
         on: vi.fn(),
         start: vi.fn(),
@@ -544,11 +640,14 @@ describe("remoteOnly routing", () => {
       mockEngineInstances.push(instance);
       return instance;
     });
-    const client = createConvexClient({
-      convex: { modules: createModulesWithRemoteMetadata() },
-      remote: { url: REMOTE_URL },
-    }) as any;
-    clientsToClose.push(client);
+    const client = asRoutedClient(
+      track(
+        createConvexClient({
+          convex: { modules: createModulesWithRemoteMetadata() },
+          remote: { url: REMOTE_URL },
+        }),
+      ),
+    );
 
     const result = await client.query(remoteFetchRef, {
       projectId: "local-project",
@@ -562,35 +661,38 @@ describe("remoteOnly routing", () => {
       vi.fn(),
       vi.fn(),
     );
-    await settle();
+    await vi.waitFor(async () => {
+      expect((await remoteInstance()).onUpdate).toHaveBeenCalledWith(
+        remoteWatchRef,
+        {
+          projectId: "remote-project",
+          paginationOpts: { cursor: null, numItems: 100, id: 1 },
+        },
+        expect.any(Function),
+        expect.any(Function),
+      );
+    });
 
-    const convexBrowser = (await vi.importMock("convex/browser")) as any;
-    const instances = convexBrowser.__mock.instances() as Array<any>;
-    const remote = instances.find((c) => c.url === REMOTE_URL)!;
-
-    expect(result.url).toBe(REMOTE_URL);
+    const remote = await remoteInstance();
+    expect(callUrl(result)).toBe(REMOTE_URL);
     expect(remote.query).toHaveBeenCalledWith(remoteFetchRef, {
       projectId: "remote-project",
     });
-    expect(remote.onUpdate).toHaveBeenCalledWith(
-      remoteWatchRef,
-      {
-        projectId: "remote-project",
-        paginationOpts: { cursor: null, numItems: 100, id: 1 },
-      },
-      expect.any(Function),
-      expect.any(Function),
-    );
 
     unsubscribe();
   });
 
-  it("routes local onUpdate subscriptions through the cache pipeline", async () => {
-    const client = createConvexClient({
-      convex: { modules: createModules() },
-      remote: { url: REMOTE_URL },
-    }) as any;
-    clientsToClose.push(client);
+  it("routes local onUpdate subscriptions through the cache pipeline", async ({
+    track,
+  }) => {
+    const client = asRoutedClient(
+      track(
+        createConvexClient({
+          convex: { modules: createModules() },
+          remote: { url: REMOTE_URL },
+        }),
+      ),
+    );
 
     const callback = vi.fn();
     const unsubscribe = client.onUpdate(localWatchRef, {}, callback, vi.fn());
@@ -599,29 +701,32 @@ describe("remoteOnly routing", () => {
     expect(typeof unsubscribe.unsubscribe).toBe("function");
     expect(typeof unsubscribe.getCurrentValue).toBe("function");
 
-    await settle();
+    await vi.waitFor(() => {
+      expect(unsubscribe.getCurrentValue()).toEqual({ source: "local" });
+    });
 
-    const convexBrowser = (await vi.importMock("convex/browser")) as any;
-    const instances = convexBrowser.__mock.instances() as Array<any>;
-    const remote = instances.find((c) => c.url === REMOTE_URL)!;
-
+    const remote = await remoteInstance();
     expect(remote.onUpdate).toHaveBeenCalledWith(
       "local:watch",
       {},
       expect.any(Function),
       expect.any(Function),
     );
-    expect(unsubscribe.getCurrentValue()).toEqual({ source: "local" });
 
     unsubscribe();
   });
 
-  it("routes local paginated subscriptions through the cache pipeline", async () => {
-    const client = createConvexClient({
-      convex: { modules: createModules() },
-      remote: { url: REMOTE_URL },
-    }) as any;
-    clientsToClose.push(client);
+  it("routes local paginated subscriptions through the cache pipeline", async ({
+    track,
+  }) => {
+    const client = asRoutedClient(
+      track(
+        createConvexClient({
+          convex: { modules: createModules() },
+          remote: { url: REMOTE_URL },
+        }),
+      ),
+    );
 
     const callback = vi.fn();
     const unsubscribe = client.onPaginatedUpdate_experimental(
@@ -632,17 +737,13 @@ describe("remoteOnly routing", () => {
       vi.fn(),
     );
 
-    await settle();
+    await vi.waitFor(() => {
+      expect(unsubscribe.getCurrentValue()).toEqual(
+        expect.objectContaining({ page: expect.any(Array) }),
+      );
+    });
 
-    expect(unsubscribe.getCurrentValue()).toEqual(
-      expect.objectContaining({
-        page: expect.any(Array),
-      }),
-    );
-
-    const convexBrowser = (await vi.importMock("convex/browser")) as any;
-    const instances = convexBrowser.__mock.instances() as Array<any>;
-    const remote = instances.find((c) => c.url === REMOTE_URL)!;
+    const remote = await remoteInstance();
     expect(remote.onUpdate).toHaveBeenCalledWith(
       "local:paginatedWatch",
       expect.objectContaining({
@@ -655,12 +756,17 @@ describe("remoteOnly routing", () => {
     unsubscribe();
   });
 
-  it("routes manifest-marked paginated subscriptions to the remote client", async () => {
-    const client = createConvexClient({
-      convex: createManifestRoutedModules(),
-      remote: { url: REMOTE_URL },
-    }) as any;
-    clientsToClose.push(client);
+  it("routes manifest-marked paginated subscriptions to the remote client", async ({
+    track,
+  }) => {
+    const client = asRoutedClient(
+      track(
+        createConvexClient({
+          convex: createManifestRoutedModules(),
+          remote: { url: REMOTE_URL },
+        }),
+      ),
+    );
 
     const callback = vi.fn();
     const unsubscribe = client.onPaginatedUpdate_experimental(
@@ -671,19 +777,19 @@ describe("remoteOnly routing", () => {
       vi.fn(),
     );
 
-    await settle();
+    await vi.waitFor(async () => {
+      expect(
+        (await remoteInstance()).onPaginatedUpdate_experimental,
+      ).toHaveBeenCalledWith(
+        remotePaginatedWatchRef,
+        { projectId: "project-1" },
+        { initialNumItems: 100 },
+        expect.any(Function),
+        expect.any(Function),
+      );
+    });
 
-    const convexBrowser = (await vi.importMock("convex/browser")) as any;
-    const instances = convexBrowser.__mock.instances() as Array<any>;
-    const remote = instances.find((c) => c.url === REMOTE_URL)!;
-
-    expect(remote.onPaginatedUpdate_experimental).toHaveBeenCalledWith(
-      remotePaginatedWatchRef,
-      { projectId: "project-1" },
-      { initialNumItems: 100 },
-      expect.any(Function),
-      expect.any(Function),
-    );
+    const remote = await remoteInstance();
     expect(remote.onUpdate).not.toHaveBeenCalledWith(
       "remote:paginatedWatch",
       expect.anything(),
@@ -694,12 +800,15 @@ describe("remoteOnly routing", () => {
     unsubscribe();
   });
 
-  it("routes top-level component refs to remote", async () => {
-    const client = createConvexClient({
-      convex: { modules: createModules() },
-      remote: { url: REMOTE_URL },
-    }) as any;
-    clientsToClose.push(client);
+  it("routes top-level component refs to remote", async ({ track }) => {
+    const client = asRoutedClient(
+      track(
+        createConvexClient({
+          convex: { modules: createModules() },
+          remote: { url: REMOTE_URL },
+        }),
+      ),
+    );
 
     const mutationResult = await client.mutation(componentMutationRef, {
       title: "component",
@@ -707,13 +816,10 @@ describe("remoteOnly routing", () => {
     const queryResult = await client.query(componentQueryRef, { id: "1" });
     const actionResult = await client.action(componentActionRef, { id: "1" });
 
-    const convexBrowser = (await vi.importMock("convex/browser")) as any;
-    const instances = convexBrowser.__mock.instances() as Array<any>;
-    const remote = instances.find((c) => c.url === REMOTE_URL)!;
-
-    expect(mutationResult.url).toBe(REMOTE_URL);
-    expect(queryResult.url).toBe(REMOTE_URL);
-    expect(actionResult.url).toBe(REMOTE_URL);
+    const remote = await remoteInstance();
+    expect(callUrl(mutationResult)).toBe(REMOTE_URL);
+    expect(callUrl(queryResult)).toBe(REMOTE_URL);
+    expect(callUrl(actionResult)).toBe(REMOTE_URL);
     expect(remote.mutation).toHaveBeenCalledWith(componentMutationRef, {
       title: "component",
     });
@@ -721,85 +827,94 @@ describe("remoteOnly routing", () => {
     expect(remote.action).toHaveBeenCalledWith(componentActionRef, { id: "1" });
   });
 
-  it("fails immediately offline for component-routed calls", async () => {
-    const client = createConvexClient({
-      convex: { modules: createModules() },
-      remote: { url: REMOTE_URL },
-    }) as any;
-    clientsToClose.push(client);
+  it("fails immediately offline for component-routed calls", async ({
+    track,
+  }) => {
+    const client = asRoutedClient(
+      track(
+        createConvexClient({
+          convex: { modules: createModules() },
+          remote: { url: REMOTE_URL },
+        }),
+      ),
+    );
 
-    Object.defineProperty(globalThis, "navigator", {
-      value: { onLine: false },
-      writable: true,
-      configurable: true,
-    });
+    goOffline();
 
     const error = await client
       .query(componentQueryRef, {})
       .catch((err: unknown) => err);
     expect(error).toBeInstanceOf(ConvexError);
-    expect((error as ConvexError<any>).data.code).toBe("ROUTE_REMOTE_OFFLINE");
+    expect(routeErrorCode(error)).toBe("ROUTE_REMOTE_OFFLINE");
     expect((error as Error).message).toMatch(/component-routed function/);
   });
 
-  it("preserves nested module paths for remoteOnly routing", async () => {
-    const client = createConvexClient({
-      convex: { modules: createNestedModules() },
-      remote: { url: REMOTE_URL },
-    }) as any;
-    clientsToClose.push(client);
+  it("preserves nested module paths for remoteOnly routing", async ({
+    track,
+  }) => {
+    const client = asRoutedClient(
+      track(
+        createConvexClient({
+          convex: { modules: createNestedModules() },
+          remote: { url: REMOTE_URL },
+        }),
+      ),
+    );
 
     const result = await client.mutation(nestedRemotePublishRef, {
       title: "hi",
     });
 
-    const convexBrowser = (await vi.importMock("convex/browser")) as any;
-    const instances = convexBrowser.__mock.instances() as Array<any>;
-    const remote = instances.find((c) => c.url === REMOTE_URL)!;
-
-    expect(result.url).toBe(REMOTE_URL);
+    const remote = await remoteInstance();
+    expect(callUrl(result)).toBe(REMOTE_URL);
     expect(remote.mutation).toHaveBeenCalledWith(nestedRemotePublishRef, {
       title: "hi",
     });
   });
 
-  it("preserves nested module paths for remote table discovery", async () => {
-    const client = createConvexClient({
-      convex: { modules: createNestedModules() },
-      remote: { url: REMOTE_URL },
-    }) as any;
-    clientsToClose.push(client);
-
-    await settle();
-
-    expect(mockEngineFactory.create).toHaveBeenCalledWith(
-      expect.objectContaining({
-        tables: {
-          messages: {
-            resolve: "messages/access:resolve",
-            schema: undefined,
-          },
-        },
+  it("preserves nested module paths for remote table discovery", async ({
+    track,
+  }) => {
+    track(
+      createConvexClient({
+        convex: { modules: createNestedModules() },
+        remote: { url: REMOTE_URL },
       }),
     );
+
+    await vi.waitFor(() => {
+      expect(mockEngineFactory.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tables: {
+            messages: {
+              resolve: "messages/access:resolve",
+              schema: undefined,
+            },
+          },
+        }),
+      );
+    });
   });
 
-  it("forwards setAuth to remote client", async () => {
-    const client = createConvexClient({
-      convex: { modules: createModules() },
-      remote: { url: REMOTE_URL },
-    }) as any;
-    clientsToClose.push(client);
+  it("forwards setAuth to remote client", async ({ track }) => {
+    const client = asRoutedClient(
+      track(
+        createConvexClient({
+          convex: { modules: createModules() },
+          remote: { url: REMOTE_URL },
+        }),
+      ),
+    );
 
     const fetchToken = vi.fn(async () => "token");
     client.setAuth(fetchToken);
 
-    const convexBrowser = (await vi.importMock("convex/browser")) as any;
-    const instances = convexBrowser.__mock.instances() as Array<any>;
-    const remote = instances.find((c) => c.url === REMOTE_URL)!;
+    const remote = await remoteInstance();
     expect(remote.setAuth).toHaveBeenCalledTimes(1);
 
-    const wrappedFetchToken = remote.setAuth.mock.calls[0][0];
+    const wrappedFetchToken = remote.setAuth.mock.calls[0]?.[0] as (args: {
+      forceRefreshToken: boolean;
+    }) => Promise<string | null>;
     expect(typeof wrappedFetchToken).toBe("function");
     await expect(wrappedFetchToken({ forceRefreshToken: false })).resolves.toBe(
       "token",
@@ -810,14 +925,14 @@ describe("remoteOnly routing", () => {
   it("does not start a discovered engine after client.close()", async () => {
     const delayed = createDelayedSyncModules();
     const client = createConvexClient({
-      convex: delayed.convex as any,
+      convex: delayed.convex,
       remote: { url: REMOTE_URL },
-    }) as any;
+    });
 
-    await settle();
+    await flushDiscovery();
     await client.close();
     delayed.resolveLoader();
-    await settle();
+    await flushDiscovery();
 
     expect(mockEngineFactory.create).not.toHaveBeenCalled();
   });
@@ -826,15 +941,12 @@ describe("remoteOnly routing", () => {
     const client = createConvexClient({
       convex: { modules: createSyncModules() },
       remote: { url: REMOTE_URL },
-    }) as any;
+    });
 
-    await settle();
-
-    const convexBrowser = (await vi.importMock("convex/browser")) as any;
-    const instances = convexBrowser.__mock.instances() as Array<any>;
-    const remote = instances.find((c) => c.url === REMOTE_URL)!;
-
-    expect(mockEngineFactory.create).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => {
+      expect(mockEngineFactory.create).toHaveBeenCalledTimes(1);
+    });
+    const remote = await remoteInstance();
     expect(mockEngineInstances[0]?.stop).not.toHaveBeenCalled();
 
     await client.close();
@@ -847,13 +959,12 @@ describe("remoteOnly routing", () => {
     const client = createConvexClient({
       convex: { modules: createSyncModules() },
       remote: { url: REMOTE_URL },
-    }) as any;
+    });
 
-    await settle();
-
-    const convexBrowser = (await vi.importMock("convex/browser")) as any;
-    const instances = convexBrowser.__mock.instances() as Array<any>;
-    const remote = instances.find((c) => c.url === REMOTE_URL)!;
+    await vi.waitFor(() => {
+      expect(mockEngineFactory.create).toHaveBeenCalledTimes(1);
+    });
+    const remote = await remoteInstance();
 
     await client.close();
     await client.close();
@@ -862,68 +973,78 @@ describe("remoteOnly routing", () => {
     expect(remote.close).toHaveBeenCalledTimes(1);
   });
 
-  it("surfaces resolve setup failures instead of silently falling back", async () => {
+  it("surfaces resolve setup failures instead of silently falling back", async ({
+    track,
+  }) => {
     mockEngineFactory.create.mockImplementationOnce(() => {
       throw new Error("engine boom");
     });
 
-    const client = createConvexClient({
-      convex: { modules: createSyncModules() },
-      remote: { url: REMOTE_URL },
-    }) as any;
-    clientsToClose.push(client);
+    const client = asRoutedClient(
+      track(
+        createConvexClient({
+          convex: { modules: createSyncModules() },
+          remote: { url: REMOTE_URL },
+        }),
+      ),
+    );
 
     await expect(client.mutation(localCreateRef, {})).rejects.toThrow(
       "engine boom",
     );
   });
 
-  it("warns when module discovery skips failed loaders", async () => {
+  it("warns when module discovery skips failed loaders", async ({ track }) => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 
-    try {
-      const client = createConvexClient({
+    track(
+      createConvexClient({
         convex: { modules: createSyncModulesWithFailure() },
         remote: { url: REMOTE_URL },
-      }) as any;
-      clientsToClose.push(client);
+      }),
+    );
 
-      await settle();
-
+    await vi.waitFor(() => {
       expect(warnSpy).toHaveBeenCalledWith(
         expect.stringContaining(
           "failed to load during remote discovery and were skipped",
         ),
         expect.any(Error),
       );
-    } finally {
-      warnSpy.mockRestore();
-    }
+    });
   });
 
-  it("routes deferred discovery failures to subscription onError", async () => {
+  it("routes deferred discovery failures to subscription onError", async ({
+    track,
+  }) => {
     mockEngineFactory.create.mockImplementationOnce(() => {
       throw new Error("engine boom");
     });
 
-    const client = createConvexClient({
-      convex: { modules: createSyncModules() },
-      remote: { url: REMOTE_URL },
-    }) as any;
-    clientsToClose.push(client);
-
-    const onError = vi.fn();
-    const unsubscribe = client.onUpdate(
-      localCreateRef as any,
-      {},
-      vi.fn(),
-      onError,
+    const client = asRoutedClient(
+      track(
+        createConvexClient({
+          convex: { modules: createSyncModules() },
+          remote: { url: REMOTE_URL },
+        }),
+      ),
     );
 
-    expect(typeof unsubscribe).toBe("function");
-    await settle();
+    const onError = vi.fn();
+    const unsubscribe = client.onUpdate(localCreateRef, {}, vi.fn(), onError);
 
-    expect(onError).toHaveBeenCalledWith(expect.any(Error));
-    expect(onError.mock.calls[0][0].message).toBe("engine boom");
+    expect(typeof unsubscribe).toBe("function");
+    await vi.waitFor(() => {
+      expect(onError).toHaveBeenCalledWith(expect.any(Error));
+    });
+
+    const [firstError] = onError.mock.calls[0] ?? [];
+    expect(firstError).toBeInstanceOf(Error);
+    expect((firstError as Error).message).toBe("engine boom");
   });
 });
+
+async function flushDiscovery(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+}

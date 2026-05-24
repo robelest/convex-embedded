@@ -1,6 +1,21 @@
+import type {
+  DocumentId,
+  Source,
+  StoredDocument,
+} from "@embedded/runtime/db/types";
+import type { PendingReplayMeta } from "@embedded/shared/symbols";
+import type {
+  DocumentWithTable,
+  StorageMetadata,
+} from "@embedded/storage/adapter";
 import { mockAdapter } from "@tests/helpers/adapter";
-import { afterEach, describe, expect, it } from "@tests/testkit";
-import { vi } from "vitest";
+import { describe, expect, it } from "@tests/testkit";
+
+const mocks = vi.hoisted(() => ({
+  discoverPendingReplayMetadata: vi.fn(
+    async (): Promise<Map<string, PendingReplayMeta>> => new Map(),
+  ),
+}));
 
 vi.mock("convex/browser", () => ({
   ConvexClient: class MockConvexClient {
@@ -28,7 +43,7 @@ vi.mock("convex/browser", () => ({
 }));
 
 vi.mock("@resolve/client/replay", () => ({
-  discoverPendingReplayMetadata: vi.fn(async () => new Map()),
+  discoverPendingReplayMetadata: mocks.discoverPendingReplayMetadata,
 }));
 
 import { getEmbeddedClientEntry } from "@resolve/client/entry";
@@ -46,229 +61,194 @@ function deferredPromise<T>() {
   return { promise, resolve, reject };
 }
 
-async function flushMicrotasks(): Promise<void> {
-  for (let i = 0; i < 50; i += 1) {
-    await Promise.resolve();
-  }
-  await new Promise<void>((resolve) => setTimeout(resolve, 0));
-  for (let i = 0; i < 50; i += 1) {
-    await Promise.resolve();
-  }
-}
-
 const MODULES = {
   "_generated/api": async () => ({}),
 };
 
 describe("createEmbeddedClient prefetch bootstrap", () => {
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  it("serves prefetched data immediately and refreshes local watches after durable storage loads", async () => {
-    const persistedRows =
-      deferredPromise<
-        Array<{ tableName: string; doc: Record<string, unknown> }>
-      >();
-    const persistedMeta = deferredPromise<{
-      timestamp: number;
-      lastCreationTime: number;
-    }>();
+  it("serves prefetched data immediately and refreshes local watches after durable storage loads", async ({
+    track,
+  }) => {
+    const persistedRows = deferredPromise<DocumentWithTable[]>();
+    const persistedMeta = deferredPromise<StorageMetadata>();
     const refreshSpy = vi
       .spyOn(EmbeddedRuntime.prototype, "refreshLocalQueryWatches")
       .mockResolvedValue(undefined);
 
-    const client = createEmbeddedClient({
-      options: {
-        convex: { modules: MODULES },
-        name: "factory-prefetch-test",
-        prefetch: {
-          identityKey: null,
-          tables: {
-            tasks: [
-              {
-                _id: "task-prefetch",
-                _creationTime: 1,
-                title: "Prefetched task",
+    const client = track(
+      createEmbeddedClient({
+        options: {
+          convex: { modules: MODULES },
+          name: "factory-prefetch-test",
+          prefetch: {
+            identityKey: null,
+            tables: {
+              tasks: [
+                {
+                  _id: "task-prefetch",
+                  _creationTime: 1,
+                  title: "Prefetched task",
+                },
+              ],
+            },
+            metadata: {
+              tasks: {
+                collectionSeq: 1,
+                documents: [{ docId: "task-prefetch", seq: 1 }],
               },
-            ],
-          },
-          metadata: {
-            tasks: {
-              collectionSeq: 1,
-              documents: [{ docId: "task-prefetch", seq: 1 }],
             },
           },
         },
-      },
-      platform: {
-        openStorage: vi.fn(async () =>
-          mockAdapter({
-            getDocuments: (table?: string) =>
-              table === undefined
-                ? (persistedRows.promise as any)
-                : Promise.resolve([]),
-            getMetadata: () => persistedMeta.promise,
-            write: vi.fn(async () => undefined),
-            putBlob: vi.fn(async () => undefined),
-            deleteBlob: vi.fn(async () => undefined),
-            clearAll: vi.fn(async () => undefined),
-            close: vi.fn(async () => undefined),
-          }),
-        ),
-      },
-    });
+        platform: {
+          openStorage: vi.fn(async () =>
+            mockAdapter({
+              getDocuments: (table?: string) =>
+                table === undefined
+                  ? persistedRows.promise
+                  : Promise.resolve([]),
+              getMetadata: () => persistedMeta.promise,
+              write: vi.fn(async () => undefined),
+              putBlob: vi.fn(async () => undefined),
+              deleteBlob: vi.fn(async () => undefined),
+              clearAll: vi.fn(async () => undefined),
+              close: vi.fn(async () => undefined),
+            }),
+          ),
+        },
+      }),
+    );
 
     const entry = getEmbeddedClientEntry(client);
     expect(entry).toBeDefined();
     const runtime = entry!.runtime;
+    track({ close: () => runtime.shutdown() });
 
-    try {
-      await runtime.hydrate();
+    await runtime.hydrate();
 
-      expect(await runtime.getDocumentsForTable("tasks")).toEqual([
-        expect.objectContaining({
-          _id: "task-prefetch",
-          title: "Prefetched task",
-        }),
-      ]);
-      expect(refreshSpy).not.toHaveBeenCalled();
+    expect(await runtime.getDocumentsForTable("tasks")).toEqual([
+      expect.objectContaining({
+        _id: "task-prefetch",
+        title: "Prefetched task",
+      }),
+    ]);
+    expect(refreshSpy).not.toHaveBeenCalled();
 
-      persistedRows.resolve([
-        {
-          tableName: "tasks",
-          doc: {
-            _id: "task-persisted",
-            _creationTime: 2,
-            title: "Persisted task",
-          },
-        },
-      ]);
-      persistedMeta.resolve({ timestamp: 2, lastCreationTime: 2 });
-      await flushMicrotasks();
-      await flushMicrotasks();
-
-      expect(refreshSpy).toHaveBeenCalledTimes(1);
-      expect(await runtime.getDocumentsForTable("tasks")).toEqual([
-        expect.objectContaining({
-          _id: "task-persisted",
+    persistedRows.resolve([
+      {
+        tableName: "tasks",
+        doc: {
+          _id: "task-persisted" as DocumentId,
+          _creationTime: 2,
           title: "Persisted task",
-        }),
-      ]);
-    } finally {
-      await (client as any).close?.();
-      runtime.shutdown();
-    }
+        },
+      },
+    ]);
+    persistedMeta.resolve({ timestamp: 2, lastCreationTime: 2 });
+
+    await vi.waitFor(() => expect(refreshSpy).toHaveBeenCalledTimes(1));
+
+    expect(await runtime.getDocumentsForTable("tasks")).toEqual([
+      expect.objectContaining({
+        _id: "task-persisted",
+        title: "Persisted task",
+      }),
+    ]);
   });
 
-  it("loads replay metadata only when sql-backed pending rows exist for the active identity", async () => {
-    const discoverSpy = vi.mocked(discoverPendingReplayMetadata);
-    discoverSpy.mockImplementation(async () => new Map());
-    const withPending = createEmbeddedClient({
-      options: {
-        convex: { modules: MODULES },
-        name: "factory-pending-hit",
-      },
-      platform: {
-        openStorage: vi.fn(async () =>
-          mockAdapter({
-            kind: "sql",
-            listAll: async () => [],
-            list: vi.fn(async () => []),
-            get: vi.fn(async () => null),
-            meta: async () => ({ timestamp: 0, lastCreationTime: 0 }),
-            listBlobs: vi.fn(async () => []),
-            getDocuments: vi.fn(async (tableName: string) =>
-              tableName === "_resolve_pending"
-                ? [
-                    {
-                      _id: "pending-1",
-                      _creationTime: 1,
-                      identityKey: null,
-                      ref: "tasks:create",
-                      args: JSON.stringify({}),
-                      localResult: JSON.stringify(null),
-                      table: "tasks",
-                      payloadVersion: 1,
-                      state: "pending",
-                    },
-                  ]
-                : [],
-            ),
-            count: vi.fn(async () => 0),
-            source: vi.fn(async (source: any) => {
-              if (
-                source.type === "IndexRange" &&
-                source.indexName ===
-                  "_resolve_pending.by_identity_key_and_creation_time"
-              ) {
-                return [
-                  {
-                    _id: "pending-1",
-                    _creationTime: 1,
-                    identityKey: null,
-                    ref: "tasks:create",
-                    args: JSON.stringify({}),
-                    localResult: JSON.stringify(null),
-                    table: "tasks",
-                    payloadVersion: 1,
-                    state: "pending",
-                  },
-                ];
-              }
-              return [];
+  it("loads replay metadata only when sql-backed pending rows exist for the active identity", async ({
+    track,
+  }) => {
+    mocks.discoverPendingReplayMetadata.mockImplementation(
+      async () => new Map(),
+    );
+    const pendingRow: StoredDocument = {
+      _id: "pending-1" as DocumentId,
+      _creationTime: 1,
+      identityKey: null,
+      ref: "tasks:create",
+      args: JSON.stringify({}),
+      localResult: JSON.stringify(null),
+      table: "tasks",
+      payloadVersion: 1,
+      state: "pending",
+    };
+
+    const withPending = track(
+      createEmbeddedClient({
+        options: {
+          convex: { modules: MODULES },
+          name: "factory-pending-hit",
+        },
+        platform: {
+          openStorage: vi.fn(async () =>
+            mockAdapter({
+              kind: "sql",
+              getDocuments: vi.fn(async () => []),
+              getDocument: vi.fn(async () => null),
+              getMetadata: async () => ({ timestamp: 0, lastCreationTime: 0 }),
+              listBlobs: vi.fn(async () => []),
+              countDocuments: vi.fn(async () => 0),
+              source: vi.fn(async (source: Source) => {
+                if (
+                  source.type === "IndexRange" &&
+                  source.indexName ===
+                    "_resolve_pending.by_identity_key_and_creation_time"
+                ) {
+                  return [pendingRow];
+                }
+                return [];
+              }),
+              query: vi.fn(async () => null),
+              write: vi.fn(async () => undefined),
+              putBlob: vi.fn(async () => undefined),
+              deleteBlob: vi.fn(async () => undefined),
+              clearAll: vi.fn(async () => undefined),
+              close: vi.fn(async () => undefined),
             }),
-            query: vi.fn(async () => null),
-            commit: vi.fn(async () => undefined),
-            putBlob: vi.fn(async () => undefined),
-            deleteBlob: vi.fn(async () => undefined),
-            clear: vi.fn(async () => undefined),
-            close: vi.fn(async () => undefined),
-          }),
-        ),
-      },
-    });
+          ),
+        },
+      }),
+    );
 
-    const withoutPending = createEmbeddedClient({
-      options: {
-        convex: { modules: MODULES },
-        name: "factory-pending-miss",
-      },
-      platform: {
-        openStorage: vi.fn(async () =>
-          mockAdapter({
-            kind: "sql",
-            listAll: async () => [],
-            list: vi.fn(async () => []),
-            get: vi.fn(async () => null),
-            meta: async () => ({ timestamp: 0, lastCreationTime: 0 }),
-            listBlobs: vi.fn(async () => []),
-            getDocuments: vi.fn(async () => []),
-            count: vi.fn(async () => 0),
-            source: vi.fn(async () => []),
-            query: vi.fn(async () => null),
-            commit: vi.fn(async () => undefined),
-            putBlob: vi.fn(async () => undefined),
-            deleteBlob: vi.fn(async () => undefined),
-            clear: vi.fn(async () => undefined),
-            close: vi.fn(async () => undefined),
-          }),
-        ),
-      },
-    });
+    const withoutPending = track(
+      createEmbeddedClient({
+        options: {
+          convex: { modules: MODULES },
+          name: "factory-pending-miss",
+        },
+        platform: {
+          openStorage: vi.fn(async () =>
+            mockAdapter({
+              kind: "sql",
+              getDocuments: vi.fn(async () => []),
+              getDocument: vi.fn(async () => null),
+              getMetadata: async () => ({ timestamp: 0, lastCreationTime: 0 }),
+              listBlobs: vi.fn(async () => []),
+              countDocuments: vi.fn(async () => 0),
+              source: vi.fn(async () => []),
+              query: vi.fn(async () => null),
+              write: vi.fn(async () => undefined),
+              putBlob: vi.fn(async () => undefined),
+              deleteBlob: vi.fn(async () => undefined),
+              clearAll: vi.fn(async () => undefined),
+              close: vi.fn(async () => undefined),
+            }),
+          ),
+        },
+      }),
+    );
 
-    try {
-      await getEmbeddedClientEntry(withPending)!.runtime.hydrate();
-      await getEmbeddedClientEntry(withoutPending)!.runtime.hydrate();
-      await flushMicrotasks();
-      await flushMicrotasks();
+    const withPendingRuntime = getEmbeddedClientEntry(withPending)!.runtime;
+    const withoutPendingRuntime =
+      getEmbeddedClientEntry(withoutPending)!.runtime;
+    track({ close: () => withPendingRuntime.shutdown() });
+    track({ close: () => withoutPendingRuntime.shutdown() });
 
-      expect(discoverSpy.mock.calls.length).toBeLessThanOrEqual(1);
-    } finally {
-      await (withPending as any).close?.();
-      await (withoutPending as any).close?.();
-      getEmbeddedClientEntry(withPending)?.runtime.shutdown();
-      getEmbeddedClientEntry(withoutPending)?.runtime.shutdown();
-    }
+    await withPendingRuntime.hydrate();
+    await withoutPendingRuntime.hydrate();
+
+    expect(
+      vi.mocked(discoverPendingReplayMetadata).mock.calls.length,
+    ).toBeLessThanOrEqual(1);
   });
 });

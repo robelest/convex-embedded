@@ -1,9 +1,12 @@
-import { ModuleLoader } from "@embedded/kernel/modules";
+import {
+  ModuleLoader,
+  type ConvexModuleRegistry,
+} from "@embedded/kernel/modules";
 import { discoverCronJobs } from "@embedded/scheduler/cron/discover";
 import { remoteOnly } from "@embedded/server/markers";
 import { describe, expect, it } from "@tests/testkit";
 
-function makeLoader(modules: Record<string, () => Promise<unknown>>) {
+function makeLoader(modules: ConvexModuleRegistry): ModuleLoader {
   return new ModuleLoader(modules);
 }
 
@@ -12,13 +15,15 @@ describe("scheduler/cron-discover", () => {
     const loader = makeLoader({
       messages: () => Promise.resolve({}),
     });
+
     expect(await discoverCronJobs(loader)).toEqual([]);
   });
 
-  it("returns [] when crons module has no Crons default export", async () => {
+  it("returns [] when the crons module has no Crons default export", async () => {
     const loader = makeLoader({
       crons: () => Promise.resolve({ default: { something: "else" } }),
     });
+
     expect(await discoverCronJobs(loader)).toEqual([]);
   });
 
@@ -53,7 +58,7 @@ describe("scheduler/cron-discover", () => {
     });
 
     const jobs = await discoverCronJobs(loader);
-    const byName = new Map(jobs.map((j) => [j.name, j]));
+    const byName = new Map(jobs.map((job) => [job.name, job]));
 
     expect(byName.size).toBe(3);
     expect(byName.get("tick")?.type).toBe("mutation");
@@ -101,10 +106,11 @@ describe("scheduler/cron-discover", () => {
     });
 
     const jobs = await discoverCronJobs(loader);
-    expect(jobs.map((j) => j.name)).toEqual(["local cleanup"]);
+
+    expect(jobs.map((job) => job.name)).toEqual(["local cleanup"]);
   });
 
-  it("skips jobs whose target function is missing or invalid type", async () => {
+  it("skips jobs whose target function is missing or an invalid type", async () => {
     const loader = makeLoader({
       crons: () =>
         Promise.resolve({
@@ -134,6 +140,7 @@ describe("scheduler/cron-discover", () => {
     });
 
     const jobs = await discoverCronJobs(loader);
-    expect(jobs.map((j) => j.name)).toEqual(["good"]);
+
+    expect(jobs.map((job) => job.name)).toEqual(["good"]);
   });
 });

@@ -16,7 +16,7 @@ import {
 
 const CONVEX_URL = process.env.CONVEX_URL;
 const maybeDescribe =
-  CONVEX_URL && process.env.RUN_CONVEX_E2E === "1" ? describe : describe.skip;
+  CONVEX_URL && process.env.RUN_CONVEX_LIVE === "1" ? describe : describe.skip;
 
 type ClosableClient = Awaited<ReturnType<typeof createLiveClient>>["client"] & {
   close(): Promise<void>;

@@ -277,7 +277,6 @@ describe("encodeState()", () => {
 describe("materializeYjsDoc()", () => {
   it("skips plain fields entirely", () => {
     const def = define({
-      version: 1,
       shape: { name: v.string(), age: v.number() },
     });
 
@@ -290,7 +289,6 @@ describe("materializeYjsDoc()", () => {
 
   it("materializes register fields (single value)", () => {
     const def = define({
-      version: 1,
       shape: { title: register(v.string()) },
     });
 
@@ -302,7 +300,6 @@ describe("materializeYjsDoc()", () => {
 
   it("materializes register fields (resolves conflict via latest timestamp)", () => {
     const def = define({
-      version: 1,
       shape: { title: register(v.string()) },
     });
 
@@ -320,7 +317,6 @@ describe("materializeYjsDoc()", () => {
 
   it("materializes counter fields", () => {
     const def = define({
-      version: 1,
       shape: { votes: counter() },
     });
 
@@ -341,7 +337,6 @@ describe("materializeYjsDoc()", () => {
 
   it("materializes set fields", () => {
     const def = define({
-      version: 1,
       shape: { tags: set(v.string()) },
     });
 
@@ -354,7 +349,6 @@ describe("materializeYjsDoc()", () => {
 
   it("skips omitted and plain fields", () => {
     const def = define({
-      version: 1,
       shape: {
         title: register(v.string()),
         name: v.string(),
@@ -376,7 +370,6 @@ describe("materializeYjsDoc()", () => {
 
   it("does not include _id, _creationTime, or plain fields", () => {
     const def = define({
-      version: 1,
       shape: {
         title: register(v.string()),
         name: v.string(),
@@ -399,7 +392,6 @@ describe("materializeYjsDoc()", () => {
 
   it("round-trips initYjsDoc -> materializeYjsDoc for CRDT fields only", () => {
     const def = define({
-      version: 1,
       shape: {
         title: register(v.string()),
         body: prose(),
@@ -438,7 +430,6 @@ describe("materializeYjsDoc()", () => {
 
   it("handles empty Y.Doc (all fields return defaults/empty)", () => {
     const def = define({
-      version: 1,
       shape: {
         title: register(v.string()),
         body: prose(),

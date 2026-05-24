@@ -1,6 +1,12 @@
+import type { UserIdentity } from "@embedded/auth";
+import type { EngineStatus } from "@embedded/shared/types";
 import { createTestIdentity } from "@embedded/test";
 import { afterEach, beforeEach, describe, expect, it } from "@tests/testkit";
-import { vi } from "vitest";
+import { makeFunctionReference } from "convex/server";
+
+interface MockBrowserModule {
+  __mock: { reset: () => void };
+}
 
 vi.mock("convex/browser", () => {
   class MockConvexClient {
@@ -14,7 +20,7 @@ vi.mock("convex/browser", () => {
     mutation = vi.fn(async () => undefined);
     query = vi.fn(async () => undefined);
     action = vi.fn(async () => undefined);
-    onUpdate = vi.fn(() => (() => {}) as any);
+    onUpdate = vi.fn(() => () => {});
     close = vi.fn(async () => {});
     setAuth = vi.fn((fetchToken: typeof this.authFetcher) => {
       this.authFetcher = fetchToken;
@@ -37,19 +43,21 @@ vi.mock("convex/browser", () => {
   };
 });
 
-const engineInstances: Array<{
-  emitChange: (status: unknown) => void;
+interface EngineProbe {
+  emitChange: (status: EngineStatus) => void;
   reloadIdentity: ReturnType<typeof vi.fn>;
   stop: ReturnType<typeof vi.fn>;
-}> = [];
+}
+
+const engineInstances: EngineProbe[] = [];
 
 vi.mock("@/client/engine", () => ({
   engine: {
     create: vi.fn(() => {
-      let onChange: ((status: unknown) => void) | null = null;
+      let onChange: ((status: EngineStatus) => void) | null = null;
       const instance = {
         mutation: vi.fn(),
-        on: vi.fn((event: string, cb: (status: unknown) => void) => {
+        on: vi.fn((event: string, cb: (status: EngineStatus) => void) => {
           if (event === "change") {
             onChange = cb;
           }
@@ -103,8 +111,8 @@ class MockBroadcastChannel {
   }
 }
 
-const whoamiRef = "auth:whoami";
-const identityKeyRef = "auth:identityKey";
+const whoamiRef = makeFunctionReference<"query">("auth:whoami");
+const identityKeyRef = makeFunctionReference<"query">("auth:identityKey");
 
 let createConvexClient: typeof import("@resolve/browser/index").createConvexClient;
 let getAuthIdentity: typeof import("@resolve/browser/index").getAuthIdentity;
@@ -157,19 +165,12 @@ function createRemoteModules() {
   };
 }
 
-async function settle(): Promise<void> {
-  await Promise.resolve();
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  await Promise.resolve();
+async function mockBrowserModule(): Promise<MockBrowserModule> {
+  return (await vi.importMock("convex/browser")) as MockBrowserModule;
 }
 
 describe("multi-client auth lifecycle", () => {
-  const clientsToClose: Array<{ close: () => Promise<void> }> = [];
-
   beforeEach(async () => {
-    const convexBrowser = (await vi.importMock("convex/browser")) as {
-      __mock: { reset: () => void };
-    };
     ({
       createConvexClient,
       getAuthIdentity,
@@ -177,101 +178,114 @@ describe("multi-client auth lifecycle", () => {
       logout,
       switchIdentity,
     } = await import("@resolve/browser/index"));
-    convexBrowser.__mock.reset();
+    (await mockBrowserModule()).__mock.reset();
     engineInstances.length = 0;
     MockBroadcastChannel.reset();
     vi.stubGlobal("BroadcastChannel", MockBroadcastChannel);
   });
 
-  afterEach(async () => {
+  afterEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
-    for (const client of clientsToClose.splice(0)) {
-      await client.close();
-    }
   });
 
-  it("keeps two clients aligned with shared native getUserIdentity state", async () => {
-    let currentIdentity: ReturnType<typeof createTestIdentity> | null =
-      createTestIdentity({ subject: "alice" });
+  it("keeps two clients aligned with shared native getUserIdentity state", async ({
+    track,
+  }) => {
+    let currentIdentity: UserIdentity | null = createTestIdentity({
+      subject: "alice",
+    });
     const getUserIdentity = vi.fn(async () => currentIdentity);
 
-    const clientA = createConvexClient({
-      convex: { modules: createModules() },
-      name: "multiclient-auth",
-      auth: { getUserIdentity },
-    });
-    const clientB = createConvexClient({
-      convex: { modules: createModules() },
-      name: "multiclient-auth",
-      auth: { getUserIdentity },
-    });
-    clientsToClose.push(clientA as any, clientB as any);
+    const clientA = track(
+      createConvexClient({
+        convex: { modules: createModules() },
+        name: "multiclient-auth",
+        auth: { getUserIdentity },
+      }),
+    );
+    const clientB = track(
+      createConvexClient({
+        convex: { modules: createModules() },
+        name: "multiclient-auth",
+        auth: { getUserIdentity },
+      }),
+    );
 
-    await settle();
-
-    expect(getAuthState(clientA)).toEqual({
-      status: "authenticated",
-      identity: currentIdentity,
-      identityKey: currentIdentity.tokenIdentifier,
-    });
-    expect(getAuthState(clientB)).toEqual({
-      status: "authenticated",
-      identity: currentIdentity,
-      identityKey: currentIdentity.tokenIdentifier,
+    await vi.waitFor(() => {
+      expect(getAuthState(clientA)).toEqual({
+        status: "authenticated",
+        identity: currentIdentity,
+        identityKey: currentIdentity!.tokenIdentifier,
+      });
+      expect(getAuthState(clientB)).toEqual({
+        status: "authenticated",
+        identity: currentIdentity,
+        identityKey: currentIdentity!.tokenIdentifier,
+      });
     });
     await expect(clientA.query(whoamiRef, {})).resolves.toEqual(
       currentIdentity,
     );
     await expect(clientB.query(identityKeyRef, {})).resolves.toBe(
-      currentIdentity.tokenIdentifier,
+      currentIdentity!.tokenIdentifier,
     );
 
     const bob = createTestIdentity({ subject: "bob" });
     currentIdentity = bob;
     await switchIdentity(clientA, bob);
-    await settle();
 
-    expect(getAuthIdentity(clientA)).toEqual(bob);
-    expect(getAuthIdentity(clientB)).toEqual(bob);
-    expect(getAuthState(clientA)).toEqual({
-      status: "authenticated",
-      identity: bob,
-      identityKey: bob.tokenIdentifier,
-    });
-    expect(getAuthState(clientB)).toEqual({
-      status: "authenticated",
-      identity: bob,
-      identityKey: bob.tokenIdentifier,
+    await vi.waitFor(() => {
+      expect(getAuthIdentity(clientA)).toEqual(bob);
+      expect(getAuthIdentity(clientB)).toEqual(bob);
+      expect(getAuthState(clientA)).toEqual({
+        status: "authenticated",
+        identity: bob,
+        identityKey: bob.tokenIdentifier,
+      });
+      expect(getAuthState(clientB)).toEqual({
+        status: "authenticated",
+        identity: bob,
+        identityKey: bob.tokenIdentifier,
+      });
     });
     await expect(clientA.query(whoamiRef, {})).resolves.toEqual(bob);
     await expect(clientB.query(whoamiRef, {})).resolves.toEqual(bob);
 
     currentIdentity = null;
     await logout(clientA);
-    await settle();
 
-    expect(getAuthState(clientA)).toEqual({ status: "unauthenticated" });
-    expect(getAuthState(clientB)).toEqual({ status: "unauthenticated" });
+    await vi.waitFor(() => {
+      expect(getAuthState(clientA)).toEqual({ status: "unauthenticated" });
+      expect(getAuthState(clientB)).toEqual({ status: "unauthenticated" });
+    });
     await expect(clientA.query(whoamiRef, {})).resolves.toBeNull();
     await expect(clientB.query(identityKeyRef, {})).resolves.toBeNull();
   });
 
-  it("keeps identityMismatch scoped to the client that still owns pending work", async () => {
+  it("keeps identityMismatch scoped to the client that still owns pending work", async ({
+    track,
+  }) => {
     let currentIdentity = createTestIdentity({ subject: "alice" });
-    const clientA = createConvexClient({
-      convex: { modules: createModules() },
-      name: "multiclient-mismatch",
-      auth: { getUserIdentity: async () => currentIdentity },
-    });
-    const clientB = createConvexClient({
-      convex: { modules: createModules() },
-      name: "multiclient-mismatch",
-      auth: { getUserIdentity: async () => currentIdentity },
-    });
-    clientsToClose.push(clientA as any, clientB as any);
+    const clientA = track(
+      createConvexClient({
+        convex: { modules: createModules() },
+        name: "multiclient-mismatch",
+        auth: { getUserIdentity: async () => currentIdentity },
+      }),
+    );
+    const clientB = track(
+      createConvexClient({
+        convex: { modules: createModules() },
+        name: "multiclient-mismatch",
+        auth: { getUserIdentity: async () => currentIdentity },
+      }),
+    );
 
-    await settle();
+    await vi.waitFor(() => {
+      expect(getAuthState(clientA).status).toBe("authenticated");
+      expect(getAuthState(clientB).status).toBe("authenticated");
+    });
 
     const { getAuthEntry } = await import("@resolve/client/auth");
     const runtime = getAuthEntry(clientA)?.runtime;
@@ -293,89 +307,104 @@ describe("multi-client auth lifecycle", () => {
     const bob = createTestIdentity({ subject: "bob" });
     currentIdentity = bob;
     await switchIdentity(clientA, bob);
-    await settle();
 
-    expect(getAuthState(clientA)).toEqual({
-      status: "identityMismatch",
-      identity: bob,
-      identityKey: bob.tokenIdentifier,
-    });
-    expect(getAuthState(clientB)).toEqual({
-      status: "authenticated",
-      identity: bob,
-      identityKey: bob.tokenIdentifier,
+    await vi.waitFor(() => {
+      expect(getAuthState(clientA)).toEqual({
+        status: "identityMismatch",
+        identity: bob,
+        identityKey: bob.tokenIdentifier,
+      });
+      expect(getAuthState(clientB)).toEqual({
+        status: "authenticated",
+        identity: bob,
+        identityKey: bob.tokenIdentifier,
+      });
     });
     await expect(clientA.query(whoamiRef, {})).resolves.toEqual(bob);
     await expect(clientB.query(whoamiRef, {})).resolves.toEqual(bob);
   });
 
-  it("closing one client does not break the surviving client's identity updates", async () => {
+  it("closing one client does not break the surviving client's identity updates", async ({
+    track,
+  }) => {
     let currentIdentity = createTestIdentity({ subject: "alice" });
     const clientA = createConvexClient({
       convex: { modules: createModules() },
       name: "multiclient-close",
       auth: { getUserIdentity: async () => currentIdentity },
     });
-    const clientB = createConvexClient({
-      convex: { modules: createModules() },
-      name: "multiclient-close",
-      auth: { getUserIdentity: async () => currentIdentity },
-    });
-    clientsToClose.push(clientA as any, clientB as any);
+    const clientB = track(
+      createConvexClient({
+        convex: { modules: createModules() },
+        name: "multiclient-close",
+        auth: { getUserIdentity: async () => currentIdentity },
+      }),
+    );
 
-    await settle();
+    await vi.waitFor(() => {
+      expect(getAuthState(clientB).status).toBe("authenticated");
+    });
     await clientA.close();
-    clientsToClose.shift();
 
     const bob = createTestIdentity({ subject: "bob" });
     currentIdentity = bob;
     await switchIdentity(clientB, bob);
-    await settle();
 
-    expect(getAuthState(clientB)).toEqual({
-      status: "authenticated",
-      identity: bob,
-      identityKey: bob.tokenIdentifier,
+    await vi.waitFor(() => {
+      expect(getAuthState(clientB)).toEqual({
+        status: "authenticated",
+        identity: bob,
+        identityKey: bob.tokenIdentifier,
+      });
     });
     await expect(clientB.query(whoamiRef, {})).resolves.toEqual(bob);
   });
 
-  it("reconnect preserves the refreshed native identity across clients", async () => {
+  it("reconnect preserves the refreshed native identity across clients", async ({
+    track,
+  }) => {
     let currentIdentity = createTestIdentity({ subject: "alice" });
-    const clientA = createConvexClient({
-      convex: { modules: createRemoteModules() },
-      name: "multiclient-reconnect",
-      remote: { url: "https://remote.example.convex.cloud" },
-      auth: { getUserIdentity: async () => currentIdentity },
-    });
-    const clientB = createConvexClient({
-      convex: { modules: createRemoteModules() },
-      name: "multiclient-reconnect",
-      remote: { url: "https://remote.example.convex.cloud" },
-      auth: { getUserIdentity: async () => currentIdentity },
-    });
-    clientsToClose.push(clientA as any, clientB as any);
+    const clientA = track(
+      createConvexClient({
+        convex: { modules: createRemoteModules() },
+        name: "multiclient-reconnect",
+        remote: { url: "https://remote.example.convex.cloud" },
+        auth: { getUserIdentity: async () => currentIdentity },
+      }),
+    );
+    const clientB = track(
+      createConvexClient({
+        convex: { modules: createRemoteModules() },
+        name: "multiclient-reconnect",
+        remote: { url: "https://remote.example.convex.cloud" },
+        auth: { getUserIdentity: async () => currentIdentity },
+      }),
+    );
 
-    await settle();
+    await vi.waitFor(() => {
+      expect(getAuthState(clientA).status).toBe("authenticated");
+      expect(getAuthState(clientB).status).toBe("authenticated");
+    });
 
     engineInstances[0]?.emitChange({ status: "offline" });
 
     const bob = createTestIdentity({ subject: "bob" });
     currentIdentity = bob;
     await switchIdentity(clientA, bob);
-    await settle();
 
-    engineInstances[0]?.emitChange({ status: "resolving" });
+    engineInstances[0]?.emitChange({ status: "resolved" });
 
-    expect(getAuthState(clientA)).toEqual({
-      status: "authenticated",
-      identity: bob,
-      identityKey: bob.tokenIdentifier,
-    });
-    expect(getAuthState(clientB)).toEqual({
-      status: "authenticated",
-      identity: bob,
-      identityKey: bob.tokenIdentifier,
+    await vi.waitFor(() => {
+      expect(getAuthState(clientA)).toEqual({
+        status: "authenticated",
+        identity: bob,
+        identityKey: bob.tokenIdentifier,
+      });
+      expect(getAuthState(clientB)).toEqual({
+        status: "authenticated",
+        identity: bob,
+        identityKey: bob.tokenIdentifier,
+      });
     });
     await expect(clientA.query(whoamiRef, {})).resolves.toEqual(bob);
     await expect(clientB.query(identityKeyRef, {})).resolves.toBe(
@@ -383,7 +412,9 @@ describe("multi-client auth lifecycle", () => {
     );
   });
 
-  it("closing one remote client does not break the surviving client's reconnect flow", async () => {
+  it("closing one remote client does not break the surviving client's reconnect flow", async ({
+    track,
+  }) => {
     let currentIdentity = createTestIdentity({ subject: "alice" });
     const clientA = createConvexClient({
       convex: { modules: createRemoteModules() },
@@ -391,29 +422,32 @@ describe("multi-client auth lifecycle", () => {
       remote: { url: "https://remote.example.convex.cloud" },
       auth: { getUserIdentity: async () => currentIdentity },
     });
-    const clientB = createConvexClient({
-      convex: { modules: createRemoteModules() },
-      name: "multiclient-remote-close",
-      remote: { url: "https://remote.example.convex.cloud" },
-      auth: { getUserIdentity: async () => currentIdentity },
-    });
-    clientsToClose.push(clientA as any, clientB as any);
+    const clientB = track(
+      createConvexClient({
+        convex: { modules: createRemoteModules() },
+        name: "multiclient-remote-close",
+        remote: { url: "https://remote.example.convex.cloud" },
+        auth: { getUserIdentity: async () => currentIdentity },
+      }),
+    );
 
-    await settle();
+    await vi.waitFor(() => {
+      expect(getAuthState(clientB).status).toBe("authenticated");
+    });
     await clientA.close();
-    clientsToClose.shift();
 
     const bob = createTestIdentity({ subject: "bob" });
     currentIdentity = bob;
     await switchIdentity(clientB, bob);
-    await settle();
 
-    engineInstances.at(-1)?.emitChange({ status: "resolving" });
+    engineInstances.at(-1)?.emitChange({ status: "resolved" });
 
-    expect(getAuthState(clientB)).toEqual({
-      status: "authenticated",
-      identity: bob,
-      identityKey: bob.tokenIdentifier,
+    await vi.waitFor(() => {
+      expect(getAuthState(clientB)).toEqual({
+        status: "authenticated",
+        identity: bob,
+        identityKey: bob.tokenIdentifier,
+      });
     });
   });
 });

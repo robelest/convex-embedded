@@ -1,29 +1,20 @@
+import type { ConvexModuleRegistry } from "@embedded/kernel/modules";
 import { EmbeddedRuntime } from "@embedded/runtime/embedded";
 import { remoteOnly } from "@embedded/server/markers";
-import { afterEach, beforeEach, describe, expect, it } from "@tests/testkit";
-import {
-  httpActionGeneric,
-  httpRouter,
-  type GenericActionCtx,
-} from "convex/server";
+import type { TestFixtures } from "@tests/testkit";
+import { describe, expect, it } from "@tests/testkit";
+import { httpActionGeneric, httpRouter } from "convex/server";
 
 const echoAction = httpActionGeneric(async (_ctx, request: Request) => {
   const body = request.method === "GET" ? null : await request.text();
   return new Response(
-    JSON.stringify({
-      method: request.method,
-      url: request.url,
-      body,
-    }),
-    {
-      status: 200,
-      headers: { "content-type": "application/json" },
-    },
+    JSON.stringify({ method: request.method, url: request.url, body }),
+    { status: 200, headers: { "content-type": "application/json" } },
   );
 });
 
 const helloAction = httpActionGeneric(
-  async (_ctx: GenericActionCtx<any>) =>
+  async () =>
     new Response("hello", {
       status: 200,
       headers: { "content-type": "text/plain" },
@@ -56,44 +47,54 @@ function makeRouterModule() {
   return { default: http };
 }
 
-const HTTP_MODULES: Record<string, () => Promise<unknown>> = {
+const HTTP_MODULES: ConvexModuleRegistry = {
   "_generated/api": () => Promise.resolve({}),
   http: () => Promise.resolve(makeRouterModule()),
 };
 
+async function startRuntime(
+  track: TestFixtures["track"],
+  modules: ConvexModuleRegistry,
+): Promise<EmbeddedRuntime> {
+  const runtime = new EmbeddedRuntime({ convex: { modules } });
+  track({ close: () => runtime.shutdown() });
+  await runtime.hydrate();
+  return runtime;
+}
+
+function request(path: string, init?: RequestInit): Request {
+  return new Request(`http://embedded.local${path}`, init);
+}
+
 describe("EmbeddedRuntime.dispatchHttpRequest", () => {
-  let runtime: EmbeddedRuntime;
+  it("routes an exact GET to the registered handler", async ({ track }) => {
+    const runtime = await startRuntime(track, HTTP_MODULES);
 
-  beforeEach(async () => {
-    runtime = new EmbeddedRuntime({ convex: { modules: HTTP_MODULES } });
-    await runtime.hydrate();
-  });
-
-  afterEach(() => {
-    runtime.shutdown();
-  });
-
-  it("routes an exact GET to the registered handler", async () => {
     const response = await runtime.dispatchHttpRequest(
-      new Request("http://embedded.local/api/hello", { method: "GET" }),
+      request("/api/hello", { method: "GET" }),
     );
+
     expect(response.status).toBe(200);
     expect(await response.text()).toBe("hello");
   });
 
-  it("returns 404 for unmatched paths", async () => {
+  it("returns 404 for unmatched paths", async ({ track }) => {
+    const runtime = await startRuntime(track, HTTP_MODULES);
+
     const response = await runtime.dispatchHttpRequest(
-      new Request("http://embedded.local/api/missing", { method: "GET" }),
+      request("/api/missing", { method: "GET" }),
     );
+
     expect(response.status).toBe(404);
   });
 
-  it("differentiates handlers by method on the same path", async () => {
+  it("differentiates handlers by method on the same path", async ({
+    track,
+  }) => {
+    const runtime = await startRuntime(track, HTTP_MODULES);
+
     const post = await runtime.dispatchHttpRequest(
-      new Request("http://embedded.local/api/echo", {
-        method: "POST",
-        body: "payload-1",
-      }),
+      request("/api/echo", { method: "POST", body: "payload-1" }),
     );
     expect(post.status).toBe(200);
     const postBody = (await post.json()) as { method: string; body: string };
@@ -101,40 +102,51 @@ describe("EmbeddedRuntime.dispatchHttpRequest", () => {
     expect(postBody.body).toBe("payload-1");
 
     const get404 = await runtime.dispatchHttpRequest(
-      new Request("http://embedded.local/api/echo", { method: "GET" }),
+      request("/api/echo", { method: "GET" }),
     );
     expect(get404.status).toBe(404);
   });
 
-  it("routes through path prefixes (longest match)", async () => {
+  it("routes through path prefixes (longest match)", async ({ track }) => {
+    const runtime = await startRuntime(track, HTTP_MODULES);
+
     const response = await runtime.dispatchHttpRequest(
-      new Request("http://embedded.local/api/profile/abc123", {
-        method: "GET",
-      }),
+      request("/api/profile/abc123", { method: "GET" }),
     );
+
     expect(response.status).toBe(200);
     expect(await response.text()).toBe("profile:/api/profile/abc123");
   });
 
-  it("HEAD requests run GET handlers and strip the body", async () => {
+  it("HEAD requests run GET handlers and strip the body", async ({ track }) => {
+    const runtime = await startRuntime(track, HTTP_MODULES);
+
     const response = await runtime.dispatchHttpRequest(
-      new Request("http://embedded.local/api/hello", { method: "HEAD" }),
+      request("/api/hello", { method: "HEAD" }),
     );
+
     expect(response.status).toBe(200);
     expect(await response.text()).toBe("");
   });
 
-  it("returns 500 with the error message when the handler throws", async () => {
+  it("returns 500 with the error message when the handler throws", async ({
+    track,
+  }) => {
+    const runtime = await startRuntime(track, HTTP_MODULES);
+
     const response = await runtime.dispatchHttpRequest(
-      new Request("http://embedded.local/api/explode", { method: "GET" }),
+      request("/api/explode", { method: "GET" }),
     );
+
     expect(response.status).toBe(500);
     expect(await response.text()).toContain("intentional handler explosion");
   });
 });
 
 describe("EmbeddedRuntime.dispatchHttpRequest with remoteOnly handlers", () => {
-  it("returns 404 for routes whose handler is wrapped in remoteOnly()", async () => {
+  it("returns 404 for routes whose handler is wrapped in remoteOnly()", async ({
+    track,
+  }) => {
     const localHello = httpActionGeneric(
       async () => new Response("local-hello", { status: 200 }),
     );
@@ -152,49 +164,36 @@ describe("EmbeddedRuntime.dispatchHttpRequest with remoteOnly handlers", () => {
       handler: stripeWebhook,
     });
 
-    const runtime = new EmbeddedRuntime({
-      convex: {
-        modules: {
-          "_generated/api": () => Promise.resolve({}),
-          http: () => Promise.resolve({ default: http }),
-        },
-      },
+    const runtime = await startRuntime(track, {
+      "_generated/api": () => Promise.resolve({}),
+      http: () => Promise.resolve({ default: http }),
     });
-    await runtime.hydrate();
 
-    try {
-      const local = await runtime.dispatchHttpRequest(
-        new Request("http://embedded.local/api/hello", { method: "GET" }),
-      );
-      expect(local.status).toBe(200);
-      expect(await local.text()).toBe("local-hello");
+    const local = await runtime.dispatchHttpRequest(
+      request("/api/hello", { method: "GET" }),
+    );
+    expect(local.status).toBe(200);
+    expect(await local.text()).toBe("local-hello");
 
-      const remote = await runtime.dispatchHttpRequest(
-        new Request("http://embedded.local/webhooks/stripe", {
-          method: "POST",
-          body: "{}",
-        }),
-      );
-      expect(remote.status).toBe(404);
-    } finally {
-      runtime.shutdown();
-    }
+    const remote = await runtime.dispatchHttpRequest(
+      request("/webhooks/stripe", { method: "POST", body: "{}" }),
+    );
+    expect(remote.status).toBe(404);
   });
 });
 
 describe("EmbeddedRuntime.dispatchHttpRequest without a router", () => {
-  it("returns 404 when convex/http is not in the module registry", async () => {
-    const runtime = new EmbeddedRuntime({
-      convex: { modules: { "_generated/api": () => Promise.resolve({}) } },
+  it("returns 404 when convex/http is not in the module registry", async ({
+    track,
+  }) => {
+    const runtime = await startRuntime(track, {
+      "_generated/api": () => Promise.resolve({}),
     });
-    await runtime.hydrate();
-    try {
-      const response = await runtime.dispatchHttpRequest(
-        new Request("http://embedded.local/anything", { method: "GET" }),
-      );
-      expect(response.status).toBe(404);
-    } finally {
-      runtime.shutdown();
-    }
+
+    const response = await runtime.dispatchHttpRequest(
+      request("/anything", { method: "GET" }),
+    );
+
+    expect(response.status).toBe(404);
   });
 });

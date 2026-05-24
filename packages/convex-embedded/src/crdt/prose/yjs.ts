@@ -114,7 +114,9 @@ function xmlTextToContent(textNode: Y.XmlText): ProseContent[] {
     if (marks && marks.length > 0) {
       node.marks = marks;
     }
-    const meta = parseJson<Record<string, unknown>>(part.attributes?.[META_KEY]);
+    const meta = parseJson<Record<string, unknown>>(
+      part.attributes?.[META_KEY],
+    );
     if (meta) {
       const { type: _t, text: _x, marks: _m, ...safe } = meta;
       Object.assign(node, safe);

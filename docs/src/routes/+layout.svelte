@@ -29,7 +29,7 @@
 		// Track page changes to re-render mermaid on navigation
 		page.url.pathname;
 		setTimeout(async () => {
-			const els = document.querySelectorAll('pre.mermaid');
+			const els = document.querySelectorAll<HTMLElement>('pre.mermaid');
 			if (els.length === 0) return;
 			try {
 				const mermaid = (await import('mermaid')).default;
@@ -38,7 +38,7 @@
 					theme: 'neutral',
 					fontFamily: 'inherit',
 				});
-				await mermaid.run({ nodes: els as any });
+				await mermaid.run({ nodes: els });
 			} catch (e) {
 				console.warn('Mermaid rendering failed:', e);
 			}

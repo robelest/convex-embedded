@@ -74,165 +74,167 @@ export default function ProjectWorkbenchScreen() {
         contentInsetAdjustmentBehavior="automatic"
         contentContainerStyle={styles.content}
       >
-      <View style={styles.headerCard}>
-        <Text selectable style={styles.identifier}>
-          {project.identifier}
-        </Text>
-        <Text selectable style={styles.title}>
-          {project.name}
-        </Text>
-        <Text selectable style={styles.meta}>
-          {project.openIssueCount} open · {project.issueCounter} total
-        </Text>
-      </View>
+        <View style={styles.headerCard}>
+          <Text selectable style={styles.identifier}>
+            {project.identifier}
+          </Text>
+          <Text selectable style={styles.title}>
+            {project.name}
+          </Text>
+          <Text selectable style={styles.meta}>
+            {project.openIssueCount} open · {project.issueCounter} total
+          </Text>
+        </View>
 
-      <View style={styles.segmentedWrap}>
-        {(["overview", "notes", "assistant"] as const).map((panel) => {
-          const active = panel === activeTab;
-          return (
-            <Pressable
-              key={panel}
-              onPress={() => setActiveTab(panel)}
-              style={[
-                styles.segmentedButton,
-                active && styles.segmentedButtonActive,
-              ]}
-            >
-              <Text selectable style={styles.segmentedLabel}>
-                {panel === "overview"
-                  ? "Overview"
-                  : panel === "notes"
-                    ? "Notes"
-                    : "Assistant"}
-              </Text>
-            </Pressable>
-          );
-        })}
-      </View>
-
-      {activeTab === "overview" ? (
-        <View style={styles.card}>
-          <View style={styles.cardHeader}>
-            <Text selectable style={styles.cardEyebrow}>
-              Project workbench
-            </Text>
-            <Text selectable style={styles.cardMeta}>
-              Summary
-            </Text>
-          </View>
-          <View style={styles.summaryGrid}>
-            <View style={styles.summaryItem}>
-              <Text selectable style={styles.summaryLabel}>
-                Open
-              </Text>
-              <Text selectable style={styles.summaryValue}>
-                {project.openIssueCount}
-              </Text>
-            </View>
-            <View style={styles.summaryItem}>
-              <Text selectable style={styles.summaryLabel}>
-                Total
-              </Text>
-              <Text selectable style={styles.summaryValue}>
-                {project.issueCounter}
-              </Text>
-            </View>
-            <View style={styles.summaryItem}>
-              <Text selectable style={styles.summaryLabel}>
-                Slug
-              </Text>
-              <Text
-                selectable
-                numberOfLines={1}
-                style={styles.summaryValueText}
+        <View style={styles.segmentedWrap}>
+          {(["overview", "notes", "assistant"] as const).map((panel) => {
+            const active = panel === activeTab;
+            return (
+              <Pressable
+                key={panel}
+                onPress={() => setActiveTab(panel)}
+                style={[
+                  styles.segmentedButton,
+                  active && styles.segmentedButtonActive,
+                ]}
               >
-                {project.slug}
+                <Text selectable style={styles.segmentedLabel}>
+                  {panel === "overview"
+                    ? "Overview"
+                    : panel === "notes"
+                      ? "Notes"
+                      : "Assistant"}
+                </Text>
+              </Pressable>
+            );
+          })}
+        </View>
+
+        {activeTab === "overview" ? (
+          <View style={styles.card}>
+            <View style={styles.cardHeader}>
+              <Text selectable style={styles.cardEyebrow}>
+                Project workbench
+              </Text>
+              <Text selectable style={styles.cardMeta}>
+                Summary
               </Text>
             </View>
-            <View style={styles.summaryItem}>
-              <Text selectable style={styles.summaryLabel}>
-                Status
-              </Text>
-              <Text selectable style={styles.summaryValueText}>
-                {project.status}
-              </Text>
-            </View>
-          </View>
-        </View>
-      ) : activeTab === "notes" ? (
-        <View style={styles.card}>
-          <View style={styles.cardHeader}>
-            <Text selectable style={styles.cardEyebrow}>
-              Project notes
-            </Text>
-            <Text selectable style={styles.cardMeta}>
-              Local only
-            </Text>
-          </View>
-          <TextInput
-            multiline
-            value={notes}
-            onChangeText={setNotes}
-            placeholder="Track local notes, follow-up items, and handoff context here."
-            placeholderTextColor={colors.warm[400]}
-            style={styles.notesInput}
-          />
-        </View>
-      ) : (
-        <View style={styles.card}>
-          <View style={styles.cardHeader}>
-            <Text selectable style={styles.cardEyebrow}>
-              Project assistant
-            </Text>
-            <Text selectable style={styles.cardMeta}>
-              Remote only
-            </Text>
-          </View>
-          <View style={styles.assistantMessages}>
-            {assistantMessages.length === 0 ? (
-              <Text selectable style={styles.assistantEmpty}>
-                Ask for risk, priorities, or what should happen next.
-              </Text>
-            ) : (
-              assistantMessages.map((message, index) => (
-                <View
-                  key={`${message.role}-${index}`}
-                  style={styles.assistantBubble}
+            <View style={styles.summaryGrid}>
+              <View style={styles.summaryItem}>
+                <Text selectable style={styles.summaryLabel}>
+                  Open
+                </Text>
+                <Text selectable style={styles.summaryValue}>
+                  {project.openIssueCount}
+                </Text>
+              </View>
+              <View style={styles.summaryItem}>
+                <Text selectable style={styles.summaryLabel}>
+                  Total
+                </Text>
+                <Text selectable style={styles.summaryValue}>
+                  {project.issueCounter}
+                </Text>
+              </View>
+              <View style={styles.summaryItem}>
+                <Text selectable style={styles.summaryLabel}>
+                  Slug
+                </Text>
+                <Text
+                  selectable
+                  numberOfLines={1}
+                  style={styles.summaryValueText}
                 >
-                  <Text selectable style={styles.assistantRole}>
-                    {message.role === "user" ? "You" : "Assistant"}
-                  </Text>
-                  <Text selectable style={styles.assistantText}>
-                    {message.content}
-                  </Text>
-                </View>
-              ))
-            )}
+                  {project.slug}
+                </Text>
+              </View>
+              <View style={styles.summaryItem}>
+                <Text selectable style={styles.summaryLabel}>
+                  Status
+                </Text>
+                <Text selectable style={styles.summaryValueText}>
+                  {project.status}
+                </Text>
+              </View>
+            </View>
           </View>
-          <View style={styles.assistantComposer}>
-            <TextInput
-              value={assistantDraft}
-              onChangeText={setAssistantDraft}
-              placeholder="Ask what matters here..."
-              placeholderTextColor={colors.warm[400]}
-              style={styles.assistantInput}
-            />
-            <Pressable
-              onPress={() => void handleAskAssistant()}
-              disabled={assistantDraft.trim().length === 0 || isAskingAssistant}
-              style={[
-                styles.sendButton,
-                (assistantDraft.trim().length === 0 || isAskingAssistant) &&
-                  styles.sendButtonDisabled,
-              ]}
-            >
-              <Text selectable style={styles.sendLabel}>
-                {isAskingAssistant ? "..." : "Send"}
+        ) : activeTab === "notes" ? (
+          <View style={styles.card}>
+            <View style={styles.cardHeader}>
+              <Text selectable style={styles.cardEyebrow}>
+                Project notes
               </Text>
-            </Pressable>
+              <Text selectable style={styles.cardMeta}>
+                Local only
+              </Text>
+            </View>
+            <TextInput
+              multiline
+              value={notes}
+              onChangeText={setNotes}
+              placeholder="Track local notes, follow-up items, and handoff context here."
+              placeholderTextColor={colors.warm[400]}
+              style={styles.notesInput}
+            />
           </View>
-        </View>
-      )}
+        ) : (
+          <View style={styles.card}>
+            <View style={styles.cardHeader}>
+              <Text selectable style={styles.cardEyebrow}>
+                Project assistant
+              </Text>
+              <Text selectable style={styles.cardMeta}>
+                Remote only
+              </Text>
+            </View>
+            <View style={styles.assistantMessages}>
+              {assistantMessages.length === 0 ? (
+                <Text selectable style={styles.assistantEmpty}>
+                  Ask for risk, priorities, or what should happen next.
+                </Text>
+              ) : (
+                assistantMessages.map((message, index) => (
+                  <View
+                    key={`${message.role}-${index}`}
+                    style={styles.assistantBubble}
+                  >
+                    <Text selectable style={styles.assistantRole}>
+                      {message.role === "user" ? "You" : "Assistant"}
+                    </Text>
+                    <Text selectable style={styles.assistantText}>
+                      {message.content}
+                    </Text>
+                  </View>
+                ))
+              )}
+            </View>
+            <View style={styles.assistantComposer}>
+              <TextInput
+                value={assistantDraft}
+                onChangeText={setAssistantDraft}
+                placeholder="Ask what matters here..."
+                placeholderTextColor={colors.warm[400]}
+                style={styles.assistantInput}
+              />
+              <Pressable
+                onPress={() => void handleAskAssistant()}
+                disabled={
+                  assistantDraft.trim().length === 0 || isAskingAssistant
+                }
+                style={[
+                  styles.sendButton,
+                  (assistantDraft.trim().length === 0 || isAskingAssistant) &&
+                    styles.sendButtonDisabled,
+                ]}
+              >
+                <Text selectable style={styles.sendLabel}>
+                  {isAskingAssistant ? "..." : "Send"}
+                </Text>
+              </Pressable>
+            </View>
+          </View>
+        )}
       </ScrollView>
     </Sheet>
   );

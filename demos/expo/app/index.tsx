@@ -224,10 +224,7 @@ export default function IssuesScreen() {
         onRequestClose={handleDismissIssue}
       >
         {openIssueId !== null && (
-          <IssueDetail
-            issueId={openIssueId}
-            onDismiss={handleDismissIssue}
-          />
+          <IssueDetail issueId={openIssueId} onDismiss={handleDismissIssue} />
         )}
       </Modal>
 

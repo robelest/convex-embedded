@@ -1,4 +1,5 @@
 import { api } from "$convex/_generated/api.js";
+import type { Doc } from "$convex/_generated/dataModel";
 import {
   createEmbeddedPrefetch,
   emptyEmbeddedPrefetch,
@@ -20,7 +21,7 @@ export const load: LayoutServerLoad = async ({ locals }) => {
   const authToken = locals.authToken ?? null;
   const authIdentityKey = locals.authIdentityKey ?? "user_alice";
 
-  let projects: Array<Record<string, unknown>> = [];
+  let projects: Doc<"projects">[] = [];
   let embedded = emptyEmbeddedPrefetch(authIdentityKey);
 
   if (convexUrl) {
@@ -34,7 +35,7 @@ export const load: LayoutServerLoad = async ({ locals }) => {
         },
       });
       embedded = result.embedded;
-      projects = result.snapshots.projects ?? [];
+      projects = (result.snapshots.projects ?? []) as unknown as Doc<"projects">[];
     } catch (error) {
       console.warn("[svelte-demo] failed to prefetch SSR data", error);
     }

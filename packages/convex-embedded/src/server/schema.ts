@@ -73,10 +73,12 @@ export {
   _resetRegistry,
   embeddedTable,
   getTableRegistry,
+  typedTable,
   type EmbeddedMutationBuilder,
   type EmbeddedQueryBuilder,
   type EmbeddedTable,
   type EmbeddedTableHandle,
   type EmbeddedTableRuntimeHandle,
   type RuntimeHooks,
+  type TypedEmbeddedTable,
 } from "./schema/table.js";

@@ -5,8 +5,7 @@ import { createConvexClient } from "@robelest/convex-embedded/expo";
 import type { ConvexReactClient } from "convex/react";
 import React from "react";
 
-const CONVEX_URL =
-  process.env.EXPO_PUBLIC_CONVEX_URL ?? process.env.CONVEX_URL;
+const CONVEX_URL = process.env.EXPO_PUBLIC_CONVEX_URL ?? process.env.CONVEX_URL;
 
 const DEMO_IDENTITY: UserIdentity = {
   issuer: "embedded-expo-demo",

@@ -40,7 +40,9 @@ type EmbeddedVectorIndexMethod = (...args: unknown[]) => unknown;
 /**
  * Mutation builder attached to an embedded table handle.
  */
-export type EmbeddedMutationBuilder = <
+export type EmbeddedMutationBuilder<
+  DataModel extends GenericDataModel = GenericDataModel,
+> = <
   ArgsValidator extends PropertyValidators | GenericValidator | void,
   ReturnsValidator extends PropertyValidators | GenericValidator | void,
   OneOrZeroArgs extends ArgsArrayForOptionalValidator<ArgsValidator> =
@@ -49,13 +51,13 @@ export type EmbeddedMutationBuilder = <
   args?: ArgsValidator;
   returns?: ReturnsValidator;
   handler: (
-    ctx: GenericMutationCtx<GenericDataModel>,
+    ctx: GenericMutationCtx<DataModel>,
     ...args: OneOrZeroArgs
   ) =>
     | ReturnValueForOptionalValidator<ReturnsValidator>
     | Promise<ReturnValueForOptionalValidator<ReturnsValidator>>;
   remote?: (
-    ctx: GenericMutationCtx<GenericDataModel>,
+    ctx: GenericMutationCtx<DataModel>,
     args: ArgsArrayToObject<OneOrZeroArgs>,
     result: Awaited<ReturnValueForOptionalValidator<ReturnsValidator>>,
   ) => unknown;
@@ -72,7 +74,9 @@ export type EmbeddedMutationBuilder = <
 /**
  * Query builder attached to an embedded table handle.
  */
-export type EmbeddedQueryBuilder = <
+export type EmbeddedQueryBuilder<
+  DataModel extends GenericDataModel = GenericDataModel,
+> = <
   ArgsValidator extends PropertyValidators | GenericValidator | void,
   ReturnsValidator extends PropertyValidators | GenericValidator | void,
   OneOrZeroArgs extends ArgsArrayForOptionalValidator<ArgsValidator> =
@@ -81,13 +85,13 @@ export type EmbeddedQueryBuilder = <
   args?: ArgsValidator;
   returns?: ReturnsValidator;
   handler: (
-    ctx: GenericQueryCtx<GenericDataModel>,
+    ctx: GenericQueryCtx<DataModel>,
     ...args: OneOrZeroArgs
   ) =>
     | ReturnValueForOptionalValidator<ReturnsValidator>
     | Promise<ReturnValueForOptionalValidator<ReturnsValidator>>;
   remote?: (
-    ctx: GenericQueryCtx<GenericDataModel>,
+    ctx: GenericQueryCtx<DataModel>,
     args: ArgsArrayToObject<OneOrZeroArgs>,
     result: Awaited<ReturnValueForOptionalValidator<ReturnsValidator>>,
   ) =>
@@ -98,6 +102,17 @@ export type EmbeddedQueryBuilder = <
   ArgsArrayToObject<OneOrZeroArgs>,
   ReturnValueForOptionalValidator<ReturnsValidator>
 >;
+
+export interface TypedEmbeddedTable<DataModel extends GenericDataModel> {
+  query: EmbeddedQueryBuilder<DataModel>;
+  mutation: EmbeddedMutationBuilder<DataModel>;
+}
+
+export function typedTable<DataModel extends GenericDataModel>(
+  table: EmbeddedTableRuntimeHandle,
+): TypedEmbeddedTable<DataModel> {
+  return table as unknown as TypedEmbeddedTable<DataModel>;
+}
 
 /**
  * Runtime-facing table handle shared by typed and untyped embedded tables.

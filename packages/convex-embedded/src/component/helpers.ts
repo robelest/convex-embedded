@@ -13,7 +13,9 @@ export const DEFAULT_KEEP_COLLECTION_TAIL_COUNT = 256;
 const EMPTY_YJS_V2_UPDATE = [0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
 
 export function toArrayBuffer(data: Uint8Array): ArrayBuffer {
-  return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+  const buffer = new ArrayBuffer(data.byteLength);
+  new Uint8Array(buffer).set(data);
+  return buffer;
 }
 
 export function isEmptyUpdate(update: Uint8Array): boolean {
@@ -25,7 +27,6 @@ export function isEmptyUpdate(update: Uint8Array): boolean {
 }
 
 type ReaderCtx = Pick<QueryCtx, "db"> | Pick<MutationCtx, "db">;
-
 
 export async function getLatestLiveState(
   ctx: ReaderCtx,
@@ -160,7 +161,9 @@ export async function trimDeltaTail(
     const toDelete = await ctx.db
       .query("deltaTail")
       .withIndex("by_collection_doc_seq", (q) =>
-        q.eq("collection", collection).eq("docId", docId)
+        q
+          .eq("collection", collection)
+          .eq("docId", docId)
           [byteBudgetExceeded ? "lte" : "lt"]("seq", cutoffSeq!),
       )
       .collect();

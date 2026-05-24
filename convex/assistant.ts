@@ -2,8 +2,8 @@ import { ConvexError } from "convex/values";
 import { v } from "convex/values";
 
 import { internalQuery } from "./_generated/server";
-import { prose } from "./prose";
 import { mapUser, requireGroup } from "./access";
+import { prose } from "./prose";
 
 export const issueForAssistant = internalQuery({
   args: { issueId: v.id("issues") },

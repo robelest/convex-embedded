@@ -6,10 +6,19 @@
 
 	let { open = $bindable(false) }: { open: boolean } = $props();
 
+	interface PagefindResult {
+		data(): Promise<{ url: string; meta?: Record<string, string>; excerpt: string }>;
+	}
+
+	interface Pagefind {
+		init(): Promise<void>;
+		search(query: string): Promise<{ results: PagefindResult[] }>;
+	}
+
 	let query = $state('');
 	let results = $state<Array<{ url: string; title: string; excerpt: string; section: string }>>([]);
 	let activeIndex = $state(0);
-	let pagefind: any = $state(null);
+	let pagefind: Pagefind | null = $state(null);
 	let inputEl: HTMLInputElement | undefined = $state();
 
 	// Build a url → section label map from sidebar config
@@ -30,7 +39,9 @@
 		try {
 			const resp = await fetch('/pagefind/pagefind.js');
 			if (!resp.ok) return;
-			pagefind = await new Function('return import("/pagefind/pagefind.js")')();
+			pagefind = (await new Function(
+				'return import("/pagefind/pagefind.js")'
+			)()) as unknown as Pagefind;
 			await pagefind.init();
 		} catch (e) {
 			console.warn('Pagefind not available:', e);
@@ -46,7 +57,7 @@
 
 		const response = await pagefind.search(q);
 		const items = await Promise.all(
-			response.results.slice(0, 6).map(async (r: any) => {
+			response.results.slice(0, 6).map(async (r) => {
 				const data = await r.data();
 				return {
 					url: data.url,

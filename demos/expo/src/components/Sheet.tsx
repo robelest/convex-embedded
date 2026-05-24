@@ -116,12 +116,8 @@ export function Sheet({
         })
         .onEnd((e) => {
           const projected = translateY.value + e.velocityY * 0.12;
-          const dismissThreshold =
-            openY + (closedY - openY) * DISMISS_FRACTION;
-          if (
-            projected > dismissThreshold ||
-            e.velocityY > DISMISS_VELOCITY
-          ) {
+          const dismissThreshold = openY + (closedY - openY) * DISMISS_FRACTION;
+          if (projected > dismissThreshold || e.velocityY > DISMISS_VELOCITY) {
             runOnJS(dismiss)();
             return;
           }

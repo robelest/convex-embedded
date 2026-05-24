@@ -12,6 +12,7 @@
  */
 export {
   embeddedTable,
+  typedTable,
   getTableRegistry,
   _resetRegistry,
 } from "@/server/schema";
@@ -32,7 +33,7 @@ export {
   STORAGE_UPLOAD_URL_META,
 } from "@/shared/symbols";
 
-export type { EmbeddedTableHandle } from "@/server/schema";
+export type { EmbeddedTableHandle, TypedEmbeddedTable } from "@/server/schema";
 export type {
   PendingReplayMeta,
   PendingReplayMigrationContext,

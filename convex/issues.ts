@@ -1,20 +1,15 @@
-import { bindTable } from "@robelest/convex-embedded/server";
+import { bindTable, typedTable } from "@robelest/convex-embedded/server";
 import type { PaginationOptions } from "convex/server";
 import { ConvexError, v } from "convex/values";
 
-import {
-  GROUP_ID,
-  USER_ID,
-  mapUser,
-  requireGroup,
-  requirePermission,
-} from "./access";
 import { components } from "./_generated/api";
-import type { Doc, Id } from "./_generated/dataModel";
+import type { DataModel, Doc, Id } from "./_generated/dataModel";
+import { USER_ID, mapUser, requireGroup, requirePermission } from "./access";
 import { prose } from "./prose";
 import { issuePriority, issueStatus, issues } from "./schema";
 
 export const bind = bindTable(issues, components.embedded);
+const t = typedTable<DataModel>(issues);
 
 const ISSUES_PER_PROJECT_LIMIT = 2_000;
 
@@ -62,10 +57,10 @@ const paginationOptsValidator = v.object({
   maximumBytesRead: v.optional(v.number()),
 });
 
-export const forProject = issues.query({
+export const forProject = t.query({
   args: {
     projectId: v.id("projects"),
-    paginationOpts: paginationOptsValidator as any,
+    paginationOpts: paginationOptsValidator,
   },
   handler: async (
     ctx,
@@ -84,13 +79,13 @@ export const forProject = issues.query({
         q.eq("projectId", args.projectId),
       )
       .order("asc")
-      .paginate(args.paginationOpts as PaginationOptions);
+      .paginate(args.paginationOpts);
 
     return { ...page, page: page.page.map((issue) => mapRow(issue, project)) };
   },
 });
 
-export const allForProject = issues.query({
+export const allForProject = t.query({
   args: { projectId: v.id("projects") },
   handler: async (ctx, args) => {
     const project = await ctx.db.get(args.projectId);
@@ -116,7 +111,7 @@ export const allForProject = issues.query({
   },
 });
 
-export const detail = issues.query({
+export const detail = t.query({
   args: { issueId: v.id("issues") },
   handler: async (ctx, args) => {
     const issue = await ctx.db.get(args.issueId);
@@ -151,7 +146,7 @@ export const detail = issues.query({
   },
 });
 
-export const create = issues.mutation({
+export const create = t.mutation({
   args: {
     projectId: v.id("projects"),
     title: v.string(),
@@ -194,7 +189,7 @@ export const create = issues.mutation({
   },
 });
 
-export const update = issues.mutation({
+export const update = t.mutation({
   args: {
     issueId: v.id("issues"),
     title: v.optional(v.string()),
@@ -264,7 +259,7 @@ export const update = issues.mutation({
   },
 });
 
-export const remove = issues.mutation({
+export const remove = t.mutation({
   args: { issueId: v.id("issues") },
   returns: v.null(),
   handler: async (ctx, args) => {

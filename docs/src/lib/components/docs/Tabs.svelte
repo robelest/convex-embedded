@@ -1,7 +1,7 @@
 <script lang="ts">
-	import { setContext } from 'svelte';
+	import { setContext, type Snippet } from 'svelte';
 
-	let { syncKey, children }: { syncKey?: string; children: any } = $props();
+	let { syncKey, children }: { syncKey?: string; children: Snippet } = $props();
 	let activeTab = $state(0);
 
 	const tabs: string[] = $state([]);

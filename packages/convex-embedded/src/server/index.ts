@@ -13,6 +13,7 @@
  */
 export {
   embeddedTable,
+  typedTable,
   bindTable,
   localOnly,
   remoteOnly,
@@ -26,6 +27,7 @@ export {
 } from "@/server/table";
 export type {
   EmbeddedTableHandle,
+  TypedEmbeddedTable,
   RemoteMeta,
   RouteMode,
   PendingReplayMeta,

@@ -23,7 +23,7 @@ export const load: PageServerLoad = async ({ parent }) => {
     ...team.children,
   ]);
 
-  const projects = prefetch.projects.map((project: any) => ({
+  const projects = prefetch.projects.map((project) => ({
     _id: project._id,
     groupId: project.groupId,
     name: project.name,

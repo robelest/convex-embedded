@@ -1,12 +1,14 @@
-import { bindTable } from "@robelest/convex-embedded/server";
+import { bindTable, typedTable } from "@robelest/convex-embedded/server";
 import { ConvexError, v } from "convex/values";
 
-import { GROUP_ID, USER_ID, requireGroup, requirePermission } from "./access";
 import { components } from "./_generated/api";
+import type { DataModel } from "./_generated/dataModel";
+import { GROUP_ID, USER_ID, requireGroup, requirePermission } from "./access";
 import { prose } from "./prose";
 import { projects } from "./schema";
 
 export const bind = bindTable(projects, components.embedded);
+const t = typedTable<DataModel>(projects);
 
 const PROJECT_LIST_LIMIT = 1_000;
 
@@ -19,7 +21,7 @@ function toSlug(value: string) {
     .slice(0, 48);
 }
 
-export const list = projects.query({
+export const list = t.query({
   args: {},
   handler: async (ctx) => {
     await requirePermission(ctx, "canReadProjects");
@@ -30,7 +32,7 @@ export const list = projects.query({
   },
 });
 
-export const create = projects.mutation({
+export const create = t.mutation({
   args: {
     name: v.string(),
     identifier: v.string(),
@@ -54,7 +56,7 @@ export const create = projects.mutation({
     const existingSlug = await ctx.db
       .query("projects")
       .withIndex("by_groupId_and_slug", (q) =>
-        (q.eq("groupId", GROUP_ID) as any).eq("slug", slug),
+        q.eq("groupId", GROUP_ID).eq("slug", slug),
       )
       .unique();
     if (existingSlug) {
@@ -63,7 +65,7 @@ export const create = projects.mutation({
     const existingIdentifier = await ctx.db
       .query("projects")
       .withIndex("by_groupId_and_identifier", (q) =>
-        (q.eq("groupId", GROUP_ID) as any).eq("identifier", identifier),
+        q.eq("groupId", GROUP_ID).eq("identifier", identifier),
       )
       .unique();
     if (existingIdentifier) {
@@ -85,7 +87,7 @@ export const create = projects.mutation({
   },
 });
 
-export const update = projects.mutation({
+export const update = t.mutation({
   args: {
     projectId: v.id("projects"),
     description: v.optional(v.any()),
@@ -112,7 +114,7 @@ export const update = projects.mutation({
   },
 });
 
-export const detail = projects.query({
+export const detail = t.query({
   args: { projectId: v.id("projects") },
   handler: async (ctx, args) => {
     const project = await ctx.db.get(args.projectId);

@@ -1,7 +1,7 @@
 <script lang="ts">
-	import { getContext, onMount } from 'svelte';
+	import { getContext, onMount, type Snippet } from 'svelte';
 
-	let { label, children }: { label: string; children: any } = $props();
+	let { label, children }: { label: string; children: Snippet } = $props();
 
 	const ctx = getContext<{
 		activeTab: number;

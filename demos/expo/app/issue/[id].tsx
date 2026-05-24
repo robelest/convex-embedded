@@ -16,7 +16,5 @@ export default function IssueDetailRoute() {
   }, [router]);
 
   if (typeof id !== "string") return null;
-  return (
-    <IssueDetail issueId={id as Id<"issues">} onDismiss={handleDismiss} />
-  );
+  return <IssueDetail issueId={id as Id<"issues">} onDismiss={handleDismiss} />;
 }

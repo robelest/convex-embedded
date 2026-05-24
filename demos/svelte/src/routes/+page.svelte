@@ -7,6 +7,8 @@
 	import IssueListPanel from "$lib/components/IssueListPanel.svelte";
 	import SettingsPanel from "$lib/components/SettingsPanel.svelte";
 	import { onMount } from "svelte";
+	import type { ProseContent } from "@robelest/convex-embedded/crdt";
+	import type { PageData } from "./$types";
 
 	const teams = [
 		{
@@ -25,9 +27,19 @@
 
 	const user = mapUser("user_alice");
 
-	type ProjectList = Array<Record<string, any>> | null;
+	let { data }: { data: PageData } = $props();
 
-	let { data }: { data: { projects: ProjectList } } = $props();
+	type Project = {
+		_id: string;
+		name: string;
+		identifier: string;
+		slug: string;
+		description: ProseContent | string;
+		status: string;
+		teamGroupId?: string | null;
+		issueCounter?: number;
+		openIssueCount: number;
+	};
 
 	const client = browser ? useConvexClient() : null;
 
@@ -50,8 +62,8 @@
 	]);
 
 	const projectsData = $derived(
-		(browser ? projectsQuery?.data ?? data.projects ?? [] : data.projects ?? [])
-			.map((project: any) => ({
+		((browser ? projectsQuery?.data ?? data.projects ?? [] : data.projects ?? []) as Project[])
+			.map((project) => ({
 				_id: project._id,
 				name: project.name,
 				identifier: project.identifier,
@@ -91,7 +103,7 @@
 
 	const selectedProject = $derived.by(() => {
 		if (selectedProjectSlug) {
-			return projectsData.find((p: any) => p.slug === selectedProjectSlug) ?? projectsData[0] ?? null;
+			return projectsData.find((p) => p.slug === selectedProjectSlug) ?? projectsData[0] ?? null;
 		}
 		return projectsData[0] ?? null;
 	});

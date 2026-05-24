@@ -1,6 +1,6 @@
 import { api } from "$convex/_generated/api";
-import { members } from "$convex/access";
 import type { Id } from "$convex/_generated/dataModel";
+import { members } from "$convex/access";
 import { useQuery } from "convex/react";
 import React, { useCallback, useState } from "react";
 import {
@@ -319,10 +319,7 @@ export function IssueDetail({ issueId, onDismiss }: IssueDetailProps) {
         <View style={styles.dangerZone}>
           <Pressable
             onPress={handleDeleteIssue}
-            style={[
-              styles.deleteBtn,
-              confirmDelete && styles.deleteBtnConfirm,
-            ]}
+            style={[styles.deleteBtn, confirmDelete && styles.deleteBtnConfirm]}
           >
             <Text
               style={[

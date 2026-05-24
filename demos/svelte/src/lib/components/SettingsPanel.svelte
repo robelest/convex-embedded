@@ -7,12 +7,12 @@
 	let { user, userRoleLabel, members, teams, permissions } = $props<{
 		user: { name: string; email: string | null };
 		userRoleLabel: string;
-		members: Array<{
+		members: ReadonlyArray<{
       memberId: string;
       userId: string;
       name: string;
       email: string | null;
-      roleIds: string[];
+      roleIds: readonly string[];
     }>;
     teams: Array<{
       groupId: string;
@@ -64,7 +64,7 @@
 		{ id: "permissions" as const, label: "Permissions" },
 	];
 
-	function getRoleLabel(roleIds: string[]) {
+	function getRoleLabel(roleIds: readonly string[]) {
 		if (roleIds.includes("orgAdmin")) return "Admin";
 		if (roleIds.includes("member")) return "Member";
 		return "Viewer";

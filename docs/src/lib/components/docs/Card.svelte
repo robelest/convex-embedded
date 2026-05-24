@@ -1,5 +1,7 @@
 <script lang="ts">
-	let { title, children }: { title: string; children: any } = $props();
+	import type { Snippet } from 'svelte';
+
+	let { title, children }: { title: string; children: Snippet } = $props();
 </script>
 
 <article class="card">

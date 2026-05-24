@@ -12,7 +12,7 @@
 			name: string;
 			identifier: string;
 			slug: string;
-			teamGroupId: string;
+			teamGroupId: string | null;
 			teamName: string;
 			description: ProseContent | string;
 		};

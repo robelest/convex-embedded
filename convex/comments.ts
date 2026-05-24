@@ -1,14 +1,16 @@
-import { bindTable } from "@robelest/convex-embedded/server";
+import { bindTable, typedTable } from "@robelest/convex-embedded/server";
 import { ConvexError, v } from "convex/values";
 
-import { USER_ID, mapUser, requireGroup, requirePermission } from "./access";
 import { components } from "./_generated/api";
+import type { DataModel } from "./_generated/dataModel";
+import { USER_ID, mapUser, requireGroup, requirePermission } from "./access";
 import { prose } from "./prose";
 import { comments } from "./schema";
 
 export const bind = bindTable(comments, components.embedded);
+const t = typedTable<DataModel>(comments);
 
-export const forIssue = comments.query({
+export const forIssue = t.query({
   args: { issueId: v.id("issues") },
   handler: async (ctx, args) => {
     const issue = await ctx.db.get(args.issueId);
@@ -32,7 +34,7 @@ export const forIssue = comments.query({
   },
 });
 
-export const create = comments.mutation({
+export const create = t.mutation({
   args: {
     issueId: v.id("issues"),
     body: v.string(),
@@ -59,7 +61,7 @@ export const create = comments.mutation({
   },
 });
 
-export const remove = comments.mutation({
+export const remove = t.mutation({
   args: { commentId: v.id("comments") },
   returns: v.null(),
   handler: async (ctx, args) => {

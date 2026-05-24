@@ -31,6 +31,9 @@ import {
   missingStorageSurfaceError,
   type StorageSurface,
 } from "@/runtime/storage";
+import { createLogger } from "@/shared/logger";
+
+const log = createLogger("scheduler");
 
 export const STORAGE_METADATA_STORE_MIGRATIONS: StoreMigrationManifest = {
   store: "storageMetadata",
@@ -333,7 +336,7 @@ export function createAsyncSyscall(
               await runUdf("mutation", functionPath, parsedArgs);
               finalState = "success";
             } catch (error) {
-              console.error(
+              log.error(
                 `Error when running scheduled function ${functionPath.udfPath}`,
                 error,
               );
@@ -373,8 +376,8 @@ export function createAsyncSyscall(
               (dbExt.jobFinished as (id: string) => void)(jobId);
             }
           } catch (error) {
-            console.error(
-              `[convex-embedded] scheduled function ${functionPath.udfPath}:`,
+            log.error(
+              `scheduled function ${functionPath.udfPath}:`,
               error,
             );
           }

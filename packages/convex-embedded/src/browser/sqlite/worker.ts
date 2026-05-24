@@ -34,7 +34,7 @@ async function resetWorkerState() {
       await Promise.resolve(sqlite3.close(db));
     }
   } catch (err) {
-    console.warn("[convex-embedded] error closing sqlite during reset", err);
+    log.warn("error closing sqlite during reset", err);
   }
   sqlite3 = null;
   db = null;

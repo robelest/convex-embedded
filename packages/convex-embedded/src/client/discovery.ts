@@ -10,7 +10,10 @@
 
 import { asError } from "@/client/routing/refs";
 import type { ConvexInput, ConvexModule } from "@/kernel/modules";
+import { createLogger } from "@/shared/logger";
 import { getRouteMode, type RouteMode } from "@/shared/route";
+
+const log = createLogger("discovery");
 
 export interface ModuleLoadFailure {
   path: string;
@@ -314,8 +317,8 @@ export function warnModuleLoadFailures(failures: ModuleLoadFailure[]): void {
 
   const skipped = failures.map(({ path }) => path).join(", ");
   const [firstFailure] = failures;
-  console.warn(
-    `[convex-embedded] ${failures.length} module(s) failed to load during remote discovery and were skipped: ${skipped}`,
+  log.warn(
+    `${failures.length} module(s) failed to load during remote discovery and were skipped: ${skipped}`,
     firstFailure?.error,
   );
 }

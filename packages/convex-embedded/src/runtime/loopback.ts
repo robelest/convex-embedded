@@ -139,7 +139,7 @@ export class LoopbackWebSocket {
         },
       )
       .catch((error) => {
-        console.error("[convex-embedded:ws] handler error:", error);
+        log.error("handler error:", error);
         const event = { type: "error" as const, error };
         this.onerror?.(event);
         this._emit("error", event);

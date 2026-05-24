@@ -1,63 +1,82 @@
 import { createLogger, setLoggerDebug } from "@resolve/shared/logger";
-import { describe, it, expect, beforeEach, afterEach } from "@tests/testkit";
-import { vi } from "vitest";
+import { describe, expect, it, vi, type MockInstance } from "@tests/testkit";
+
+interface ConsoleSpies {
+  debug: MockInstance<typeof console.debug>;
+  info: MockInstance<typeof console.info>;
+  warn: MockInstance<typeof console.warn>;
+  error: MockInstance<typeof console.error>;
+}
+
+function spyOnConsole(): ConsoleSpies {
+  return {
+    debug: vi.spyOn(console, "debug").mockImplementation(() => {}),
+    info: vi.spyOn(console, "info").mockImplementation(() => {}),
+    warn: vi.spyOn(console, "warn").mockImplementation(() => {}),
+    error: vi.spyOn(console, "error").mockImplementation(() => {}),
+  };
+}
 
 describe("createLogger", () => {
-  beforeEach(() => {
-    vi.spyOn(console, "debug").mockImplementation(() => {});
-    vi.spyOn(console, "info").mockImplementation(() => {});
-    vi.spyOn(console, "warn").mockImplementation(() => {});
-    vi.spyOn(console, "error").mockImplementation(() => {});
+  it("mirrors info to console with the category when debug enabled", ({
+    track,
+  }) => {
+    const spies = spyOnConsole();
+    track({ close: () => setLoggerDebug(false) });
+    setLoggerDebug(true);
+
+    createLogger("test").info("hello");
+
+    expect(spies.info).toHaveBeenCalledWith("[convex-embedded:test] hello");
   });
 
-  afterEach(() => {
-    vi.restoreAllMocks();
-    setLoggerDebug(false);
-  });
-
-  it("creates a logger with category prefix", () => {
-    const log = createLogger("test");
-    log.info("hello");
-
-    expect(console.info).toHaveBeenCalledWith("[convex-embedded:test] hello");
-  });
-
-  it("passes extra args through", () => {
-    const log = createLogger("cat");
+  it("passes extra args through", ({ track }) => {
+    const spies = spyOnConsole();
+    track({ close: () => setLoggerDebug(false) });
     const extra = { foo: 42 };
-    log.warn("warning", extra);
 
-    expect(console.warn).toHaveBeenCalledWith(
+    createLogger("cat").warn("warning", extra);
+
+    expect(spies.warn).toHaveBeenCalledWith(
       "[convex-embedded:cat] warning",
       extra,
     );
   });
 
-  it("delegates debug to console.debug when enabled", () => {
+  it("delegates debug to console.debug when enabled", ({ track }) => {
+    const spies = spyOnConsole();
+    track({ close: () => setLoggerDebug(false) });
     setLoggerDebug(true);
-    const log = createLogger("verbose");
-    log.debug("trace msg");
 
-    expect(console.debug).toHaveBeenCalledWith(
+    createLogger("verbose").debug("trace msg");
+
+    expect(spies.debug).toHaveBeenCalledWith(
       "[convex-embedded:verbose] trace msg",
     );
   });
 
-  it("silences debug by default", () => {
-    const log = createLogger("verbose");
-    log.debug("trace msg");
+  it("silences debug by default", ({ track }) => {
+    const spies = spyOnConsole();
+    track({ close: () => setLoggerDebug(false) });
 
-    expect(console.debug).not.toHaveBeenCalled();
+    createLogger("verbose").debug("trace msg");
+
+    expect(spies.debug).not.toHaveBeenCalled();
   });
 
-  it("logs info/warn/error", () => {
+  it("mirrors warn and error to console once; info stays silent by default", ({
+    track,
+  }) => {
+    const spies = spyOnConsole();
+    track({ close: () => setLoggerDebug(false) });
     const log = createLogger("noisy");
+
     log.info("info msg");
     log.warn("warn msg");
     log.error("error msg");
 
-    expect(console.info).toHaveBeenCalledTimes(1);
-    expect(console.warn).toHaveBeenCalledTimes(1);
-    expect(console.error).toHaveBeenCalledTimes(1);
+    expect(spies.info).not.toHaveBeenCalled();
+    expect(spies.warn).toHaveBeenCalledTimes(1);
+    expect(spies.error).toHaveBeenCalledTimes(1);
   });
 });

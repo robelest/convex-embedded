@@ -12,13 +12,11 @@
  * user-space without patching globals.
  */
 
-export type LogLevel = "log" | "warn" | "error" | "info" | "debug";
+import { logs, SeverityNumber } from "@opentelemetry/api-logs";
 
-export interface LogEntry {
-  level: LogLevel;
-  args: unknown[];
-  timestamp: number;
-}
+const UDF_LOGGER_NAME = "convex-embedded:udf";
+
+export type LogLevel = "log" | "warn" | "error" | "info" | "debug";
 
 export interface CapturedConsole {
   log(...args: unknown[]): void;
@@ -26,6 +24,20 @@ export interface CapturedConsole {
   error(...args: unknown[]): void;
   info(...args: unknown[]): void;
   debug(...args: unknown[]): void;
+}
+
+function formatLogArgs(args: unknown[]): string {
+  return args
+    .map((arg) => {
+      if (typeof arg === "string") return arg;
+      if (arg instanceof Error) return arg.stack ?? arg.message;
+      try {
+        return JSON.stringify(arg);
+      } catch {
+        return String(arg);
+      }
+    })
+    .join(" ");
 }
 
 /**
@@ -84,7 +96,6 @@ function uuidV4(rng: () => number): string {
 export class OpsContext {
   private readonly rng: () => number;
   private readonly pinnedTimestamp: number;
-  private readonly _logs: LogEntry[] = [];
 
   /** Captured console proxy. */
   readonly console: CapturedConsole;
@@ -93,24 +104,24 @@ export class OpsContext {
     this.rng = mulberry32(seed);
     this.pinnedTimestamp = timestamp;
 
-    const logs = this._logs;
-    const ts = this.pinnedTimestamp;
+    const record = (
+      level: LogLevel,
+      severityNumber: SeverityNumber,
+      args: unknown[],
+    ): void => {
+      logs.getLogger(UDF_LOGGER_NAME).emit({
+        severityNumber,
+        severityText: level,
+        body: formatLogArgs(args),
+        attributes: { source: "udf" },
+      });
+    };
     this.console = {
-      log(...args: unknown[]) {
-        logs.push({ level: "log", args, timestamp: ts });
-      },
-      warn(...args: unknown[]) {
-        logs.push({ level: "warn", args, timestamp: ts });
-      },
-      error(...args: unknown[]) {
-        logs.push({ level: "error", args, timestamp: ts });
-      },
-      info(...args: unknown[]) {
-        logs.push({ level: "info", args, timestamp: ts });
-      },
-      debug(...args: unknown[]) {
-        logs.push({ level: "debug", args, timestamp: ts });
-      },
+      log: (...args: unknown[]) => record("log", SeverityNumber.INFO, args),
+      warn: (...args: unknown[]) => record("warn", SeverityNumber.WARN, args),
+      error: (...args: unknown[]) => record("error", SeverityNumber.ERROR, args),
+      info: (...args: unknown[]) => record("info", SeverityNumber.INFO, args),
+      debug: (...args: unknown[]) => record("debug", SeverityNumber.DEBUG, args),
     };
   }
 
@@ -128,21 +139,22 @@ export class OpsContext {
   randomUUID(): string {
     return uuidV4(this.rng);
   }
-
-  /** All console output captured during this invocation. */
-  get logs(): ReadonlyArray<LogEntry> {
-    return this._logs;
-  }
 }
+
+let opsSeedCounter = 0;
 
 /**
  * Create a fresh {@link OpsContext} for a single UDF invocation.
  *
- * @param seed — PRNG seed. Defaults to `Date.now()` for convenience during
- *   development; pass an explicit seed for reproducible test runs.
+ * @param seed — PRNG seed. Pass an explicit seed for reproducible test runs.
+ *   When omitted, the seed mixes the wall clock with a per-invocation counter
+ *   so that invocations occurring within the same millisecond still receive
+ *   distinct seeds (otherwise rapid mutations would replay identical
+ *   `crypto.randomUUID()` sequences and collide on document ids).
  */
 export function createOpsContext(seed?: number): OpsContext {
-  const effectiveSeed = seed ?? Date.now();
   const timestamp = Date.now();
+  const effectiveSeed =
+    seed ?? ((timestamp ^ Math.imul(opsSeedCounter++, 0x9e3779b1)) | 0);
   return new OpsContext(effectiveSeed, timestamp);
 }

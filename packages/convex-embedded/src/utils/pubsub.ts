@@ -1,3 +1,7 @@
+import { createLogger } from "@/shared/logger";
+
+const log = createLogger("pubsub");
+
 export class PubSub<T> {
   private subs = new Set<(value: T) => void>();
   private closed = false;
@@ -8,7 +12,7 @@ export class PubSub<T> {
       try {
         fn(value);
       } catch (err) {
-        console.warn("[convex-embedded] pubsub listener error", err);
+        log.warn("pubsub listener error", err);
       }
     }
   }

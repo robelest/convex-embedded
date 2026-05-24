@@ -21,6 +21,8 @@ import type {
   WriteBatch,
 } from "@/storage/adapter";
 
+import { withSpan } from "@/tracing/spans";
+
 import type { SqliteDriver } from "./driver";
 import { createSqliteStorage, type InternalTableSpec } from "./factory";
 
@@ -68,11 +70,16 @@ export class SqliteAdapter implements QueryableAdapter {
     table?: string,
     opts?: ReadOptions,
   ): Promise<DocumentWithTable[] | StoredDocument[]> {
-    const impl = await this.ready();
-    if (table === undefined) {
-      return impl.getDocuments();
-    }
-    return impl.getDocumentsByTable(table, opts);
+    return withSpan("convex-embedded.storage.getDocuments", async (span) => {
+      if (table !== undefined) {
+        span.setAttribute("convex.table", table);
+      }
+      const impl = await this.ready();
+      if (table === undefined) {
+        return impl.getDocuments();
+      }
+      return impl.getDocumentsByTable(table, opts);
+    });
   }
 
   async getDocument(
@@ -80,13 +87,20 @@ export class SqliteAdapter implements QueryableAdapter {
     id: string,
     opts?: ReadOptions,
   ): Promise<StoredDocument | null> {
-    const impl = await this.ready();
-    return impl.getDocument(table, id, opts);
+    return withSpan("convex-embedded.storage.getDocument", async (span) => {
+      span.setAttribute("convex.table", table);
+      span.setAttribute("convex.id", id);
+      const impl = await this.ready();
+      return impl.getDocument(table, id, opts);
+    });
   }
 
   async countDocuments(table: string, opts?: ReadOptions): Promise<number> {
-    const impl = await this.ready();
-    return impl.countDocuments(table, opts);
+    return withSpan("convex-embedded.storage.countDocuments", async (span) => {
+      span.setAttribute("convex.table", table);
+      const impl = await this.ready();
+      return impl.countDocuments(table, opts);
+    });
   }
 
   async getMetadata(): Promise<StorageMetadata | null> {
@@ -98,11 +112,13 @@ export class SqliteAdapter implements QueryableAdapter {
     batch: WriteBatch,
     opts?: WriteOptions,
   ): Promise<WriteResult | void> {
-    const impl = await this.ready();
-    if (opts) {
-      return impl.applyCommit(batch, opts);
-    }
-    return impl.commit(batch);
+    return withSpan("convex-embedded.storage.write", async () => {
+      const impl = await this.ready();
+      if (opts) {
+        return impl.applyCommit(batch, opts);
+      }
+      return impl.commit(batch);
+    });
   }
 
   async clearAll(): Promise<void> {
@@ -111,18 +127,27 @@ export class SqliteAdapter implements QueryableAdapter {
   }
 
   async getBlob(id: string): Promise<Blob | null> {
-    const impl = await this.ready();
-    return impl.getBlob(id);
+    return withSpan("convex-embedded.storage.getBlob", async (span) => {
+      span.setAttribute("convex.id", id);
+      const impl = await this.ready();
+      return impl.getBlob(id);
+    });
   }
 
   async putBlob(id: string, blob: Blob): Promise<void> {
-    const impl = await this.ready();
-    return impl.storeBlob(id, blob);
+    return withSpan("convex-embedded.storage.putBlob", async (span) => {
+      span.setAttribute("convex.id", id);
+      const impl = await this.ready();
+      return impl.storeBlob(id, blob);
+    });
   }
 
   async deleteBlob(id: string): Promise<void> {
-    const impl = await this.ready();
-    return impl.deleteBlob(id);
+    return withSpan("convex-embedded.storage.deleteBlob", async (span) => {
+      span.setAttribute("convex.id", id);
+      const impl = await this.ready();
+      return impl.deleteBlob(id);
+    });
   }
 
   async query(args: QueryArgs): Promise<StoredDocument[] | null> {

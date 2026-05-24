@@ -1170,14 +1170,11 @@ function deferSubscription(input: {
             /* listener error */
           }
         }
-        console.error(
-          "[convex-embedded] failed to initialize subscription",
-          normalized,
-        );
+        log.error("failed to initialize subscription", normalized);
       },
     )
     .catch((error: unknown) => {
-      console.error("[adapter] deferSubscription:", error);
+      log.error("deferSubscription:", error);
     });
 
   return unsubscribe;
@@ -1475,7 +1472,7 @@ export function patchRoutedConvexClient(input: {
           pipeline.applyOptimisticTransition(updates);
         }
       } catch (error) {
-        console.warn("[convex-embedded] optimistic apply failed:", error);
+        log.warn("optimistic apply failed:", error);
       }
     }
 

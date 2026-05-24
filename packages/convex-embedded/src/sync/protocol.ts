@@ -21,6 +21,7 @@ import {
 import { encodeBase64 } from "@/shared/base64";
 import { createLogger } from "@/shared/logger";
 import { matchTag } from "@/shared/match";
+import { withSpan } from "@/tracing/spans";
 
 const log = createLogger("protocol");
 
@@ -354,17 +355,21 @@ export class SyncProtocolHandler {
     sessionId: string,
     message: ClientMessage,
   ): Promise<ServerMessage[]> {
-    return this._withSessionLock(sessionId, async () => {
-      log.debug(message.type, sessionId);
-      return matchTag(message, "type", {
-        Connect: (current) =>
-          Promise.resolve(this._handleConnect(sessionId, current)),
-        ModifyQuerySet: (current) =>
-          this._handleModifyQuerySet(sessionId, current),
-        Mutation: (current) => this._handleMutation(sessionId, current),
-        Action: (current) => this._handleAction(sessionId, current),
-        Authenticate: (current) => this._handleAuthenticate(sessionId, current),
-        Event: () => Promise.resolve([] as ServerMessage[]),
+    return withSpan("convex-embedded.sync.handleMessage", (span) => {
+      span.setAttribute("convex.message_type", message.type);
+      return this._withSessionLock(sessionId, async () => {
+        log.debug(message.type, sessionId);
+        return matchTag(message, "type", {
+          Connect: (current) =>
+            Promise.resolve(this._handleConnect(sessionId, current)),
+          ModifyQuerySet: (current) =>
+            this._handleModifyQuerySet(sessionId, current),
+          Mutation: (current) => this._handleMutation(sessionId, current),
+          Action: (current) => this._handleAction(sessionId, current),
+          Authenticate: (current) =>
+            this._handleAuthenticate(sessionId, current),
+          Event: () => Promise.resolve([] as ServerMessage[]),
+        });
       });
     });
   }
@@ -382,6 +387,14 @@ export class SyncProtocolHandler {
    *   Sessions with no active queries are omitted.
    */
   async reEvaluateQueries(
+    affectedTablesOrChanges?: Set<string> | ProtocolChange[],
+  ): Promise<Map<string, ServerMessage[]>> {
+    return withSpan("convex-embedded.sync.reEvaluateQueries", () =>
+      this._reEvaluateQueriesImpl(affectedTablesOrChanges),
+    );
+  }
+
+  private async _reEvaluateQueriesImpl(
     affectedTablesOrChanges?: Set<string> | ProtocolChange[],
   ): Promise<Map<string, ServerMessage[]>> {
     const result = new Map<string, ServerMessage[]>();

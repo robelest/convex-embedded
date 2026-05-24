@@ -19,7 +19,7 @@ import type { Value } from "convex/values";
 import { ConvexError, convexToJson, jsonToConvex } from "convex/values";
 
 import type { FunctionPath, ModuleLoader } from "@/kernel/modules";
-import { OpsContext, createOpsContext } from "@/kernel/ops";
+import { OpsContext, createOpsContext, type LogLevel } from "@/kernel/ops";
 import {
   createSyncSyscall,
   createAsyncSyscall,
@@ -33,6 +33,7 @@ import type { QueryDependency } from "@/runtime/db/types";
 import type { StorageSurface } from "@/runtime/storage";
 import { createLogger } from "@/shared/logger";
 import { componentRouteTargetLabel, isRemoteOnly } from "@/shared/route";
+import { isLogCaptureActive } from "@/tracing/spans";
 
 const log = createLogger("udf");
 const loaderLog = createLogger("loader");
@@ -191,6 +192,31 @@ function restoreObjectProperty<T extends object, K extends keyof T>(
       Object.defineProperty(object, key, descriptor);
     } catch {}
   }
+}
+
+function patchConsole(ops: OpsContext): () => void {
+  if (!isLogCaptureActive() || typeof console === "undefined") {
+    return () => {};
+  }
+  const target = console as unknown as Record<string, unknown>;
+  const levels: LogLevel[] = ["log", "warn", "error", "info", "debug"];
+  const saved: Partial<Record<LogLevel, unknown>> = {};
+  for (const level of levels) {
+    const original = target[level];
+    saved[level] = original;
+    const capture = ops.console[level].bind(ops.console);
+    target[level] = (...args: unknown[]): void => {
+      capture(...args);
+      if (typeof original === "function") {
+        (original as (...inner: unknown[]) => void)(...args);
+      }
+    };
+  }
+  return () => {
+    for (const level of levels) {
+      target[level] = saved[level];
+    }
+  };
 }
 
 /**
@@ -485,6 +511,7 @@ export class UdfExecutor {
 
     const ops = createOpsContext();
     const savedGlobals = patchGlobals(ops);
+    const restoreConsole = patchConsole(ops);
     const previousConvexDescriptor = Object.getOwnPropertyDescriptor(
       globalThis,
       "Convex",
@@ -504,6 +531,7 @@ export class UdfExecutor {
       if (typeof db.setActiveIdentityKey === "function") {
         db.setActiveIdentityKey(previousIdentityKey);
       }
+      restoreConsole();
       restoreGlobals(savedGlobals);
     }
   }

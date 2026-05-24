@@ -1,3 +1,7 @@
+import { createLogger } from "@/shared/logger";
+
+const log = createLogger("scope");
+
 /**
  * A disposable scope that runs registered finalizers in LIFO order on close.
  * Implements `Symbol.asyncDispose` so callers can use `await using`:
@@ -29,7 +33,7 @@ export class DisposableScope {
       try {
         await fn();
       } catch (error) {
-        console.error("[DisposableScope] finalizer error:", error);
+        log.error("finalizer error:", error);
       }
     }
   }

@@ -1,6 +1,8 @@
 import { evaluateFieldPath, evaluateValue } from "@/runtime/db/query";
 import type { QueryDependency, StoredDocument } from "@/runtime/db/types";
 import { stableValueKey } from "@/shared/valuekey";
+import { recordCounter } from "@/tracing/metrics";
+import { withSpanSync } from "@/tracing/spans";
 import { dependencyOverlapsChanges } from "@/sync/invalidation";
 
 type ProtocolChangeLike = {
@@ -171,25 +173,28 @@ export class SubscriptionManager {
    * after a mutation commits.
    */
   invalidate(changesOrTables: Set<string> | ProtocolChangeLike[]): void {
-    const { candidateTokens, changes, tablesWritten } =
-      this._collectRelevantSubscriptions(changesOrTables);
+    withSpanSync("convex-embedded.sync.invalidate", () => {
+      recordCounter("invalidation");
+      const { candidateTokens, changes, tablesWritten } =
+        this._collectRelevantSubscriptions(changesOrTables);
 
-    for (const token of candidateTokens) {
-      const sub = this._subscriptions.get(token);
-      if (!sub) {
-        continue;
-      }
-      const overlaps =
-        changes !== null && sub.dependencies.length > 0
-          ? sub.dependencies.some((dependency) =>
-              dependencyOverlapsChanges(dependency, changes),
-            )
-          : [...sub.tables].some((table) => tablesWritten.has(table));
+      for (const token of candidateTokens) {
+        const sub = this._subscriptions.get(token);
+        if (!sub) {
+          continue;
+        }
+        const overlaps =
+          changes !== null && sub.dependencies.length > 0
+            ? sub.dependencies.some((dependency) =>
+                dependencyOverlapsChanges(dependency, changes),
+              )
+            : [...sub.tables].some((table) => tablesWritten.has(table));
 
-      if (overlaps) {
-        sub.callback();
+        if (overlaps) {
+          sub.callback();
+        }
       }
-    }
+    });
   }
 
   collectRelevantTokens(

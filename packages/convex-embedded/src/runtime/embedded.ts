@@ -430,8 +430,8 @@ export class EmbeddedRuntime {
         try {
           setUserTableSpecs.call(this._storageAdapter, this._userTableSpecs);
         } catch (error) {
-          console.warn(
-            "[convex-embedded] failed to install user table specs on storage adapter",
+          runtimeLog.warn(
+            "failed to install user table specs on storage adapter",
             error,
           );
         }
@@ -441,9 +441,7 @@ export class EmbeddedRuntime {
     this.writeFanout.onNotification((tablesWritten) => {
       this._crossTabSyncChain = this._crossTabSyncChain
         .then(() => this._handleCrossTabSync(tablesWritten))
-        .catch((err) =>
-          console.error("[convex-embedded] cross-tab sync:", err),
-        );
+        .catch((err) => runtimeLog.error("cross-tab sync:", err));
     });
 
     this._scope.addFinalizer(() => {
@@ -495,7 +493,7 @@ export class EmbeddedRuntime {
         // hydration errors.
         await moduleLoader.preloadAll();
       } catch (err) {
-        console.error("[convex-embedded] hydration failed:", err);
+        storageLog.error("hydration failed:", err);
         throw err;
       } finally {
         this._storageHydratedComplete = true;
@@ -657,8 +655,8 @@ export class EmbeddedRuntime {
         try {
           setUserTableSpecs.call(storage, this._userTableSpecs);
         } catch (error) {
-          console.warn(
-            "[convex-embedded] failed to install user table specs on storage adapter",
+          runtimeLog.warn(
+            "failed to install user table specs on storage adapter",
             error,
           );
         }
@@ -1127,7 +1125,7 @@ export class EmbeddedRuntime {
     try {
       parsed = JSON.parse(message);
     } catch (err) {
-      console.error("[convex-embedded] failed to parse message:", err);
+      runtimeLog.error("failed to parse message:", err);
       return [JSON.stringify({ type: "FatalError", error: "Invalid JSON" })];
     }
 
@@ -1151,12 +1149,7 @@ export class EmbeddedRuntime {
 
       return responses.map((r) => JSON.stringify(r));
     } catch (err) {
-      console.error(
-        "[convex-embedded] protocol error on",
-        parsed.type,
-        ":",
-        err,
-      );
+      runtimeLog.error("protocol error on", parsed.type, ":", err);
       return [
         JSON.stringify({
           type: "FatalError",
@@ -1208,8 +1201,8 @@ export class EmbeddedRuntime {
         try {
           listener(source);
         } catch (error) {
-          console.error(
-            `[convex-embedded] table write listener failed for "${tableName}":`,
+          runtimeLog.error(
+            `table write listener failed for "${tableName}":`,
             error,
           );
         }
@@ -1257,8 +1250,8 @@ export class EmbeddedRuntime {
       await commit.persisted;
       this.writeFanout.notify(commit.tablesWritten);
     } catch (err) {
-      console.error(
-        "[convex-embedded] skipping cross-tab notify after storage failure:",
+      runtimeLog.error(
+        "skipping cross-tab notify after storage failure:",
         err,
       );
     }
@@ -1303,7 +1296,7 @@ export class EmbeddedRuntime {
         }
       }
     } catch (err) {
-      console.error("[convex-embedded] cross-tab remote failed:", err);
+      runtimeLog.error("cross-tab remote failed:", err);
     }
   }
 
@@ -1388,10 +1381,7 @@ export class EmbeddedRuntime {
       ]);
       await this._pushProtocolUpdates(updates);
     } catch (err) {
-      console.error(
-        `[convex-embedded] ingestDocuments("${table}") failed:`,
-        err,
-      );
+      runtimeLog.error(`ingestDocuments("${table}") failed:`, err);
       throw err;
     }
   }
@@ -1841,9 +1831,13 @@ export class EmbeddedRuntime {
       query: async (current) => {
         const path = resolveFunctionPath({ name: current.path });
         const systemFn = SYSTEM_FUNCTIONS[path.udfPath];
-        return systemFn !== undefined
-          ? this._runSystemFunction(systemFn, "query", current.args)
-          : this._runUdf("query", path, current.args);
+        if (systemFn !== undefined) {
+          return this._runSystemFunction(systemFn, "query", current.args);
+        }
+        return withSpan("convex-embedded.executeLocal.query", (span) => {
+          span.setAttribute("convex.udf_path", path.udfPath);
+          return this._runUdf("query", path, current.args);
+        });
       },
       mutation: async (current) => {
         const functionPath = resolveFunctionPath({ name: current.path });
@@ -1858,18 +1852,24 @@ export class EmbeddedRuntime {
             },
           );
         }
-        const runMutation = () =>
-          this.executor.executeMutation(functionPath, current.args, {
-            holdsTransactionLock: true,
-          });
-        const { result, commit } =
-          await this._runWithTransactionLock(runMutation);
+        return withSpan(
+          "convex-embedded.executeLocal.mutation",
+          async (span) => {
+            span.setAttribute("convex.udf_path", functionPath.udfPath);
+            const runMutation = () =>
+              this.executor.executeMutation(functionPath, current.args, {
+                holdsTransactionLock: true,
+              });
+            const { result, commit } =
+              await this._runWithTransactionLock(runMutation);
 
-        if (current.applyLocalEffects) {
-          this.onMutationCommit(commit);
-        }
+            if (current.applyLocalEffects) {
+              this.onMutationCommit(commit);
+            }
 
-        return result;
+            return result;
+          },
+        );
       },
       action: (current) =>
         this._runUdf(
@@ -2353,7 +2353,7 @@ export class EmbeddedRuntime {
       this.cronRunner.start();
       runtimeLog.debug(`cron runner started with ${jobs.length} job(s)`);
     } catch (err) {
-      console.error("[convex-embedded] cron runner start failed:", err);
+      runtimeLog.error("cron runner start failed:", err);
     }
   }
 
@@ -2368,7 +2368,7 @@ export class EmbeddedRuntime {
         `http dispatcher initialized (hasRoutes=${this._httpDispatcher.hasRoutes()})`,
       );
     } catch (err) {
-      console.error("[convex-embedded] http dispatcher init failed:", err);
+      runtimeLog.error("http dispatcher init failed:", err);
     }
   }
 
@@ -2482,8 +2482,8 @@ export class EmbeddedRuntime {
             );
             finalState = "success";
           } catch (error) {
-            console.error(
-              `[convex-embedded] recovered scheduled function ${udfPath}:`,
+            runtimeLog.error(
+              `recovered scheduled function ${udfPath}:`,
               error,
             );
             finalState = "failed";

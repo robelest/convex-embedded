@@ -13,6 +13,7 @@ import type { ConvexClient } from "convex/browser";
 
 import { createLogger } from "@/shared/logger";
 import { getFunctionName } from "@/shared/refs";
+import { withSpan } from "@/tracing/spans";
 
 const log = createLogger("pending-queue");
 
@@ -171,6 +172,19 @@ export class PendingQueue {
     table: string,
     payloadVersion = 1,
   ): Promise<void> {
+    return withSpan("convex-embedded.pending.push", (span) => {
+      span.setAttribute("convex.table", table);
+      return this._pushImpl(ref, args, localResult, table, payloadVersion);
+    });
+  }
+
+  private async _pushImpl(
+    ref: unknown,
+    args: Record<string, unknown>,
+    localResult: unknown,
+    table: string,
+    payloadVersion = 1,
+  ): Promise<void> {
     const refName =
       typeof ref === "string"
         ? ref
@@ -286,6 +300,15 @@ export class PendingQueue {
     target?: PendingEntry,
     owner?: string,
   ): Promise<PendingEntry | undefined> {
+    return withSpan("convex-embedded.pending.remove", () =>
+      this._removeImpl(target, owner),
+    );
+  }
+
+  private async _removeImpl(
+    target?: PendingEntry,
+    owner?: string,
+  ): Promise<PendingEntry | undefined> {
     const index =
       target === undefined
         ? 0
@@ -325,6 +348,16 @@ export class PendingQueue {
   }
 
   async claimNext(
+    owner: string,
+    leaseMs = 30_000,
+    processorStaleMs = leaseMs,
+  ): Promise<PendingEntry | undefined> {
+    return withSpan("convex-embedded.pending.claimNext", () =>
+      this._claimNextImpl(owner, leaseMs, processorStaleMs),
+    );
+  }
+
+  private async _claimNextImpl(
     owner: string,
     leaseMs = 30_000,
     processorStaleMs = leaseMs,
@@ -429,19 +462,21 @@ export class PendingQueue {
    * Clear all entries from the queue.
    */
   async clear(): Promise<void> {
-    this._entries = [];
+    return withSpan("convex-embedded.pending.clear", async () => {
+      this._entries = [];
 
-    try {
-      await (this._mutationFn
-        ? this._mutationFn(SYS_PENDING_CLEAR, {
-            identityKey: this._getIdentityKey?.() ?? null,
-          })
-        : (this._sysClient.mutation(SYS_PENDING_CLEAR, {
-            identityKey: this._getIdentityKey?.() ?? null,
-          }) as Promise<unknown>));
-    } catch (err) {
-      log.warn("pending-queue: failed to clear persisted entries", err);
-    }
+      try {
+        await (this._mutationFn
+          ? this._mutationFn(SYS_PENDING_CLEAR, {
+              identityKey: this._getIdentityKey?.() ?? null,
+            })
+          : (this._sysClient.mutation(SYS_PENDING_CLEAR, {
+              identityKey: this._getIdentityKey?.() ?? null,
+            }) as Promise<unknown>));
+      } catch (err) {
+        log.warn("pending-queue: failed to clear persisted entries", err);
+      }
+    });
   }
 
   /** Number of entries in the queue. */
@@ -518,7 +553,7 @@ export class PendingQueue {
       return null;
     }
 
-    return Promise.all(matchingEntries.map((entry) => this.remove(entry)))
+    return Promise.all(matchingEntries.map((entry) => this._removeImpl(entry)))
       .then(() => {
         log.debug(
           `pending-queue: collapsed transient create/delete pair (table: ${candidate.table}, queue size: ${this._entries.length})`,

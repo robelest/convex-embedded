@@ -1,5 +1,8 @@
-import { metrics, trace } from "@opentelemetry/api";
+import { context, metrics, trace } from "@opentelemetry/api";
+import { logs } from "@opentelemetry/api-logs";
 import type { Resource } from "@opentelemetry/resources";
+import { LoggerProvider } from "@opentelemetry/sdk-logs";
+import { StackContextManager } from "@opentelemetry/sdk-trace-web";
 import {
   AggregationTemporality,
   DataPointType,
@@ -10,11 +13,14 @@ import {
 import { BasicTracerProvider } from "@opentelemetry/sdk-trace-base";
 
 import {
+  BufferingLogRecordProcessor,
   BufferingSpanProcessor,
+  type BufferedLog,
   type BufferedMetricPoint,
   type BufferedSpan,
   type BufferingTracingHandle,
 } from "@/tracing/buffer";
+import { setLogCaptureActive } from "@/tracing/spans";
 
 /**
  * Options for {@link installInMemoryTracing}.
@@ -56,7 +62,10 @@ export function installInMemoryTracing(
     resource: options.resource,
     spanProcessors: [processor],
   });
-  const registered = trace.setGlobalTracerProvider(provider);
+  const contextManager = new StackContextManager();
+  contextManager.enable();
+  context.setGlobalContextManager(contextManager);
+  trace.setGlobalTracerProvider(provider);
 
   const metricExporter = new InMemoryMetricExporter(
     AggregationTemporality.CUMULATIVE,
@@ -72,28 +81,41 @@ export function installInMemoryTracing(
   });
   metrics.setGlobalMeterProvider(meterProvider);
 
-  console.log(
-    `[tracing] installInMemoryTracing registered=${registered} capacity=${capacity}`,
-  );
-  const probeTracer = trace.getTracer("convex-embedded");
-  console.log(
-    `[tracing] probe tracer constructor=${probeTracer.constructor?.name ?? "?"}`,
-  );
+  const logProcessor = new BufferingLogRecordProcessor(capacity);
+  const loggerProvider = new LoggerProvider({
+    resource: options.resource,
+    processors: [logProcessor],
+  });
+  logs.setGlobalLoggerProvider(loggerProvider);
+  setLogCaptureActive(true);
 
   return {
     getSpans: (): BufferedSpan[] => processor.getSpans(),
     clearSpans: (): void => processor.clearSpans(),
-    subscribe: (callback) => processor.subscribe(callback),
+    getLogs: (): BufferedLog[] => logProcessor.getLogs(),
+    clearLogs: (): void => logProcessor.clearLogs(),
+    subscribe: (callback) => {
+      const unsubscribeSpans = processor.subscribe(callback);
+      const unsubscribeLogs = logProcessor.subscribe(callback);
+      return () => {
+        unsubscribeSpans();
+        unsubscribeLogs();
+      };
+    },
     getMetrics: async (): Promise<BufferedMetricPoint[]> => {
       await meterProvider.forceFlush();
       return collectExportedMetrics(metricExporter);
     },
     close: async (): Promise<void> => {
+      context.disable();
       trace.disable();
       metrics.disable();
+      logs.disable();
+      setLogCaptureActive(false);
       await processor.shutdown();
       await provider.shutdown();
       await meterProvider.shutdown();
+      await loggerProvider.shutdown();
     },
   };
 }
@@ -141,6 +163,7 @@ function hrTimeToMs(hrTime: [number, number]): number {
 }
 
 export type {
+  BufferedLog,
   BufferedMetricPoint,
   BufferedSpan,
   BufferingTracingHandle,

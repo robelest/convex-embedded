@@ -29,10 +29,13 @@ import type { ConvexInput } from "@/kernel/modules";
 import type { EmbeddedRuntime } from "@/runtime/embedded";
 import type { ConnectivityAdapter } from "@/runtime/platform";
 import type { QueryCacheStorage } from "@/runtime/sqlite/cache";
+import { createLogger } from "@/shared/logger";
 import type { RouteMode } from "@/shared/route";
 import type { EngineStatus } from "@/shared/types";
 import { PubSub } from "@/utils/pubsub";
 import { DisposableScope } from "@/utils/scope";
+
+const log = createLogger("remote");
 
 /**
  * Configuration for the embedded remote sync engine.
@@ -411,8 +414,8 @@ async function discoverAndStart(input: ResolveInput): Promise<void> {
         entry.routeModes = current.routeModes;
         warnModuleLoadFailures(current.moduleLoadFailures);
         if (entry.routeModes.size === 0) {
-          console.warn(
-            "[convex-embedded] remote enabled but no remote metadata found in modules. Make sure your Convex modules export `tasks.resolve` (for example `export const resolve = tasks.resolve`).",
+          log.warn(
+            "remote enabled but no remote metadata found in modules. Make sure your Convex modules export `tasks.resolve` (for example `export const resolve = tasks.resolve`).",
           );
         }
       },
@@ -464,7 +467,7 @@ async function discoverAndStart(input: ResolveInput): Promise<void> {
   } catch (err) {
     if (entry.closed) return;
     const error = err instanceof Error ? err : new Error(toErrorMessage(err));
-    console.error("[convex-embedded] resolve setup failed", error);
+    log.error("resolve setup failed", error);
     notifyResolveListeners(entry, { status: "error", error });
   }
 }
@@ -530,10 +533,7 @@ export function attachResolve(input: {
     try {
       await closeRemoteClientSafely(remoteClient);
     } catch (err) {
-      console.warn(
-        "[convex-embedded] error during remote client teardown",
-        err,
-      );
+      log.warn("error during remote client teardown", err);
     }
   });
   entry.scope.addFinalizer(() => {

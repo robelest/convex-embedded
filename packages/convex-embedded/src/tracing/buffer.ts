@@ -8,6 +8,7 @@
  */
 
 import { SpanStatusCode } from "@opentelemetry/api";
+import type { LogRecordProcessor, SdkLogRecord } from "@opentelemetry/sdk-logs";
 import type {
   ReadableSpan,
   SpanProcessor,
@@ -69,6 +70,16 @@ export interface BufferedMetricPoint {
   timeMs: number;
 }
 
+export interface BufferedLog {
+  severity: string;
+  severityNumber: number;
+  body: string;
+  attributes: Record<string, unknown>;
+  timeMs: number;
+  traceId?: string;
+  spanId?: string;
+}
+
 /**
  * Handle returned by {@link installInMemoryTracing}. Lets tests and
  * dev tools introspect everything the runtime emits — spans, events,
@@ -83,6 +94,8 @@ export interface BufferingTracingHandle {
   /** Snapshot of every span finished since installation (or last `clearSpans`). */
   getSpans(): BufferedSpan[];
   clearSpans(): void;
+  getLogs(): BufferedLog[];
+  clearLogs(): void;
   /** Subscribe to a debounced callback that fires when new spans arrive. */
   subscribe(callback: () => void): () => void;
   /**
@@ -111,11 +124,6 @@ export class BufferingSpanProcessor implements SpanProcessor {
   onStart(): void {}
 
   onEnd(span: ReadableSpan): void {
-    if (this._spans.length === 0) {
-      console.log(
-        `[tracing] BufferingSpanProcessor.onEnd first span: ${span.name}`,
-      );
-    }
     const ctx = span.spanContext();
     const startMs = hrTimeToMs(span.startTime);
     const endMs = hrTimeToMs(span.endTime);
@@ -187,6 +195,93 @@ export class BufferingSpanProcessor implements SpanProcessor {
       }
     }, 50);
   }
+}
+
+export class BufferingLogRecordProcessor implements LogRecordProcessor {
+  private readonly _logs: BufferedLog[] = [];
+  private readonly _listeners = new Set<Listener>();
+  private _notifyHandle: ReturnType<typeof setTimeout> | null = null;
+
+  constructor(private readonly _capacity: number) {}
+
+  onEmit(logRecord: SdkLogRecord): void {
+    const sc = logRecord.spanContext;
+    const body = logRecord.body;
+    this._logs.push({
+      severity:
+        logRecord.severityText ??
+        severityNumberToText(logRecord.severityNumber),
+      severityNumber: logRecord.severityNumber ?? 0,
+      body:
+        typeof body === "string"
+          ? body
+          : body === undefined
+            ? ""
+            : JSON.stringify(body),
+      attributes: { ...logRecord.attributes },
+      timeMs: hrTimeToMs(logRecord.hrTime),
+      traceId: sc?.traceId,
+      spanId: sc?.spanId,
+    });
+    if (this._logs.length > this._capacity) {
+      this._logs.splice(0, this._logs.length - this._capacity);
+    }
+    this._scheduleNotify();
+  }
+
+  forceFlush(): Promise<void> {
+    return Promise.resolve();
+  }
+
+  shutdown(): Promise<void> {
+    if (this._notifyHandle !== null) {
+      clearTimeout(this._notifyHandle);
+      this._notifyHandle = null;
+    }
+    this._listeners.clear();
+    this._logs.length = 0;
+    return Promise.resolve();
+  }
+
+  getLogs(): BufferedLog[] {
+    return this._logs.slice();
+  }
+
+  clearLogs(): void {
+    this._logs.length = 0;
+    this._scheduleNotify();
+  }
+
+  subscribe(listener: Listener): () => void {
+    this._listeners.add(listener);
+    return () => {
+      this._listeners.delete(listener);
+    };
+  }
+
+  private _scheduleNotify(): void {
+    if (this._notifyHandle !== null) return;
+    this._notifyHandle = setTimeout(() => {
+      this._notifyHandle = null;
+      for (const listener of this._listeners) {
+        try {
+          listener();
+        } catch {
+          // ignore listener errors
+        }
+      }
+    }, 50);
+  }
+}
+
+function severityNumberToText(severityNumber: number | undefined): string {
+  if (severityNumber === undefined || severityNumber <= 0) return "info";
+  if (severityNumber >= 21) return "fatal";
+  if (severityNumber >= 17) return "error";
+  if (severityNumber >= 13) return "warn";
+  if (severityNumber >= 9) return "info";
+  if (severityNumber >= 5) return "debug";
+  return "trace";
 }
 
 function hrTimeToMs(hrTime: [number, number]): number {

@@ -15,6 +15,9 @@ import {
 } from "@/client/auth/entry";
 import type { AuthEntry, AuthOptions, AuthState } from "@/client/auth/entry";
 import type { EmbeddedRuntime } from "@/runtime/embedded";
+import { createLogger } from "@/shared/logger";
+
+const log = createLogger("auth");
 
 /**
  * Embedded auth entry and configuration types re-exported for advanced
@@ -115,7 +118,7 @@ export function subscribeAuthState(
     try {
       callback(state);
     } catch (err) {
-      console.warn("[convex-embedded] auth state callback error", err);
+      log.warn("auth state callback error", err);
     }
   });
 }

@@ -186,8 +186,27 @@ created after reconnect. Observable depth is emitted as the
 
 ## Observability
 
-The runtime emits OpenTelemetry spans, events, counters, and gauges through the
-standard global API. Install the in-memory provider in tests + dev tools:
+Everything the runtime observes flows through **one model — OpenTelemetry**:
+traces (spans), **logs** (LogRecords), and metrics (counters/gauges). All three
+land in the same in-memory buffer, so tests, the benchmark profiler, and dev
+tools consume a single source.
+
+- **Logs**: the internal logger (`createLogger`) emits OTel LogRecords and
+  mirrors warn/error to the console (debug/info only when debug logging is on).
+  User `console.*` inside a query/mutation is captured too, correlated to that
+  operation's span. There is no raw `console.*` in the runtime (lint-enforced).
+- **Traces**: spans follow `convex-embedded.<subsystem>.<operation>` — e.g.
+  `convex-embedded.executeLocal.mutation`, `convex-embedded.db.commit`,
+  `convex-embedded.db.applyIndexChanges`, `convex-embedded.sync.handleMessage`,
+  `convex-embedded.storage.write`.
+- **Metrics**: `convex.embedded.<name>` — e.g. `convex.embedded.commit`,
+  `convex.embedded.invalidation`, `convex.embedded.sync.cycle`,
+  `convex.embedded.replay.success`, `convex.embedded.http_dispatch`,
+  `convex.embedded.pending_queue.depth`.
+- **Zero-cost when off**: with no provider installed (production default) every
+  span/log/metric emit is a noop.
+
+Install the in-memory provider in tests + dev tools:
 
 ```ts
 import { installInMemoryTracing } from "@robelest/convex-embedded/tracing/memory";
@@ -195,20 +214,25 @@ import { installInMemoryTracing } from "@robelest/convex-embedded/tracing/memory
 const tracing = installInMemoryTracing();
 // ... run your code ...
 const spans = tracing.getSpans(); // BufferedSpan[]
+const logs = tracing.getLogs(); // BufferedLog[] (correlated via traceId/spanId)
 const metrics = await tracing.getMetrics(); // BufferedMetricPoint[]
+tracing.subscribe(() => {
+  /* fires when new spans or logs arrive */
+});
 await tracing.close();
 ```
 
-Stable metric names include `convex.embedded.replay.success`,
-`convex.embedded.replay.failure`, `convex.embedded.cron.fired`,
-`convex.embedded.cron.skipped_remote`, `convex.embedded.http_dispatch` (with
-`result` attribute), `convex.embedded.pending_queue.depth`,
-`convex.embedded.pending_uploads.depth`. State-transition events include
-`lease.acquired` / `replay.started` / `cron.fired` / `http.dispatch.404` /
-`connectivity.online` / `connectivity.offline`.
+Log/span correlation uses a synchronous context manager, so logs emitted
+synchronously within a span carry its `traceId`/`spanId`; full correlation
+across `await` boundaries requires a Node async-hooks context manager (pass one
+to `installNodeTracing`).
 
 For production, install `@robelest/convex-embedded/tracing/{browser,node}` to
-attach OTLP exporters or any other OTel `SpanProcessor` / `MetricReader`.
+attach OTLP exporters / log processors or any other OTel `SpanProcessor` /
+`MetricReader` / `LogRecordProcessor`.
+
+See `benchmarks/profile.test.ts` for a live example that prints the span +
+log breakdown for the hot path.
 
 ## TanStack DB seam
 

@@ -8,6 +8,9 @@ import {
 } from "@/expo/storage";
 import { createExpoWorkScheduler } from "@/expo/work";
 import type { EmbeddedPlatformAdapter } from "@/runtime/platform";
+import { createLogger } from "@/shared/logger";
+
+const log = createLogger("expo");
 
 export interface ExpoPlatformOptions {
   databaseDirectory?: string;
@@ -32,8 +35,8 @@ export function createExpoPlatformAdapter(
           workScheduler,
         });
       } catch (error) {
-        console.error(
-          "[convex-embedded] op-sqlite storage init failed, continuing in-memory",
+        log.error(
+          "op-sqlite storage init failed, continuing in-memory",
           error,
         );
         return null;

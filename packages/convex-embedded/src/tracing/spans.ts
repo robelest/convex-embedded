@@ -18,6 +18,7 @@ import {
   type Span,
   type SpanOptions,
 } from "@opentelemetry/api";
+import { logs, type Logger } from "@opentelemetry/api-logs";
 
 /** Stable tracer name used by every span the runtime emits. */
 export const TRACER_NAME = "convex-embedded";
@@ -25,25 +26,48 @@ export const TRACER_NAME = "convex-embedded";
 /** Stable meter name used by every counter / gauge the runtime emits. */
 export const METER_NAME = "convex-embedded";
 
-let probeLogged = false;
+let logCaptureActive = false;
+
+/**
+ * Whether a logger provider is installed and UDF console capture should run.
+ * When false (production default), the runtime skips patching globals for log
+ * capture so there is zero per-invocation overhead.
+ *
+ * @public
+ */
+export function isLogCaptureActive(): boolean {
+  return logCaptureActive;
+}
+
+/**
+ * Toggle UDF log capture. Called by the tracing install/close helpers when a
+ * logger provider is wired up.
+ *
+ * @public
+ */
+export function setLogCaptureActive(active: boolean): void {
+  logCaptureActive = active;
+}
 
 /**
  * Get the embedded runtime's tracer. Returns the global tracer keyed
- * on {@link TRACER_NAME}; logs a one-time probe identifying the
- * tracer's concrete class so misconfigured providers (e.g. forgetting
- * to call `installInMemoryTracing()`) are diagnosable.
+ * on {@link TRACER_NAME}.
  *
  * @public
  */
 export function getTracer() {
-  const tracer = trace.getTracer(TRACER_NAME);
-  if (!probeLogged) {
-    probeLogged = true;
-    console.log(
-      `[tracing] first getTracer() called, tracer=${tracer.constructor?.name ?? "?"}`,
-    );
-  }
-  return tracer;
+  return trace.getTracer(TRACER_NAME);
+}
+
+/**
+ * Get the embedded runtime's logger. Returns the global logger keyed
+ * on {@link TRACER_NAME}; LogRecords it emits flow to the same
+ * in-memory buffer as spans and metrics.
+ *
+ * @public
+ */
+export function getLogger(): Logger {
+  return logs.getLogger(TRACER_NAME);
 }
 
 /**

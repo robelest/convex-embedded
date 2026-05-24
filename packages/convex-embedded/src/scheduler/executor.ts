@@ -8,6 +8,10 @@
 
 import type { Database } from "@/runtime/db/database";
 import type { StoreMigrationManifest } from "@/runtime/migrations/types";
+import { createLogger } from "@/shared/logger";
+import { withSpan, withSpanSync } from "@/tracing/spans";
+
+const log = createLogger("scheduler");
 
 export const SCHEDULED_FUNCTIONS_STORE_MIGRATIONS: StoreMigrationManifest = {
   store: "scheduledFunctions",
@@ -58,20 +62,23 @@ export class SchedulerExecutor {
     args: Record<string, unknown>,
     delayMs: number,
   ): string {
-    const jobId = `job_${this._nextId++}`;
+    return withSpanSync("convex-embedded.scheduler.schedule", (span) => {
+      span.setAttribute("convex.function_path", functionPath);
+      const jobId = `job_${this._nextId++}`;
 
-    const timerId = setTimeout(() => {
-      this._pending.delete(jobId);
-      this._runFunction(functionPath, args).catch((error) => {
-        console.error(
-          `[SchedulerExecutor] Scheduled function "${functionPath}" failed:`,
-          error,
-        );
-      });
-    }, delayMs);
+      const timerId = setTimeout(() => {
+        this._pending.delete(jobId);
+        void withSpan("convex-embedded.scheduler.run", (runSpan) => {
+          runSpan.setAttribute("convex.function_path", functionPath);
+          return this._runFunction(functionPath, args).catch((error) => {
+            log.error(`Scheduled function "${functionPath}" failed:`, error);
+          });
+        });
+      }, delayMs);
 
-    this._pending.set(jobId, { timerId, functionPath, args });
-    return jobId;
+      this._pending.set(jobId, { timerId, functionPath, args });
+      return jobId;
+    });
   }
 
   /**

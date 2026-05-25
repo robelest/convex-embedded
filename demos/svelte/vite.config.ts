@@ -66,6 +66,10 @@ export default defineConfig(({ command }) => ({
               replacement: embeddedSrc + "/crdt/index.ts",
             },
             {
+              find: "@robelest/convex-embedded/devtools",
+              replacement: embeddedSrc + "/devtools/index.ts",
+            },
+            {
               find: "@robelest/convex-embedded/client",
               replacement: embeddedSrc + "/client/index.ts",
             },

@@ -2,6 +2,7 @@ import type { ConvexInput } from "@robelest/convex-embedded";
 
 export const convex: ConvexInput = {
   modules: {
+    access: () => import("../../../../../convex/access"),
     assistant: () => import("../../../../../convex/assistant"),
     comments: () => import("../../../../../convex/comments"),
     convex_config: () => import("../../../../../convex/convex.config"),
@@ -10,7 +11,6 @@ export const convex: ConvexInput = {
     prose: () => import("../../../../../convex/prose"),
     schema: () => import("../../../../../convex/schema"),
     validators: () => import("../../../../../convex/validators"),
-    access: () => import("../../../../../convex/access"),
   },
   manifest: {
     remote: {

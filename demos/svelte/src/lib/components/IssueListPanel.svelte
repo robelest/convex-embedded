@@ -2,7 +2,7 @@
 	import type { ConvexClient } from "convex/browser";
 	import { api } from "$convex/_generated/api.js";
 	import type { ProseContent } from "@robelest/convex-embedded/crdt";
-	import { useQuery } from "convex-svelte";
+	import { usePaginatedQuery } from "$lib/usePaginatedQuery.svelte";
 	import IssueDetailPanel from "./IssueDetailPanel.svelte";
 	import ProjectWorkbenchPanel from "./ProjectWorkbenchPanel.svelte";
 
@@ -32,33 +32,32 @@
     client: ConvexClient;
   }>();
 
-  const issuesQuery = useQuery(
-      api.issues.allForProject,
-    () => ({
-      projectId: project._id,
-    }),
-  );
-
-  const issues = $derived(issuesQuery.data ?? []);
-  const issuesLoading = $derived(issuesQuery.data === undefined && !issuesQuery.error);
-  const issuesErrorMessage = $derived(
-    issuesQuery.error instanceof Error
-      ? issuesQuery.error.message
-      : issuesQuery.error
-        ? String(issuesQuery.error)
-        : null,
-  );
-
-  // Status ordering and labels
-  const statusOrder = ["in_progress", "todo", "backlog", "done", "cancelled"] as const;
-
-  const statusLabels: Record<string, string> = {
-    backlog: "Backlog",
-    todo: "Todo",
-    in_progress: "In progress",
-    done: "Done",
-    cancelled: "Cancelled",
+  type IssueRow = {
+    _id: string;
+    identifier: string;
+    number: number;
+    title: string;
+    description: ProseContent;
+    status: string;
+    priority: string;
+    labels: string[];
+    assigneeName: string | null;
+    assigneeUserId: string | null;
+    createdByName: string;
+    createdByUserId: string;
   };
+
+  const PAGE_SIZE = 50;
+
+  const paged = usePaginatedQuery<IssueRow>(
+    () => client,
+    api.issues.forProject,
+    () => ({ projectId: project._id }),
+    { initialNumItems: PAGE_SIZE },
+  );
+
+  const issues = $derived(paged.results);
+  const status = $derived(paged.status);
 
   const statusColors: Record<string, string> = {
     backlog: "text-gray-400",
@@ -66,15 +65,6 @@
     in_progress: "text-accent-500",
     done: "text-green-600",
     cancelled: "text-gray-300",
-  };
-
-  // Priority sort weight (lower = higher priority = sorted first)
-  const priorityWeight: Record<string, number> = {
-    urgent: 0,
-    high: 1,
-    medium: 2,
-    low: 3,
-    none: 4,
   };
 
   const priorityLabels: Record<string, string> = {
@@ -85,34 +75,39 @@
     none: "",
   };
 
-  // Group by status, sort by priority within each group
-  type IssueType = (typeof issues)[number];
-  type StatusGroup = { status: string; label: string; issues: IssueType[] };
-
-  function issueLabels(issue: IssueType): string[] {
+  function issueLabels(issue: IssueRow): string[] {
     return Array.isArray(issue.labels) ? issue.labels : [];
   }
 
-	const groupedIssues = $derived.by(() => {
-		const groups: StatusGroup[] = [];
-		for (const status of statusOrder) {
-			const grouped = issues
-				.filter((issue: IssueType) => issue.status === status)
-				.sort(
-					(a: IssueType, b: IssueType) =>
-						(priorityWeight[a.priority] ?? 4) - (priorityWeight[b.priority] ?? 4),
-				);
-			if (grouped.length > 0) {
-				groups.push({ status, label: statusLabels[status], issues: grouped });
-			}
-    }
-    return groups;
-  });
+  function statusDotFill(value: string): string {
+    if (value === "done") return "bg-green-600";
+    if (value === "in_progress") return "bg-accent-500/50";
+    if (value === "cancelled") return "bg-gray-300";
+    return "bg-current";
+  }
 
   let expandedIssueId = $state<string | null>(null);
   let createRequests = $state(0);
   let newTitle = $state("");
   let errorMessage = $state<string | null>(null);
+  let sentinel = $state<HTMLDivElement | null>(null);
+
+  $effect(() => {
+    const node = sentinel;
+    if (!node) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (entry.isIntersecting && paged.status === "CanLoadMore") {
+            paged.loadMore(PAGE_SIZE);
+          }
+        }
+      },
+      { rootMargin: "300px" },
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  });
 
   function toggleIssue(issueId: string) {
     expandedIssueId = expandedIssueId === issueId ? null : issueId;
@@ -184,70 +179,68 @@
 
 	<ProjectWorkbenchPanel {project} {client} canEditProject={permissions.canManageProjects} />
 
-	<!-- Issue list grouped by status -->
-  {#if issuesErrorMessage}
-    <p class="error-banner">{issuesErrorMessage}</p>
-  {:else if issuesLoading}
+	<!-- Issue list (paginated, infinite scroll) -->
+  {#if status === "LoadingFirstPage"}
     <p class="muted">Loading issues...</p>
   {:else if issues.length === 0}
     <p class="muted">No issues yet.</p>
   {:else}
     <div class="flex flex-col border border-gray-300 bg-white">
-      {#each groupedIssues as group (group.status)}
-        <!-- Status group header -->
-        <div class="flex items-center gap-2 px-3 py-1.5 bg-gray-100 border-b border-gray-200">
-          <span class="inline-block w-2 h-2 rounded-full {statusColors[group.status]} {group.status === 'done' ? 'bg-green-600' : group.status === 'in_progress' ? 'bg-accent-500/50' : group.status === 'cancelled' ? 'bg-gray-300' : 'bg-current'}"></span>
-          <span class="font-label text-[0.65rem] font-semibold uppercase tracking-[0.08em] text-gray-500">{group.label}</span>
-          <span class="font-label text-[0.6rem] text-gray-400">{group.issues.length}</span>
+      {#each issues as issue (issue._id)}
+        <!-- Issue row -->
+        <div
+		class="flex items-center gap-3 px-3 py-2 border-b border-gray-200 bg-transparent cursor-pointer hover:bg-gray-50 text-left w-full transition-colors duration-75 {expandedIssueId === issue._id ? 'bg-gray-100' : ''}"
+		onclick={() => toggleIssue(issue._id)}
+		onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleIssue(issue._id); } }}
+          role="button"
+          tabindex="0"
+        >
+          <!-- Status dot -->
+          <span class="inline-block w-2 h-2 rounded-full shrink-0 {statusColors[issue.status]} {statusDotFill(issue.status)}" title={issue.status}></span>
+
+          <!-- Identifier -->
+          <span class="font-label text-[0.6875rem] font-semibold text-gray-400 shrink-0 w-16">{issue.identifier}</span>
+
+          <!-- Title -->
+          <span class="font-sans text-[0.8125rem] font-medium text-gray-900 flex-1 truncate">{issue.title}</span>
+
+          <!-- Priority -->
+          {#if issue.priority !== "none"}
+            <span class={`chip chip--${issue.priority === "urgent" ? "high" : issue.priority} shrink-0`}>{priorityLabels[issue.priority]}</span>
+          {/if}
+
+          <!-- Labels -->
+		{#each issueLabels(issue).slice(0, 2) as label (label)}
+            <span class="chip chip--grant shrink-0">{label}</span>
+          {/each}
+
+          <!-- Assignee -->
+          <span class="font-label text-[0.6875rem] text-gray-500 shrink-0 w-20 text-right truncate">
+            {issue.assigneeName ?? "—"}
+          </span>
         </div>
 
-		{#each group.issues as issue (issue._id)}
-          <!-- Issue row -->
-          <div
-			class="flex items-center gap-3 px-3 py-2 border-b border-gray-200 bg-transparent cursor-pointer hover:bg-gray-50 text-left w-full transition-colors duration-75 {expandedIssueId === issue._id ? 'bg-gray-100' : ''}"
-			onclick={() => toggleIssue(issue._id)}
-			onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleIssue(issue._id); } }}
-            role="button"
-            tabindex="0"
-          >
-            <!-- Identifier -->
-            <span class="font-label text-[0.6875rem] font-semibold text-gray-400 shrink-0 w-16">{issue.identifier}</span>
-
-            <!-- Title -->
-            <span class="font-sans text-[0.8125rem] font-medium text-gray-900 flex-1 truncate">{issue.title}</span>
-
-            <!-- Priority -->
-            {#if issue.priority !== "none"}
-              <span class={`chip chip--${issue.priority === "urgent" ? "high" : issue.priority} shrink-0`}>{priorityLabels[issue.priority]}</span>
-            {/if}
-
-            <!-- Labels -->
-			{#each issueLabels(issue).slice(0, 2) as label (label)}
-              <span class="chip chip--grant shrink-0">{label}</span>
-            {/each}
-
-            <!-- Assignee -->
-            <span class="font-label text-[0.6875rem] text-gray-500 shrink-0 w-20 text-right truncate">
-              {issue.assigneeName ?? "—"}
-            </span>
+        <!-- Inline expand -->
+		{#if expandedIssueId === issue._id}
+          <div class="border-b border-gray-300 bg-gray-50">
+            <IssueDetailPanel
+              {issue}
+              {permissions}
+              {members}
+              {currentUserId}
+              {groupId}
+              {client}
+              onclose={() => { expandedIssueId = null; }}
+            />
           </div>
-
-          <!-- Inline expand -->
-		  {#if expandedIssueId === issue._id}
-            <div class="border-b border-gray-300 bg-gray-50">
-              <IssueDetailPanel
-                {issue}
-                {permissions}
-                {members}
-                {currentUserId}
-                {groupId}
-                {client}
-                onclose={() => { expandedIssueId = null; }}
-              />
-            </div>
-          {/if}
-        {/each}
+        {/if}
       {/each}
+
+      <div bind:this={sentinel} class="h-px w-full"></div>
+
+      {#if status === "LoadingMore"}
+        <p class="muted px-3 py-2 text-center">Loading more...</p>
+      {/if}
     </div>
   {/if}
 </div>

@@ -62,7 +62,17 @@
 			})
 		: () => {};
 
+	let devtools: { unmount: () => void } | null = null;
+
 	onMount(() => {
+		if (import.meta.env.DEV && client) {
+			void import("@robelest/convex-embedded/devtools").then(
+				({ mountEmbeddedDevtools }) => {
+					devtools = mountEmbeddedDevtools(client);
+				},
+			);
+		}
+
 		async function registerServiceWorker() {
 			const registration = await navigator.serviceWorker.register(
 				"/service-worker.js",
@@ -88,12 +98,14 @@
 	});
 
 	onDestroy(() => {
+		devtools?.unmount();
 		unsubscribe();
 		client?.close();
 	});
 
 	if (import.meta.hot) {
 		import.meta.hot.dispose(() => {
+			devtools?.unmount();
 			unsubscribe();
 			client?.close();
 		});

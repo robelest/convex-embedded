@@ -35,7 +35,8 @@ export const load: LayoutServerLoad = async ({ locals }) => {
         },
       });
       embedded = result.embedded;
-      projects = (result.snapshots.projects ?? []) as unknown as Doc<"projects">[];
+      projects = (result.snapshots.projects ??
+        []) as unknown as Doc<"projects">[];
     } catch (error) {
       console.warn("[svelte-demo] failed to prefetch SSR data", error);
     }

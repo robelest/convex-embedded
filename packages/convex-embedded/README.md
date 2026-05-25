@@ -231,8 +231,8 @@ For production, install `@robelest/convex-embedded/tracing/{browser,node}` to
 attach OTLP exporters / log processors or any other OTel `SpanProcessor` /
 `MetricReader` / `LogRecordProcessor`.
 
-See `benchmarks/profile.test.ts` for a live example that prints the span +
-log breakdown for the hot path.
+See `benchmarks/profile.test.ts` for a live example that prints the span + log
+breakdown for the hot path.
 
 ## TanStack DB seam
 

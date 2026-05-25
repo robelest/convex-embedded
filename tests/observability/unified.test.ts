@@ -1,9 +1,8 @@
 import { createLogger } from "@embedded/shared/logger";
 import { installInMemoryTracing } from "@embedded/tracing/memory";
+import type { BufferingTracingHandle } from "@embedded/tracing/memory";
 import { withSpan } from "@embedded/tracing/spans";
 import { afterEach, describe, expect, it } from "@tests/testkit";
-
-import type { BufferingTracingHandle } from "@embedded/tracing/memory";
 
 let handle: BufferingTracingHandle | null = null;
 

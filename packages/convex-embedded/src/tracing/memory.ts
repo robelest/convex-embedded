@@ -2,7 +2,6 @@ import { context, metrics, trace } from "@opentelemetry/api";
 import { logs } from "@opentelemetry/api-logs";
 import type { Resource } from "@opentelemetry/resources";
 import { LoggerProvider } from "@opentelemetry/sdk-logs";
-import { StackContextManager } from "@opentelemetry/sdk-trace-web";
 import {
   AggregationTemporality,
   DataPointType,
@@ -11,6 +10,7 @@ import {
   PeriodicExportingMetricReader,
 } from "@opentelemetry/sdk-metrics";
 import { BasicTracerProvider } from "@opentelemetry/sdk-trace-base";
+import { StackContextManager } from "@opentelemetry/sdk-trace-web";
 
 import {
   BufferingLogRecordProcessor,

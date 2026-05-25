@@ -1,6 +1,9 @@
 import { logs } from "@opentelemetry/api-logs";
 import type { Resource } from "@opentelemetry/resources";
-import { LoggerProvider, type LogRecordProcessor } from "@opentelemetry/sdk-logs";
+import {
+  LoggerProvider,
+  type LogRecordProcessor,
+} from "@opentelemetry/sdk-logs";
 import type { SpanProcessor } from "@opentelemetry/sdk-trace-base";
 import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
 

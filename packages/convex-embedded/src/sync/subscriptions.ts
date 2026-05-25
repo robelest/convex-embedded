@@ -1,9 +1,9 @@
 import { evaluateFieldPath, evaluateValue } from "@/runtime/db/query";
 import type { QueryDependency, StoredDocument } from "@/runtime/db/types";
 import { stableValueKey } from "@/shared/valuekey";
+import { dependencyOverlapsChanges } from "@/sync/invalidation";
 import { recordCounter } from "@/tracing/metrics";
 import { withSpanSync } from "@/tracing/spans";
-import { dependencyOverlapsChanges } from "@/sync/invalidation";
 
 type ProtocolChangeLike = {
   tableName: string;

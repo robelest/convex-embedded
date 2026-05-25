@@ -35,10 +35,7 @@ export function createExpoPlatformAdapter(
           workScheduler,
         });
       } catch (error) {
-        log.error(
-          "op-sqlite storage init failed, continuing in-memory",
-          error,
-        );
+        log.error("op-sqlite storage init failed, continuing in-memory", error);
         return null;
       }
     },

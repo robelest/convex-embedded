@@ -119,9 +119,11 @@ export class OpsContext {
     this.console = {
       log: (...args: unknown[]) => record("log", SeverityNumber.INFO, args),
       warn: (...args: unknown[]) => record("warn", SeverityNumber.WARN, args),
-      error: (...args: unknown[]) => record("error", SeverityNumber.ERROR, args),
+      error: (...args: unknown[]) =>
+        record("error", SeverityNumber.ERROR, args),
       info: (...args: unknown[]) => record("info", SeverityNumber.INFO, args),
-      debug: (...args: unknown[]) => record("debug", SeverityNumber.DEBUG, args),
+      debug: (...args: unknown[]) =>
+        record("debug", SeverityNumber.DEBUG, args),
     };
   }
 
@@ -155,6 +157,6 @@ let opsSeedCounter = 0;
 export function createOpsContext(seed?: number): OpsContext {
   const timestamp = Date.now();
   const effectiveSeed =
-    seed ?? ((timestamp ^ Math.imul(opsSeedCounter++, 0x9e3779b1)) | 0);
+    seed ?? (timestamp ^ Math.imul(opsSeedCounter++, 0x9e3779b1)) | 0;
   return new OpsContext(effectiveSeed, timestamp);
 }

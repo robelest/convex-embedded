@@ -20,7 +20,6 @@ import type {
   VectorSearchArgs,
   WriteBatch,
 } from "@/storage/adapter";
-
 import { withSpan } from "@/tracing/spans";
 
 import type { SqliteDriver } from "./driver";

@@ -8,9 +8,9 @@ import type {
   SerializedRangeExpression,
 } from "@embedded/runtime/db/types";
 import { EmbeddedRuntime } from "@embedded/runtime/embedded";
-import { buildUserTableSpecs } from "@embedded/storage/sqlite/factory";
-import { define, type Definition } from "@embedded/shared/schema";
 import { schema as crdtSchema } from "@embedded/server/schema/fields";
+import { define, type Definition } from "@embedded/shared/schema";
+import { buildUserTableSpecs } from "@embedded/storage/sqlite/factory";
 import { temporaryDatabasePath, uniqueSuffix } from "@tests/helpers/storage";
 import {
   defineSchema,
@@ -177,6 +177,20 @@ export async function seededSqliteDb(
   return { db, file };
 }
 
+export async function unhydratedSqliteDb(file: string): Promise<Database> {
+  const storage = track(
+    await openNodeStorage({
+      filename: file,
+      userTableSpecs: USER_TABLE_SPECS,
+    }),
+  );
+
+  const db = new Database(PARSED_SCHEMA);
+  db.setStorage(storage);
+
+  return db;
+}
+
 export function indexRangeQuery(
   indexName: string,
   range: SerializedRangeExpression[],
@@ -192,6 +206,56 @@ export function fullScanQuery(tableName: string): SerializedQuery {
     source: { type: "FullTableScan", tableName, order: "asc" },
     operators: [
       { filter: { $eq: [{ $field: "status" }, { $literal: "active" }] } },
+    ],
+  };
+}
+
+export function fullScanTakeFilteredQuery(
+  tableName: string,
+  priority: number,
+  limit: number,
+): SerializedQuery {
+  return {
+    source: { type: "FullTableScan", tableName, order: "asc" },
+    operators: [
+      { filter: { $eq: [{ $field: "priority" }, { $literal: priority }] } },
+      { limit },
+    ],
+  };
+}
+
+export function fullScanTakeArithmeticQuery(
+  tableName: string,
+  limit: number,
+): SerializedQuery {
+  return {
+    source: { type: "FullTableScan", tableName, order: "asc" },
+    operators: [
+      {
+        filter: {
+          $eq: [
+            { $mod: [{ $field: "priority" }, { $literal: 9 }] },
+            { $literal: 7 },
+          ],
+        },
+      },
+      { limit },
+    ],
+  };
+}
+
+export function fullScanArithmeticQuery(tableName: string): SerializedQuery {
+  return {
+    source: { type: "FullTableScan", tableName, order: "asc" },
+    operators: [
+      {
+        filter: {
+          $eq: [
+            { $mod: [{ $field: "priority" }, { $literal: 9 }] },
+            { $literal: 7 },
+          ],
+        },
+      },
     ],
   };
 }
@@ -263,10 +327,10 @@ export interface SeededRuntime {
   readonly file: string;
 }
 
-export async function seededSqliteRuntime(
-  size: Size,
-): Promise<SeededRuntime> {
-  const file = temporaryDatabasePath(uniqueSuffix(`bench-runtime-${size.label}`));
+export async function seededSqliteRuntime(size: Size): Promise<SeededRuntime> {
+  const file = temporaryDatabasePath(
+    uniqueSuffix(`bench-runtime-${size.label}`),
+  );
   trackFile(file);
 
   const storage = await openNodeStorage({ filename: file });

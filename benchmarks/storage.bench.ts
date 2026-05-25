@@ -40,7 +40,10 @@ async function seedBlobs(
   count: number,
   prefix: string,
 ): Promise<string[]> {
-  const keys = Array.from({ length: count }, (_, index) => `${prefix}-${index}`);
+  const keys = Array.from(
+    { length: count },
+    (_, index) => `${prefix}-${index}`,
+  );
   for (const key of keys) {
     await store.putBlob(key, blob);
   }
@@ -55,10 +58,10 @@ describe("storage substrate", () => {
       if (!db) throw new Error("write db not initialized");
       db.startTransaction();
       for (let index = 0; index < insertRows.length; index += 1) {
-        db.insert("tasks", insertRows[index] as unknown as Record<
-          string,
-          unknown
-        >);
+        db.insert(
+          "tasks",
+          insertRows[index] as unknown as Record<string, unknown>,
+        );
       }
       await db.commitAsync();
       await db.waitForPersistence();
@@ -83,7 +86,10 @@ describe("storage substrate", () => {
     async () => {
       if (!blobStore) throw new Error("blob store not initialized");
       blobCounter += 1;
-      await blobStore.putBlob(`blob-64k-${blobCounter % PUT_KEY_WINDOW}`, BLOB_64K);
+      await blobStore.putBlob(
+        `blob-64k-${blobCounter % PUT_KEY_WINDOW}`,
+        BLOB_64K,
+      );
     },
     {
       setup: async () => {
@@ -101,7 +107,10 @@ describe("storage substrate", () => {
     async () => {
       if (!blobStore) throw new Error("blob store not initialized");
       blobCounter += 1;
-      await blobStore.putBlob(`blob-1m-${blobCounter % PUT_KEY_WINDOW}`, BLOB_1M);
+      await blobStore.putBlob(
+        `blob-1m-${blobCounter % PUT_KEY_WINDOW}`,
+        BLOB_1M,
+      );
     },
     {
       setup: async () => {

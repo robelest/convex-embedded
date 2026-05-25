@@ -206,7 +206,11 @@ async function record(
   ctx: MockCtx,
   docId: string,
   content: string,
-  options: { keepTailCount: number; tailByteLimit: number; creationTime: number },
+  options: {
+    keepTailCount: number;
+    tailByteLimit: number;
+    creationTime: number;
+  },
 ): Promise<void> {
   await recordUpdateHandler(ctx, {
     collection: COLLECTION,
@@ -301,7 +305,10 @@ describe("component storage", () => {
       setup: async () => {
         const created = createMockCtx();
         liveStatesCtx = created.ctx;
-        liveStateIds = Array.from({ length: 1_000 }, (_, index) => `doc-${index}`);
+        liveStateIds = Array.from(
+          { length: 1_000 },
+          (_, index) => `doc-${index}`,
+        );
         await Promise.all(
           liveStateIds.map((docId, index) =>
             record(liveStatesCtx, docId, `seed-${index}`, {

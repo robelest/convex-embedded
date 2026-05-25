@@ -4,6 +4,7 @@ import { expect, it } from "@tests/testkit";
 
 import {
   closeTrackedResources,
+  indexRangeQuery,
   makeRow,
   seededSqliteRuntime,
   sizeByLabel,
@@ -11,6 +12,7 @@ import {
 
 const MUTATIONS = 300;
 const QUERIES = 300;
+const PAGES = 200;
 
 function percentile(sorted: number[], p: number): number {
   if (sorted.length === 0) return 0;
@@ -104,10 +106,20 @@ it("profiles executeLocal hot path via in-memory OTel spans", async () => {
       path: "tasks:byStatusLimit",
       args: { status: "active", limit: 20 },
     });
+  const byStatusActive = indexRangeQuery("tasks.by_status", [
+    { type: "Eq", fieldPath: "status", value: "active" },
+  ]);
+  const runPaginate = (): Promise<unknown> =>
+    runtime.db.paginateAsync({
+      query: byStatusActive,
+      cursor: null,
+      pageSize: 50,
+    });
 
   for (let i = 0; i < 20; i += 1) {
     await runMutation();
     await runQuery();
+    await runPaginate();
   }
   handle.clearSpans();
   handle.clearLogs();
@@ -117,6 +129,9 @@ it("profiles executeLocal hot path via in-memory OTel spans", async () => {
   }
   for (let i = 0; i < QUERIES; i += 1) {
     await runQuery();
+  }
+  for (let i = 0; i < PAGES; i += 1) {
+    await runPaginate();
   }
 
   const spans = handle.getSpans();
@@ -129,8 +144,12 @@ it("profiles executeLocal hot path via in-memory OTel spans", async () => {
   const indexSpans = spans.filter(
     (span) => span.name === "convex-embedded.db.applyIndexChanges",
   );
+  const paginateSpans = spans.filter(
+    (span) => span.name === "convex-embedded.db.paginate",
+  );
   expect(mutationSpans.length).toBe(MUTATIONS);
   expect(indexSpans.length).toBeGreaterThanOrEqual(MUTATIONS);
+  expect(paginateSpans.length).toBe(PAGES);
 
   await runtime.db.waitForPersistence();
   await handle.close();

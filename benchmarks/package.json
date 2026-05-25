@@ -10,10 +10,12 @@
     "bench:compute": "vp exec vitest bench --run compute.bench.ts",
     "bench:storage": "vp exec vitest bench --run storage.bench.ts",
     "bench:queries": "vp exec vitest bench --run queries.bench.ts",
+    "bench:searchcache": "vp exec vitest bench --run searchcache.bench.ts",
     "bench:reactivity": "vp exec vitest bench --run reactivity.bench.ts",
     "bench:platform": "vp exec vitest bench --run platform.bench.ts",
     "bench:remote": "vp exec vitest bench --run remote.bench.ts",
-    "profile": "vp exec vitest run profile.test.ts --disableConsoleIntercept"
+    "profile": "vp exec vitest run profile.test.ts --disableConsoleIntercept",
+    "profile:coldopen": "vp exec vitest run coldopen.test.ts --disableConsoleIntercept"
   },
   "devDependencies": {
     "@robelest/convex-embedded": "workspace:*",

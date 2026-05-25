@@ -21,7 +21,10 @@ import {
 import { materializeYjsDoc } from "@/client/schema";
 import type { EngineResolveInput } from "@/client/services/engine";
 import { SystemPaths } from "@/kernel/system";
-import type { LocalExecutionRequest } from "@/runtime/embedded";
+import type {
+  IngestDocumentsOptions,
+  LocalExecutionRequest,
+} from "@/runtime/embedded";
 import {
   createAmbientConnectivityAdapter,
   type ConnectivityAdapter,
@@ -475,6 +478,11 @@ function registerRemoteSubscription(input: {
     runHandler: () => void;
   }) => void;
   onPartialResponse?: () => void;
+  shouldSkipRedundantPartialResolve?: (
+    tableName: string,
+    scopeArgs: Record<string, unknown> | undefined,
+    signalSeq: number,
+  ) => boolean;
 }) {
   const remoteClient = input.resolveServices.remoteClient;
   const baseHandler = createRemoteUpdateHandler({
@@ -509,6 +517,15 @@ function registerRemoteSubscription(input: {
     }
 
     if (res?.mode === "full" && res?.isDone === false) {
+      if (
+        input.shouldSkipRedundantPartialResolve?.(
+          input.tableName,
+          input.scopeArgs,
+          signalSeq,
+        ) === true
+      ) {
+        return;
+      }
       input.onPartialResponse?.();
       return;
     }
@@ -600,6 +617,7 @@ export interface EmbeddedClientLike {
     table: string,
     documents: Array<Record<string, unknown>>,
     scopeArgs?: Record<string, unknown>,
+    options?: IngestDocumentsOptions,
   ): Promise<void>;
   canonicalizeMappedCreate(input: {
     localId: string;
@@ -1038,7 +1056,13 @@ async function runSpan<A>(input: {
   attributes?: Record<string, string | number | boolean | null | undefined>;
   run: () => Promise<A> | A;
 }): Promise<A> {
-  return Promise.resolve(input.run());
+  const attributes: Record<string, string | number | boolean> = {};
+  for (const [key, value] of Object.entries(input.attributes ?? {})) {
+    if (value !== null && value !== undefined) {
+      attributes[key] = value;
+    }
+  }
+  return withSpan(input.name, () => input.run(), { attributes });
 }
 
 function hasResolvableReferences(
@@ -1597,18 +1621,24 @@ async function ingestMergedDocs(input: {
     table: string,
     documents: Array<Record<string, unknown>>,
     scopeArgs?: Record<string, unknown>,
+    options?: IngestDocumentsOptions,
   ) => Promise<void>;
   mergedDocs: Array<Record<string, unknown>>;
   scopeArgs?: Record<string, unknown>;
   tableName: string;
+  ingestOptions?: IngestDocumentsOptions;
 }): Promise<void> {
-  if (input.mergedDocs.length === 0) {
+  if (
+    input.mergedDocs.length === 0 &&
+    input.ingestOptions?.keepIds === undefined
+  ) {
     return;
   }
   await input.ingestDocuments(
     input.tableName,
     input.mergedDocs,
     input.scopeArgs,
+    input.ingestOptions,
   );
 }
 
@@ -1666,11 +1696,12 @@ function createEngine(config: EngineConfig): EngineInstance {
     table: string,
     docs: Array<Record<string, unknown>>,
     scopeArgs?: Record<string, unknown>,
+    options?: IngestDocumentsOptions,
   ): Promise<void> {
     const prev = ingestLockMap.get(table) ?? Promise.resolve();
     const next = prev.then(
-      () => rawIngestDocuments(table, docs, scopeArgs),
-      () => rawIngestDocuments(table, docs, scopeArgs),
+      () => rawIngestDocuments(table, docs, scopeArgs, options),
+      () => rawIngestDocuments(table, docs, scopeArgs, options),
     );
     ingestLockMap.set(table, next);
     next
@@ -1850,6 +1881,7 @@ function createEngine(config: EngineConfig): EngineInstance {
   const RESOLVE_TABLE_COALESCE_MS = 32;
   const expectedSelfCausedSignals = new Map<string, number[]>();
   const lastKnownCollectionSeqByTable = new Map<string, number>();
+  const lastResolvedScopeSeq = new Map<string, number>();
   type TableCoalesceEntry = {
     signalSeqs: Set<number>;
     pendingThunks: Map<string, () => void>;
@@ -1906,6 +1938,44 @@ function createEngine(config: EngineConfig): EngineInstance {
       `sync: skipping self-caused bind for "${tableName}" (signalSeq=${signalSeq})`,
     );
     return true;
+  }
+
+  function recordResolvedScopeSeq(
+    tableName: string,
+    scopeArgs: Record<string, unknown> | undefined,
+    collectionSeq: number | null,
+  ): void {
+    if (collectionSeq === null) {
+      return;
+    }
+    const scopeKey = makeScopeKey(tableName, scopeArgs ?? {});
+    const prev = lastResolvedScopeSeq.get(scopeKey) ?? -Infinity;
+    if (collectionSeq > prev) {
+      lastResolvedScopeSeq.set(scopeKey, collectionSeq);
+    }
+  }
+
+  function shouldSkipRedundantPartialResolve(
+    tableName: string,
+    scopeArgs: Record<string, unknown> | undefined,
+    signalSeq: number,
+  ): boolean {
+    if (signalSeq < 0) {
+      return false;
+    }
+    const scopeKey = makeScopeKey(tableName, scopeArgs ?? {});
+    const resolvedSeq = lastResolvedScopeSeq.get(scopeKey);
+    if (resolvedSeq === undefined) {
+      return false;
+    }
+    if (signalSeq <= resolvedSeq) {
+      log.debug(
+        `sync: skipping redundant partial resolve for "${tableName}" ` +
+          `(signalSeq=${signalSeq} <= resolvedSeq=${resolvedSeq})`,
+      );
+      return true;
+    }
+    return false;
   }
 
   function fireCoalescedTableUpdate(tableName: string): void {
@@ -1972,6 +2042,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     tableCoalesceMap.clear();
     expectedSelfCausedSignals.clear();
     lastKnownCollectionSeqByTable.clear();
+    lastResolvedScopeSeq.clear();
   }
 
   function getRemoteApplyOrder(): string[] {
@@ -3304,11 +3375,12 @@ function createEngine(config: EngineConfig): EngineInstance {
           )
         : await readResolveMetadata(tableName, tableConfig, docIds);
 
-    const { schemaDef, localYjsMap, resolveDocuments } = prepareResolveInput(
-      tableConfig.schema,
-      scopedLocalDocs,
-      metadata,
-    );
+    const { schemaDef, localYjsMap, resolveDocuments } = await runSpan({
+      name: "convex_embedded.resolve.prepareInput",
+      attributes: { table: tableName, local_doc_count: scopedLocalDocs.length },
+      run: () =>
+        prepareResolveInput(tableConfig.schema, scopedLocalDocs, metadata),
+    });
 
     const isNewScope =
       scopeArgs &&
@@ -3353,102 +3425,169 @@ function createEngine(config: EngineConfig): EngineInstance {
       return normalizeResolveResponse(rawResolveResult, effectiveCollectionSeq);
     };
 
-    const firstResolveResult = await fetchResolvePage();
-    let resolveResult = firstResolveResult;
-    if (
-      firstResolveResult.mode === "full" &&
-      firstResolveResult.isDone === false
-    ) {
-      const fullDocuments = [...firstResolveResult.documents];
+    const accumulatedMetadataEntries: Array<{ docId: string; seq: number }> =
+      [];
+    const accumulatedDeletedDocIds: string[] = [];
+    const ingestedRemoteIds = new Set<string>();
+    let totalResolvedDocs = 0;
+    let totalDiffCount = 0;
+    let finalResolveResult: ResolveResponse | null = null;
+
+    const processPage = async (
+      page: ResolveResponse,
+      pageNumber: number,
+      streamingFullMode: boolean,
+    ): Promise<void> => {
+      const { deletedDocIds, mergedDocs, diffCount, metadataEntries } =
+        await runSpan({
+          name: "convex_embedded.resolve.merge",
+          attributes: {
+            table: tableName,
+            page: pageNumber,
+            resolved_doc_count: page.documents.length,
+            mode: page.mode,
+          },
+          run: () =>
+            mergeResolveResult({
+              localDocs: scopedLocalDocs,
+              localYjsMap,
+              resolveResult: page,
+              schemaDef,
+              tableName,
+              translateRemoteDocument: (document) =>
+                stripOmittedFields(schemaDef, [document])[0] ?? document,
+            }),
+        });
+      const { accepted: resolvableDocs, skipped: unresolvedDocs } =
+        await filterAfterHydratingReferences({
+          docs: mergedDocs,
+          tableName,
+          signal,
+        });
+      if (unresolvedDocs.length > 0) {
+        await runSpan({
+          name: "convex_embedded.resolve.unresolved_documents",
+          attributes: {
+            table: tableName,
+            unresolved_count: unresolvedDocs.length,
+            merged_count: mergedDocs.length,
+          },
+          run: async () => undefined,
+        });
+        log.warn(
+          `sync: skipped ${unresolvedDocs.length} "${tableName}" resolve doc(s) with unresolved references`,
+        );
+      }
+      const resolvableDocIds = new Set(
+        resolvableDocs.flatMap((doc) =>
+          typeof doc._id === "string" ? [String(doc._id)] : [],
+        ),
+      );
+      for (const entry of metadataEntries) {
+        if (resolvableDocIds.has(entry.docId)) {
+          accumulatedMetadataEntries.push(entry);
+        }
+      }
+      for (const id of resolvableDocIds) {
+        ingestedRemoteIds.add(id);
+      }
+      accumulatedDeletedDocIds.push(...deletedDocIds);
+      totalResolvedDocs += page.documents.length;
+      totalDiffCount += diffCount;
+
+      await runSpan({
+        name: "convex_embedded.resolve.ingest",
+        attributes: {
+          table: tableName,
+          page: pageNumber,
+          resolved_doc_count: page.documents.length,
+          diff_count: diffCount,
+          ingest_count: resolvableDocs.length,
+          streaming: streamingFullMode,
+        },
+        run: () =>
+          ingestMergedDocs({
+            ingestDocuments,
+            mergedDocs: resolvableDocs,
+            scopeArgs,
+            tableName,
+            ingestOptions: streamingFullMode
+              ? { deleteAbsent: false }
+              : undefined,
+          }),
+      });
+    };
+
+    const firstResolveResult = await runSpan({
+      name: "convex_embedded.resolve.fetch",
+      attributes: { table: tableName, page: 0 },
+      run: () => fetchResolvePage(),
+    });
+    const isStreamingFullMode =
+      firstResolveResult.mode === "full" && firstResolveResult.isDone === false;
+    await processPage(firstResolveResult, 0, isStreamingFullMode);
+    finalResolveResult = firstResolveResult;
+
+    if (isStreamingFullMode) {
       let continueCursor = firstResolveResult.continueCursor ?? null;
+      let pageIndex = 1;
 
       while (continueCursor !== null) {
         if (signal?.aborted) {
           throw new DOMException("Aborted", "AbortError");
         }
-        const page = await fetchResolvePage(continueCursor);
+        const cursor = continueCursor;
+        const pageNumber = pageIndex;
+        const page = await runSpan({
+          name: "convex_embedded.resolve.fetch",
+          attributes: { table: tableName, page: pageNumber },
+          run: () => fetchResolvePage(cursor),
+        });
         if (page.mode !== "full") {
           throw new Error(
             `[convex-embedded] resolve pagination changed mode unexpectedly for "${tableName}".`,
           );
         }
-        fullDocuments.push(...page.documents);
+        await processPage(page, pageNumber, true);
         continueCursor = page.continueCursor ?? null;
-        resolveResult = {
-          ...page,
-          documents: fullDocuments,
-          continueCursor,
-        };
+        pageIndex += 1;
+        finalResolveResult = page;
       }
-    }
 
-    const { deletedDocIds, mergedDocs, diffCount, metadataEntries } =
-      mergeResolveResult({
-        localDocs: scopedLocalDocs,
-        localYjsMap,
-        resolveResult,
-        schemaDef,
-        tableName,
-        translateRemoteDocument: (document) =>
-          stripOmittedFields(schemaDef, [document])[0] ?? document,
-      });
-    const { accepted: resolvableDocs, skipped: unresolvedDocs } =
-      await filterAfterHydratingReferences({
-        docs: mergedDocs,
-        tableName,
-        signal,
-      });
-    if (unresolvedDocs.length > 0) {
       await runSpan({
-        name: "convex_embedded.resolve.unresolved_documents",
+        name: "convex_embedded.resolve.prune",
         attributes: {
           table: tableName,
-          unresolved_count: unresolvedDocs.length,
-          merged_count: mergedDocs.length,
+          keep_count: ingestedRemoteIds.size,
         },
-        run: async () => undefined,
+        run: () =>
+          ingestMergedDocs({
+            ingestDocuments,
+            mergedDocs: [],
+            scopeArgs,
+            tableName,
+            ingestOptions: { deleteAbsent: true, keepIds: ingestedRemoteIds },
+          }),
       });
-      log.warn(
-        `sync: skipped ${unresolvedDocs.length} "${tableName}" resolve doc(s) with unresolved references`,
-      );
     }
-    const resolvableDocIds = new Set(
-      resolvableDocs.flatMap((doc) =>
-        typeof doc._id === "string" ? [String(doc._id)] : [],
-      ),
-    );
-    const resolvableMetadataEntries = metadataEntries.filter((entry) =>
-      resolvableDocIds.has(entry.docId),
-    );
-
-    await runSpan({
-      name: "convex_embedded.resolve.ingest",
-      attributes: {
-        table: tableName,
-        resolved_doc_count: resolveResult.documents.length,
-        diff_count: diffCount,
-        ingest_count: resolvableDocs.length,
-      },
-      run: () =>
-        ingestMergedDocs({
-          ingestDocuments,
-          mergedDocs: resolvableDocs,
-          scopeArgs,
-          tableName,
-        }),
-    });
 
     await persistResolveMetadata({
       tableConfig,
       tableName,
-      resolveResult,
-      metadataEntries: resolvableMetadataEntries,
-      deletedDocIds,
+      resolveResult: finalResolveResult,
+      metadataEntries: accumulatedMetadataEntries,
+      deletedDocIds: accumulatedDeletedDocIds,
     });
+
+    recordResolvedScopeSeq(
+      tableName,
+      scopeArgs,
+      finalResolveResult.collectionSeq,
+    );
 
     log.debug(
       `sync: resolved table "${tableName}" — ` +
-        `${resolveResult.documents.length} doc(s), ${diffCount} diff(s) applied`,
+        `${totalResolvedDocs} doc(s), ${totalDiffCount} diff(s) applied`,
     );
     return;
   }
@@ -3514,6 +3653,7 @@ function createEngine(config: EngineConfig): EngineInstance {
         scopeArgs: entry.scopeArgs,
         consumeExpectedSelfCausedSignal,
         scheduleTableCoalesce,
+        shouldSkipRedundantPartialResolve,
         onPartialResponse: () => {
           runDetached(
             () =>
@@ -3623,6 +3763,7 @@ function createEngine(config: EngineConfig): EngineInstance {
         scopeArgs: normalizedScope,
         consumeExpectedSelfCausedSignal,
         scheduleTableCoalesce,
+        shouldSkipRedundantPartialResolve,
         onPartialResponse: () => {
           runDetached(
             () =>

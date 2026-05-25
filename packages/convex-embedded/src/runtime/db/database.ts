@@ -17,6 +17,7 @@ import {
   type AsyncTableCountReader,
   type DocumentIterator,
   type FilterNode,
+  type PaginateResult,
   type QueryReader,
   type SourceReader,
   type TableCountReader,
@@ -41,6 +42,7 @@ import type { GenericDocument } from "@/runtime/db/types";
 import type {
   DocumentId,
   QueryId,
+  SeekBound,
   SerializedQuery,
   SerializedRangeExpression,
   StoredDocument,
@@ -393,10 +395,10 @@ export class Database {
     const query: QueryReader = (query) => this._readOptimizedQuery(query);
     const readQueryAsync: AsyncQueryReader = (query) =>
       this._readOptimizedQueryAsync(query);
-    const source: SourceReader = (source, limit) =>
-      this._readOptimizedSource(source, limit);
-    const readSourceAsync: AsyncSourceReader = (source, limit) =>
-      this._readOptimizedSourceAsync(source, limit);
+    const source: SourceReader = (source, limit, seek) =>
+      this._readOptimizedSource(source, limit, seek);
+    const readSourceAsync: AsyncSourceReader = (source, limit, seek) =>
+      this._readOptimizedSourceAsync(source, limit, seek);
 
     this.queryEngine = new QueryEngine(
       schema,
@@ -407,6 +409,7 @@ export class Database {
       countTableAsync,
       readQueryAsync,
       readSourceAsync,
+      (tableName) => this.getTableVersion(tableName),
     );
   }
 
@@ -686,6 +689,7 @@ export class Database {
       const tablesWritten = new Set(this._tablesWritten);
       if (tablesWritten.size > 0) {
         this._timestamp += 1;
+        this.bumpTableVersions(tablesWritten);
         this._applyCommittedStateChanges(stateChanges);
       }
       this._tablesWritten.clear();
@@ -756,6 +760,7 @@ export class Database {
     const { puts, deletes, rowChanges, stateChanges, invalidation } =
       this._buildCommittedWriteArtifacts(lastWrites);
     const nextTimestamp = this._timestamp + 1;
+    this.bumpTableVersions(tablesWritten);
 
     const batch = {
       puts,
@@ -787,7 +792,9 @@ export class Database {
       this._lastCreationTime = batch.meta.lastCreationTime;
       if (rowChanges.length > 0) {
         this._applyCommittedRowChanges(rowChanges);
-        this._applyCommittedStateChanges(stateChanges, { skipQueryable: false });
+        this._applyCommittedStateChanges(stateChanges, {
+          skipQueryable: false,
+        });
       }
       this._tablesWritten.clear();
 
@@ -1194,6 +1201,28 @@ export class Database {
     return (this._tableDocuments.get(tableName)?.size ?? 0) > 0;
   }
 
+  getTableNames(): string[] {
+    const names = new Set<string>();
+    if (this._schema) {
+      for (const name of this._schema.tables.keys()) {
+        names.add(name);
+      }
+    }
+    for (const name of this._tableDocuments.keys()) {
+      names.add(name);
+    }
+    return [...names].sort();
+  }
+
+  getIndexDefinitions(
+    tableName: string,
+  ): Array<{ indexName: string; fields: string[] }> {
+    return this._getIndexDefinitions(tableName).map((definition) => ({
+      indexName: definition.indexName,
+      fields: [...definition.fields],
+    }));
+  }
+
   migrateAnonymousDataToIdentity(identityKey: string): Set<string> {
     const tablesWritten = new Set<string>();
     for (const [id, doc] of this._documents) {
@@ -1304,28 +1333,23 @@ export class Database {
     this.queryEngine.queryCleanup(queryId);
   }
 
-  paginate(args: {
-    query: SerializedQuery;
-    cursor: string | null;
-    pageSize: number;
-  }): {
-    page: GenericDocument[];
-    isDone: boolean;
-    continueCursor: string;
-  } {
-    return this.queryEngine.paginate(args);
-  }
-
   paginateAsync(args: {
     query: SerializedQuery;
     cursor: string | null;
+    endCursor?: string | null;
     pageSize: number;
-  }): Promise<{
-    page: GenericDocument[];
-    isDone: boolean;
-    continueCursor: string;
-  }> {
-    return this.queryEngine.paginateAsync(args);
+    maximumRowsRead?: number | null;
+    maximumBytesRead?: number | null;
+  }): Promise<PaginateResult> {
+    return withSpan("convex-embedded.db.paginate", async (span) => {
+      span.setAttribute("convex.page.size", args.pageSize);
+      span.setAttribute("convex.page.has_cursor", args.cursor !== null);
+      span.setAttribute("convex.page.has_end_cursor", args.endCursor != null);
+      const result = await this.queryEngine.paginateAsync(args);
+      span.setAttribute("convex.page.returned", result.page.length);
+      span.setAttribute("convex.page.is_done", result.isDone);
+      return result;
+    });
   }
 
   count(tableName: string): number {
@@ -2187,25 +2211,53 @@ export class Database {
   private _readOptimizedSource(
     source: SerializedQuery["source"],
     limit?: number | null,
+    seek?: SeekBound,
   ): {
     results: StoredDocument[];
     fieldPathsToSortBy: string[];
     order: "asc" | "desc";
+    presorted: boolean;
   } | null {
     if (source.type === "FullTableScan") {
       const indexName =
         source.order === "desc" ? "by_creation_time_desc" : "by_creation_time";
       if (this._hasPendingWritesForTable(source.tableName)) {
         return {
-          results: this._getMergedIndexedDocuments(source.tableName, indexName),
+          results: this._applySeekToOrderedDocs(
+            this._getMergedIndexedDocuments(source.tableName, indexName),
+            seek,
+          ),
           fieldPathsToSortBy: [],
           order: source.order ?? "asc",
+          presorted: true,
+        };
+      }
+      const ids = this._indexedIds(source.tableName, indexName);
+      if (ids === null) {
+        return {
+          results: this._applySeekToOrderedDocs(
+            this.getIndexedDocuments(source.tableName, indexName),
+            seek,
+          ),
+          fieldPathsToSortBy: [],
+          order: source.order ?? "asc",
+          presorted: true,
         };
       }
       return {
-        results: this.getIndexedDocuments(source.tableName, indexName),
+        results: this._readIndexWindow({
+          ids,
+          fields: ["_creationTime", "_id"],
+          lower: null,
+          upper: null,
+          predicate: () => true,
+          iterate: "forward",
+          seek,
+          limit: limit ?? null,
+        }),
         fieldPathsToSortBy: [],
         order: source.order ?? "asc",
+        presorted: true,
       };
     }
 
@@ -2214,7 +2266,6 @@ export class Database {
         string,
         string,
       ];
-      const orderedDocs = this.getIndexedDocuments(tableName, indexName);
       const fields = this._getIndexDefinitions(tableName).find(
         (entry) => entry.indexName === indexName,
       )?.fields;
@@ -2230,24 +2281,49 @@ export class Database {
       const predicate = this._buildRangePredicate(source.range);
       if (this._hasPendingWritesForTable(tableName) && source.order === "asc") {
         return {
-          results: this._collectMergedIndexRangeDocs(
-            tableName,
-            indexName,
-            [],
-            null,
-            fields,
-            lower,
-            upper,
-            predicate,
+          results: this._applySeekToOrderedDocs(
+            this._collectMergedIndexRangeDocs(
+              tableName,
+              indexName,
+              [],
+              null,
+              fields,
+              lower,
+              upper,
+              predicate,
+            ),
+            seek,
           ),
           fieldPathsToSortBy: [],
           order: "asc",
+          presorted: true,
         };
+      }
+
+      if (!this._hasPendingWritesForTable(tableName)) {
+        const ids = this._indexedIds(tableName, indexName);
+        if (ids !== null) {
+          return {
+            results: this._readIndexWindow({
+              ids,
+              fields,
+              lower,
+              upper,
+              predicate,
+              iterate: source.order === "desc" ? "backward" : "forward",
+              seek,
+              limit: limit ?? null,
+            }),
+            fieldPathsToSortBy: [],
+            order: "asc",
+            presorted: true,
+          };
+        }
       }
 
       const sourceDocs = this._hasPendingWritesForTable(tableName)
         ? this._getMergedIndexedDocuments(tableName, indexName)
-        : orderedDocs;
+        : this.getIndexedDocuments(tableName, indexName);
       const start = lower
         ? this._binarySearchLowerBound(sourceDocs, fields, lower)
         : 0;
@@ -2255,11 +2331,13 @@ export class Database {
         ? this._binarySearchUpperBound(sourceDocs, fields, upper)
         : sourceDocs.length;
       const filteredDocs = sourceDocs.slice(start, end).filter(predicate);
+      const ordered =
+        source.order === "desc" ? [...filteredDocs].reverse() : filteredDocs;
       return {
-        results:
-          source.order === "desc" ? [...filteredDocs].reverse() : filteredDocs,
+        results: this._applySeekToOrderedDocs(ordered, seek),
         fieldPathsToSortBy: [],
         order: "asc",
+        presorted: true,
       };
     }
 
@@ -2286,6 +2364,7 @@ export class Database {
           ),
           fieldPathsToSortBy: [],
           order: "asc",
+          presorted: true,
         };
       }
 
@@ -2297,6 +2376,7 @@ export class Database {
         }),
         fieldPathsToSortBy: [],
         order: "asc",
+        presorted: true,
       };
     }
 
@@ -2306,17 +2386,19 @@ export class Database {
   private async _readOptimizedSourceAsync(
     source: SerializedQuery["source"],
     limit?: number | null,
+    seek?: SeekBound,
   ): Promise<{
     results: StoredDocument[];
     fieldPathsToSortBy: string[];
     order: "asc" | "desc";
+    presorted: boolean;
   } | null> {
     const sourceTable = sourceTableName(source);
     if (
       this.isTableHydrationAttempted(sourceTable) &&
       source.type !== "Search"
     ) {
-      const inMemory = this._readOptimizedSource(source, limit);
+      const inMemory = this._readOptimizedSource(source, limit, seek);
       if (inMemory !== null) {
         return inMemory;
       }
@@ -2345,6 +2427,7 @@ export class Database {
         indexFields: indexFields ?? undefined,
         searchDefinition,
         activeIdentityKey: this._activeIdentityKey,
+        seek: source.type === "Search" ? undefined : seek,
       });
       if (results !== null) {
         this._rememberCommittedLookup(sourceTableName(source), results);
@@ -2355,6 +2438,7 @@ export class Database {
           fieldPathsToSortBy:
             source.type === "FullTableScan" ? ["_creationTime"] : [],
           order,
+          presorted: true,
         };
       }
     }
@@ -2369,10 +2453,12 @@ export class Database {
       );
       if (docs !== null) {
         this._rememberCommittedLookup(source.tableName, docs);
+        const order = source.order ?? "asc";
         return {
           results: this._stripIdentityScopes(docs),
           fieldPathsToSortBy: ["_creationTime"],
-          order: source.order ?? "asc",
+          order,
+          presorted: order === "asc",
         };
       }
     }
@@ -3550,6 +3636,45 @@ export class Database {
     };
   }
 
+  private _applySeekToOrderedDocs(
+    docs: StoredDocument[],
+    seek: SeekBound | undefined,
+  ): StoredDocument[] {
+    if (seek === undefined || docs.length === 0) {
+      return docs;
+    }
+    const value = evaluateValue(seek.value);
+    const keep = (doc: StoredDocument): boolean => {
+      const comparison = compareValues(
+        evaluateFieldPath(seek.field, doc),
+        value,
+      );
+      if (seek.direction === "asc") {
+        return seek.inclusive ? comparison >= 0 : comparison > 0;
+      }
+      return seek.inclusive ? comparison <= 0 : comparison < 0;
+    };
+    const start = this._seekStartIndex(docs, keep);
+    return start === 0 ? docs : docs.slice(start);
+  }
+
+  private _seekStartIndex(
+    docs: StoredDocument[],
+    keep: (doc: StoredDocument) => boolean,
+  ): number {
+    let low = 0;
+    let high = docs.length;
+    while (low < high) {
+      const mid = (low + high) >>> 1;
+      if (keep(docs[mid]!)) {
+        high = mid;
+      } else {
+        low = mid + 1;
+      }
+    }
+    return low;
+  }
+
   private _buildRangeBound(
     range: SerializedRangeExpression[],
     fields: string[],
@@ -3594,6 +3719,154 @@ export class Database {
     values.length = prefixLength;
 
     return values.length === 0 ? null : { values, inclusive };
+  }
+
+  private _indexedIds(tableName: string, indexName: string): string[] | null {
+    const ids = this._indexDocuments.get(`${tableName}.${indexName}`);
+    return ids === undefined ? null : (ids as string[]);
+  }
+
+  private _materializeIndexedId(id: string): StoredDocument | null {
+    const raw = this._documents.get(id as DocumentId) as
+      | IdentityScopedDocument
+      | undefined;
+    return raw === undefined ? null : this._stripIdentityScope(raw);
+  }
+
+  private _readIndexWindow(input: {
+    ids: string[];
+    fields: string[];
+    lower: { values: Array<Value | undefined>; inclusive: boolean } | null;
+    upper: { values: Array<Value | undefined>; inclusive: boolean } | null;
+    predicate: (doc: StoredDocument) => boolean;
+    iterate: "forward" | "backward";
+    seek: SeekBound | undefined;
+    limit: number | null;
+  }): StoredDocument[] {
+    const { ids, fields, lower, upper, predicate, iterate, seek, limit } =
+      input;
+    const docAt = (index: number): StoredDocument | null =>
+      this._materializeIndexedId(ids[index]!);
+    const lowerIndex = lower
+      ? this._binarySearchBoundIds(ids, fields, lower, docAt, "lower")
+      : 0;
+    const upperIndex = upper
+      ? this._binarySearchBoundIds(ids, fields, upper, docAt, "upper")
+      : ids.length;
+
+    const seekValue =
+      seek === undefined ? undefined : evaluateValue(seek.value);
+    const passesSeek = (doc: StoredDocument): boolean => {
+      if (seek === undefined) {
+        return true;
+      }
+      const comparison = compareValues(
+        evaluateFieldPath(seek.field, doc),
+        seekValue,
+      );
+      if (seek.direction === "asc") {
+        return seek.inclusive ? comparison >= 0 : comparison > 0;
+      }
+      return seek.inclusive ? comparison <= 0 : comparison < 0;
+    };
+
+    const results: StoredDocument[] = [];
+    const step = iterate === "backward" ? -1 : 1;
+    let index = iterate === "backward" ? upperIndex - 1 : lowerIndex;
+    const stop = iterate === "backward" ? lowerIndex - 1 : upperIndex;
+
+    if (iterate === "forward" && seek !== undefined) {
+      index = this._seekIndexInRange(lowerIndex, upperIndex, docAt, passesSeek);
+    } else if (iterate === "backward" && seek !== undefined) {
+      index = this._seekIndexInRangeBackward(
+        lowerIndex,
+        upperIndex,
+        docAt,
+        passesSeek,
+      );
+    }
+    for (; index !== stop; index += step) {
+      const doc = docAt(index);
+      if (doc === null || !predicate(doc) || !passesSeek(doc)) {
+        continue;
+      }
+      results.push(doc);
+      if (limit !== null && results.length >= limit) {
+        break;
+      }
+    }
+    return results;
+  }
+
+  private _seekIndexInRange(
+    lowerIndex: number,
+    upperIndex: number,
+    docAt: (index: number) => StoredDocument | null,
+    passesSeek: (doc: StoredDocument) => boolean,
+  ): number {
+    let low = lowerIndex;
+    let high = upperIndex;
+    while (low < high) {
+      const mid = (low + high) >>> 1;
+      const doc = docAt(mid);
+      if (doc !== null && passesSeek(doc)) {
+        high = mid;
+      } else {
+        low = mid + 1;
+      }
+    }
+    return low;
+  }
+
+  private _seekIndexInRangeBackward(
+    lowerIndex: number,
+    upperIndex: number,
+    docAt: (index: number) => StoredDocument | null,
+    passesSeek: (doc: StoredDocument) => boolean,
+  ): number {
+    let low = lowerIndex;
+    let high = upperIndex;
+    while (low < high) {
+      const mid = (low + high) >>> 1;
+      const doc = docAt(mid);
+      if (doc !== null && passesSeek(doc)) {
+        low = mid + 1;
+      } else {
+        high = mid;
+      }
+    }
+    return low - 1;
+  }
+
+  private _binarySearchBoundIds(
+    ids: string[],
+    fields: string[],
+    bound: { values: Array<Value | undefined>; inclusive: boolean },
+    docAt: (index: number) => StoredDocument | null,
+    side: "lower" | "upper",
+  ): number {
+    let low = 0;
+    let high = ids.length;
+    while (low < high) {
+      const mid = (low + high) >>> 1;
+      const doc = docAt(mid);
+      const comparison =
+        doc === null ? 0 : this._compareDocToBound(doc, fields, bound);
+      const moveRight =
+        side === "lower"
+          ? bound.inclusive
+            ? comparison < 0
+            : comparison <= 0
+          : bound.inclusive
+            ? comparison <= 0
+            : comparison < 0;
+      if (moveRight) {
+        low = mid + 1;
+      } else {
+        high = mid;
+      }
+    }
+    return low;
   }
 
   private _compareDocToBound(

@@ -657,7 +657,7 @@ describe.concurrent("QueryEngine — search", () => {
 });
 
 describe.concurrent("QueryEngine — pagination", () => {
-  it("walks pages with cursor-based pagination", () => {
+  it("walks pages with cursor-based pagination", async () => {
     const db = seedDb("tasks", [
       { title: "a" },
       { title: "b" },
@@ -667,7 +667,7 @@ describe.concurrent("QueryEngine — pagination", () => {
     ]);
     db.startTransaction();
 
-    const page1 = db.paginate({
+    const page1 = await db.paginateAsync({
       query: fullScan("tasks", "asc"),
       cursor: null,
       pageSize: 2,
@@ -675,14 +675,14 @@ describe.concurrent("QueryEngine — pagination", () => {
     expect(page1.page.map((doc) => doc.title)).toEqual(["a", "b"]);
     expect(page1.isDone).toBe(false);
 
-    const page2 = db.paginate({
+    const page2 = await db.paginateAsync({
       query: fullScan("tasks", "asc"),
       cursor: page1.continueCursor,
       pageSize: 2,
     });
     expect(page2.page.map((doc) => doc.title)).toEqual(["c", "d"]);
 
-    const page3 = db.paginate({
+    const page3 = await db.paginateAsync({
       query: fullScan("tasks", "asc"),
       cursor: page2.continueCursor,
       pageSize: 2,
@@ -693,11 +693,11 @@ describe.concurrent("QueryEngine — pagination", () => {
     db.commit();
   });
 
-  it("returns all results in one page when pageSize covers the table", () => {
+  it("returns all results in one page when pageSize covers the table", async () => {
     const db = seedDb("tasks", [{ title: "a" }, { title: "b" }]);
     db.startTransaction();
 
-    const result = db.paginate({
+    const result = await db.paginateAsync({
       query: fullScan("tasks", "asc"),
       cursor: null,
       pageSize: 10,

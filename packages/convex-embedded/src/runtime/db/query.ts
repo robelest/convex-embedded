@@ -6,7 +6,7 @@
  * full-text search, filters, ordering, pagination, and vector search.
  */
 import type { JSONValue, Value } from "convex/values";
-import { jsonToConvex } from "convex/values";
+import { convexToJson, jsonToConvex } from "convex/values";
 
 import { compareValues } from "@/runtime/db/compare";
 import type { ParsedSchema } from "@/runtime/db/schema";
@@ -20,6 +20,7 @@ import type {
   FilterJson,
   QueryId,
   QueryOperator,
+  SeekBound,
   SerializedQuery,
   Source,
   StoredDocument,
@@ -53,10 +54,75 @@ export type FilterNode =
 
 type QueryResults = Array<GenericDocument>;
 
+type OrderKey = {
+  seekFields: string[];
+  order: "asc" | "desc";
+};
+
+const CURSOR_PREFIX = "ck1:";
+
+const SPLIT_RECOMMENDED_FACTOR = 2;
+const SPLIT_REQUIRED_FACTOR = 4;
+
+export type PaginateResult = {
+  page: GenericDocument[];
+  isDone: boolean;
+  continueCursor: string;
+  splitCursor: string | null;
+  pageStatus: "SplitRecommended" | "SplitRequired" | null;
+};
+
+type ReadBudget = {
+  maximumRowsRead: number | null;
+  maximumBytesRead: number | null;
+};
+
+function documentByteSize(doc: GenericDocument): number {
+  let json: string;
+  try {
+    json = JSON.stringify(convexToJson(doc as Value));
+  } catch {
+    return 0;
+  }
+  let bytes = 0;
+  for (let i = 0; i < json.length; i += 1) {
+    const code = json.charCodeAt(i);
+    if (code < 0x80) {
+      bytes += 1;
+    } else if (code < 0x800) {
+      bytes += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      bytes += 4;
+      i += 1;
+    } else {
+      bytes += 3;
+    }
+  }
+  return bytes;
+}
+
+function applyByteBudget(
+  results: QueryResults,
+  maximumBytesRead: number | null,
+): { results: QueryResults; bytesExceeded: boolean } {
+  if (maximumBytesRead === null) {
+    return { results, bytesExceeded: false };
+  }
+  let total = 0;
+  for (let i = 0; i < results.length; i += 1) {
+    total += documentByteSize(results[i]!);
+    if (total > maximumBytesRead) {
+      return { results: results.slice(0, i + 1), bytesExceeded: true };
+    }
+  }
+  return { results, bytesExceeded: false };
+}
+
 type SourceEvaluation = {
   results: QueryResults;
   fieldPathsToSortBy: string[];
   order: "asc" | "desc";
+  presorted?: boolean;
 };
 
 type ActiveQuery = {
@@ -532,11 +598,24 @@ export type AsyncQueryReader = (
 export type SourceReader = (
   source: Source,
   limit?: number | null,
+  seek?: SeekBound,
 ) => SourceEvaluation | null;
 export type AsyncSourceReader = (
   source: Source,
   limit?: number | null,
+  seek?: SeekBound,
 ) => Promise<SourceEvaluation | null>;
+export type TableVersionReader = (tableName: string) => number | null;
+
+type SearchIndexCacheEntry = {
+  version: number;
+  state: ReturnType<typeof buildSearchIndexState>;
+};
+
+type VectorIndexCacheEntry = {
+  version: number;
+  state: ReturnType<typeof buildVectorIndexState>;
+};
 
 /**
  * Stateful query engine. Manages active streaming queries and
@@ -546,6 +625,8 @@ export class QueryEngine {
   private _nextQueryId: QueryId = 1;
   private _queryResults: Record<QueryId, ActiveQuery> = {};
   private _asyncQueryResults: Record<QueryId, AsyncActiveQuery> = {};
+  private _searchIndexCache = new Map<string, SearchIndexCacheEntry>();
+  private _vectorIndexCache = new Map<string, VectorIndexCacheEntry>();
 
   constructor(
     private _schema: ParsedSchema | null,
@@ -557,8 +638,9 @@ export class QueryEngine {
       this._countTable(tableName),
     private _readQueryAsync: AsyncQueryReader = async (query) =>
       this._query(query),
-    private _readSourceAsync: AsyncSourceReader = async (source, limit) =>
-      this._source(source, limit),
+    private _readSourceAsync: AsyncSourceReader = async (source, limit, seek) =>
+      this._source(source, limit, seek),
+    private _tableVersion: TableVersionReader = () => null,
   ) {}
 
   /** Update the document iterator (e.g. after a schema or docs change). */
@@ -622,76 +704,243 @@ export class QueryEngine {
     delete this._asyncQueryResults[queryId];
   }
 
-  paginate({
-    query,
-    cursor,
-    pageSize,
-  }: {
-    query: SerializedQuery;
-    cursor: string | null;
-    pageSize: number;
-  }): {
-    page: GenericDocument[];
-    isDone: boolean;
-    continueCursor: string;
-  } {
-    const queryId = this.startQuery(query);
-    const page: GenericDocument[] = [];
-    let isInPage = cursor === null;
-    let isDone = false;
-    let continueCursor = "_end_cursor";
-
-    for (;;) {
-      const { value, done } = this.queryNext(queryId);
-      if (done) {
-        isDone = true;
-        continueCursor = "_end_cursor";
-        break;
-      }
-
-      const current = value!;
-      const reachedLimit = isInPage && page.length + 1 >= pageSize;
-
-      if (reachedLimit) {
-        page.push(current);
-        continueCursor = current._id as string;
-        break;
-      }
-
-      if (isInPage) {
-        page.push(current);
-      }
-
-      isInPage = isInPage || current._id === cursor;
-    }
-
-    this.queryCleanup(queryId);
-
-    if (cursor !== null && !isInPage && page.length === 0) {
-      return this.paginate({ query, cursor: null, pageSize });
-    }
-
-    return { page, isDone, continueCursor };
-  }
-
   async paginateAsync({
     query,
     cursor,
+    endCursor,
     pageSize,
+    maximumRowsRead,
+    maximumBytesRead,
   }: {
     query: SerializedQuery;
     cursor: string | null;
+    endCursor?: string | null;
     pageSize: number;
-  }): Promise<{
-    page: GenericDocument[];
-    isDone: boolean;
-    continueCursor: string;
-  }> {
+    maximumRowsRead?: number | null;
+    maximumBytesRead?: number | null;
+  }): Promise<PaginateResult> {
+    const budget: ReadBudget = {
+      maximumRowsRead: maximumRowsRead ?? null,
+      maximumBytesRead: maximumBytesRead ?? null,
+    };
+    const orderKey = this._resolveOrderKey(query);
+    if (orderKey === null) {
+      return this._paginateLinearAsync({
+        query,
+        cursor,
+        endCursor: endCursor ?? null,
+        pageSize,
+        budget,
+      });
+    }
+    return this._paginateSeekAsync({
+      query,
+      cursor,
+      endCursor: endCursor ?? null,
+      pageSize,
+      orderKey,
+      budget,
+    });
+  }
+
+  private async _paginateSeekAsync({
+    query,
+    cursor,
+    endCursor,
+    pageSize,
+    orderKey,
+    budget,
+  }: {
+    query: SerializedQuery;
+    cursor: string | null;
+    endCursor: string | null;
+    pageSize: number;
+    orderKey: OrderKey;
+    budget: ReadBudget;
+  }): Promise<PaginateResult> {
+    const { filters } = this._extractQueryOperators(query.operators);
+    const decoded = cursor === null ? null : this._decodeCursor(cursor);
+    const endDecoded =
+      endCursor === null || endCursor === "_end_cursor"
+        ? null
+        : this._decodeCursor(endCursor);
+    const pinnedEnd = endCursor !== null;
+    const seek =
+      decoded === null ? undefined : this._buildSeek(orderKey, decoded);
+    const target = pageSize <= 0 ? 0 : pageSize;
+    const rowCap = budget.maximumRowsRead;
+
+    let readLimit = target + 1 + (filters.length > 0 ? target : 0);
+    for (;;) {
+      const unboundedRead = pinnedEnd && endDecoded === null;
+      const cappedLimit =
+        rowCap === null
+          ? readLimit
+          : unboundedRead
+            ? rowCap
+            : Math.min(readLimit, rowCap);
+      const effectiveLimit =
+        unboundedRead && rowCap === null ? null : cappedLimit;
+      const source = await this._evaluateSourceAsync(
+        query.source,
+        effectiveLimit,
+        seek,
+      );
+      const rowsExceeded = rowCap !== null && source.results.length >= rowCap;
+      const { results: budgetedRaw, bytesExceeded } = applyByteBudget(
+        source.results,
+        budget.maximumBytesRead,
+      );
+      const budgetHit = rowsExceeded || bytesExceeded;
+      const ordered = this._sortResults(
+        budgetedRaw,
+        source.fieldPathsToSortBy,
+        source.order,
+      );
+      const filtered = this._applyFilters(ordered, filters);
+      const afterStart =
+        decoded === null
+          ? filtered
+          : filtered.filter(
+              (doc) => this._compareOrderKey(orderKey, doc, decoded) > 0,
+            );
+      const exhausted = source.results.length < cappedLimit;
+
+      if (pinnedEnd) {
+        if (endDecoded === null) {
+          if (budgetHit) {
+            return this._budgetBoundedPage(orderKey, afterStart, target, {
+              continueCursor: null,
+            });
+          }
+          return {
+            page: afterStart,
+            isDone: true,
+            continueCursor: "_end_cursor",
+            ...this._pageSplit(orderKey, afterStart, target),
+          };
+        }
+        const inRange = afterStart.filter(
+          (doc) => this._compareOrderKey(orderKey, doc, endDecoded) <= 0,
+        );
+        const sawBeyondEnd = inRange.length < afterStart.length;
+        if (sawBeyondEnd || exhausted) {
+          return {
+            page: inRange,
+            isDone: false,
+            continueCursor: endCursor as string,
+            ...this._pageSplit(orderKey, inRange, target),
+          };
+        }
+        if (budgetHit) {
+          return this._budgetBoundedPage(orderKey, inRange, target, {
+            continueCursor: endCursor as string,
+          });
+        }
+        readLimit *= 2;
+        continue;
+      }
+
+      if (afterStart.length > target) {
+        const page = afterStart.slice(0, target);
+        const last = page.at(-1) ?? null;
+        const continueCursor =
+          last === null ? "_end_cursor" : this._encodeCursor(orderKey, last);
+        return {
+          page,
+          isDone: false,
+          continueCursor,
+          ...this._pageSplit(orderKey, page, target),
+        };
+      }
+
+      if (exhausted) {
+        const page = afterStart.slice(0, target);
+        return {
+          page,
+          isDone: true,
+          continueCursor: "_end_cursor",
+          ...this._pageSplit(orderKey, page, target),
+        };
+      }
+
+      if (budgetHit) {
+        return this._budgetBoundedPage(orderKey, afterStart, target, {
+          continueCursor: null,
+        });
+      }
+
+      readLimit *= 2;
+    }
+  }
+
+  private _budgetBoundedPage(
+    orderKey: OrderKey,
+    candidates: GenericDocument[],
+    target: number,
+    options: { continueCursor: string | null },
+  ): PaginateResult {
+    const page =
+      target > 0 && candidates.length > target
+        ? candidates.slice(0, target)
+        : candidates;
+    const last = page.at(-1) ?? null;
+    const continueCursor =
+      options.continueCursor ??
+      (last === null ? "_end_cursor" : this._encodeCursor(orderKey, last));
+    const split = this._pageSplit(orderKey, page, target);
+    return {
+      page,
+      isDone: false,
+      continueCursor,
+      splitCursor: split.splitCursor,
+      pageStatus: "SplitRequired",
+    };
+  }
+
+  private _pageSplit(
+    orderKey: OrderKey,
+    page: GenericDocument[],
+    target: number,
+  ): { splitCursor: string | null; pageStatus: PaginateResult["pageStatus"] } {
+    if (page.length < 2 || target <= 0) {
+      return { splitCursor: null, pageStatus: null };
+    }
+    const midIndex = Math.floor((page.length - 1) / 2);
+    const midpoint = page[midIndex] ?? null;
+    const splitCursor =
+      midpoint === null ? null : this._encodeCursor(orderKey, midpoint);
+    let pageStatus: PaginateResult["pageStatus"] = null;
+    if (page.length > target * SPLIT_REQUIRED_FACTOR) {
+      pageStatus = "SplitRequired";
+    } else if (page.length > target * SPLIT_RECOMMENDED_FACTOR) {
+      pageStatus = "SplitRecommended";
+    }
+    return { splitCursor, pageStatus };
+  }
+
+  private async _paginateLinearAsync({
+    query,
+    cursor,
+    endCursor,
+    pageSize,
+    budget,
+  }: {
+    query: SerializedQuery;
+    cursor: string | null;
+    endCursor: string | null;
+    pageSize: number;
+    budget: ReadBudget;
+  }): Promise<PaginateResult> {
+    const pinnedEnd = endCursor !== null && endCursor !== "_end_cursor";
     const queryId = this.startQueryAsync(query);
     const page: GenericDocument[] = [];
     let isInPage = cursor === null;
     let isDone = false;
     let continueCursor = "_end_cursor";
+    let rowsRead = 0;
+    let bytesRead = 0;
+    let budgetBounded = false;
 
     for (;;) {
       const { value, done } = await this.queryNextAsync(queryId);
@@ -702,28 +951,162 @@ export class QueryEngine {
       }
 
       const current = value!;
-      const reachedLimit = isInPage && page.length + 1 >= pageSize;
+      rowsRead += 1;
+      if (budget.maximumBytesRead !== null) {
+        bytesRead += documentByteSize(current);
+      }
 
-      if (reachedLimit) {
+      if (pinnedEnd && isInPage) {
         page.push(current);
-        continueCursor = current._id as string;
+        if (current._id === endCursor) {
+          continueCursor = endCursor;
+          break;
+        }
+        isInPage = true;
+      } else {
+        const reachedLimit = isInPage && page.length + 1 >= pageSize;
+        if (!pinnedEnd && reachedLimit) {
+          page.push(current);
+          continueCursor = current._id as string;
+          break;
+        }
+        if (isInPage) {
+          page.push(current);
+        }
+        isInPage = isInPage || current._id === cursor;
+      }
+
+      const rowsExceeded =
+        budget.maximumRowsRead !== null && rowsRead >= budget.maximumRowsRead;
+      const bytesExceeded =
+        budget.maximumBytesRead !== null && bytesRead > budget.maximumBytesRead;
+      if (isInPage && (rowsExceeded || bytesExceeded)) {
+        budgetBounded = true;
+        continueCursor =
+          page.length > 0
+            ? (page[page.length - 1]!._id as string)
+            : "_end_cursor";
         break;
       }
-
-      if (isInPage) {
-        page.push(current);
-      }
-
-      isInPage = isInPage || current._id === cursor;
     }
 
     this.queryCleanup(queryId);
 
     if (cursor !== null && !isInPage && page.length === 0) {
-      return this.paginateAsync({ query, cursor: null, pageSize });
+      return this._paginateLinearAsync({
+        query,
+        cursor: null,
+        endCursor,
+        pageSize,
+        budget,
+      });
     }
 
-    return { page, isDone, continueCursor };
+    if (budgetBounded) {
+      return {
+        page,
+        isDone: false,
+        continueCursor,
+        splitCursor: null,
+        pageStatus: "SplitRequired",
+      };
+    }
+
+    return {
+      page,
+      isDone: pinnedEnd ? false : isDone,
+      continueCursor,
+      splitCursor: null,
+      pageStatus: null,
+    };
+  }
+
+  private _resolveOrderKey(query: SerializedQuery): OrderKey | null {
+    const source = query.source;
+    if (source.type === "Search") {
+      return null;
+    }
+    if (source.type === "FullTableScan") {
+      return {
+        seekFields: ["_creationTime", "_id"],
+        order: source.order ?? "asc",
+      };
+    }
+    const [tableName, indexName] = source.indexName.split(".") as [
+      string,
+      string,
+    ];
+    const fields = this._resolveIndexFields(tableName, indexName);
+    const pinned = new Set<string>();
+    for (const expr of source.range) {
+      if (expr.type === "Eq") {
+        pinned.add(expr.fieldPath);
+      }
+    }
+    const seekFields: string[] = [];
+    let prefix = true;
+    for (const field of fields) {
+      if (prefix && pinned.has(field)) {
+        continue;
+      }
+      prefix = false;
+      seekFields.push(field);
+    }
+    if (
+      seekFields.length === 0 ||
+      seekFields[seekFields.length - 1] !== "_id"
+    ) {
+      return null;
+    }
+    return { seekFields, order: source.order ?? "asc" };
+  }
+
+  private _buildSeek(
+    orderKey: OrderKey,
+    cursor: Array<Value | undefined>,
+  ): SeekBound {
+    return {
+      field: orderKey.seekFields[0]!,
+      value: convexToJson(cursor[0] ?? null) as JSONValue,
+      inclusive: true,
+      direction: orderKey.order,
+    };
+  }
+
+  private _encodeCursor(orderKey: OrderKey, doc: GenericDocument): string {
+    const values = orderKey.seekFields.map((field) =>
+      convexToJson((evaluateFieldPath(field, doc) ?? null) as Value),
+    );
+    return `${CURSOR_PREFIX}${JSON.stringify(values)}`;
+  }
+
+  private _decodeCursor(cursor: string): Array<Value | undefined> | null {
+    if (!cursor.startsWith(CURSOR_PREFIX)) {
+      return null;
+    }
+    const parsed = JSON.parse(
+      cursor.slice(CURSOR_PREFIX.length),
+    ) as JSONValue[];
+    return parsed.map((value) => jsonToConvex(value));
+  }
+
+  private _compareOrderKey(
+    orderKey: OrderKey,
+    doc: GenericDocument,
+    cursor: Array<Value | undefined>,
+  ): number {
+    const multiplier = orderKey.order === "asc" ? 1 : -1;
+    for (let index = 0; index < orderKey.seekFields.length; index += 1) {
+      const field = orderKey.seekFields[index]!;
+      const comparison = compareValues(
+        evaluateFieldPath(field, doc),
+        cursor[index],
+      );
+      if (comparison !== 0) {
+        return comparison * multiplier;
+      }
+    }
+    return 0;
   }
 
   count(tableName: string): number {
@@ -750,21 +1133,32 @@ export class QueryEngine {
       indexName,
     );
 
-    return executeVectorSearch(
-      buildVectorIndexState({
+    const cacheKey = `${tableName}.${indexName}`;
+    const version = this._tableVersion(tableName);
+    const cached =
+      version === null ? undefined : this._vectorIndexCache.get(cacheKey);
+    let state: ReturnType<typeof buildVectorIndexState>;
+    if (cached !== undefined && cached.version === version) {
+      state = cached.state;
+    } else {
+      state = buildVectorIndexState({
         docs: this._collectDocs(tableName).map((doc) => ({
           doc: doc as StoredDocument,
           identityKey: null,
         })),
         definition,
-      }),
-      {
-        vector,
-        limit,
-        filter,
-        activeIdentityKey: null,
-      },
-    );
+      });
+      if (version !== null) {
+        this._vectorIndexCache.set(cacheKey, { version, state });
+      }
+    }
+
+    return executeVectorSearch(state, {
+      vector,
+      limit,
+      filter,
+      activeIdentityKey: null,
+    });
   }
 
   private _evaluateQuery(query: SerializedQuery): Array<GenericDocument> {
@@ -774,17 +1168,25 @@ export class QueryEngine {
     }
 
     const { filters, limit } = this._extractQueryOperators(query.operators);
+
+    if (limit !== null && filters.length > 0) {
+      const probe = this._evaluateSource(query.source, limit);
+      if (probe.presorted === true) {
+        return this._boundedFilteredRead(
+          (readLimit) => this._evaluateSource(query.source, readLimit),
+          probe,
+          filters,
+          limit,
+        );
+      }
+      return this._finalizeSource(probe, filters, limit);
+    }
+
     const source = this._evaluateSource(
       query.source,
       filters.length === 0 ? limit : null,
     );
-    const filteredResults = this._applyFilters(source.results, filters);
-    const sortedResults = this._sortResults(
-      filteredResults,
-      source.fieldPathsToSortBy,
-      source.order,
-    );
-    return this._applyLimit(sortedResults, limit);
+    return this._finalizeSource(source, filters, limit);
   }
 
   private async _evaluateQueryAsync(
@@ -796,24 +1198,84 @@ export class QueryEngine {
     }
 
     const { filters, limit } = this._extractQueryOperators(query.operators);
+
+    if (limit !== null && filters.length > 0) {
+      const probe = await this._evaluateSourceAsync(query.source, limit);
+      if (probe.presorted === true) {
+        return this._boundedFilteredReadAsync(
+          (readLimit) => this._evaluateSourceAsync(query.source, readLimit),
+          probe,
+          filters,
+          limit,
+        );
+      }
+      return this._finalizeSource(probe, filters, limit);
+    }
+
     const source = await this._evaluateSourceAsync(
       query.source,
       filters.length === 0 ? limit : null,
     );
-    const filteredResults = this._applyFilters(source.results, filters);
-    const sortedResults = this._sortResults(
-      filteredResults,
-      source.fieldPathsToSortBy,
-      source.order,
-    );
-    return this._applyLimit(sortedResults, limit);
+    return this._finalizeSource(source, filters, limit);
+  }
+
+  private _finalizeSource(
+    source: SourceEvaluation,
+    filters: FilterNode[],
+    limit: number | null,
+  ): Array<GenericDocument> {
+    const filtered = this._applyFilters(source.results, filters);
+    const sorted =
+      source.presorted === true
+        ? filtered
+        : this._sortResults(filtered, source.fieldPathsToSortBy, source.order);
+    return this._applyLimit(sorted, limit);
+  }
+
+  private _boundedFilteredRead(
+    read: (readLimit: number) => SourceEvaluation,
+    firstRead: SourceEvaluation,
+    filters: FilterNode[],
+    limit: number,
+  ): Array<GenericDocument> {
+    let readLimit = limit;
+    let source = firstRead;
+    for (;;) {
+      const survivors = this._applyFilters(source.results, filters);
+      const exhausted = source.results.length < readLimit;
+      if (survivors.length >= limit || exhausted) {
+        return survivors.slice(0, limit);
+      }
+      readLimit *= 2;
+      source = read(readLimit);
+    }
+  }
+
+  private async _boundedFilteredReadAsync(
+    read: (readLimit: number) => Promise<SourceEvaluation>,
+    firstRead: SourceEvaluation,
+    filters: FilterNode[],
+    limit: number,
+  ): Promise<Array<GenericDocument>> {
+    let readLimit = limit;
+    let source = firstRead;
+    for (;;) {
+      const survivors = this._applyFilters(source.results, filters);
+      const exhausted = source.results.length < readLimit;
+      if (survivors.length >= limit || exhausted) {
+        return survivors.slice(0, limit);
+      }
+      readLimit *= 2;
+      source = await read(readLimit);
+    }
   }
 
   private _evaluateSource(
     source: Source,
     limit: number | null = null,
+    seek?: SeekBound,
   ): SourceEvaluation {
-    const optimized = this._source(source, limit);
+    const optimized = this._source(source, limit, seek);
     if (optimized !== null) {
       return optimized;
     }
@@ -828,13 +1290,14 @@ export class QueryEngine {
   private async _evaluateSourceAsync(
     source: Source,
     limit: number | null = null,
+    seek?: SeekBound,
   ): Promise<SourceEvaluation> {
-    const optimized = await this._readSourceAsync(source, limit);
+    const optimized = await this._readSourceAsync(source, limit, seek);
     if (optimized !== null) {
       return optimized;
     }
 
-    return this._evaluateSource(source, limit);
+    return this._evaluateSource(source, limit, seek);
   }
 
   private _evaluateFullTableScanSource(
@@ -842,7 +1305,7 @@ export class QueryEngine {
   ): SourceEvaluation {
     return {
       results: this._collectDocs(source.tableName),
-      fieldPathsToSortBy: ["_creationTime"],
+      fieldPathsToSortBy: ["_creationTime", "_id"],
       order: source.order ?? "asc",
     };
   }
@@ -878,18 +1341,31 @@ export class QueryEngine {
       tableName,
       indexName,
     );
-    const docs = this._collectDocs(tableName);
+    const cacheKey = `${tableName}.${indexName}`;
+    const version = this._tableVersion(tableName);
+    const cached =
+      version === null ? undefined : this._searchIndexCache.get(cacheKey);
+    let state: ReturnType<typeof buildSearchIndexState>;
+    if (cached !== undefined && cached.version === version) {
+      state = cached.state;
+    } else {
+      state = buildSearchIndexState({
+        docs: this._collectDocs(tableName).map((doc) => ({
+          doc: doc as StoredDocument,
+          identityKey: null,
+        })),
+        definition,
+      });
+      if (version !== null) {
+        this._searchIndexCache.set(cacheKey, { version, state });
+      }
+    }
     return {
-      results: executeSearch(
-        buildSearchIndexState({
-          docs: docs.map((doc) => ({
-            doc: doc as StoredDocument,
-            identityKey: null,
-          })),
-          definition,
-        }),
-        { source, activeIdentityKey: null, limit: limit ?? undefined },
-      ),
+      results: executeSearch(state, {
+        source,
+        activeIdentityKey: null,
+        limit: limit ?? undefined,
+      }),
       fieldPathsToSortBy: [],
       order: "asc",
     };

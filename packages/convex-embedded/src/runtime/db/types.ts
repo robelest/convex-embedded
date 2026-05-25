@@ -60,6 +60,13 @@ export type SerializedRangeExpression = {
   value: JSONValue;
 };
 
+export type SeekBound = {
+  field: string;
+  value: JSONValue;
+  inclusive: boolean;
+  direction: "asc" | "desc";
+};
+
 export type SerializedSearchFilter =
   | {
       type: "Search";

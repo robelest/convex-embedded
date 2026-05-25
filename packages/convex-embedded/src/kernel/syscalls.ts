@@ -376,10 +376,7 @@ export function createAsyncSyscall(
               (dbExt.jobFinished as (id: string) => void)(jobId);
             }
           } catch (error) {
-            log.error(
-              `scheduled function ${functionPath.udfPath}:`,
-              error,
-            );
+            log.error(`scheduled function ${functionPath.udfPath}:`, error);
           }
         })();
       },
@@ -431,20 +428,37 @@ export function createAsyncSyscall(
       return JSON.stringify(convexToJson({ value, done }));
     },
     "1.0/queryPage": async (args) => {
-      const { query, cursor, pageSize } = args as {
+      const { query, cursor, endCursor, pageSize, maximumRowsRead } = args as {
         query: unknown;
         cursor: string | null;
+        endCursor?: string | null;
         pageSize: number;
+        maximumRowsRead?: number | null;
+        maximumBytesRead?: number | null;
       };
+      const maximumBytesRead = (args as { maximumBytesRead?: number | null })
+        .maximumBytesRead;
       for (const dependency of extractQueryDependencies(query)) {
         options?.onDependency?.(dependency);
       }
-      const { page, isDone, continueCursor } = await db.paginateAsync({
-        query: query as SerializedQuery,
-        cursor,
-        pageSize,
-      });
-      return JSON.stringify(convexToJson({ page, isDone, continueCursor }));
+      const { page, isDone, continueCursor, splitCursor, pageStatus } =
+        await db.paginateAsync({
+          query: query as SerializedQuery,
+          cursor,
+          endCursor: endCursor ?? null,
+          pageSize,
+          maximumRowsRead: maximumRowsRead ?? null,
+          maximumBytesRead: maximumBytesRead ?? null,
+        });
+      return JSON.stringify(
+        convexToJson({
+          page,
+          isDone,
+          continueCursor,
+          splitCursor,
+          pageStatus,
+        }),
+      );
     },
     "1.0/insert": async (args) => {
       const { table, value } = args as { table: string; value: unknown };

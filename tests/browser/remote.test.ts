@@ -739,7 +739,11 @@ describe("remoteOnly routing", () => {
 
     await vi.waitFor(() => {
       expect(unsubscribe.getCurrentValue()).toEqual(
-        expect.objectContaining({ page: expect.any(Array) }),
+        expect.objectContaining({
+          results: expect.any(Array),
+          status: expect.any(String),
+          loadMore: expect.any(Function),
+        }),
       );
     });
 

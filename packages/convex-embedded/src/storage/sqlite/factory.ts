@@ -16,6 +16,7 @@ import type {
   QueryArgs,
   ReadOptions,
   SchemaOp,
+  SeekBound,
   VectorSearchArgs,
   SqlWriteOptions,
   SqlWriteResult,
@@ -707,6 +708,28 @@ function internalRangeWhereClause(input: {
   return clauses;
 }
 
+function appendSeekClause(
+  target: TableStorageTarget,
+  seek: SeekBound | undefined,
+  clauses: string[],
+  params: unknown[],
+): void {
+  if (seek === undefined) {
+    return;
+  }
+  const fieldExpr = internalFieldExpression(target, seek.field);
+  const operator =
+    seek.direction === "asc"
+      ? seek.inclusive
+        ? ">="
+        : ">"
+      : seek.inclusive
+        ? "<="
+        : "<";
+  clauses.push(`${fieldExpr} ${operator} ?`);
+  params.push(seek.value);
+}
+
 function internalFilterWhereClause(
   target: TableStorageTarget,
   filter: import("@/runtime/db/query").FilterNode,
@@ -1344,12 +1367,14 @@ function sourceQuerySql(
   appendIdentityScopeClause(target, options.activeIdentityKey, clauses, params);
 
   if (source.type === "FullTableScan") {
+    appendSeekClause(target, options.seek, clauses, params);
     sql += whereClause(clauses);
     sql += ` ORDER BY ${internalOrderByClause(target, ["_creationTime"], source.order ?? "asc")}`;
   } else {
     clauses.push(
       ...internalRangeWhereClause({ target, range: source, params }),
     );
+    appendSeekClause(target, options.seek, clauses, params);
     sql += whereClause(clauses);
     sql += ` ORDER BY ${internalOrderByClause(target, options.indexFields ?? [], source.order ?? "asc")}`;
   }

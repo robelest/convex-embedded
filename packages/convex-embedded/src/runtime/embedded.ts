@@ -81,7 +81,7 @@ import type {
 } from "@/sync/protocol";
 import { SessionManager } from "@/sync/session";
 import { SubscriptionManager } from "@/sync/subscriptions";
-import { withSpan } from "@/tracing/spans";
+import { captureValueAttr, withSpan } from "@/tracing/spans";
 import { runDetached } from "@/utils/detached";
 import { DisposableScope } from "@/utils/scope";
 
@@ -193,14 +193,31 @@ type LocalPaginatedPageResult = {
   page: unknown[];
   isDone: boolean;
   continueCursor: string;
+  splitCursor: string | null;
+  pageStatus: "SplitRecommended" | "SplitRequired" | null;
+};
+
+type LocalPaginatedPageRecord = {
+  cursor: string | null;
+  numItems: number;
+};
+
+type LocalPaginatedPageCacheEntry = {
+  result: LocalPaginatedPageResult;
+  tablesRead: Set<string>;
+  dependencies: QueryDependency[];
+  depVersions: Map<string, number>;
 };
 
 type LocalPaginatedWatchRecord = {
   path: string;
   args: Record<string, unknown>;
   initialNumItems: number;
-  requestedPageSizes: number[];
+  pages: LocalPaginatedPageRecord[];
   loadingMore: boolean;
+  lastContinueCursor: string | null;
+  lastIsDone: boolean;
+  pageCache: Map<string, LocalPaginatedPageCacheEntry>;
 };
 
 type RuntimeState = {
@@ -228,6 +245,21 @@ type RuntimeState = {
 interface RuntimeInput {
   readonly runtime: EmbeddedRuntime;
   readonly options: EmbeddedRuntimeOptions;
+}
+
+/**
+ * Controls how {@link EmbeddedRuntime.ingestDocuments} reconciles the
+ * incoming snapshot against local state.
+ *
+ * - `deleteAbsent: false` ingests in append/upsert-only mode: local
+ *   documents absent from `remoteDocs` are kept. Used while streaming a
+ *   paginated full resolve so earlier pages are not deleted by later ones.
+ * - `keepIds` retains the given ids even when reconciling deletes, so a
+ *   final reconcile pass can prune against the union of all streamed pages.
+ */
+export interface IngestDocumentsOptions {
+  deleteAbsent?: boolean;
+  keepIds?: ReadonlySet<string>;
 }
 
 /**
@@ -1075,6 +1107,7 @@ export class EmbeddedRuntime {
   private _diffIngestDocuments(
     localMap: Map<string, StoredDocument>,
     remoteMap: Map<string, Record<string, unknown>>,
+    options?: IngestDocumentsOptions,
   ): {
     toDelete: string[];
     toUpsert: Array<
@@ -1093,7 +1126,14 @@ export class EmbeddedRuntime {
         : [];
     });
 
-    const toDelete = [...localMap.keys()].filter((id) => !remoteMap.has(id));
+    if (options?.deleteAbsent === false) {
+      return { toDelete: [], toUpsert };
+    }
+
+    const keepIds = options?.keepIds;
+    const toDelete = [...localMap.keys()].filter(
+      (id) => !remoteMap.has(id) && !(keepIds?.has(id) ?? false),
+    );
 
     return { toDelete, toUpsert };
   }
@@ -1250,10 +1290,7 @@ export class EmbeddedRuntime {
       await commit.persisted;
       this.writeFanout.notify(commit.tablesWritten);
     } catch (err) {
-      runtimeLog.error(
-        "skipping cross-tab notify after storage failure:",
-        err,
-      );
+      runtimeLog.error("skipping cross-tab notify after storage failure:", err);
     }
   }
 
@@ -1327,6 +1364,7 @@ export class EmbeddedRuntime {
     table: string,
     remoteDocs: Array<Record<string, unknown>>,
     scopeArgs?: Record<string, unknown>,
+    options?: IngestDocumentsOptions,
   ): Promise<void> {
     try {
       await this._storageHydrated;
@@ -1336,6 +1374,7 @@ export class EmbeddedRuntime {
       const { toDelete, toUpsert } = this._diffIngestDocuments(
         localMap,
         remoteMap,
+        options,
       );
 
       if (toUpsert.length === 0 && toDelete.length === 0) {
@@ -1834,9 +1873,12 @@ export class EmbeddedRuntime {
         if (systemFn !== undefined) {
           return this._runSystemFunction(systemFn, "query", current.args);
         }
-        return withSpan("convex-embedded.executeLocal.query", (span) => {
+        return withSpan("convex-embedded.executeLocal.query", async (span) => {
           span.setAttribute("convex.udf_path", path.udfPath);
-          return this._runUdf("query", path, current.args);
+          captureValueAttr(span, "convex.args", current.args);
+          const result = await this._runUdf("query", path, current.args);
+          captureValueAttr(span, "convex.result", result);
+          return result;
         });
       },
       mutation: async (current) => {
@@ -1856,6 +1898,7 @@ export class EmbeddedRuntime {
           "convex-embedded.executeLocal.mutation",
           async (span) => {
             span.setAttribute("convex.udf_path", functionPath.udfPath);
+            captureValueAttr(span, "convex.args", current.args);
             const runMutation = () =>
               this.executor.executeMutation(functionPath, current.args, {
                 holdsTransactionLock: true,
@@ -1867,6 +1910,7 @@ export class EmbeddedRuntime {
               this.onMutationCommit(commit);
             }
 
+            captureValueAttr(span, "convex.result", result);
             return result;
           },
         );
@@ -1927,8 +1971,11 @@ export class EmbeddedRuntime {
       path,
       args,
       initialNumItems,
-      requestedPageSizes: [],
+      pages: [{ cursor: null, numItems: initialNumItems }],
       loadingMore: false,
+      lastContinueCursor: null,
+      lastIsDone: false,
+      pageCache: new Map(),
     };
 
     const observer = this._localPaginatedQueryWatches.ensure(
@@ -1943,31 +1990,51 @@ export class EmbeddedRuntime {
   private async _evaluateLocalPaginatedWatch(
     observer: RuntimeQueryObserver<LocalPaginatedWatchRecord>,
   ): Promise<LocalQueryEvaluation> {
-    const pageSizes = [
-      observer.meta.initialNumItems,
-      ...observer.meta.requestedPageSizes,
-    ];
-    const pageResults: LocalPaginatedPageResult[] = [];
     const tablesRead = new Set<string>();
     const dependencies: QueryDependency[] = [];
-    let cursor: string | null = null;
 
-    for (const pageSize of pageSizes) {
-      const pageResult = await this._evaluateLocalPaginatedPage(
-        observer.meta.path,
-        observer.meta.args,
-        cursor,
-        pageSize,
-      );
-      pageResults.push(pageResult.result);
-      for (const table of pageResult.tablesRead) {
-        tablesRead.add(table);
+    const MAX_SPLIT_PASSES = 8;
+    let pageResults: LocalPaginatedPageResult[] = [];
+
+    for (let pass = 0; pass <= MAX_SPLIT_PASSES; pass += 1) {
+      tablesRead.clear();
+      dependencies.length = 0;
+      pageResults = [];
+
+      const pages = observer.meta.pages;
+      const liveKeys = new Set<string>();
+      for (let index = 0; index < pages.length; index += 1) {
+        const pageRecord = pages[index]!;
+        const isLast = index === pages.length - 1;
+        const endCursor = isLast ? null : pages[index + 1]!.cursor;
+        const cacheKey = `${pageRecord.cursor ?? " "}|${endCursor ?? " "}|${pageRecord.numItems}`;
+        liveKeys.add(cacheKey);
+        const evaluated = await this._evaluatePaginatedPageCached(
+          observer,
+          cacheKey,
+          pageRecord.cursor,
+          endCursor,
+          pageRecord.numItems,
+        );
+        pageResults.push(evaluated.result);
+        for (const table of evaluated.tablesRead) {
+          tablesRead.add(table);
+        }
+        dependencies.push(...evaluated.dependencies);
+
+        if (isLast && evaluated.result.isDone) {
+          break;
+        }
       }
-      dependencies.push(...pageResult.dependencies);
-      cursor = pageResult.result.isDone
-        ? null
-        : pageResult.result.continueCursor;
-      if (pageResult.result.isDone) {
+
+      for (const key of Array.from(observer.meta.pageCache.keys())) {
+        if (!liveKeys.has(key)) {
+          observer.meta.pageCache.delete(key);
+        }
+      }
+
+      const splitApplied = this._applyPaginatedSplits(observer, pageResults);
+      if (!splitApplied) {
         break;
       }
     }
@@ -1975,6 +2042,8 @@ export class EmbeddedRuntime {
     const results = pageResults.flatMap((page) => page.page) as unknown[];
     const lastPage = pageResults.at(-1) ?? null;
     observer.meta.loadingMore = false;
+    observer.meta.lastContinueCursor = lastPage?.continueCursor ?? null;
+    observer.meta.lastIsDone = lastPage?.isDone ?? false;
     const status =
       lastPage === null
         ? "LoadingFirstPage"
@@ -1992,6 +2061,91 @@ export class EmbeddedRuntime {
       tablesRead,
       dependencies,
     };
+  }
+
+  private _applyPaginatedSplits(
+    observer: RuntimeQueryObserver<LocalPaginatedWatchRecord>,
+    pageResults: LocalPaginatedPageResult[],
+  ): boolean {
+    const pages = observer.meta.pages;
+    const target = observer.meta.initialNumItems;
+    for (let index = 0; index < pageResults.length; index += 1) {
+      const result = pageResults[index]!;
+      const record = pages[index];
+      if (record === undefined) {
+        continue;
+      }
+      const splitCursor = result.splitCursor;
+      if (splitCursor === null) {
+        continue;
+      }
+      const overgrown =
+        result.pageStatus === "SplitRecommended" ||
+        result.pageStatus === "SplitRequired" ||
+        (target > 0 && result.page.length > target * 2);
+      if (!overgrown) {
+        continue;
+      }
+      if (pages.some((page) => page.cursor === splitCursor)) {
+        continue;
+      }
+      pages.splice(index + 1, 0, {
+        cursor: splitCursor,
+        numItems: record.numItems,
+      });
+      return true;
+    }
+    return false;
+  }
+
+  private async _evaluatePaginatedPageCached(
+    observer: RuntimeQueryObserver<LocalPaginatedWatchRecord>,
+    cacheKey: string,
+    cursor: string | null,
+    endCursor: string | null,
+    numItems: number,
+  ): Promise<{
+    result: LocalPaginatedPageResult;
+    tablesRead: Set<string>;
+    dependencies: QueryDependency[];
+  }> {
+    const cached = observer.meta.pageCache.get(cacheKey);
+    if (cached !== undefined && this._depVersionsFresh(cached.depVersions)) {
+      return {
+        result: cached.result,
+        tablesRead: cached.tablesRead,
+        dependencies: cached.dependencies,
+      };
+    }
+
+    const evaluated = await this._evaluateLocalPaginatedPage(
+      observer.meta.path,
+      observer.meta.args,
+      cursor,
+      endCursor,
+      numItems,
+    );
+
+    const depVersions = new Map<string, number>();
+    for (const table of evaluated.tablesRead) {
+      depVersions.set(table, this.db.getTableVersion(table));
+    }
+    observer.meta.pageCache.set(cacheKey, {
+      result: evaluated.result,
+      tablesRead: evaluated.tablesRead,
+      dependencies: evaluated.dependencies,
+      depVersions,
+    });
+    return evaluated;
+  }
+
+  private _depVersionsFresh(depVersions: Map<string, number>): boolean {
+    for (const [table, version] of depVersions) {
+      if (this.db.getTableVersion(table) !== version) {
+        return false;
+      }
+    }
+    return true;
   }
 
   private async _evaluateHydratedLocalQuery(
@@ -2051,6 +2205,7 @@ export class EmbeddedRuntime {
       !Number.isFinite(numItems) ||
       numItems <= 0 ||
       observer.meta.loadingMore ||
+      observer.meta.lastIsDone ||
       (observer.currentValue as LocalPaginatedQueryResult | undefined)
         ?.status === "Exhausted" ||
       observer.currentValue === undefined
@@ -2058,7 +2213,12 @@ export class EmbeddedRuntime {
       return false;
     }
 
-    observer.meta.requestedPageSizes.push(numItems);
+    const nextCursor = observer.meta.lastContinueCursor;
+    if (nextCursor === null || nextCursor === "_end_cursor") {
+      return false;
+    }
+
+    observer.meta.pages.push({ cursor: nextCursor, numItems });
     observer.meta.loadingMore = true;
     const currentValue = observer.currentValue as
       | LocalPaginatedQueryResult
@@ -2147,6 +2307,7 @@ export class EmbeddedRuntime {
     pathName: string,
     args: Record<string, unknown>,
     cursor: string | null,
+    endCursor: string | null,
     numItems: number,
   ): Promise<{
     result: LocalPaginatedPageResult;
@@ -2157,6 +2318,7 @@ export class EmbeddedRuntime {
       ...args,
       paginationOpts: {
         cursor,
+        endCursor,
         numItems,
         id: -1,
       },
@@ -2166,6 +2328,8 @@ export class EmbeddedRuntime {
       page?: unknown[];
       isDone?: boolean;
       continueCursor?: string;
+      splitCursor?: string | null;
+      pageStatus?: "SplitRecommended" | "SplitRequired" | null;
     };
 
     if (
@@ -2184,6 +2348,8 @@ export class EmbeddedRuntime {
         page: result.page,
         isDone: result.isDone,
         continueCursor: result.continueCursor,
+        splitCursor: result.splitCursor ?? null,
+        pageStatus: result.pageStatus ?? null,
       },
       tablesRead: evaluation.tablesRead,
       dependencies: evaluation.dependencies,
@@ -2231,7 +2397,10 @@ export class EmbeddedRuntime {
   ): Promise<unknown> {
     return withSpan(
       `convex-embedded.runUdf.${type}`,
-      async () => {
+      async (span) => {
+        if (type === "action") {
+          captureValueAttr(span, "convex.args", args);
+        }
         const systemFn = SYSTEM_FUNCTIONS[path.udfPath];
         if (systemFn !== undefined) {
           return this._runSystemFunction(systemFn, type, args, context);
@@ -2250,7 +2419,7 @@ export class EmbeddedRuntime {
           });
         }
 
-        return matchTag({ _tag: type }, "_tag", {
+        const out = await matchTag({ _tag: type }, "_tag", {
           query: () => {
             const runQuery = () =>
               this.executor.executeQuery(path, args, {
@@ -2282,6 +2451,10 @@ export class EmbeddedRuntime {
               : this._runWithTransactionLock(runAction);
           },
         });
+        if (type === "action") {
+          captureValueAttr(span, "convex.result", out);
+        }
+        return out;
       },
       {
         attributes: {
@@ -2482,10 +2655,7 @@ export class EmbeddedRuntime {
             );
             finalState = "success";
           } catch (error) {
-            runtimeLog.error(
-              `recovered scheduled function ${udfPath}:`,
-              error,
-            );
+            runtimeLog.error(`recovered scheduled function ${udfPath}:`, error);
             finalState = "failed";
           }
 

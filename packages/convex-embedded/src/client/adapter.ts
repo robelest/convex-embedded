@@ -9,7 +9,10 @@ import {
   type MutationPlan,
   type ReadPlan,
 } from "@/client/routing/plan";
-import type { EmbeddedRuntime } from "@/runtime/embedded";
+import type {
+  EmbeddedRuntime,
+  LocalPaginatedQueryResult,
+} from "@/runtime/embedded";
 import {
   isConnectivityOffline,
   type ConnectivityAdapter,
@@ -183,6 +186,10 @@ interface CachePipelineConfig {
   connectivity?: ConnectivityAdapter;
   asError: (error: unknown) => Error;
   runtime: EmbeddedRuntime;
+  ensureReadReady?: (
+    refName: string,
+    readArgs?: Record<string, unknown>,
+  ) => Promise<void>;
   translateLocalArgsToRuntime?: (
     args: Record<string, unknown>,
   ) => Record<string, unknown>;
@@ -206,6 +213,17 @@ interface ActiveSubscription {
   pendingPushHasValue: boolean;
   pendingPushTimer: ReturnType<typeof setTimeout> | null;
   lastPushAtMs: number;
+  updateCount: number;
+  lastUpdateMs: number;
+}
+
+export interface ActiveSubscriptionSnapshot {
+  id: string;
+  path: string;
+  args: unknown;
+  value: unknown;
+  updateCount: number;
+  lastUpdateMs: number;
 }
 
 const REMOTE_PUSH_COALESCE_MS = 16;
@@ -215,6 +233,7 @@ const OPTIMISTIC_PROTECTION_MS = 500;
 class CachePipeline {
   private readonly active = new Map<string, ActiveSubscription>();
   private readonly removeOnlineListener: (() => void) | null;
+  private readonly changeListeners = new Set<() => void>();
 
   constructor(private readonly config: CachePipelineConfig) {
     const connectivity = config.connectivity;
@@ -227,6 +246,38 @@ class CachePipeline {
     config.cache.setIsPinned((argsKey) => this.active.has(argsKey));
   }
 
+  listActiveSubscriptions(): ActiveSubscriptionSnapshot[] {
+    const snapshot: ActiveSubscriptionSnapshot[] = [];
+    for (const entry of this.active.values()) {
+      snapshot.push({
+        id: entry.argsKey,
+        path: entry.refName,
+        args: entry.args,
+        value: entry.hasValue ? entry.currentValue : undefined,
+        updateCount: entry.updateCount,
+        lastUpdateMs: entry.lastUpdateMs,
+      });
+    }
+    return snapshot;
+  }
+
+  onSubscriptionsChange(listener: () => void): () => void {
+    this.changeListeners.add(listener);
+    return () => {
+      this.changeListeners.delete(listener);
+    };
+  }
+
+  private notifySubscriptionsChange(): void {
+    for (const listener of this.changeListeners) {
+      try {
+        listener();
+      } catch {
+        /* listener error */
+      }
+    }
+  }
+
   dispose(): void {
     this.removeOnlineListener?.();
     for (const entry of this.active.values()) {
@@ -234,6 +285,7 @@ class CachePipeline {
       entry.localUnsubscribe?.();
     }
     this.active.clear();
+    this.changeListeners.clear();
   }
 
   private openDeferredSubscriptions(): void {
@@ -355,9 +407,12 @@ class CachePipeline {
         pendingPushHasValue: false,
         pendingPushTimer: null,
         lastPushAtMs: 0,
+        updateCount: 0,
+        lastUpdateMs: 0,
       };
       this.active.set(argsKey, entry);
       this.bootstrapEntry(entry);
+      this.notifySubscriptionsChange();
     }
 
     entry.listeners.add(input.onValue);
@@ -404,12 +459,19 @@ class CachePipeline {
           current.localUnsubscribe = null;
         }
         this.active.delete(argsKey);
+        this.notifySubscriptionsChange();
       }
     };
   }
 
   private bootstrapEntry(entry: ActiveSubscription): void {
     const startedAt = nowMs();
+    if (!isSystemRefName(entry.refName)) {
+      void this.config.ensureReadReady?.(
+        entry.refName,
+        entry.args as Record<string, unknown>,
+      );
+    }
     const cached = this.config.cache.get(entry.refName, entry.args);
     let cacheState: "hit" | "miss-disk" | "miss-cold" = "miss-cold";
     if (cached) {
@@ -768,6 +830,9 @@ class CachePipeline {
   }
 
   private notifyListeners(entry: ActiveSubscription): void {
+    entry.updateCount += 1;
+    entry.lastUpdateMs = Date.now();
+    this.notifySubscriptionsChange();
     if (entry.listeners.size === 0) return;
     log.debug(
       `notify ${entry.refName} listeners=${entry.listeners.size} ts=${nowMs().toFixed(1)}`,
@@ -859,6 +924,30 @@ function createCacheOnUpdate(input: {
   };
 }
 
+interface PageResultShape {
+  page: unknown[];
+  isDone: boolean;
+  continueCursor: string;
+  splitCursor?: string | null;
+  pageStatus?: "SplitRecommended" | "SplitRequired" | null;
+}
+
+function isPageResultShape(value: unknown): value is PageResultShape {
+  return (
+    isPlainObject(value) &&
+    Array.isArray((value as { page?: unknown }).page) &&
+    typeof (value as { isDone?: unknown }).isDone === "boolean" &&
+    typeof (value as { continueCursor?: unknown }).continueCursor === "string"
+  );
+}
+
+interface ManagedPage {
+  cursor: string | null;
+  numItems: number;
+  unsubscribe: (() => void) | null;
+  subscribedKey: string | null;
+}
+
 function createCachePaginatedOnUpdate(input: {
   pipeline: CachePipeline;
   getRefName: (ref: unknown) => string;
@@ -873,27 +962,101 @@ function createCachePaginatedOnUpdate(input: {
     onError?: (error: Error, meta?: unknown) => unknown,
   ) => {
     const refName = input.getRefName(ref);
-    const paginationArgs = args.paginationOpts;
+    const extraPaginationArgs = isPlainObject(args.paginationOpts)
+      ? (args.paginationOpts as Record<string, unknown>)
+      : {};
+    const { paginationOpts: _ignored, ...restArgs } = args;
+    void _ignored;
 
-    const baseArgs: Record<string, unknown> = {
-      ...args,
-      paginationOpts: {
+    const pages: ManagedPage[] = [
+      {
         cursor: null,
         numItems: options.initialNumItems,
-        ...(isPlainObject(paginationArgs)
-          ? (paginationArgs as Record<string, unknown>)
-          : {}),
+        unsubscribe: null,
+        subscribedKey: null,
       },
+    ];
+    let loadingMore = false;
+    let disposed = false;
+
+    const pageArgs = (page: ManagedPage, endCursor: string | null) => ({
+      ...restArgs,
+      paginationOpts: {
+        ...extraPaginationArgs,
+        cursor: page.cursor,
+        endCursor,
+        numItems: page.numItems,
+      },
+    });
+
+    const readPage = (page: ManagedPage, index: number): unknown => {
+      const isLast = index === pages.length - 1;
+      const endCursor = isLast ? null : pages[index + 1]!.cursor;
+      return input.pipeline.getCurrentValue(refName, pageArgs(page, endCursor));
     };
 
-    const fireValue = (raw: unknown) => {
+    const buildSnapshot = ():
+      | { results: unknown[]; isDone: boolean; continueCursor: string | null }
+      | undefined => {
+      const results: unknown[] = [];
+      let last: PageResultShape | undefined;
+      let splitChanged = false;
+      for (let index = 0; index < pages.length; index += 1) {
+        const raw = readPage(pages[index]!, index);
+        if (raw === undefined) {
+          return undefined;
+        }
+        if (!isPageResultShape(raw)) {
+          return undefined;
+        }
+        last = raw;
+        const target = options.initialNumItems;
+        if (
+          raw.splitCursor &&
+          (raw.pageStatus === "SplitRecommended" ||
+            raw.pageStatus === "SplitRequired" ||
+            (target > 0 && raw.page.length > target * 2)) &&
+          !pages.some((p) => p.cursor === raw.splitCursor)
+        ) {
+          pages.splice(index + 1, 0, {
+            cursor: raw.splitCursor,
+            numItems: pages[index]!.numItems,
+            unsubscribe: null,
+            subscribedKey: null,
+          });
+          splitChanged = true;
+        }
+        results.push(...raw.page);
+        if (index === pages.length - 1 && raw.isDone) {
+          break;
+        }
+      }
+      if (splitChanged) {
+        resubscribeAll();
+        return undefined;
+      }
+      return {
+        results,
+        isDone: last?.isDone ?? false,
+        continueCursor: last?.continueCursor ?? null,
+      };
+    };
+
+    let currentSnapshot:
+      | { results: unknown[]; isDone: boolean; continueCursor: string | null }
+      | undefined;
+
+    const emit = () => {
+      if (disposed) return;
+      const snapshot = buildSnapshot();
+      if (snapshot === undefined) {
+        return;
+      }
+      currentSnapshot = snapshot;
+      loadingMore = false;
       try {
-        const translated = toClientResult(
-          raw,
-          input.translateLocalResultToClient,
-        );
         callback(
-          translated,
+          toClientResult(makeResult(), input.translateLocalResultToClient),
           "Second argument to onUpdate callback is reserved for later use",
         );
       } catch (error) {
@@ -921,19 +1084,93 @@ function createCachePaginatedOnUpdate(input: {
       }
     };
 
-    const unsubscribe = input.pipeline.subscribe({
-      refName,
-      args: baseArgs,
-      onValue: fireValue,
-      onError: fireError,
-    }) as SubscriptionHandle;
-
-    unsubscribe.unsubscribe = unsubscribe;
-    unsubscribe.getCurrentValue = () => {
-      const raw = input.pipeline.getCurrentValue(refName, baseArgs);
-      if (raw === undefined) return undefined;
-      return toClientResult(raw, input.translateLocalResultToClient);
+    const subscribePage = (page: ManagedPage, index: number) => {
+      const isLast = index === pages.length - 1;
+      const endCursor = isLast ? null : pages[index + 1]!.cursor;
+      const nextArgs = pageArgs(page, endCursor);
+      const nextKey = `${refName} ${stableValueKey(nextArgs)}`;
+      if (page.subscribedKey === nextKey && page.unsubscribe !== null) {
+        return;
+      }
+      page.unsubscribe?.();
+      page.subscribedKey = nextKey;
+      page.unsubscribe = input.pipeline.subscribe({
+        refName,
+        args: nextArgs,
+        onValue: () => emit(),
+        onError: fireError,
+      });
     };
+
+    function resubscribeAll(): void {
+      for (let index = 0; index < pages.length; index += 1) {
+        subscribePage(pages[index]!, index);
+      }
+    }
+
+    const loadMore = (numItems: number): boolean => {
+      if (
+        disposed ||
+        loadingMore ||
+        !Number.isFinite(numItems) ||
+        numItems <= 0 ||
+        currentSnapshot === undefined ||
+        currentSnapshot.isDone
+      ) {
+        return false;
+      }
+      const nextCursor = currentSnapshot.continueCursor;
+      if (nextCursor === null || nextCursor === "_end_cursor") {
+        return false;
+      }
+      loadingMore = true;
+      const previousLast = pages[pages.length - 1]!;
+      pages.push({
+        cursor: nextCursor,
+        numItems,
+        unsubscribe: null,
+        subscribedKey: null,
+      });
+      subscribePage(previousLast, pages.length - 2);
+      subscribePage(pages[pages.length - 1]!, pages.length - 1);
+      try {
+        callback(
+          toClientResult(makeResult(), input.translateLocalResultToClient),
+          "Second argument to onUpdate callback is reserved for later use",
+        );
+      } catch {
+        /* listener error */
+      }
+      return true;
+    };
+
+    const statusOf = (): LocalPaginatedQueryResult["status"] => {
+      if (currentSnapshot === undefined) {
+        return pages.length > 1 ? "LoadingMore" : "LoadingFirstPage";
+      }
+      if (loadingMore) return "LoadingMore";
+      return currentSnapshot.isDone ? "Exhausted" : "CanLoadMore";
+    };
+
+    const makeResult = (): LocalPaginatedQueryResult => ({
+      results: currentSnapshot?.results ?? [],
+      status: statusOf(),
+      loadMore,
+    });
+
+    resubscribeAll();
+    emit();
+
+    const unsubscribe = (() => {
+      disposed = true;
+      for (const page of pages) {
+        page.unsubscribe?.();
+        page.unsubscribe = null;
+      }
+    }) as SubscriptionHandle;
+    unsubscribe.unsubscribe = unsubscribe;
+    unsubscribe.getCurrentValue = () =>
+      toClientResult(makeResult(), input.translateLocalResultToClient);
     unsubscribe.getQueryLogs = () => undefined;
     return unsubscribe;
   };
@@ -1180,6 +1417,58 @@ function deferSubscription(input: {
   return unsubscribe;
 }
 
+export interface ActiveSubscriptionsAccessor {
+  list(): ActiveSubscriptionSnapshot[];
+  onChange(listener: () => void): () => void;
+}
+
+const ACTIVE_SUBSCRIPTION_ACCESSORS = Symbol.for(
+  "convex-embedded:client/adapter:activeSubscriptionAccessors",
+);
+
+type AdapterGlobal = typeof globalThis & {
+  [ACTIVE_SUBSCRIPTION_ACCESSORS]?: WeakMap<
+    ConvexClient,
+    ActiveSubscriptionsAccessor
+  >;
+};
+
+function getActiveSubscriptionAccessorStore() {
+  const globalState = globalThis as AdapterGlobal;
+  globalState[ACTIVE_SUBSCRIPTION_ACCESSORS] ??= new WeakMap<
+    ConvexClient,
+    ActiveSubscriptionsAccessor
+  >();
+  return globalState[ACTIVE_SUBSCRIPTION_ACCESSORS];
+}
+
+export function registerActiveSubscriptionsAccessor(
+  client: ConvexClient,
+  accessor: ActiveSubscriptionsAccessor,
+): void {
+  getActiveSubscriptionAccessorStore().set(client, accessor);
+}
+
+export function deleteActiveSubscriptionsAccessor(client: ConvexClient): void {
+  getActiveSubscriptionAccessorStore().delete(client);
+}
+
+export function getActiveSubscriptions(
+  client: ConvexClient,
+): ActiveSubscriptionSnapshot[] {
+  return getActiveSubscriptionAccessorStore().get(client)?.list() ?? [];
+}
+
+export function subscribeActiveSubscriptions(
+  client: ConvexClient,
+  listener: () => void,
+): () => void {
+  return (
+    getActiveSubscriptionAccessorStore().get(client)?.onChange(listener) ??
+    (() => {})
+  );
+}
+
 type WaitUntilReady = <T>(run: () => Promise<T>) => Promise<T>;
 
 export function patchRoutedConvexClient(input: {
@@ -1256,9 +1545,17 @@ export function patchRoutedConvexClient(input: {
         connectivity: input.connectivity,
         asError: input.asError,
         runtime: input.runtime,
+        ensureReadReady: input.ensureReadReady,
         translateLocalArgsToRuntime: input.translateLocalArgsToRuntime,
       })
     : null;
+
+  if (pipeline) {
+    registerActiveSubscriptionsAccessor(input.client, {
+      list: () => pipeline.listActiveSubscriptions(),
+      onChange: (listener) => pipeline.onSubscriptionsChange(listener),
+    });
+  }
 
   const runtimeLocalOnUpdate = createRuntimeLocalOnUpdate({
     runtime: input.runtime,
@@ -1620,17 +1917,25 @@ export function patchRoutedConvexClient(input: {
     const existingPaginationOpts = isPlainObject(argRecord.paginationOpts)
       ? (argRecord.paginationOpts as Record<string, unknown>)
       : {};
-    const baseArgs: Record<string, unknown> = {
-      ...argRecord,
+    const { paginationOpts: _ignored, ...restArgs } = argRecord;
+    void _ignored;
+    const firstPageArgs: Record<string, unknown> = {
+      ...restArgs,
       paginationOpts: {
-        cursor: null,
-        numItems: options.initialNumItems,
         ...existingPaginationOpts,
+        cursor: null,
+        endCursor: null,
+        numItems: options.initialNumItems,
       },
     };
-    const raw = pipeline.getCurrentValue(refName, baseArgs);
-    if (raw === undefined) return undefined;
-    return toClientResult(raw, input.translateLocalResultToClient);
+    const raw = pipeline.getCurrentValue(refName, firstPageArgs);
+    if (raw === undefined || !isPageResultShape(raw)) return undefined;
+    const snapshot: LocalPaginatedQueryResult = {
+      results: raw.page,
+      status: raw.isDone ? "Exhausted" : "CanLoadMore",
+      loadMore: () => false,
+    };
+    return toClientResult(snapshot, input.translateLocalResultToClient);
   };
 
   patchable.applyOptimisticTransition = (
@@ -1670,6 +1975,11 @@ export function patchRoutedConvexClient(input: {
   }
 
   return {
-    dispose: () => pipeline?.dispose(),
+    dispose: () => {
+      if (pipeline) {
+        deleteActiveSubscriptionsAccessor(input.client);
+        pipeline.dispose();
+      }
+    },
   };
 }

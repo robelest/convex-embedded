@@ -288,9 +288,29 @@ function createStatefulEmbedded(initialDocs: Doc[]): StatefulEmbeddedBundle {
 
   const embedded: MockEmbedded = {
     client: asConvexClient(localClient),
-    ingestDocuments: vi.fn(async (_table: string, nextDocs: Doc[]) => {
-      docs = [...nextDocs];
-    }),
+    ingestDocuments: vi.fn(
+      async (
+        _table: string,
+        nextDocs: Doc[],
+        _scopeArgs?: Args,
+        options?: { deleteAbsent?: boolean; keepIds?: ReadonlySet<string> },
+      ) => {
+        const byId = new Map(docs.map((doc) => [doc._id as string, doc]));
+        for (const doc of nextDocs) {
+          byId.set(doc._id as string, doc);
+        }
+        if (options?.deleteAbsent !== false) {
+          const remoteIds = new Set(nextDocs.map((doc) => doc._id as string));
+          const keepIds = options?.keepIds;
+          for (const id of Array.from(byId.keys())) {
+            if (!remoteIds.has(id) && !(keepIds?.has(id) ?? false)) {
+              byId.delete(id);
+            }
+          }
+        }
+        docs = [...byId.values()];
+      },
+    ),
     canonicalizeMappedCreate: vi.fn(
       async (input: {
         localId: string;
@@ -1381,6 +1401,7 @@ describe("engine.create()", () => {
         },
       ],
       undefined,
+      undefined,
     );
   });
 
@@ -1423,6 +1444,7 @@ describe("engine.create()", () => {
           body: "from remote",
         },
       ],
+      undefined,
       undefined,
     );
   });
@@ -1471,6 +1493,7 @@ describe("engine.create()", () => {
     expect(embedded.ingestDocuments).toHaveBeenCalledWith(
       "tasks",
       [localDoc],
+      undefined,
       undefined,
     );
   });
@@ -1527,7 +1550,7 @@ describe("engine.create()", () => {
     ]);
   });
 
-  it("resolveNow() buffers paged full-mode results until the snapshot completes", async () => {
+  it("resolveNow() streams paged full-mode results and prunes stale local docs", async () => {
     const { embedded, getDocs } = createStatefulEmbedded([
       {
         _id: "stale-local",
@@ -1608,7 +1631,19 @@ describe("engine.create()", () => {
         documents: [expect.objectContaining({ docId: "stale-local" })],
       }),
     );
-    expect(embedded.ingestDocuments).toHaveBeenCalledTimes(1);
+    // Streaming: one append-only ingest per page, then a final prune pass.
+    const pageIngests = embedded.ingestDocuments.mock.calls.filter(
+      (call) =>
+        (call[3] as { deleteAbsent?: boolean } | undefined)?.deleteAbsent ===
+        false,
+    );
+    expect(pageIngests).toHaveLength(2);
+    const pruneIngests = embedded.ingestDocuments.mock.calls.filter(
+      (call) =>
+        (call[3] as { keepIds?: ReadonlySet<string> } | undefined)?.keepIds !==
+        undefined,
+    );
+    expect(pruneIngests).toHaveLength(1);
     expect(getDocs()).toEqual([
       {
         _id: "page-1",
@@ -1890,6 +1925,7 @@ describe("engine.create()", () => {
         expect.objectContaining({ _id: "doc-1", _creationTime: 100 }),
       ]),
       undefined,
+      undefined,
     );
 
     m.stop();
@@ -1957,6 +1993,7 @@ describe("engine.create()", () => {
             body: "Body",
           }),
         ],
+        undefined,
         undefined,
       ),
     );

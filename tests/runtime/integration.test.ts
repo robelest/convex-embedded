@@ -526,7 +526,7 @@ describe("Integration: Index Range Queries", () => {
 // ===========================================================================
 
 describe("Integration: Pagination", () => {
-  it("first page returns correct number of results", () => {
+  it("first page returns correct number of results", async () => {
     const db = freshDb();
     for (let i = 0; i < 5; i++) {
       db.insert("items", { n: i });
@@ -534,7 +534,7 @@ describe("Integration: Pagination", () => {
     db.commit();
 
     db.startTransaction();
-    const page1 = db.paginate({
+    const page1 = await db.paginateAsync({
       query: fullScan("items"),
       cursor: null,
       pageSize: 2,
@@ -546,7 +546,7 @@ describe("Integration: Pagination", () => {
     db.rollbackWrites();
   });
 
-  it("subsequent pages continue from cursor", () => {
+  it("subsequent pages continue from cursor", async () => {
     const db = freshDb();
     for (let i = 0; i < 5; i++) {
       db.insert("items", { n: i });
@@ -554,13 +554,13 @@ describe("Integration: Pagination", () => {
     db.commit();
 
     db.startTransaction();
-    const page1 = db.paginate({
+    const page1 = await db.paginateAsync({
       query: fullScan("items"),
       cursor: null,
       pageSize: 2,
     });
 
-    const page2 = db.paginate({
+    const page2 = await db.paginateAsync({
       query: fullScan("items"),
       cursor: page1.continueCursor,
       pageSize: 2,
@@ -574,14 +574,14 @@ describe("Integration: Pagination", () => {
     db.rollbackWrites();
   });
 
-  it("last page reports isDone", () => {
+  it("last page reports isDone", async () => {
     const db = freshDb();
     db.insert("items", { n: 1 });
     db.insert("items", { n: 2 });
     db.commit();
 
     db.startTransaction();
-    const page = db.paginate({
+    const page = await db.paginateAsync({
       query: fullScan("items"),
       cursor: null,
       pageSize: 10,
@@ -593,12 +593,12 @@ describe("Integration: Pagination", () => {
     db.rollbackWrites();
   });
 
-  it("paginating empty table returns empty page and isDone", () => {
+  it("paginating empty table returns empty page and isDone", async () => {
     const db = freshDb();
     db.commit();
 
     db.startTransaction();
-    const page = db.paginate({
+    const page = await db.paginateAsync({
       query: fullScan("empty"),
       cursor: null,
       pageSize: 10,

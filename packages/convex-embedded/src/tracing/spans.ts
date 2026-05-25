@@ -154,3 +154,27 @@ export function withSpanSync<T>(
 export function setAttrs(span: Span, attrs: Attributes): void {
   span.setAttributes(attrs);
 }
+
+const MAX_CAPTURED_VALUE_CHARS = 8192;
+
+export function captureValueAttr(
+  span: Span,
+  key: string,
+  value: unknown,
+): void {
+  if (!logCaptureActive) {
+    return;
+  }
+  let json: string;
+  try {
+    json = JSON.stringify(value) ?? "null";
+  } catch {
+    return;
+  }
+  span.setAttribute(
+    key,
+    json.length > MAX_CAPTURED_VALUE_CHARS
+      ? json.slice(0, MAX_CAPTURED_VALUE_CHARS)
+      : json,
+  );
+}

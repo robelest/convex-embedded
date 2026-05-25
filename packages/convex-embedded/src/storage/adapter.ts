@@ -13,6 +13,7 @@ import type {
   VectorIndexDefinition,
 } from "@/runtime/db/schema";
 import type {
+  SeekBound,
   Source,
   StoredDocument,
   VectorSearchExpression,
@@ -55,11 +56,14 @@ export interface WriteResult {
   tables: TableSnapshot[];
 }
 
+export type { SeekBound };
+
 export interface ReadOptions {
   limit?: number | null;
   indexFields?: string[];
   searchDefinition?: SearchIndexDefinition;
   activeIdentityKey?: string | null;
+  seek?: SeekBound;
 }
 
 export interface QueryArgs {

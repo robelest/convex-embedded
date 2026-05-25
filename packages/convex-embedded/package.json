@@ -141,6 +141,16 @@
       "import": "./dist/crdt/index.js",
       "default": "./dist/crdt/index.js"
     },
+    "./devtools": {
+      "types": "./dist/devtools/index.d.ts",
+      "import": "./dist/devtools/index.js",
+      "default": "./dist/devtools/index.js"
+    },
+    "./devtools/vite": {
+      "types": "./dist/devtools/vite.d.ts",
+      "import": "./dist/devtools/vite.js",
+      "default": "./dist/devtools/vite.js"
+    },
     "./client": {
       "@convex-dev/component-source": "./src/client/index.ts",
       "types": "./dist/client/index.d.ts",
@@ -192,10 +202,13 @@
     "yjs": "^13.6.0"
   },
   "devDependencies": {
+    "@tanstack/devtools": "^0.12.2",
+    "@tanstack/devtools-vite": "^0.7.0",
     "@types/better-sqlite3": "^7.6.0",
     "@types/node": "^24.3.0",
     "convex": "catalog:",
     "convex-test": "^0.0.36",
+    "solid-js": "^1.9.7",
     "tsdown": "catalog:",
     "typescript": "catalog:",
     "vite-plus": "catalog:"
@@ -203,12 +216,15 @@
   "peerDependencies": {
     "@op-engineering/op-sqlite": ">=15",
     "@tanstack/db": ">=0.0.1",
+    "@tanstack/devtools": ">=0.12.0",
+    "@tanstack/devtools-vite": ">=0.7.0",
     "convex": "^1.37.0",
     "expo": ">=54",
     "expo-file-system": ">=19",
     "expo-network": ">=8",
     "react": ">=18",
     "react-native": ">=0.74",
+    "solid-js": ">=1.9.7",
     "typescript": ">=5.0.0"
   },
   "peerDependenciesMeta": {
@@ -216,6 +232,15 @@
       "optional": true
     },
     "@tanstack/db": {
+      "optional": true
+    },
+    "@tanstack/devtools": {
+      "optional": true
+    },
+    "@tanstack/devtools-vite": {
+      "optional": true
+    },
+    "solid-js": {
       "optional": true
     },
     "expo": {

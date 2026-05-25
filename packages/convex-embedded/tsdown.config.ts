@@ -40,6 +40,7 @@ export default defineConfig([
       nitro: "src/nitro.ts",
       unplugin: "src/unplugin.ts",
       vite: "src/vite.ts",
+      "devtools/vite": "src/devtools/vite.ts",
     },
     format: "esm",
     outDir: "dist",
@@ -47,13 +48,43 @@ export default defineConfig([
     clean: false,
     platform: "node",
     deps: {
-      neverBundle: [/^convex/, "yjs", "convex-helpers"],
+      neverBundle: [
+        /^convex/,
+        "yjs",
+        "convex-helpers",
+        /^@tanstack\/devtools-vite/,
+        /^@tanstack\/devtools/,
+      ],
       alwaysBundle: [
         "effect",
         /^effect\//,
         /^@effect\/platform-node/,
         /^@effect\/sql-sqlite-node/,
       ],
+    },
+    outExtensions: jsExtensions,
+    alias: srcAlias,
+  },
+  // In-browser EmbeddedDevtools overlay (TanStack shell). Solid + TanStack stay
+  // external so they never leak into the main runtime bundle; consumers provide
+  // them as optional peers and a Vite plugin strips this chunk from prod builds.
+  {
+    entry: { "devtools/index": "src/devtools/index.ts" },
+    format: "esm",
+    outDir: "dist",
+    dts: true,
+    clean: false,
+    platform: "browser",
+    deps: {
+      neverBundle: [
+        /^convex/,
+        "yjs",
+        "convex-helpers",
+        /^@tanstack\/devtools/,
+        "solid-js",
+        /^solid-js\//,
+      ],
+      alwaysBundle: ["effect", /^effect\//, /^@effect\/platform-browser/],
     },
     outExtensions: jsExtensions,
     alias: srcAlias,

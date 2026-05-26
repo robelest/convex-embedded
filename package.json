@@ -41,7 +41,6 @@
     "convex": "catalog:"
   },
   "devDependencies": {
-    "@convex-dev/action-retrier": "^0.3.0",
     "@robelest/convex-embedded": "workspace:*",
     "@typescript/native-preview": "7.0.0-dev.20260326.1",
     "fallow": "^2.80.0",

@@ -194,8 +194,6 @@
     "@opentelemetry/sdk-trace-base": "catalog:",
     "@opentelemetry/sdk-trace-node": "catalog:",
     "@opentelemetry/sdk-trace-web": "catalog:",
-    "@opentelemetry/semantic-conventions": "catalog:",
-    "convex-helpers": "^0.1.0",
     "react-native-get-random-values": "^1.11.0",
     "unplugin": "^2.3.10",
     "wa-sqlite": "github:rhashimoto/wa-sqlite",

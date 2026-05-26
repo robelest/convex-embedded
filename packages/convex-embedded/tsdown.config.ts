@@ -27,7 +27,7 @@ export default defineConfig([
     dts: true,
     clean: true,
     deps: {
-      neverBundle: [/^convex/, "yjs", "convex-helpers"],
+      neverBundle: [/^convex/, "yjs"],
       alwaysBundle: ["effect", /^effect\//, /^@effect\/platform-browser/],
     },
     alias: srcAlias,
@@ -51,7 +51,6 @@ export default defineConfig([
       neverBundle: [
         /^convex/,
         "yjs",
-        "convex-helpers",
         /^@tanstack\/devtools-vite/,
         /^@tanstack\/devtools/,
       ],
@@ -79,7 +78,6 @@ export default defineConfig([
       neverBundle: [
         /^convex/,
         "yjs",
-        "convex-helpers",
         /^@tanstack\/devtools/,
         "solid-js",
         /^solid-js\//,
@@ -115,7 +113,7 @@ export default defineConfig([
     unbundle: true,
     platform: "node",
     deps: {
-      neverBundle: [/^convex/, "yjs", "convex-helpers"],
+      neverBundle: [/^convex/, "yjs"],
       alwaysBundle: ["effect", /^effect\//, /^@effect\/platform-browser/],
     },
     outExtensions: jsExtensions,
@@ -130,7 +128,7 @@ export default defineConfig([
     clean: false,
     platform: "browser",
     deps: {
-      neverBundle: [/^convex/, "yjs", "convex-helpers"],
+      neverBundle: [/^convex/, "yjs"],
       alwaysBundle: ["effect", /^effect\//, /^@effect\/platform-browser/],
     },
     outExtensions: jsExtensions,
@@ -145,7 +143,7 @@ export default defineConfig([
     clean: false,
     platform: "browser",
     deps: {
-      neverBundle: [/^convex/, "yjs", "convex-helpers"],
+      neverBundle: [/^convex/, "yjs"],
       alwaysBundle: ["effect"],
     },
     outExtensions: jsExtensions,
@@ -160,7 +158,7 @@ export default defineConfig([
     clean: false,
     platform: "node",
     deps: {
-      neverBundle: [/^convex/, "convex-test", "yjs", "convex-helpers"],
+      neverBundle: [/^convex/, "convex-test", "yjs"],
       alwaysBundle: ["effect"],
     },
     outExtensions: jsExtensions,
@@ -176,7 +174,7 @@ export default defineConfig([
     unbundle: true,
     platform: "node",
     deps: {
-      neverBundle: [/^convex/, "yjs", "convex-helpers"],
+      neverBundle: [/^convex/, "yjs"],
     },
     outExtensions: jsExtensions,
   },

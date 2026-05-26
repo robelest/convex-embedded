@@ -12,7 +12,6 @@
     "test:live": "RUN_CONVEX_LIVE=1 vp exec vitest --run --project live"
   },
   "devDependencies": {
-    "@edge-runtime/vm": "^5.0.0",
     "@robelest/convex-embedded": "workspace:*",
     "@types/node": "^25.5.0",
     "convex": "catalog:",

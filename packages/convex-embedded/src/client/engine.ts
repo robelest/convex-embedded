@@ -2572,244 +2572,6 @@ function createEngine(config: EngineConfig): EngineInstance {
    *
    * On failure, the entry stays in the queue for retry on next cycle.
    */
-  async function dropMappedCreate(
-    entry: PendingEntry,
-    route: Extract<QueueEntryRoute, { _tag: "DropMappedCreate" }>,
-    replayDocId: string | null,
-  ): Promise<true> {
-    await pendingQueue.remove(entry, processorIdForReplay);
-    if (replayDocId) addRecentlyReplayed(replayDocId);
-    await cleanupMappedCreateAlias(route.localResult);
-    log.debug(
-      `sync: dropping already-mapped create mutation (remaining: ${pendingQueue.length})`,
-    );
-    recordCounter("replay.outcome", { result: "drop_mapped" });
-    return true;
-  }
-
-  async function pushQueueEntry(
-    entry: PendingEntry,
-    route: Extract<QueueEntryRoute, { _tag: "Push" }>,
-    replayDocId: string | null,
-  ): Promise<boolean> {
-    const ref = makeFunctionReference<"mutation">(entry.ref);
-    const originalArgs = JSON.parse(entry.args) as Record<string, unknown>;
-    await ensureRemoteStorageMappings(entry, originalArgs);
-    const translatedArgs = idMap.translateArgs(originalArgs);
-    const leaseHeld = await pendingQueue.renewLease(
-      entry,
-      processorIdForReplay,
-      leaseMs,
-    );
-    if (!leaseHeld) {
-      if (entry.hydrated === true) {
-        activeEntry = null;
-        log.warn(
-          `sync: lost replay lease before remote push (table: ${entry.table})`,
-        );
-        return false;
-      }
-      log.warn(
-        `sync: continuing replay for current-session entry after lease renewal miss (table: ${entry.table})`,
-      );
-    }
-
-    const heartbeat = startReplayLeaseHeartbeat({
-      entry,
-      renew: () =>
-        pendingQueue.renewLease(entry, processorIdForReplay, leaseMs),
-      leaseMs,
-    });
-    let remoteResult: unknown;
-    try {
-      remoteResult = await heartbeat.race(
-        (remoteClient as unknown as RemoteCallable).mutation(
-          ref,
-          translatedArgs,
-        ),
-      );
-    } finally {
-      heartbeat.stop();
-    }
-
-    recordExpectedSelfCausedSignal(
-      entry.table,
-      nextExpectedSelfCausedSeq(entry.table),
-    );
-
-    if (
-      typeof route.localResult === "string" &&
-      typeof remoteResult === "string" &&
-      route.localResult !== remoteResult
-    ) {
-      await canonicalizeMappedCreate({
-        localId: route.localResult,
-        remoteId: remoteResult,
-        tableName: entry.table,
-        schemas: tableSchemas,
-      });
-      await idMap.set(route.localResult, remoteResult, entry.table);
-    }
-    await pendingQueue.remove(entry, processorIdForReplay);
-    if (replayDocId) addRecentlyReplayed(replayDocId);
-    activeEntry = null;
-    log.debug(
-      `sync: pushed mutation to remote (table: ${entry.table}, remaining: ${pendingQueue.length})`,
-    );
-    recordCounter("replay.outcome", {
-      result: "success",
-      "convex.table": entry.table,
-    });
-    return true;
-  }
-
-  async function handlePushError(
-    entry: PendingEntry,
-    err: unknown,
-    replayDocId: string | null,
-    deadLetteredTables: Set<string>,
-  ): Promise<boolean> {
-    if (isAlreadyAppliedReplayError(entry, err as Error)) {
-      await pendingQueue.remove(entry, processorIdForReplay);
-      if (replayDocId) addRecentlyReplayed(replayDocId);
-      activeEntry = null;
-      log.debug(
-        `sync: dropping already-applied mutation (table: ${entry.table}, remaining: ${pendingQueue.length})`,
-      );
-      recordCounter("replay.outcome", {
-        result: "drop_already_applied",
-        "convex.table": entry.table,
-      });
-      return true;
-    }
-    if (err instanceof ReplayLeaseLostError) {
-      activeEntry = null;
-      log.warn(`sync: replay lease lost while processing ${entry.ref}`);
-      recordCounter("replay.outcome", {
-        result: "lease_lost",
-        "convex.table": entry.table,
-      });
-      return false;
-    }
-    const reason = classifyReplayError(err as Error);
-    if (reason !== "unknown") {
-      await pendingQueue.block(entry, reason);
-      activeEntry = null;
-      recordCounter("replay.outcome", {
-        result: "blocked",
-        reason,
-        "convex.table": entry.table,
-      });
-      return false;
-    }
-    entry.retryCount = (entry.retryCount ?? 0) + 1;
-    if (entry.retryCount >= MAX_REPLAY_RETRIES) {
-      log.error(
-        `sync: mutation exceeded max retries (${MAX_REPLAY_RETRIES}), dead-lettering (table: ${entry.table}, ref: ${entry.ref})`,
-        err,
-      );
-      await pendingQueue.remove(entry, processorIdForReplay);
-      deadLetteredTables.add(entry.table);
-      activeEntry = null;
-      recordCounter("replay.outcome", {
-        result: "dead_letter",
-        "convex.table": entry.table,
-      });
-    } else {
-      log.warn(
-        `sync: remote push failed (attempt ${entry.retryCount}/${MAX_REPLAY_RETRIES}), releasing (table: ${entry.table})`,
-        err,
-      );
-      await pendingQueue.release(entry, processorIdForReplay);
-      activeEntry = null;
-      recordCounter("replay.outcome", {
-        result: "released",
-        "convex.table": entry.table,
-      });
-    }
-    return false;
-  }
-
-  async function processQueueEntry(
-    entry: PendingEntry,
-    deadLetteredTables: Set<string>,
-    signal?: AbortSignal,
-  ): Promise<{ shouldContinue: boolean; halt: boolean }> {
-    activeEntry = entry;
-    if (entry.state === "blocked") {
-      log.warn(`sync: blocked pending entry for ${entry.ref}; halting replay`);
-      return { shouldContinue: false, halt: true };
-    }
-
-    const replayDocId = extractPendingLogicalId(entry);
-    const route = getQueueEntryRoute({
-      entry,
-      hasMappedLocalId: (localId: string) => idMap.hasLocalId(localId),
-      hasActiveLocalDocument: (localId: string) =>
-        embedded.hasLocalDocumentId?.(localId) ?? false,
-      getRemoteId: (localId: string) => idMap.getRemoteId(localId),
-      isOnline,
-      signal,
-    });
-    await runSpan({
-      name: "convex_embedded.replay.route_decision",
-      attributes: {
-        "replay.route": route._tag,
-        "replay.ref": entry.ref,
-        "replay.table": entry.table,
-        "replay.hydrated": entry.hydrated === true,
-      },
-      run: async () => undefined,
-    });
-
-    if (route._tag === "Stop") return { shouldContinue: false, halt: false };
-    if (route._tag === "DropMappedCreate") {
-      return {
-        shouldContinue: await dropMappedCreate(entry, route, replayDocId),
-        halt: false,
-      };
-    }
-    if (route._tag === "Push") {
-      try {
-        return {
-          shouldContinue: await pushQueueEntry(entry, route, replayDocId),
-          halt: false,
-        };
-      } catch (err) {
-        return {
-          shouldContinue: await handlePushError(
-            entry,
-            err,
-            replayDocId,
-            deadLetteredTables,
-          ),
-          halt: false,
-        };
-      }
-    }
-    return { shouldContinue: false, halt: false };
-  }
-
-  async function drainQueue(
-    deadLetteredTables: Set<string>,
-    signal: AbortSignal | undefined,
-  ): Promise<void> {
-    while (!pendingQueue.isEmpty && isOnline && !signal?.aborted) {
-      const entry = await pendingQueue.claimNext(
-        processorIdForReplay,
-        leaseMs,
-        leaseMs,
-      );
-      if (!entry) break;
-      const { shouldContinue, halt } = await processQueueEntry(
-        entry,
-        deadLetteredTables,
-        signal,
-      );
-      if (halt || !shouldContinue) break;
-    }
-  }
-
   async function processQueue(signal?: AbortSignal): Promise<Set<string>> {
     if (queueProcessingPromise) {
       queueProcessingRequestedWhileActive = true;
@@ -2826,9 +2588,193 @@ function createEngine(config: EngineConfig): EngineInstance {
 
     queueProcessingPromise = (async () => {
       try {
-        while (isOnline && !signal?.aborted) {
+        outer: while (isOnline && !signal?.aborted) {
           queueProcessingRequestedWhileActive = false;
-          await drainQueue(deadLetteredTables, signal);
+          while (!pendingQueue.isEmpty && isOnline && !signal?.aborted) {
+            const entry = await pendingQueue.claimNext(
+              processorIdForReplay,
+              leaseMs,
+              leaseMs,
+            );
+            if (!entry) break;
+            activeEntry = entry;
+            if (entry.state === "blocked") {
+              log.warn(
+                `sync: blocked pending entry for ${entry.ref}; halting replay`,
+              );
+              break outer;
+            }
+
+            const replayDocId = extractPendingLogicalId(entry);
+            const route = getQueueEntryRoute({
+              entry,
+              hasMappedLocalId: (localId: string) => idMap.hasLocalId(localId),
+              hasActiveLocalDocument: (localId: string) =>
+                embedded.hasLocalDocumentId?.(localId) ?? false,
+              getRemoteId: (localId: string) => idMap.getRemoteId(localId),
+              isOnline,
+              signal,
+            });
+            await runSpan({
+              name: "convex_embedded.replay.route_decision",
+              attributes: {
+                "replay.route": route._tag,
+                "replay.ref": entry.ref,
+                "replay.table": entry.table,
+                "replay.hydrated": entry.hydrated === true,
+              },
+              run: async () => undefined,
+            });
+
+            if (route._tag === "Stop") break;
+            if (route._tag === "DropMappedCreate") {
+              await pendingQueue.remove(entry, processorIdForReplay);
+              if (replayDocId) addRecentlyReplayed(replayDocId);
+              await cleanupMappedCreateAlias(route.localResult);
+              log.debug(
+                `sync: dropping already-mapped create mutation (remaining: ${pendingQueue.length})`,
+              );
+              recordCounter("replay.outcome", { result: "drop_mapped" });
+              continue;
+            }
+            if (route._tag !== "Push") break;
+
+            try {
+              const ref = makeFunctionReference<"mutation">(entry.ref);
+              const originalArgs = JSON.parse(entry.args) as Record<
+                string,
+                unknown
+              >;
+              await ensureRemoteStorageMappings(entry, originalArgs);
+              const translatedArgs = idMap.translateArgs(originalArgs);
+              const leaseHeld = await pendingQueue.renewLease(
+                entry,
+                processorIdForReplay,
+                leaseMs,
+              );
+              if (!leaseHeld) {
+                if (entry.hydrated === true) {
+                  activeEntry = null;
+                  log.warn(
+                    `sync: lost replay lease before remote push (table: ${entry.table})`,
+                  );
+                  break;
+                }
+                log.warn(
+                  `sync: continuing replay for current-session entry after lease renewal miss (table: ${entry.table})`,
+                );
+              }
+
+              const heartbeat = startReplayLeaseHeartbeat({
+                entry,
+                renew: () =>
+                  pendingQueue.renewLease(entry, processorIdForReplay, leaseMs),
+                leaseMs,
+              });
+              let remoteResult: unknown;
+              try {
+                remoteResult = await heartbeat.race(
+                  (remoteClient as unknown as RemoteCallable).mutation(
+                    ref,
+                    translatedArgs,
+                  ),
+                );
+              } finally {
+                heartbeat.stop();
+              }
+
+              recordExpectedSelfCausedSignal(
+                entry.table,
+                nextExpectedSelfCausedSeq(entry.table),
+              );
+
+              if (
+                typeof route.localResult === "string" &&
+                typeof remoteResult === "string" &&
+                route.localResult !== remoteResult
+              ) {
+                await canonicalizeMappedCreate({
+                  localId: route.localResult,
+                  remoteId: remoteResult,
+                  tableName: entry.table,
+                  schemas: tableSchemas,
+                });
+                await idMap.set(route.localResult, remoteResult, entry.table);
+              }
+              await pendingQueue.remove(entry, processorIdForReplay);
+              if (replayDocId) addRecentlyReplayed(replayDocId);
+              activeEntry = null;
+              log.debug(
+                `sync: pushed mutation to remote (table: ${entry.table}, remaining: ${pendingQueue.length})`,
+              );
+              recordCounter("replay.outcome", {
+                result: "success",
+                "convex.table": entry.table,
+              });
+            } catch (err) {
+              if (isAlreadyAppliedReplayError(entry, err as Error)) {
+                await pendingQueue.remove(entry, processorIdForReplay);
+                if (replayDocId) addRecentlyReplayed(replayDocId);
+                activeEntry = null;
+                log.debug(
+                  `sync: dropping already-applied mutation (table: ${entry.table}, remaining: ${pendingQueue.length})`,
+                );
+                recordCounter("replay.outcome", {
+                  result: "drop_already_applied",
+                  "convex.table": entry.table,
+                });
+                continue;
+              }
+              if (err instanceof ReplayLeaseLostError) {
+                activeEntry = null;
+                log.warn(
+                  `sync: replay lease lost while processing ${entry.ref}`,
+                );
+                recordCounter("replay.outcome", {
+                  result: "lease_lost",
+                  "convex.table": entry.table,
+                });
+                break;
+              }
+              const reason = classifyReplayError(err as Error);
+              if (reason !== "unknown") {
+                await pendingQueue.block(entry, reason);
+                activeEntry = null;
+                recordCounter("replay.outcome", {
+                  result: "blocked",
+                  reason,
+                  "convex.table": entry.table,
+                });
+                break;
+              }
+              entry.retryCount = (entry.retryCount ?? 0) + 1;
+              if (entry.retryCount >= MAX_REPLAY_RETRIES) {
+                log.error(
+                  `sync: mutation exceeded max retries (${MAX_REPLAY_RETRIES}), dead-lettering (table: ${entry.table}, ref: ${entry.ref})`,
+                  err,
+                );
+                await pendingQueue.remove(entry, processorIdForReplay);
+                deadLetteredTables.add(entry.table);
+                activeEntry = null;
+                recordCounter("replay.outcome", {
+                  result: "dead_letter",
+                  "convex.table": entry.table,
+                });
+              } else {
+                log.warn(
+                  `sync: remote push failed (attempt ${entry.retryCount}/${MAX_REPLAY_RETRIES}), releasing (table: ${entry.table})`,
+                  err,
+                );
+                await pendingQueue.release(entry, processorIdForReplay);
+                activeEntry = null;
+                recordCounter("replay.outcome", {
+                  result: "released",
+                  "convex.table": entry.table,
+                });
+              }
+              break;
+            }
+          }
           if (
             !queueProcessingRequestedWhileActive ||
             pendingQueue.isEmpty ||

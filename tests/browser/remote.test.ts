@@ -748,14 +748,58 @@ describe("remoteOnly routing", () => {
     });
 
     const remote = await remoteInstance();
-    expect(remote.onUpdate).toHaveBeenCalledWith(
-      "local:paginatedWatch",
-      expect.objectContaining({
-        paginationOpts: expect.objectContaining({ numItems: 1 }),
-      }),
-      expect.any(Function),
-      expect.any(Function),
+    const paginatedRemoteCalls = remote.onUpdate.mock.calls.filter(
+      (call) => call[0] === "local:paginatedWatch",
     );
+    expect(paginatedRemoteCalls).toHaveLength(0);
+
+    unsubscribe();
+  });
+
+  it("does not forward a local pagination cursor to the remote on loadMore", async ({
+    track,
+  }) => {
+    interface PagedResult {
+      results: unknown[];
+      status: string;
+      loadMore: (n: number) => boolean;
+    }
+    const client = asRoutedClient(
+      track(
+        createConvexClient({
+          convex: { modules: createModules() },
+          remote: { url: REMOTE_URL },
+        }),
+      ),
+    );
+
+    const unsubscribe = client.onPaginatedUpdate_experimental(
+      localPaginatedWatchRef,
+      {},
+      { initialNumItems: 1 },
+      vi.fn(),
+      vi.fn(),
+    );
+
+    await vi.waitFor(() => {
+      const value = unsubscribe.getCurrentValue() as PagedResult;
+      expect(value.results.length).toBeGreaterThan(0);
+    });
+    (unsubscribe.getCurrentValue() as PagedResult).loadMore(1);
+    await vi.waitFor(() => {
+      const value = unsubscribe.getCurrentValue() as PagedResult;
+      expect(value.results.length).toBeGreaterThan(1);
+    });
+
+    const remote = await remoteInstance();
+    const forwardedCursors = remote.onUpdate.mock.calls
+      .filter((call) => call[0] === "local:paginatedWatch")
+      .map(
+        (call) =>
+          (call[1] as { paginationOpts?: { cursor?: unknown } })?.paginationOpts
+            ?.cursor,
+      );
+    expect(forwardedCursors).not.toContain("cursor-2");
 
     unsubscribe();
   });

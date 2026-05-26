@@ -83,14 +83,21 @@ export type StorageWorkerRequest = {
   };
 }[WorkerMethod];
 
+export interface WorkerTiming {
+  queueWaitMs: number;
+  execMs: number;
+}
+
 export type StorageWorkerResponse =
   | {
       id: number;
       ok: true;
       result: WorkerResultMap[WorkerMethod];
+      timing?: WorkerTiming;
     }
   | {
       id: number;
       ok: false;
       error: string;
+      timing?: WorkerTiming;
     };

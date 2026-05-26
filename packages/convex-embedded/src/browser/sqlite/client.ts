@@ -5,6 +5,27 @@ import type {
   StorageWorkerRequest,
   StorageWorkerResponse,
 } from "@/browser/sqlite/protocol";
+import { createLogger } from "@/shared/logger";
+import { recordHistogram } from "@/tracing/metrics";
+
+const log = createLogger("browser-sqlite");
+
+const SLOW_WORKER_OP_MS = 100;
+
+const WRITE_METHODS: ReadonlySet<WorkerMethod> = new Set<WorkerMethod>([
+  "execute",
+  "executeBatch",
+  "commit",
+  "storeBlob",
+  "deleteBlob",
+  "clear",
+]);
+
+function laneFor(method: WorkerMethod): "read" | "write" | "control" {
+  if (WRITE_METHODS.has(method)) return "write";
+  if (method === "init" || method === "close") return "control";
+  return "read";
+}
 
 export interface BrowserSqlClient {
   query<T extends Record<string, unknown> = Record<string, unknown>>(
@@ -65,6 +86,7 @@ export async function openBrowserSqlClient(options: {
       resolve: (value: unknown) => void;
       reject: (error: unknown) => void;
       timeoutId: ReturnType<typeof globalThis.setTimeout>;
+      method: WorkerMethod;
     }
   >();
 
@@ -93,6 +115,26 @@ export async function openBrowserSqlClient(options: {
       const entry = cleanupPending(response.id);
       if (entry === null) {
         return;
+      }
+      if (response.timing) {
+        const attributes = {
+          method: entry.method,
+          lane: laneFor(entry.method),
+        };
+        recordHistogram(
+          "sqlite.queue_wait_ms",
+          response.timing.queueWaitMs,
+          attributes,
+        );
+        recordHistogram("sqlite.exec_ms", response.timing.execMs, attributes);
+        if (
+          response.timing.execMs >= SLOW_WORKER_OP_MS ||
+          response.timing.queueWaitMs >= SLOW_WORKER_OP_MS
+        ) {
+          log.debug(
+            `slow worker op ${entry.method} (${laneFor(entry.method)}) exec_ms=${response.timing.execMs.toFixed(1)} queue_wait_ms=${response.timing.queueWaitMs.toFixed(1)}`,
+          );
+        }
       }
       if (response.ok) {
         entry.resolve(response.result);
@@ -132,6 +174,7 @@ export async function openBrowserSqlClient(options: {
         resolve: resolve as (value: unknown) => void,
         reject,
         timeoutId,
+        method,
       });
       const message: StorageWorkerRequest = {
         id,

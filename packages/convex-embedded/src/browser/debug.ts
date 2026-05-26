@@ -60,15 +60,20 @@ function getOrCreateDebugApi(): BrowserDebugApi | null {
         );
       }
 
-      const registered = getRegisteredClients().get(selectedName);
-      if (registered) {
-        await registered.clear();
-      } else {
-        await clearBrowserLocalData(selectedName);
-      }
-
-      if (options.reload && typeof globalThis.location?.reload === "function") {
-        globalThis.location.reload();
+      try {
+        const registered = getRegisteredClients().get(selectedName);
+        if (registered) {
+          await registered.clear();
+        } else {
+          await clearBrowserLocalData(selectedName);
+        }
+      } finally {
+        if (
+          options.reload &&
+          typeof globalThis.location?.reload === "function"
+        ) {
+          globalThis.location.reload();
+        }
       }
     },
     listClientNames() {

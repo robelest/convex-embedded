@@ -9,13 +9,51 @@
  * @packageDocumentation
  */
 
-import type { Attributes, Counter, ObservableGauge } from "@opentelemetry/api";
+import type {
+  Attributes,
+  Counter,
+  Histogram,
+  ObservableGauge,
+} from "@opentelemetry/api";
 
 import { getMeter } from "@/tracing/spans";
 
 const METRIC_PREFIX = "convex.embedded.";
 
 const counters = new Map<string, Counter>();
+const histograms = new Map<string, Histogram>();
+
+function histogramFor(name: string, description?: string): Histogram {
+  let histogram = histograms.get(name);
+  if (histogram) return histogram;
+  histogram = getMeter().createHistogram(`${METRIC_PREFIX}${name}`, {
+    description,
+    unit: "ms",
+  });
+  histograms.set(name, histogram);
+  return histogram;
+}
+
+/**
+ * Record a value into a named latency histogram, lazily creating the OTel
+ * `Histogram` instrument (unit `ms`) on first call. The full metric name is
+ * `convex.embedded.<name>`. Use for durations whose distribution matters —
+ * e.g. SQLite worker queue-wait and execution time.
+ *
+ * @param name — short, dot-separated metric name (no prefix).
+ * @param value — the measurement (milliseconds).
+ * @param attributes — optional attribute set; histograms with different
+ *   attribute sets aggregate independently.
+ *
+ * @public
+ */
+export function recordHistogram(
+  name: string,
+  value: number,
+  attributes?: Attributes,
+): void {
+  histogramFor(name).record(value, attributes);
+}
 
 function counterFor(name: string, description?: string): Counter {
   let counter = counters.get(name);
@@ -112,6 +150,7 @@ export function registerGauge(name: string, read: () => number): () => void {
  */
 export function resetMetricsRegistrations(): void {
   counters.clear();
+  histograms.clear();
   gaugeRegistrations.clear();
   gaugeRegistered = false;
 }

@@ -67,7 +67,6 @@ import {
 } from "@/browser/platform";
 import { type AuthOptions, type AuthState } from "@/client/auth";
 import { createEmbeddedClient } from "@/client/factory";
-import type { Prefetch } from "@/client/prefetch";
 import { type RemoteOptions, type RemoteState } from "@/client/remote";
 import { type ConvexInput } from "@/kernel/modules";
 
@@ -191,15 +190,6 @@ export interface ClientOptions {
    * remote Convex client's `setAuth(...)` flow.
    */
   auth?: AuthOptions;
-
-  /**
-   * Optional remote-backed prefetch data used to seed the embedded database.
-   *
-   * This is the browser-side half of the SSR/prefetch flow: build the prefetch
-   * on the server with `createEmbeddedPrefetch(...)`, serialize it into the
-   * page, then pass it here so the browser client starts warm.
-   */
-  prefetch?: Prefetch;
 }
 
 /**
@@ -356,7 +346,9 @@ export function createConvexClient(options: ClientOptions): ConvexClient {
   registerBrowserDebugClient({
     name,
     clear: async () => {
-      await client.close();
+      try {
+        await client.close();
+      } catch {}
       await clearBrowserLocalData(name);
     },
   });
@@ -395,6 +387,12 @@ export {
  * Remote sync state helpers for browser clients.
  */
 export { getRemoteState, subscribeRemoteState } from "@/client/remote";
+
+/**
+ * Preload (SSR) handoff helper: resolves once a `preloadQuery` value can defer to
+ * the live local query (scope resolved, offline, or no engine) — no stale flash.
+ */
+export { whenPreloaded } from "@/client/remote";
 
 function ensureConvexAllowFunctionsInBrowser(): void {
   try {

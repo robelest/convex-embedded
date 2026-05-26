@@ -381,14 +381,18 @@ function collectTransferables(result: unknown): Array<Transferable> {
 self.addEventListener(
   "message",
   (event: MessageEvent<StorageWorkerRequest>) => {
+    const receivedAt = performance.now();
     void withSerialized(async () => {
       const message = event.data;
+      const startedAt = performance.now();
+      const queueWaitMs = startedAt - receivedAt;
       try {
         const result = await dispatch(message);
         const response: StorageWorkerResponse = {
           id: message.id,
           ok: true,
           result,
+          timing: { queueWaitMs, execMs: performance.now() - startedAt },
         };
         self.postMessage(response, collectTransferables(result));
       } catch (error) {
@@ -396,6 +400,7 @@ self.addEventListener(
           id: message.id,
           ok: false,
           error: error instanceof Error ? error.message : String(error),
+          timing: { queueWaitMs, execMs: performance.now() - startedAt },
         };
         self.postMessage(response);
       }

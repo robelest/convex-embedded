@@ -66,6 +66,29 @@ describe("browser debug console hook", () => {
     expect(clearBrowserLocalData).toHaveBeenCalledWith("test-db");
   });
 
+  it("reloads the page even when teardown throws", async () => {
+    const close = vi.fn(async () => {
+      throw new Error("close failed");
+    });
+    createEmbeddedClient.mockReturnValue({ close });
+    clearBrowserLocalData.mockRejectedValueOnce(new Error("clear failed"));
+
+    const reload = vi.fn();
+    vi.stubGlobal("location", { reload });
+
+    const { createConvexClient } = await import("@resolve/browser/index");
+    createConvexClient({ convex: { modules: {} }, name: "test-db" });
+
+    const api = debugApi();
+    await expect(api.clearLocalData({ reload: true })).rejects.toThrow(
+      "clear failed",
+    );
+
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(clearBrowserLocalData).toHaveBeenCalledWith("test-db");
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
   it("unregisters the client when close is called", async () => {
     const close = vi.fn(async () => undefined);
     createEmbeddedClient.mockReturnValue({ close });

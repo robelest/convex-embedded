@@ -3,6 +3,9 @@ import type {
   StorageWorkerRequest,
   StorageWorkerResponse,
 } from "@embedded/browser/sqlite/protocol";
+import { installInMemoryTracing } from "@embedded/tracing/memory";
+import type { BufferingTracingHandle } from "@embedded/tracing/memory";
+import { resetMetricsRegistrations } from "@embedded/tracing/metrics";
 import { withFakeTimers } from "@tests/helpers/time";
 import {
   afterEach,
@@ -143,6 +146,61 @@ describe("openBrowserSqlClient", () => {
         /timed out after 15000ms.*getMeta/,
       );
     });
+  });
+
+  it("records worker queue-wait + exec histograms tagged by method and lane", async () => {
+    let handle: BufferingTracingHandle | null = null;
+    try {
+      handle = installInMemoryTracing();
+      resetMetricsRegistrations();
+      const { client, worker } = await openInitializedClient("sqlite-metrics");
+
+      const readPromise = client.getMeta();
+      const readMessage = worker.messages[1]!.message;
+      worker.reply({
+        id: readMessage.id,
+        ok: true,
+        result: null,
+        timing: { queueWaitMs: 42, execMs: 3 },
+      });
+      await readPromise;
+
+      const writePromise = client.execute("INSERT INTO t VALUES (1)");
+      const writeMessage = worker.messages[2]!.message;
+      worker.reply({
+        id: writeMessage.id,
+        ok: true,
+        result: null,
+        timing: { queueWaitMs: 7, execMs: 11 },
+      });
+      await writePromise;
+
+      const metrics = await handle.getMetrics();
+      const queueWait = metrics.filter(
+        (point) => point.name === "convex.embedded.sqlite.queue_wait_ms",
+      );
+      expect(
+        queueWait.some(
+          (point) =>
+            point.attributes.method === "getMeta" &&
+            point.attributes.lane === "read",
+        ),
+      ).toBe(true);
+      expect(
+        queueWait.some(
+          (point) =>
+            point.attributes.method === "execute" &&
+            point.attributes.lane === "write",
+        ),
+      ).toBe(true);
+      expect(
+        metrics.some(
+          (point) => point.name === "convex.embedded.sqlite.exec_ms",
+        ),
+      ).toBe(true);
+    } finally {
+      if (handle) await handle.close();
+    }
   });
 
   it("passes ArrayBuffer transferables for storeBlob and terminates on close", async () => {

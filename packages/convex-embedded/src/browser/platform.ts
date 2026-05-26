@@ -29,6 +29,38 @@ function isNotFoundError(error: unknown): boolean {
   );
 }
 
+function isLockedError(error: unknown): boolean {
+  return (
+    typeof DOMException !== "undefined" &&
+    error instanceof DOMException &&
+    (error.name === "NoModificationAllowedError" ||
+      error.name === "InvalidStateError")
+  );
+}
+
+const REMOVE_ENTRY_MAX_ATTEMPTS = 12;
+
+async function removeEntryWithRetry(
+  directory: FileSystemDirectoryHandle,
+  entryName: string,
+): Promise<void> {
+  for (let attempt = 0; attempt < REMOVE_ENTRY_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      await directory.removeEntry(entryName);
+      return;
+    } catch (error) {
+      if (isNotFoundError(error)) {
+        return;
+      }
+      if (isLockedError(error) && attempt < REMOVE_ENTRY_MAX_ATTEMPTS - 1) {
+        await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
+        continue;
+      }
+      throw error;
+    }
+  }
+}
+
 async function resolveOpfsDirectory(name: string): Promise<{
   directory: FileSystemDirectoryHandle;
   baseName: string;
@@ -66,14 +98,10 @@ async function clearBrowserSqliteFiles(name: string): Promise<boolean> {
   }
 
   for (const suffix of SQLITE_FILE_SUFFIXES) {
-    try {
-      await resolved.directory.removeEntry(`${resolved.baseName}${suffix}`);
-    } catch (error) {
-      if (isNotFoundError(error)) {
-        continue;
-      }
-      throw error;
-    }
+    await removeEntryWithRetry(
+      resolved.directory,
+      `${resolved.baseName}${suffix}`,
+    );
   }
 
   return true;

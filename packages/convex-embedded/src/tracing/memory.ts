@@ -112,10 +112,12 @@ export function installInMemoryTracing(
       metrics.disable();
       logs.disable();
       setLogCaptureActive(false);
-      await processor.shutdown();
-      await provider.shutdown();
-      await meterProvider.shutdown();
-      await loggerProvider.shutdown();
+      await Promise.all([
+        processor.shutdown(),
+        provider.shutdown(),
+        meterProvider.shutdown(),
+        loggerProvider.shutdown(),
+      ]);
     },
   };
 }

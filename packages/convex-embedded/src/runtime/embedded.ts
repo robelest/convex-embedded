@@ -486,8 +486,10 @@ export class EmbeddedRuntime {
         if (hasInitialStorage) {
           await this._resumeScheduledFunctions();
         }
-        await this._startCronRunner();
-        await this._initializeHttpDispatcher();
+        await Promise.all([
+          this._startCronRunner(),
+          this._initializeHttpDispatcher(),
+        ]);
         // Preload user modules so the first user-triggered query / mutation
         // doesn't pay the dynamic-import cost on its critical path. Runs
         // concurrently with the cron / http startup above where it would

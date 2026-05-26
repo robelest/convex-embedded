@@ -148,9 +148,13 @@ class UnifiedStore implements Store {
     if (this._queryable && !isSystemTable(input.tableName)) {
       return { docs: null, meta: await da.getMetadata() };
     }
+    const [docs, meta] = await Promise.all([
+      da.getDocuments(input.tableName),
+      da.getMetadata(),
+    ]);
     return {
-      docs: (await da.getDocuments(input.tableName)) as StoredDocument[],
-      meta: await da.getMetadata(),
+      docs: docs as StoredDocument[],
+      meta,
     };
   }
 

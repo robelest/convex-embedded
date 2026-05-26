@@ -53,7 +53,7 @@ function createSqliteMigrationAdapter(
   db: Database,
   storage: SqliteAdapter,
 ): MigrationRuntimeAdapter {
-  const txWrite = async <T>(work: () => Promise<T>): Promise<T> => {
+  const writeInTransaction = async <T>(work: () => Promise<T>): Promise<T> => {
     db.startTransaction();
     try {
       const result = await work();
@@ -72,13 +72,14 @@ function createSqliteMigrationAdapter(
         indexName: input.indexName,
         range: input.range,
       }),
-    systemInsert: (table, doc) => txWrite(async () => db.insert(table, doc)),
+    systemInsert: (table, doc) =>
+      writeInTransaction(async () => db.insert(table, doc)),
     systemPatch: (id, fields) =>
-      txWrite(async () => {
+      writeInTransaction(async () => {
         db.patch(undefined, id as DocumentId, fields);
       }),
     systemDelete: (id) =>
-      txWrite(async () => {
+      writeInTransaction(async () => {
         db.delete(undefined, id as DocumentId);
       }),
     tableList: (table) => db.listDocumentsAsync(table),
@@ -86,17 +87,18 @@ function createSqliteMigrationAdapter(
       const docs = await db.listDocumentsAsync(table);
       return docs.find((doc) => doc._id === id) ?? null;
     },
-    tableInsert: (table, doc) => txWrite(async () => db.insert(table, doc)),
+    tableInsert: (table, doc) =>
+      writeInTransaction(async () => db.insert(table, doc)),
     tablePatch: (_table, id, fields) =>
-      txWrite(async () => {
+      writeInTransaction(async () => {
         db.patch(undefined, id as DocumentId, fields);
       }),
     tableReplace: (_table, id, fields) =>
-      txWrite(async () => {
+      writeInTransaction(async () => {
         db.replace(undefined, id as DocumentId, fields);
       }),
     tableDelete: (_table, id) =>
-      txWrite(async () => {
+      writeInTransaction(async () => {
         db.delete(undefined, id as DocumentId);
       }),
     applySchemaOps: (table, ops) => storage.applySchemaOps(table, ops),

@@ -60,7 +60,9 @@ async function readRowsByIndex(
 function createMigrationAdapter(
   runtime: EmbeddedRuntime,
 ): MigrationRuntimeAdapter {
-  const txWrite = async <T>(work: () => Promise<T> | T): Promise<T> => {
+  const writeInTransaction = async <T>(
+    work: () => Promise<T> | T,
+  ): Promise<T> => {
     runtime.db.startTransaction();
     try {
       const result = await work();
@@ -80,13 +82,15 @@ function createMigrationAdapter(
         range: input.range,
       }),
     systemInsert: (table, doc) =>
-      txWrite(async () => runtime.db.insert(table, doc) as unknown as string),
+      writeInTransaction(
+        async () => runtime.db.insert(table, doc) as unknown as string,
+      ),
     systemPatch: (id, fields) =>
-      txWrite(async () => {
+      writeInTransaction(async () => {
         runtime.db.patch(undefined, id as never, fields);
       }),
     systemDelete: (id) =>
-      txWrite(async () => {
+      writeInTransaction(async () => {
         runtime.db.delete(undefined, id as never);
       }),
 
@@ -100,17 +104,19 @@ function createMigrationAdapter(
       );
     },
     tableInsert: (table, doc) =>
-      txWrite(async () => runtime.db.insert(table, doc) as unknown as string),
+      writeInTransaction(
+        async () => runtime.db.insert(table, doc) as unknown as string,
+      ),
     tablePatch: (_table, id, fields) =>
-      txWrite(async () => {
+      writeInTransaction(async () => {
         runtime.db.patch(undefined, id as never, fields);
       }),
     tableReplace: (_table, id, fields) =>
-      txWrite(async () => {
+      writeInTransaction(async () => {
         runtime.db.replace(undefined, id as never, fields);
       }),
     tableDelete: (_table, id) =>
-      txWrite(async () => {
+      writeInTransaction(async () => {
         runtime.db.delete(undefined, id as never);
       }),
 

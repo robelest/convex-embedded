@@ -160,6 +160,60 @@ function validateFieldPath(fieldPath: string, errorPrefix: string): void {
  *                  name. Required for `v.id("tableName")` validation when
  *                  using UUID-based IDs.
  */
+function assertType(check: boolean, expected: string, value: Value): void {
+  if (!check) {
+    throw new Error(
+      `Validator error: Expected \`${expected}\`, got \`${formatValueForError(value)}\``,
+    );
+  }
+}
+
+function validateObject(
+  validator: Extract<ValidatorJSON, { type: "object" }>,
+  value: Value,
+  idLookup?: (id: string) => string | undefined,
+): void {
+  assertType(typeof value === "object", "object", value);
+  if (!isSimpleObject(value)) {
+    throw new Error(
+      `Validator error: Expected a plain old JavaScript \`object\`, got \`${formatValueForError(value)}\``,
+    );
+  }
+  const obj = value as Record<string, Value | undefined>;
+  for (const [k, { fieldType, optional }] of Object.entries(validator.value)) {
+    if (obj[k] === undefined) {
+      if (!optional) {
+        throw new Error(
+          `Validator error: Missing required field \`${k}\` in object`,
+        );
+      }
+    } else {
+      validateValidator(fieldType, obj[k]!, idLookup);
+    }
+  }
+  for (const k of Object.keys(obj)) {
+    if (validator.value[k] === undefined) {
+      throw new Error(`Validator error: Unexpected field \`${k}\` in object`);
+    }
+  }
+}
+
+function validateUnion(
+  validator: Extract<ValidatorJSON, { type: "union" }>,
+  value: Value,
+  idLookup?: (id: string) => string | undefined,
+): void {
+  for (const v of validator.value) {
+    try {
+      validateValidator(v, value, idLookup);
+      return;
+    } catch {}
+  }
+  throw new Error(
+    `Validator error: Expected one of ${validator.value.map((v) => v.type).join(", ")}, got \`${JSON.stringify(convexToJson(value))}\``,
+  );
+}
+
 export function validateValidator(
   validator: ValidatorJSON,
   value: Value,
@@ -167,140 +221,43 @@ export function validateValidator(
 ): void {
   switch (validator.type) {
     case "null":
-      if (value !== null) {
-        throw new Error(
-          `Validator error: Expected \`null\`, got \`${formatValueForError(value)}\``,
-        );
-      }
-      return;
-
+      return assertType(value === null, "null", value);
     case "number":
-      if (typeof value !== "number") {
-        throw new Error(
-          `Validator error: Expected \`number\`, got \`${formatValueForError(value)}\``,
-        );
-      }
-      return;
-
+      return assertType(typeof value === "number", "number", value);
     case "bigint":
-      if (typeof value !== "bigint") {
-        throw new Error(
-          `Validator error: Expected \`bigint\`, got \`${formatValueForError(value)}\``,
-        );
-      }
-      return;
-
+      return assertType(typeof value === "bigint", "bigint", value);
     case "boolean":
-      if (typeof value !== "boolean") {
-        throw new Error(
-          `Validator error: Expected \`boolean\`, got \`${formatValueForError(value)}\``,
-        );
-      }
-      return;
-
+      return assertType(typeof value === "boolean", "boolean", value);
     case "string":
-      if (typeof value !== "string") {
-        throw new Error(
-          `Validator error: Expected \`string\`, got \`${formatValueForError(value)}\``,
-        );
-      }
-      return;
-
+      return assertType(typeof value === "string", "string", value);
     case "bytes":
-      if (!(value instanceof ArrayBuffer)) {
-        throw new Error(
-          `Validator error: Expected \`ArrayBuffer\`, got \`${formatValueForError(value)}\``,
-        );
-      }
-      return;
-
+      return assertType(value instanceof ArrayBuffer, "ArrayBuffer", value);
     case "any":
       return;
-
     case "literal":
-      if (value !== validator.value) {
-        throw new Error(
-          `Validator error: Expected \`${formatValueForError(validator.value)}\`, got \`${formatValueForError(value)}\``,
-        );
-      }
-      return;
-
+      return assertType(
+        value === validator.value,
+        formatValueForError(validator.value),
+        value,
+      );
     case "id":
-      if (typeof value !== "string") {
+      assertType(typeof value === "string", "string", value);
+      if (tableNameFromId(value as string, idLookup) !== validator.tableName) {
         throw new Error(
-          `Validator error: Expected \`string\`, got \`${formatValueForError(value)}\``,
-        );
-      }
-      if (tableNameFromId(value, idLookup) !== validator.tableName) {
-        throw new Error(
-          `Validator error: Expected ID for table "${validator.tableName}", got \`${value}\``,
+          `Validator error: Expected ID for table "${validator.tableName}", got \`${String(value)}\``,
         );
       }
       return;
-
     case "array":
-      if (!Array.isArray(value)) {
-        throw new Error(
-          `Validator error: Expected \`Array\`, got \`${formatValueForError(value)}\``,
-        );
-      }
-      for (const v of value) {
+      assertType(Array.isArray(value), "Array", value);
+      for (const v of value as Value[]) {
         validateValidator(validator.value, v, idLookup);
       }
       return;
-
-    case "union": {
-      let isValid = false;
-      for (const v of validator.value) {
-        try {
-          validateValidator(v, value, idLookup);
-          isValid = true;
-          break;
-        } catch {}
-      }
-      if (!isValid) {
-        throw new Error(
-          `Validator error: Expected one of ${validator.value.map((v) => v.type).join(", ")}, got \`${JSON.stringify(convexToJson(value))}\``,
-        );
-      }
-      return;
-    }
-
+    case "union":
+      return validateUnion(validator, value, idLookup);
     case "object":
-      if (typeof value !== "object") {
-        throw new Error(
-          `Validator error: Expected \`object\`, got \`${formatValueForError(value)}\``,
-        );
-      }
-      if (!isSimpleObject(value)) {
-        throw new Error(
-          `Validator error: Expected a plain old JavaScript \`object\`, got \`${formatValueForError(value)}\``,
-        );
-      }
-      {
-        const obj = value as Record<string, Value | undefined>;
-        for (const [k, { fieldType, optional }] of Object.entries(
-          validator.value,
-        )) {
-          if (obj[k] === undefined) {
-            if (!optional) {
-              throw new Error(
-                `Validator error: Missing required field \`${k}\` in object`,
-              );
-            }
-          } else {
-            validateValidator(fieldType, obj[k]!, idLookup);
-          }
-        }
-        for (const k of Object.keys(obj)) {
-          if (validator.value[k] === undefined) {
-            throw new Error(
-              `Validator error: Unexpected field \`${k}\` in object`,
-            );
-          }
-        }
-      }
-      return;
+      return validateObject(validator, value, idLookup);
   }
 }
 

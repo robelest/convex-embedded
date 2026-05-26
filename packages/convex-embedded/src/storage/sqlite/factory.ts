@@ -1582,6 +1582,23 @@ export async function createSqliteStorage(input: {
       if (statements.length === 0) return;
       await driver.executeBatch(statements);
     },
+    async reStampAnonymousIdentity(identityKey: string): Promise<string[]> {
+      const changed: string[] = [];
+      for (const route of await listTableRoutes(driver)) {
+        if (route.table_name.startsWith("_")) continue;
+        const quoted = quoteIdentifier(route.physical_table_name);
+        const counts = await driver.query<{ n: number }>(
+          `SELECT COUNT(*) AS n FROM ${quoted} WHERE identity_key IS NULL`,
+        );
+        if ((counts[0]?.n ?? 0) === 0) continue;
+        await driver.execute(
+          `UPDATE ${quoted} SET identity_key = ? WHERE identity_key IS NULL`,
+          [identityKey],
+        );
+        changed.push(route.table_name);
+      }
+      return changed;
+    },
     async listDocuments(
       tableName: string,
       opts: ReadOptions = {},

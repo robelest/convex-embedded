@@ -141,6 +141,7 @@ export interface QueryableAdapter extends StorageAdapter {
   vectorSearch(args: VectorSearchArgs): Promise<StoredDocument[] | null>;
   hasDocuments(table: string): Promise<boolean | null>;
   applySchemaOps?(table: string, ops: readonly SchemaOp[]): Promise<void>;
+  reStampAnonymousIdentity?(identityKey: string): Promise<string[]>;
 }
 
 /**
@@ -200,6 +201,12 @@ export interface SqlStorageAdapter {
   vectorSearch(args: VectorSearchArgs): Promise<StoredDocument[] | null>;
   hasAnyDocuments(tableName: string): Promise<boolean>;
   applySchemaOps(tableName: string, ops: readonly SchemaOp[]): Promise<void>;
+  /**
+   * Re-stamp every user-table row whose `identity_key` is NULL to `identityKey`
+   * (the first-login anonymous → identity move). Returns the logical table names
+   * that had rows updated.
+   */
+  reStampAnonymousIdentity(identityKey: string): Promise<string[]>;
   getBlobs(): Promise<Array<{ id: string; blob: Blob }>>;
   getBlob(id: string): Promise<Blob | null>;
   commit(batch: WriteBatch): Promise<void>;

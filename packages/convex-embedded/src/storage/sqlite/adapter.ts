@@ -177,6 +177,11 @@ export class SqliteAdapter implements QueryableAdapter {
     return impl.applySchemaOps(table, ops);
   }
 
+  async reStampAnonymousIdentity(identityKey: string): Promise<string[]> {
+    const impl = await this.ready();
+    return impl.reStampAnonymousIdentity(identityKey);
+  }
+
   async close(): Promise<void> {
     const impl = await this.ready();
     await impl.close();

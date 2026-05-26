@@ -202,6 +202,22 @@ const SYSTEM_INDEX_DEFINITIONS: Record<
   ],
 };
 
+/**
+ * Runtime system tables kept in memory. The store's push-down read path never
+ * serves `_`-prefixed tables (see `store.ts` `isSystemTable`), so these must be
+ * hydrated eagerly at open; user tables hydrate lazily / read from the store
+ * directly. The `_search_*` / `_vector_*` / `_convex_sqlite_*` /
+ * `_embedded_query_cache*` tables are storage-adapter-internal (never queried as
+ * runtime tables) and are intentionally excluded. A completeness test guards
+ * this list against the store/adapter system-table set.
+ */
+export const RUNTIME_SYSTEM_TABLES: readonly string[] = [
+  ...Object.keys(SYSTEM_INDEX_DEFINITIONS),
+  "_resolve_auth_state",
+  "_scheduled_functions",
+  "_storage",
+];
+
 export interface DatabaseCommitResult {
   timestamp: Timestamp;
   tablesWritten: Set<string>;
@@ -344,6 +360,9 @@ export class Database {
   /** Pending write ids grouped by table for each transaction level. */
   private _writeTables: Array<Map<string, Set<string>>> = [];
 
+  /** Dedups concurrent `hydrate()` calls with the same scope. */
+  private _hydrationInFlight = new Map<string, Promise<void>>();
+
   /** Serializes async-persisted commits so SQLite writes apply in order. */
   private _pendingPersistChain: Promise<void> = Promise.resolve();
 
@@ -447,7 +466,14 @@ export class Database {
    */
   async hydrate(options?: { tables?: string[] }): Promise<void> {
     if (this._storage === null) return;
-    return withSpan("convex-embedded.db.hydrate", async (span) => {
+    const scopeKey = options?.tables
+      ? [...options.tables].sort().join(",")
+      : "__all__";
+    const inFlight = this._hydrationInFlight.get(scopeKey);
+    if (inFlight !== undefined) {
+      return inFlight;
+    }
+    const promise = withSpan("convex-embedded.db.hydrate", async (span) => {
       const started = globalThis.performance?.now?.() ?? Date.now();
 
       const tableNames = options?.tables;
@@ -546,6 +572,29 @@ export class Database {
         `hydrate: docs=${documents.length}, scope=${tableNames?.length ? tableNames.join(",") : "all"}, blobs=lazy, fetch=${(fetched - started).toFixed(1)}ms total=${(ended - started).toFixed(1)}ms`,
       );
     });
+    this._hydrationInFlight.set(scopeKey, promise);
+    try {
+      await promise;
+    } finally {
+      if (this._hydrationInFlight.get(scopeKey) === promise) {
+        this._hydrationInFlight.delete(scopeKey);
+      }
+    }
+  }
+
+  /**
+   * Hydrate only the runtime's system tables (the open path). User tables are
+   * left for lazy on-demand hydration and are read directly from the store
+   * (push-down). This only applies to queryable (SQL) storage where reads can be
+   * served without an in-memory copy; on non-queryable storage there is no
+   * push-down, so fall back to full hydration.
+   */
+  async hydrateSystemTables(): Promise<void> {
+    if (this._storage === null) return;
+    if (!this._store.isQueryable()) {
+      return this.hydrate();
+    }
+    return this.hydrate({ tables: [...RUNTIME_SYSTEM_TABLES] });
   }
 
   isTableHydrationAttempted(tableName: string): boolean {
@@ -553,7 +602,14 @@ export class Database {
   }
 
   tableHydrated(tableName: string): Promise<void> {
-    if (this._storage === null || this._fullyHydrated) {
+    if (
+      this._storage === null ||
+      this._fullyHydrated ||
+      // Queryable (SQL) user tables are served by push-down reads, so a reader
+      // never needs to wait for an in-memory hydrate that will not happen under
+      // lazy hydration. Without this the per-table query gate would hang.
+      this._isQueryableTable(tableName)
+    ) {
       return Promise.resolve();
     }
     return this._ensureTableHydrationEntry(tableName);
@@ -1243,6 +1299,41 @@ export class Database {
   }
 
   /**
+   * Re-stamp anonymous (`identity_key IS NULL`) rows that live only in SQLite —
+   * the in-memory {@link migrateAnonymousDataToIdentity} pass cannot see them
+   * because user tables are SQLite-as-truth and never bulk-hydrated. Returns the
+   * logical tables changed; their committed cache is evicted so reads re-fetch.
+   */
+  async reStampAnonymousUserTablesInStorage(
+    identityKey: string,
+  ): Promise<string[]> {
+    const adapter = this._storage as
+      | (StorageAdapter & {
+          reStampAnonymousIdentity?: (key: string) => Promise<string[]>;
+        })
+      | null;
+    if (!adapter?.reStampAnonymousIdentity) {
+      return [];
+    }
+    const changed = await adapter.reStampAnonymousIdentity(identityKey);
+    for (const tableName of changed) {
+      this._evictCommittedTable(tableName);
+    }
+    return changed;
+  }
+
+  private _evictCommittedTable(tableName: string): void {
+    const ids = this._tableDocuments.get(tableName);
+    if (!ids) {
+      return;
+    }
+    for (const id of ids) {
+      this._documents.delete(id as DocumentId);
+    }
+    this._tableDocuments.delete(tableName);
+  }
+
+  /**
    * If `idString` is a valid ID that belongs to `table`, return it.
    * Otherwise return `null`.
    */
@@ -1474,6 +1565,38 @@ export class Database {
       }
     }
     return this.getDocumentsForTable(tableName);
+  }
+
+  async listDocumentsForScopeAsync(
+    tableName: TableName,
+    scopeArgs: Record<string, unknown>,
+  ): Promise<StoredDocument[] | null> {
+    const scopeKeys = Object.keys(scopeArgs);
+    if (scopeKeys.length === 0) {
+      return this.listDocumentsAsync(tableName);
+    }
+    const wantedKeys = new Set(scopeKeys);
+    const index = this.getIndexDefinitions(tableName).find((definition) => {
+      if (definition.fields.length < scopeKeys.length) return false;
+      return definition.fields
+        .slice(0, scopeKeys.length)
+        .every((field) => wantedKeys.has(field));
+    });
+    if (index === undefined) {
+      return null;
+    }
+    const source: SerializedQuery["source"] = {
+      type: "IndexRange",
+      indexName: `${tableName}.${index.indexName}`,
+      range: index.fields.slice(0, scopeKeys.length).map((field) => ({
+        type: "Eq",
+        fieldPath: field,
+        value: scopeArgs[field] as JSONValue,
+      })),
+      order: null,
+    };
+    const evaluation = await this._readOptimizedSourceAsync(source);
+    return evaluation?.results ?? null;
   }
 
   getCommittedTableCount(tableName: string): number {
@@ -2468,10 +2591,85 @@ export class Database {
       this._isQueryableTable(sourceTable) &&
       !this.isTableHydrationAttempted(sourceTable)
     ) {
-      await this.hydrate({ tables: [sourceTable] });
+      const overlaid = await this._readPushdownWithPendingOverlay(
+        source,
+        limit,
+        seek,
+      );
+      if (overlaid !== null) {
+        return overlaid;
+      }
     }
 
     return this._readOptimizedSource(source, limit);
+  }
+
+  private async _readPushdownWithPendingOverlay(
+    source: SerializedQuery["source"],
+    limit?: number | null,
+    seek?: SeekBound,
+  ): Promise<{
+    results: StoredDocument[];
+    fieldPathsToSortBy: string[];
+    order: "asc" | "desc";
+    presorted: boolean;
+  } | null> {
+    if (source.type === "Search") {
+      return null;
+    }
+    const tableName = sourceTableName(source);
+    const indexFields =
+      source.type === "IndexRange"
+        ? (this._getIndexDefinitions(splitIndexName(source.indexName)[0]).find(
+            (entry) => entry.indexName === splitIndexName(source.indexName)[1],
+          )?.fields ?? null)
+        : null;
+    const committed = await this._store.source(source, {
+      limit,
+      indexFields: indexFields ?? undefined,
+      activeIdentityKey: this._activeIdentityKey,
+      seek,
+    });
+    if (committed === null) {
+      return null;
+    }
+    const { shadowedIds } = this._getPendingTableState(tableName);
+    const rangePredicate =
+      source.type === "IndexRange"
+        ? this._buildRangePredicate(source.range)
+        : () => true;
+    const byId = new Map<string, StoredDocument>();
+    for (const doc of committed) {
+      if (!shadowedIds.has(doc._id as string)) {
+        byId.set(doc._id as string, doc);
+      }
+    }
+    for (const { doc } of this._getVisiblePendingDocs(tableName)) {
+      if (rangePredicate(doc)) {
+        byId.set(doc._id as string, doc);
+      }
+    }
+    const merged = this._stripIdentityScopes([...byId.values()]);
+    const sortIndexName =
+      source.type === "IndexRange"
+        ? splitIndexName(source.indexName)[1]
+        : "by_creation_time";
+    const sortFields =
+      source.type === "IndexRange" && indexFields
+        ? indexFields
+        : ["_creationTime"];
+    merged.sort((left, right) =>
+      this._compareDocsForIndex(sortIndexName, sortFields, left, right),
+    );
+    if ((source.order ?? "asc") === "desc") {
+      merged.reverse();
+    }
+    return {
+      results: merged,
+      fieldPathsToSortBy: [],
+      order: source.order ?? "asc",
+      presorted: true,
+    };
   }
 
   private _readOptimizedQuery(
@@ -2666,6 +2864,22 @@ export class Database {
         return this._stripIdentityScopes(
           this._filterOrderedDocs(orderedDocs, filters, limit),
         );
+      }
+    }
+
+    if (
+      (query.source.type === "FullTableScan" ||
+        query.source.type === "IndexRange") &&
+      this._hasPendingWritesForAnySource(query.source) &&
+      this._isQueryableTable(queryTable) &&
+      !this.isTableHydrationAttempted(queryTable)
+    ) {
+      const overlaid = await this._readPushdownWithPendingOverlay(
+        query.source,
+        limit,
+      );
+      if (overlaid !== null) {
+        return this._filterOrderedDocs(overlaid.results, filters, limit);
       }
     }
 

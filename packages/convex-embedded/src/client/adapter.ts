@@ -1797,70 +1797,75 @@ export function patchRoutedConvexClient(input: {
 
   const patchable = input.client as unknown as PatchableConvexClient;
 
-  patchable.mutation = function patchedMutation(
-    ...args: unknown[]
-  ): Promise<unknown> {
-    if (pipeline) {
-      try {
-        const ref = args[0];
-        const argsObj = (args[1] ?? {}) as Record<string, unknown>;
-        const refName = input.getRefName(ref);
-        const explicit = getExplicitOptimistic(ref);
-        const updates = explicit
-          ? explicit(
-              { getQuery: pipeline.getCurrentValue.bind(pipeline) },
-              argsObj,
-            )
-          : (() => {
-              const effect = deriveOptimisticEffect({
-                refName,
-                args: argsObj,
-                knownTables: input.knownTables,
-              });
-              if (!effect) return [];
-              return effectToTransitions(effect, cache!);
-            })();
-        if (updates.length > 0) {
-          pipeline.applyOptimisticTransition(updates);
-        }
-      } catch (error) {
-        log.warn("optimistic apply failed:", error);
+  const applyOptimisticForMutation = (
+    ref: unknown,
+    argsObj: Record<string, unknown>,
+  ): void => {
+    if (!pipeline) return;
+    try {
+      const refName = input.getRefName(ref);
+      const explicit = getExplicitOptimistic(ref);
+      const updates = explicit
+        ? explicit(
+            { getQuery: pipeline.getCurrentValue.bind(pipeline) },
+            argsObj,
+          )
+        : (() => {
+            const effect = deriveOptimisticEffect({
+              refName,
+              args: argsObj,
+              knownTables: input.knownTables,
+            });
+            if (!effect) return [];
+            return effectToTransitions(effect, cache!);
+          })();
+      if (updates.length > 0) {
+        pipeline.applyOptimisticTransition(updates);
       }
+    } catch (error) {
+      log.warn("optimistic apply failed:", error);
     }
+  };
 
-    return waitUntilReady(async () => {
-      const route = input.planMutation(args[0]);
-      if (route.kind === "error") {
-        throw route.error;
-      }
-      if (route.kind === "local") {
-        try {
-          return await input.executeLocalMutation(
-            args[0],
-            (args[1] ?? {}) as Record<string, unknown>,
-            route.enqueueForReplay,
-          );
-        } catch (error) {
-          throw input.asError(error);
-        }
-      }
-
+  const dispatchMutation = async (args: unknown[]): Promise<unknown> => {
+    const route = input.planMutation(args[0]);
+    if (route.kind === "error") throw route.error;
+    if (route.kind === "local") {
       try {
-        assertRemotePlanOnline(route, input.connectivity);
-        if (!remoteClient) {
-          throw new ConvexError({
-            code: "REMOTE_CLIENT_UNAVAILABLE",
-            message:
-              "[convex-embedded] Remote mutation execution was requested, but no remote client is configured. " +
-              "Add ClientOptions.remote or remove remoteOnly().",
-            kind: "mutation",
-          });
-        }
-        return await createRemoteCaller("mutation")(...args);
+        return await input.executeLocalMutation(
+          args[0],
+          (args[1] ?? {}) as Record<string, unknown>,
+          route.enqueueForReplay,
+        );
       } catch (error) {
         throw input.asError(error);
       }
-    });
+    }
+    try {
+      assertRemotePlanOnline(route, input.connectivity);
+      if (!remoteClient) {
+        throw new ConvexError({
+          code: "REMOTE_CLIENT_UNAVAILABLE",
+          message:
+            "[convex-embedded] Remote mutation execution was requested, but no remote client is configured. " +
+            "Add ClientOptions.remote or remove remoteOnly().",
+          kind: "mutation",
+        });
+      }
+      return await createRemoteCaller("mutation")(...args);
+    } catch (error) {
+      throw input.asError(error);
+    }
+  };
+
+  patchable.mutation = function patchedMutation(
+    ...args: unknown[]
+  ): Promise<unknown> {
+    applyOptimisticForMutation(
+      args[0],
+      (args[1] ?? {}) as Record<string, unknown>,
+    );
+    return waitUntilReady(() => dispatchMutation(args));
   };
 
   patchable.query = function patchedQuery(

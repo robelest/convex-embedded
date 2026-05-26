@@ -1579,7 +1579,7 @@ export function patchRoutedConvexClient(input: {
     ) => Array<{ refName: string; args: unknown; value: unknown }>
   >();
 
-  const lookupExplicitOptimistic = (
+  const getExplicitOptimistic = (
     ref: unknown,
   ):
     | ((
@@ -1805,7 +1805,7 @@ export function patchRoutedConvexClient(input: {
         const ref = args[0];
         const argsObj = (args[1] ?? {}) as Record<string, unknown>;
         const refName = input.getRefName(ref);
-        const explicit = lookupExplicitOptimistic(ref);
+        const explicit = getExplicitOptimistic(ref);
         const updates = explicit
           ? explicit(
               { getQuery: pipeline.getCurrentValue.bind(pipeline) },

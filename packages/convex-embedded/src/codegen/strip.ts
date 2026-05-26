@@ -59,7 +59,7 @@ export function stripRemoteOnlyExports(input: StripInput): StripResult {
     detectScriptKind(fileName),
   );
 
-  const remoteOnlyNames = findRemoteOnlyLocalNames(sourceFile);
+  const remoteOnlyNames = gatherRemoteOnlyLocalNames(sourceFile);
   if (
     remoteOnlyNames.named.size === 0 &&
     remoteOnlyNames.namespaced.size === 0
@@ -158,7 +158,9 @@ interface RemoteOnlyNames {
   namespaced: Set<string>;
 }
 
-function findRemoteOnlyLocalNames(sourceFile: ts.SourceFile): RemoteOnlyNames {
+function gatherRemoteOnlyLocalNames(
+  sourceFile: ts.SourceFile,
+): RemoteOnlyNames {
   const named = new Set<string>();
   const namespaced = new Set<string>();
   for (const stmt of sourceFile.statements) {

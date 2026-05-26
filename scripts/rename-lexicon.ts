@@ -94,6 +94,14 @@ const FAMILIES: ReadonlyArray<RenameFamily> = [
       ["makeComparable", "toComparable"],
     ],
   },
+  {
+    id: 6,
+    name: "retrieval singletons: find/lookup → get/gather",
+    renames: [
+      ["findRemoteOnlyLocalNames", "gatherRemoteOnlyLocalNames"],
+      ["lookupExplicitOptimistic", "getExplicitOptimistic"],
+    ],
+  },
 ];
 
 function repoRoot(): string {

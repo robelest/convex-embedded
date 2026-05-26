@@ -22,7 +22,7 @@
     "!dist/component/_virtual/**",
     "src/auth",
     "src/client/index.ts",
-    "src/client/prefetch.ts",
+    "src/client/preload.ts",
     "src/codegen",
     "src/component",
     "src/crdt",

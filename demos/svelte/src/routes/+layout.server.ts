@@ -1,9 +1,5 @@
 import { api } from "$convex/_generated/api.js";
-import type { Doc } from "$convex/_generated/dataModel";
-import {
-  createEmbeddedPrefetch,
-  emptyEmbeddedPrefetch,
-} from "@robelest/convex-embedded/client";
+import { emptyPreloaded, preloadQuery } from "@robelest/convex-embedded/client";
 
 import type { LayoutServerLoad } from "./$types";
 
@@ -21,33 +17,23 @@ export const load: LayoutServerLoad = async ({ locals }) => {
   const authToken = locals.authToken ?? null;
   const authIdentityKey = locals.authIdentityKey ?? "user_alice";
 
-  let projects: Doc<"projects">[] = [];
-  let embedded = emptyEmbeddedPrefetch(authIdentityKey);
+  let preloadedProjects = emptyPreloaded(api.projects.list, {});
 
   if (convexUrl) {
     try {
-      const result = await createEmbeddedPrefetch({
-        url: convexUrl,
-        token: authToken,
-        identityKey: authIdentityKey,
-        tables: {
-          projects: api.projects.bind,
-        },
-      });
-      embedded = result.embedded;
-      projects = (result.snapshots.projects ??
-        []) as unknown as Doc<"projects">[];
+      preloadedProjects = await preloadQuery(
+        api.projects.list,
+        {},
+        { url: convexUrl, token: authToken },
+      );
     } catch (error) {
-      console.warn("[svelte-demo] failed to prefetch SSR data", error);
+      console.warn("[svelte-demo] failed to preload SSR data", error);
     }
   }
 
   return {
     convexUrl: convexUrl ?? null,
-    embedded,
-    prefetch: {
-      projects,
-    },
+    preloadedProjects,
     auth: {
       token: authToken,
       identityKey: authIdentityKey,

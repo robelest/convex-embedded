@@ -104,7 +104,7 @@ export function installInMemoryTracing(
     },
     getMetrics: async (): Promise<BufferedMetricPoint[]> => {
       await meterProvider.forceFlush();
-      return collectExportedMetrics(metricExporter);
+      return gatherExportedMetrics(metricExporter);
     },
     close: async (): Promise<void> => {
       context.disable();
@@ -120,7 +120,7 @@ export function installInMemoryTracing(
   };
 }
 
-function collectExportedMetrics(
+function gatherExportedMetrics(
   exporter: InMemoryMetricExporter,
 ): BufferedMetricPoint[] {
   const out: BufferedMetricPoint[] = [];

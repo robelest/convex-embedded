@@ -118,7 +118,7 @@ export function canonicalizeRelativeModuleId(
 }
 
 /** @internal — codegen-internal import-statement scanner. */
-export function collectImports(
+export function extractImports(
   currentModuleId: string,
   source: string,
 ): Map<string, { moduleId: string; exportName: string }> {
@@ -185,7 +185,7 @@ export async function resolveEmbeddedTableName(input: {
  *
  * @internal
  */
-export async function collectRemoteManifest(input: {
+export async function fetchRemoteManifest(input: {
   convexRoot: string;
   moduleId: string;
   source: string;
@@ -193,7 +193,7 @@ export async function collectRemoteManifest(input: {
   const routeModes: Record<string, "local" | "remote"> = {};
   const tables: GeneratedRemoteManifest["tables"] = {};
   let uploadUrl: string | undefined;
-  const imports = collectImports(input.moduleId, input.source);
+  const imports = extractImports(input.moduleId, input.source);
 
   const bindMatch = input.source.match(
     /export\s+const\s+bind\s*=\s*bindTable\s*\(\s*(\w+)\s*(?:,|\))/,

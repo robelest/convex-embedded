@@ -1142,7 +1142,7 @@ export class QueryEngine {
       state = cached.state;
     } else {
       state = buildVectorIndexState({
-        docs: this._collectDocs(tableName).map((doc) => ({
+        docs: this._readDocs(tableName).map((doc) => ({
           doc: doc as StoredDocument,
           identityKey: null,
         })),
@@ -1304,7 +1304,7 @@ export class QueryEngine {
     source: Extract<Source, { type: "FullTableScan" }>,
   ): SourceEvaluation {
     return {
-      results: this._collectDocs(source.tableName),
+      results: this._readDocs(source.tableName),
       fieldPathsToSortBy: ["_creationTime", "_id"],
       order: source.order ?? "asc",
     };
@@ -1322,7 +1322,7 @@ export class QueryEngine {
     const rangePredicate = this._buildRangePredicate(source.range);
 
     return {
-      results: this._collectDocs(tableName, rangePredicate),
+      results: this._readDocs(tableName, rangePredicate),
       fieldPathsToSortBy: fields,
       order: source.order ?? "asc",
     };
@@ -1350,7 +1350,7 @@ export class QueryEngine {
       state = cached.state;
     } else {
       state = buildSearchIndexState({
-        docs: this._collectDocs(tableName).map((doc) => ({
+        docs: this._readDocs(tableName).map((doc) => ({
           doc: doc as StoredDocument,
           identityKey: null,
         })),
@@ -1371,7 +1371,7 @@ export class QueryEngine {
     };
   }
 
-  private _collectDocs(
+  private _readDocs(
     tableName: string,
     predicate: (doc: StoredDocument) => boolean = () => true,
   ): QueryResults {

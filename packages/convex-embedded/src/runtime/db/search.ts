@@ -374,7 +374,7 @@ function intersectSets(left: Set<string>, right: Set<string>): Set<string> {
   return result;
 }
 
-function collectCandidateIds(
+function gatherCandidateIds(
   state: SearchIndexState,
   plan: SearchQueryPlan,
 ): {
@@ -734,7 +734,7 @@ export function executeSearch(
   if (plan.finalPrefix === null) {
     return [];
   }
-  const { candidateIds, termGroups } = collectCandidateIds(state, plan);
+  const { candidateIds, termGroups } = gatherCandidateIds(state, plan);
   if (candidateIds.size === 0 || termGroups.length === 0) {
     return [];
   }
@@ -775,8 +775,8 @@ export function executeOverlaySearch(
     return [];
   }
 
-  const baseCandidates = collectCandidateIds(baseState, plan);
-  const overlayCandidates = collectCandidateIds(overlay.state, plan);
+  const baseCandidates = gatherCandidateIds(baseState, plan);
+  const overlayCandidates = gatherCandidateIds(overlay.state, plan);
   const termGroups =
     baseCandidates.termGroups.length > 0
       ? baseCandidates.termGroups

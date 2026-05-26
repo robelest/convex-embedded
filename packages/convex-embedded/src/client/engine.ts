@@ -965,10 +965,7 @@ function createHydrationAwareOnlineHandler(input: {
   };
 }
 
-function collectReferencedTables(
-  field: unknown,
-  referenced: Set<string>,
-): void {
+function gatherReferencedTables(field: unknown, referenced: Set<string>): void {
   const unwrapped = unwrapSchemaField(field);
   if (typeof unwrapped !== "object" || unwrapped === null) {
     return;
@@ -982,10 +979,10 @@ function collectReferencedTables(
     }
     return;
   } else if (validator.kind === "array") {
-    collectReferencedTables(validator.element, referenced);
+    gatherReferencedTables(validator.element, referenced);
     return;
   } else if (validator.kind === "record") {
-    collectReferencedTables(validator.value, referenced);
+    gatherReferencedTables(validator.value, referenced);
     return;
   } else if (validator.kind === "object") {
     const fields = validator.fields as Record<string, unknown> | undefined;
@@ -993,7 +990,7 @@ function collectReferencedTables(
       return;
     }
     for (const nested of Object.values(fields)) {
-      collectReferencedTables(nested, referenced);
+      gatherReferencedTables(nested, referenced);
     }
     return;
   } else if (validator.kind === "union") {
@@ -1002,11 +999,11 @@ function collectReferencedTables(
       return;
     }
     for (const member of members) {
-      collectReferencedTables(member, referenced);
+      gatherReferencedTables(member, referenced);
     }
     return;
   } else if (validator.kind === "optional") {
-    collectReferencedTables(validator.field, referenced);
+    gatherReferencedTables(validator.field, referenced);
     return;
   }
 }
@@ -1021,7 +1018,7 @@ function orderTablesByDependencies(
       const schema = tables[tableName]?.schema;
       if (schema) {
         for (const field of Object.values(schema.getShape())) {
-          collectReferencedTables(field, referenced);
+          gatherReferencedTables(field, referenced);
         }
       }
       referenced.delete(tableName);
@@ -1069,7 +1066,7 @@ function rootTablesByDependencies(
         return true;
       }
       for (const field of Object.values(schema.getShape())) {
-        collectReferencedTables(field, referenced);
+        gatherReferencedTables(field, referenced);
       }
       return referenced.size === 0;
     })
@@ -1175,7 +1172,7 @@ function hasResolvableReferences(
   return true;
 }
 
-function collectMissingReferences(
+function gatherMissingReferences(
   value: unknown,
   field: unknown,
   hasDocumentId: (id: string) => boolean,
@@ -1208,7 +1205,7 @@ function collectMissingReferences(
   if (validator.kind === "array") {
     if (Array.isArray(value)) {
       for (const entry of value) {
-        collectMissingReferences(
+        gatherMissingReferences(
           entry,
           validator.element,
           hasDocumentId,
@@ -1222,7 +1219,7 @@ function collectMissingReferences(
   if (validator.kind === "record") {
     if (typeof value === "object" && value !== null && !Array.isArray(value)) {
       for (const entry of Object.values(value)) {
-        collectMissingReferences(
+        gatherMissingReferences(
           entry,
           validator.value,
           hasDocumentId,
@@ -1242,7 +1239,7 @@ function collectMissingReferences(
       return;
     }
     for (const [key, nestedField] of Object.entries(fields)) {
-      collectMissingReferences(
+      gatherMissingReferences(
         (value as Record<string, unknown>)[key],
         nestedField,
         hasDocumentId,
@@ -1263,7 +1260,7 @@ function collectMissingReferences(
         return;
       }
       for (const member of members) {
-        collectMissingReferences(
+        gatherMissingReferences(
           value,
           member,
           hasDocumentId,
@@ -1275,7 +1272,7 @@ function collectMissingReferences(
     return;
   }
   if (validator.kind === "optional") {
-    collectMissingReferences(
+    gatherMissingReferences(
       value,
       validator.field,
       hasDocumentId,
@@ -1299,7 +1296,7 @@ function getMissingReferences(input: {
   const getAliases = input.getAliases ?? (() => new Set<string>());
   for (const doc of input.docs) {
     for (const [fieldName, field] of Object.entries(input.schema.getShape())) {
-      collectMissingReferences(
+      gatherMissingReferences(
         doc[fieldName],
         field,
         input.hasDocumentId,
@@ -1382,7 +1379,7 @@ function isLocalUploadUrl(value: unknown): value is string {
   }
 }
 
-function collectCandidateStorageIds(
+function gatherCandidateStorageIds(
   value: unknown,
   seen = new Set<string>(),
 ): Set<string> {
@@ -1394,7 +1391,7 @@ function collectCandidateStorageIds(
   }
 
   if (Array.isArray(value)) {
-    value.forEach((entry) => collectCandidateStorageIds(entry, seen));
+    value.forEach((entry) => gatherCandidateStorageIds(entry, seen));
     return seen;
   }
 
@@ -1408,7 +1405,7 @@ function collectCandidateStorageIds(
   }
 
   Object.values(value).forEach((entry) =>
-    collectCandidateStorageIds(entry, seen),
+    gatherCandidateStorageIds(entry, seen),
   );
   return seen;
 }
@@ -2398,7 +2395,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     }
   }
 
-  async function collectUnmappedStorageDependencies(
+  async function gatherUnmappedStorageDependencies(
     args: Record<string, unknown>,
   ): Promise<StorageDependency[]> {
     if (!getStorageBlob || !getStorageMetadata) {
@@ -2406,7 +2403,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     }
 
     const dependencies: StorageDependency[] = [];
-    for (const candidate of collectCandidateStorageIds(args)) {
+    for (const candidate of gatherCandidateStorageIds(args)) {
       if (idMap.getRemoteId(candidate) !== null) {
         continue;
       }
@@ -2437,7 +2434,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     entry: PendingEntry,
     args: Record<string, unknown>,
   ): Promise<void> {
-    const dependencies = await collectUnmappedStorageDependencies(args);
+    const dependencies = await gatherUnmappedStorageDependencies(args);
     if (dependencies.length === 0) {
       return;
     }

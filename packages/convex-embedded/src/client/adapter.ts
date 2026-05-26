@@ -105,14 +105,14 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return prototype === null || prototype === Object.prototype;
 }
 
-function collectDocs(
+function readDocs(
   value: unknown,
   out: Array<Record<string, unknown>>,
   depth = 0,
 ): void {
   if (depth > 4) return;
   if (Array.isArray(value)) {
-    for (const item of value) collectDocs(item, out, depth + 1);
+    for (const item of value) readDocs(item, out, depth + 1);
     return;
   }
   if (!isPlainObject(value)) return;
@@ -124,7 +124,7 @@ function collectDocs(
   }
   for (const child of Object.values(value)) {
     if (Array.isArray(child) || isPlainObject(child)) {
-      collectDocs(child, out, depth + 1);
+      readDocs(child, out, depth + 1);
     }
   }
 }
@@ -781,7 +781,7 @@ class CachePipeline {
     if (!tableName || tableName.startsWith("_")) return;
     const collectStart = nowMs();
     const docs: Array<Record<string, unknown>> = [];
-    collectDocs(value, docs);
+    readDocs(value, docs);
     if (docs.length === 0) return;
 
     let changed: Array<Record<string, unknown>> = docs;

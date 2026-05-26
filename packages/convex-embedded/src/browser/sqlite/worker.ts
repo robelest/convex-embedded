@@ -64,7 +64,7 @@ function invariantAdapterReady(): SqlStorageAdapter {
   return storageAdapter;
 }
 
-async function collectRows(sql: string, params?: Array<unknown>) {
+async function readRows(sql: string, params?: Array<unknown>) {
   const ready = invariantReady();
   return withRetryOps(async () => {
     const rows: Array<Record<string, unknown>> = [];
@@ -94,7 +94,7 @@ async function collectRows(sql: string, params?: Array<unknown>) {
 }
 
 async function execute(sql: string, params?: Array<unknown>) {
-  void (await collectRows(sql, params));
+  void (await readRows(sql, params));
 }
 
 async function withSerialized<T>(operation: () => Promise<T>): Promise<T> {
@@ -169,7 +169,7 @@ async function handleInit(name: string) {
           sql: string,
           params?: readonly unknown[],
         ): Promise<T[]> {
-          return collectRows(sql, params ? [...params] : undefined) as Promise<
+          return readRows(sql, params ? [...params] : undefined) as Promise<
             T[]
           >;
         },
@@ -202,7 +202,7 @@ async function handleQuery(input: {
   sql: string;
   params?: unknown[];
 }): Promise<Record<string, unknown>[]> {
-  return collectRows(input.sql, input.params);
+  return readRows(input.sql, input.params);
 }
 
 async function handleExecute(input: {
@@ -356,7 +356,7 @@ async function dispatch(message: StorageWorkerRequest) {
   }
 }
 
-function collectTransferables(result: unknown): Array<Transferable> {
+function gatherTransferables(result: unknown): Array<Transferable> {
   if (result === null) {
     return [];
   }
@@ -364,7 +364,7 @@ function collectTransferables(result: unknown): Array<Transferable> {
     return [result];
   }
   if (Array.isArray(result)) {
-    return result.flatMap((value) => collectTransferables(value));
+    return result.flatMap((value) => gatherTransferables(value));
   }
   if (typeof result === "object") {
     if (
@@ -394,7 +394,7 @@ self.addEventListener(
           result,
           timing: { queueWaitMs, execMs: performance.now() - startedAt },
         };
-        self.postMessage(response, collectTransferables(result));
+        self.postMessage(response, gatherTransferables(result));
       } catch (error) {
         const response: StorageWorkerResponse = {
           id: message.id,

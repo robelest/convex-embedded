@@ -75,7 +75,7 @@ export function buildVectorFilterSqlClauseGroups(
   if (filter === null) {
     return [];
   }
-  return collectFilterClauseGroups(filter, definition);
+  return gatherFilterClauseGroups(filter, definition);
 }
 
 function normalizeVector(values: number[]): {
@@ -197,7 +197,7 @@ function parseEqClause(
   };
 }
 
-function collectFilterClauses(
+function gatherFilterClauses(
   expression: VectorSearchExpression,
   definition: VectorIndexDefinition,
 ): VectorFilterClause[] {
@@ -220,7 +220,7 @@ function collectFilterClauses(
       );
     }
     return children.flatMap((child) =>
-      collectFilterClauses(child as VectorSearchExpression, definition),
+      gatherFilterClauses(child as VectorSearchExpression, definition),
     );
   }
 
@@ -229,7 +229,7 @@ function collectFilterClauses(
   );
 }
 
-function collectFilterClauseGroups(
+function gatherFilterClauseGroups(
   expression: VectorSearchExpression,
   definition: VectorIndexDefinition,
 ): VectorFilterSqlClauseGroup[] {
@@ -255,7 +255,7 @@ function collectFilterClauseGroups(
       {
         kind: "or",
         clauses: children.flatMap((child) =>
-          collectFilterClauses(child as VectorSearchExpression, definition),
+          gatherFilterClauses(child as VectorSearchExpression, definition),
         ),
       },
     ];
@@ -274,7 +274,7 @@ function buildVectorFilterPlan(
     return { kind: "all" };
   }
 
-  const clauses = collectFilterClauses(filter, definition);
+  const clauses = gatherFilterClauses(filter, definition);
   if (clauses.length > 64) {
     throw new Error("Vector search supports up to 64 filter expressions.");
   }

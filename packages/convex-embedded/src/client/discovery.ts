@@ -60,7 +60,7 @@ async function loadManifestTableSchema(input: {
   return exported?.schema;
 }
 
-function collectTableDependencies(
+function gatherTableDependencies(
   value: unknown,
   dependencies: Set<string>,
 ): void {
@@ -80,12 +80,12 @@ function collectTableDependencies(
 
   if (candidate.shape && typeof candidate.shape === "object") {
     for (const field of Object.values(candidate.shape)) {
-      collectTableDependencies(field, dependencies);
+      gatherTableDependencies(field, dependencies);
     }
   }
 
   if (candidate.validator !== undefined) {
-    collectTableDependencies(candidate.validator, dependencies);
+    gatherTableDependencies(candidate.validator, dependencies);
   }
 
   switch (candidate.kind) {
@@ -95,19 +95,19 @@ function collectTableDependencies(
       }
       return;
     case "array":
-      collectTableDependencies(candidate.element, dependencies);
+      gatherTableDependencies(candidate.element, dependencies);
       return;
     case "union":
       if (Array.isArray(candidate.members)) {
         for (const member of candidate.members) {
-          collectTableDependencies(member, dependencies);
+          gatherTableDependencies(member, dependencies);
         }
       }
       return;
     case "object":
       if (candidate.fields && typeof candidate.fields === "object") {
         for (const field of Object.values(candidate.fields)) {
-          collectTableDependencies(field, dependencies);
+          gatherTableDependencies(field, dependencies);
         }
       }
       return;
@@ -122,7 +122,7 @@ function sortDiscoveredTables<T extends DiscoveryTable>(
 
   for (const tableName of tableNames) {
     const dependencies = new Set<string>();
-    collectTableDependencies(tables[tableName]?.schema, dependencies);
+    gatherTableDependencies(tables[tableName]?.schema, dependencies);
     dependencies.delete(tableName);
     dependenciesByTable.set(
       tableName,

@@ -1,3 +1,4 @@
+import path from "node:path";
 /**
  * Type-aware lexicon codemod.
  *
@@ -15,7 +16,7 @@
  * to verify nothing references the old name as a string.
  */
 import { fileURLToPath } from "node:url";
-import path from "node:path";
+
 import { Project } from "ts-morph";
 
 interface RenameFamily {
@@ -43,7 +44,10 @@ const FAMILIES: ReadonlyArray<RenameFamily> = [
       ["collectText", "extractText"],
       ["collectTopLevelBindings", "extractTopLevelBindings"],
       ["collectTransferables", "gatherTransferables"],
-      ["collectUnmappedStorageDependencies", "gatherUnmappedStorageDependencies"],
+      [
+        "collectUnmappedStorageDependencies",
+        "gatherUnmappedStorageDependencies",
+      ],
       ["collectDocs", "readDocs"],
       ["collectRows", "readRows"],
     ],
@@ -56,12 +60,16 @@ function repoRoot(): string {
 
 function loadProject(): Project {
   const root = repoRoot();
+  // Anchor on the package tsconfig so the `@/...` path alias resolves and the
+  // language service can follow cross-file imports. Then pull in the rest of
+  // the monorepo's TS sources so renames propagate into consumers (tests,
+  // convex/, demos/, benchmarks/, scripts/) too.
   const project = new Project({
-    skipAddingFilesFromTsConfig: true,
+    tsConfigFilePath: `${root}/packages/convex-embedded/tsconfig.json`,
+    skipAddingFilesFromTsConfig: false,
     compilerOptions: { allowJs: false, noEmit: true },
   });
   project.addSourceFilesAtPaths([
-    `${root}/packages/convex-embedded/src/**/*.{ts,tsx}`,
     `${root}/packages/convex-embedded/tests/**/*.{ts,tsx}`,
     `${root}/tests/**/*.{ts,tsx}`,
     `${root}/benchmarks/**/*.{ts,tsx}`,
@@ -145,7 +153,9 @@ async function applyFamily(
   for (const [oldName, newName] of family.renames) {
     const decls = findDeclarations(project, oldName);
     if (decls.length === 0) {
-      process.stdout.write(`  ${oldName} → ${newName}: (no declaration found)\n`);
+      process.stdout.write(
+        `  ${oldName} → ${newName}: (no declaration found)\n`,
+      );
       missingCount++;
       continue;
     }

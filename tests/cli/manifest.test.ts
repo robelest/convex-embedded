@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { collectRemoteManifest } from "@embedded/codegen/manifest";
+import { fetchRemoteManifest } from "@embedded/codegen/manifest";
 import { describe, expect, it as base } from "@tests/testkit";
 
 const it = base.extend<{ convexRoot: string }>({
@@ -27,7 +27,7 @@ export const taskTable = embeddedTable("tasks", {});
       "utf8",
     );
 
-    const manifest = await collectRemoteManifest({
+    const manifest = await fetchRemoteManifest({
       convexRoot,
       moduleId: "features/tasks",
       source: `
@@ -60,7 +60,7 @@ export const tasks = embeddedTable("tasks", {});
       "utf8",
     );
 
-    const manifest = await collectRemoteManifest({
+    const manifest = await fetchRemoteManifest({
       convexRoot,
       moduleId: "tasks",
       source: `

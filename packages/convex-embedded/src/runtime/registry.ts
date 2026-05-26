@@ -390,7 +390,7 @@ export class RuntimeQueryObserverRegistry<TMeta> {
     changesOrTables: Set<string> | ProtocolChange[],
   ): RuntimeQueryObserver<TMeta>[] {
     const relevantTokens =
-      this._subscriptions.collectRelevantTokens(changesOrTables);
+      this._subscriptions.gatherRelevantTokens(changesOrTables);
     return [...relevantTokens]
       .map((token) => this._entries.get(token)?.observer)
       .filter(

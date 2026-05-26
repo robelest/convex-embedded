@@ -99,7 +99,7 @@ export function stripRemoteOnlyExports(input: StripInput): StripResult {
     };
   }
 
-  const topLevelBindings = collectTopLevelBindings(sourceFile);
+  const topLevelBindings = extractTopLevelBindings(sourceFile);
 
   let removedBindings: Set<string>;
   let iterations = 0;
@@ -243,7 +243,7 @@ interface TopLevelBinding {
   isSideEffectImport: boolean;
 }
 
-function collectTopLevelBindings(
+function extractTopLevelBindings(
   sourceFile: ts.SourceFile,
 ): Map<string, TopLevelBinding> {
   const bindings = new Map<string, TopLevelBinding>();

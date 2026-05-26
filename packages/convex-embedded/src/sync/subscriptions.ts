@@ -197,7 +197,7 @@ export class SubscriptionManager {
     });
   }
 
-  collectRelevantTokens(
+  gatherRelevantTokens(
     changesOrTables: Set<string> | ProtocolChangeLike[],
   ): Set<string> {
     const { candidateTokens, changes, tablesWritten } =

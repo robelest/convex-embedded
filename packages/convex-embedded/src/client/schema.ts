@@ -23,7 +23,7 @@ export { materializeYjsDoc };
  * Returns the text content of the Y.XmlFragment.
  */
 export function extractProseText(doc: Y.Doc, fieldName: string): string {
-  const collectText = (node: unknown): string => {
+  const extractText = (node: unknown): string => {
     if (node instanceof Y.XmlText) {
       return node.toString();
     }
@@ -35,14 +35,14 @@ export function extractProseText(doc: Y.Doc, fieldName: string): string {
       typeof node.toArray === "function"
     ) {
       const children = (node.toArray as () => unknown[])();
-      return children.map((child) => collectText(child)).join("");
+      return children.map((child) => extractText(child)).join("");
     }
 
     return "";
   };
 
   const fragment = doc.getXmlFragment(fieldName);
-  const text = collectText(fragment).trim();
+  const text = extractText(fragment).trim();
   return text.length > 0
     ? text
     : proseContentToPlainText(yDocToProseContent(doc, fieldName));

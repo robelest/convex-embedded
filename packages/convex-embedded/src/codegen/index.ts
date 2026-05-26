@@ -3,7 +3,7 @@ import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import {
-  collectRemoteManifest,
+  fetchRemoteManifest,
   renderGeneratedFile,
   toModuleId,
   type GeneratedRemoteManifest,
@@ -95,7 +95,7 @@ export async function runCodegen(
     const source = await readFile(filePath, "utf8");
     const moduleId = toModuleId(convexRoot, filePath);
 
-    const remote = await collectRemoteManifest({
+    const remote = await fetchRemoteManifest({
       convexRoot,
       moduleId,
       source,

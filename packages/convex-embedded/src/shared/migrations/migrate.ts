@@ -62,7 +62,7 @@ export interface RunMigrationsOptions {
   onMigrationError?: MigrationErrorHandler;
 }
 
-function buildLogger(table: string): MigrationLogger {
+function createMigrationLogger(table: string): MigrationLogger {
   return {
     info: (message, ...rest) => log.info(`[${table}] ${message}`, ...rest),
     warn: (message, ...rest) => log.warn(`[${table}] ${message}`, ...rest),
@@ -164,7 +164,7 @@ export async function runMigrations(
   const { table, schema, adapter, onMigrationError } = options;
   const { migrations } = schema;
   const targetVersion = schema.version;
-  const logger = buildLogger(table);
+  const logger = createMigrationLogger(table);
 
   logger.info(`checking, target version=${targetVersion}`);
 

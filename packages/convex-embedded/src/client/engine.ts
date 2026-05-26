@@ -104,7 +104,7 @@ function canonicalizeScopeArgs(
   return normalized;
 }
 
-function makeScopeKey(
+function buildScopeKey(
   tableName: string,
   scopeArgs?: Record<string, unknown>,
 ): string {
@@ -542,7 +542,7 @@ function registerRemoteSubscription(input: {
     }
 
     if (input.scheduleTableCoalesce) {
-      const scopeKey = makeScopeKey(input.tableName, input.scopeArgs);
+      const scopeKey = buildScopeKey(input.tableName, input.scopeArgs);
       input.scheduleTableCoalesce({
         tableName: input.tableName,
         scopeKey,
@@ -1985,7 +1985,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     if (collectionSeq === null) {
       return;
     }
-    const scopeKey = makeScopeKey(tableName, scopeArgs ?? {});
+    const scopeKey = buildScopeKey(tableName, scopeArgs ?? {});
     const prev = lastResolvedScopeSeq.get(scopeKey) ?? -Infinity;
     if (collectionSeq > prev) {
       lastResolvedScopeSeq.set(scopeKey, collectionSeq);
@@ -1996,7 +1996,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     tableName: string,
     scopeArgs?: Record<string, unknown>,
   ): void {
-    const scopeKey = makeScopeKey(tableName, scopeArgs ?? {});
+    const scopeKey = buildScopeKey(tableName, scopeArgs ?? {});
     if (resolvedScopes.has(scopeKey)) {
       return;
     }
@@ -2020,7 +2020,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     scopeArgs: Record<string, unknown> | undefined,
     cb: () => void,
   ): () => void {
-    const scopeKey = makeScopeKey(tableName, scopeArgs ?? {});
+    const scopeKey = buildScopeKey(tableName, scopeArgs ?? {});
     let set = scopeResolveListeners.get(scopeKey);
     if (!set) {
       set = new Set();
@@ -2051,7 +2051,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     if (signalSeq < 0) {
       return false;
     }
-    const scopeKey = makeScopeKey(tableName, scopeArgs ?? {});
+    const scopeKey = buildScopeKey(tableName, scopeArgs ?? {});
     const resolvedSeq = lastResolvedScopeSeq.get(scopeKey);
     if (resolvedSeq === undefined) {
       return false;
@@ -2151,7 +2151,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     scopeArgs?: Record<string, unknown>,
   ): TableRemoteSyncState {
     const normalizedScope = canonicalizeScopeArgs(scopeArgs);
-    const scopeKey = makeScopeKey(tableName, normalizedScope);
+    const scopeKey = buildScopeKey(tableName, normalizedScope);
     let state = tableRemoteSyncStateMap.get(scopeKey);
     if (!state) {
       state = {
@@ -3174,7 +3174,7 @@ function createEngine(config: EngineConfig): EngineInstance {
       tables: [
         ...remoteApplyOrder,
         ...scopedResolves.map((entry) =>
-          makeScopeKey(entry.tableName, entry.scopeArgs),
+          buildScopeKey(entry.tableName, entry.scopeArgs),
         ),
       ],
       completed: 0,
@@ -3228,7 +3228,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     signal?: AbortSignal,
     scopeArgs?: Record<string, unknown>,
   ): Promise<void> {
-    const key = makeScopeKey(tableName, scopeArgs ?? {});
+    const key = buildScopeKey(tableName, scopeArgs ?? {});
     const inFlight = resolveInFlight.get(key);
     if (inFlight) {
       resolveRerun.add(key);
@@ -3871,7 +3871,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     if (Object.keys(normalizedScope).length === 0) {
       return;
     }
-    const key = makeScopeKey(tableName, normalizedScope);
+    const key = buildScopeKey(tableName, normalizedScope);
     const pendingTeardown = scopeTeardownTimers.get(key);
     if (pendingTeardown !== undefined) {
       clearTimeout(pendingTeardown);
@@ -3915,7 +3915,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     if (Object.keys(normalizedScope).length === 0) {
       return;
     }
-    const key = makeScopeKey(tableName, normalizedScope);
+    const key = buildScopeKey(tableName, normalizedScope);
     const entry = activeScopes.get(key);
     if (!entry) {
       return;
@@ -3943,7 +3943,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     }
 
     const normalizedScope = canonicalizeScopeArgs(scopeArgs);
-    const key = makeScopeKey(tableName, normalizedScope);
+    const key = buildScopeKey(tableName, normalizedScope);
     const existing = activeScopes.get(key);
     if (existing?.unsub) {
       return;

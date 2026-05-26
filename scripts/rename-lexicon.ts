@@ -83,6 +83,17 @@ const FAMILIES: ReadonlyArray<RenameFamily> = [
       ["removeSocketFromSession", "detachSocketFromSession"],
     ],
   },
+  {
+    id: 5,
+    name: "construction: clarify create (stateful factory) vs build (pure data assembly)",
+    renames: [
+      ["buildLogger", "createMigrationLogger"],
+      ["makeResult", "buildResult"],
+      ["makeRow", "buildRow"],
+      ["makeScopeKey", "buildScopeKey"],
+      ["makeComparable", "toComparable"],
+    ],
+  },
 ];
 
 function repoRoot(): string {

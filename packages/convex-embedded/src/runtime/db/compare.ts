@@ -15,7 +15,7 @@ export function compareValues(
   k1: Value | undefined,
   k2: Value | undefined,
 ): number {
-  return compareAsTuples(makeComparable(k1), makeComparable(k2));
+  return compareAsTuples(toComparable(k1), toComparable(k2));
 }
 
 function compareAsTuples<T>(a: [number, T], b: [number, T]): number {
@@ -55,7 +55,7 @@ function compareSameTypeValues<T>(v1: T, v2: T): number {
  * Map a Convex value to a `[typeTag, comparable]` tuple so that
  * cross-type ordering works correctly.
  */
-function makeComparable(v: Value | undefined): [number, unknown] {
+function toComparable(v: Value | undefined): [number, unknown] {
   if (v === undefined) return [0, undefined];
   if (v === null) return [1, null];
   if (typeof v === "bigint") return [2, v];
@@ -66,12 +66,12 @@ function makeComparable(v: Value | undefined): [number, unknown] {
   if (typeof v === "boolean") return [4, v];
   if (typeof v === "string") return [5, v];
   if (v instanceof ArrayBuffer) {
-    return [6, Array.from(new Uint8Array(v)).map(makeComparable)];
+    return [6, Array.from(new Uint8Array(v)).map(toComparable)];
   }
   if (Array.isArray(v)) {
-    return [7, v.map(makeComparable)];
+    return [7, v.map(toComparable)];
   }
   const keys = Object.keys(v).sort();
   const pojo: Value[] = keys.map((k) => [k, v[k]!]);
-  return [8, pojo.map(makeComparable)];
+  return [8, pojo.map(toComparable)];
 }

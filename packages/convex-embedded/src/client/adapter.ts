@@ -1087,7 +1087,7 @@ function createCachePaginatedOnUpdate(input: {
     const fireCallback = () => {
       try {
         callback(
-          toClientResult(makeResult(), input.translateLocalResultToClient),
+          toClientResult(buildResult(), input.translateLocalResultToClient),
           "Second argument to onUpdate callback is reserved for later use",
         );
       } catch (error) {
@@ -1181,7 +1181,7 @@ function createCachePaginatedOnUpdate(input: {
       subscribePage(pages[pages.length - 1]!, pages.length - 1);
       try {
         callback(
-          toClientResult(makeResult(), input.translateLocalResultToClient),
+          toClientResult(buildResult(), input.translateLocalResultToClient),
           "Second argument to onUpdate callback is reserved for later use",
         );
       } catch {
@@ -1198,7 +1198,7 @@ function createCachePaginatedOnUpdate(input: {
       return currentSnapshot.isDone ? "Exhausted" : "CanLoadMore";
     };
 
-    const makeResult = (): LocalPaginatedQueryResult => ({
+    const buildResult = (): LocalPaginatedQueryResult => ({
       results: currentSnapshot?.results ?? [],
       status: statusOf(),
       loadMore,
@@ -1223,7 +1223,7 @@ function createCachePaginatedOnUpdate(input: {
     }) as SubscriptionHandle;
     unsubscribe.unsubscribe = unsubscribe;
     unsubscribe.getCurrentValue = () =>
-      toClientResult(makeResult(), input.translateLocalResultToClient);
+      toClientResult(buildResult(), input.translateLocalResultToClient);
     unsubscribe.getQueryLogs = () => undefined;
     return unsubscribe;
   };

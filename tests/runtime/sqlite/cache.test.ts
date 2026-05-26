@@ -47,7 +47,7 @@ function setup(track: TestFixtures["track"]): {
   return { driver, cache: createQueryCacheStorage(driver) };
 }
 
-function makeRow(overrides: Partial<SqliteCacheRow> = {}): SqliteCacheRow {
+function buildRow(overrides: Partial<SqliteCacheRow> = {}): SqliteCacheRow {
   return {
     refName: "ref:foo",
     argsHash: "hash:1",
@@ -102,7 +102,7 @@ describe("query cache sqlite storage", () => {
       track,
     }) => {
       const { cache } = setup(track);
-      const row = makeRow({ refName: "ref:auto", argsHash: "h:auto" });
+      const row = buildRow({ refName: "ref:auto", argsHash: "h:auto" });
       await cache.write(row);
 
       const loaded = await cache.load(row.refName, row.argsHash);
@@ -113,7 +113,7 @@ describe("query cache sqlite storage", () => {
   describe("upsert and load", () => {
     it("inserts a new row that load returns verbatim", async ({ track }) => {
       const { cache } = setup(track);
-      const row = makeRow();
+      const row = buildRow();
       await cache.write(row);
 
       await expect(cache.load(row.refName, row.argsHash)).resolves.toEqual(row);
@@ -123,9 +123,9 @@ describe("query cache sqlite storage", () => {
       track,
     }) => {
       const { cache } = setup(track);
-      await cache.write(makeRow({ valueJson: JSON.stringify({ v: 1 }) }));
+      await cache.write(buildRow({ valueJson: JSON.stringify({ v: 1 }) }));
 
-      const updated = makeRow({
+      const updated = buildRow({
         valueJson: JSON.stringify({ v: 2 }),
         receivedAt: 5_000,
         ts: 7_000,
@@ -151,9 +151,9 @@ describe("query cache sqlite storage", () => {
       track,
     }) => {
       const { cache } = setup(track);
-      await cache.write(makeRow({ refName: "ref:x", argsHash: "h:1" }));
-      await cache.write(makeRow({ refName: "ref:x", argsHash: "h:2" }));
-      await cache.write(makeRow({ refName: "ref:x", argsHash: "h:3" }));
+      await cache.write(buildRow({ refName: "ref:x", argsHash: "h:1" }));
+      await cache.write(buildRow({ refName: "ref:x", argsHash: "h:2" }));
+      await cache.write(buildRow({ refName: "ref:x", argsHash: "h:3" }));
 
       await expect(cache.loadAll()).resolves.toHaveLength(3);
 
@@ -164,7 +164,7 @@ describe("query cache sqlite storage", () => {
 
     it("normalizes truthy paginationIsDone values to 1", async ({ track }) => {
       const { cache } = setup(track);
-      const row = makeRow({ paginationIsDone: 7 as unknown as number });
+      const row = buildRow({ paginationIsDone: 7 as unknown as number });
       await cache.write(row);
 
       const loaded = await cache.load(row.refName, row.argsHash);
@@ -173,7 +173,7 @@ describe("query cache sqlite storage", () => {
 
     it("preserves null pagination fields when unset", async ({ track }) => {
       const { cache } = setup(track);
-      const row = makeRow({ paginationCursor: null, paginationIsDone: null });
+      const row = buildRow({ paginationCursor: null, paginationIsDone: null });
       await cache.write(row);
 
       const loaded = await cache.load(row.refName, row.argsHash);
@@ -185,8 +185,8 @@ describe("query cache sqlite storage", () => {
   describe("delete", () => {
     it("removes only the specified row", async ({ track }) => {
       const { cache } = setup(track);
-      const a = makeRow({ refName: "ref:a", argsHash: "h:a" });
-      const b = makeRow({ refName: "ref:b", argsHash: "h:b" });
+      const a = buildRow({ refName: "ref:a", argsHash: "h:a" });
+      const b = buildRow({ refName: "ref:b", argsHash: "h:b" });
       await cache.write(a);
       await cache.write(b);
 
@@ -208,9 +208,9 @@ describe("query cache sqlite storage", () => {
   describe("loadAll", () => {
     it("returns every row", async ({ track }) => {
       const { cache } = setup(track);
-      await cache.write(makeRow({ refName: "ref:a", argsHash: "h:a" }));
-      await cache.write(makeRow({ refName: "ref:b", argsHash: "h:b" }));
-      await cache.write(makeRow({ refName: "ref:c", argsHash: "h:c" }));
+      await cache.write(buildRow({ refName: "ref:a", argsHash: "h:a" }));
+      await cache.write(buildRow({ refName: "ref:b", argsHash: "h:b" }));
+      await cache.write(buildRow({ refName: "ref:c", argsHash: "h:c" }));
 
       const rows = await cache.loadAll();
       const refs = rows.map((r) => `${r.refName}:${r.argsHash}`).sort();
@@ -221,13 +221,13 @@ describe("query cache sqlite storage", () => {
   describe("clear", () => {
     it("removes all rows but keeps the schema usable", async ({ track }) => {
       const { cache } = setup(track);
-      await cache.write(makeRow({ refName: "ref:a", argsHash: "h:a" }));
-      await cache.write(makeRow({ refName: "ref:b", argsHash: "h:b" }));
+      await cache.write(buildRow({ refName: "ref:a", argsHash: "h:a" }));
+      await cache.write(buildRow({ refName: "ref:b", argsHash: "h:b" }));
 
       await cache.clear();
       await expect(cache.loadAll()).resolves.toHaveLength(0);
 
-      await cache.write(makeRow({ refName: "ref:c", argsHash: "h:c" }));
+      await cache.write(buildRow({ refName: "ref:c", argsHash: "h:c" }));
       await expect(cache.loadAll()).resolves.toHaveLength(1);
     });
   });
@@ -238,13 +238,13 @@ describe("query cache sqlite storage", () => {
     }) => {
       const { cache } = setup(track);
       await cache.write(
-        makeRow({ refName: "ref:a", argsHash: "h:a", receivedAt: 100 }),
+        buildRow({ refName: "ref:a", argsHash: "h:a", receivedAt: 100 }),
       );
       await cache.write(
-        makeRow({ refName: "ref:b", argsHash: "h:b", receivedAt: 500 }),
+        buildRow({ refName: "ref:b", argsHash: "h:b", receivedAt: 500 }),
       );
       await cache.write(
-        makeRow({ refName: "ref:c", argsHash: "h:c", receivedAt: 1_000 }),
+        buildRow({ refName: "ref:c", argsHash: "h:c", receivedAt: 1_000 }),
       );
 
       await expect(cache.pruneOlderThan(750)).resolves.toBe(2);
@@ -257,7 +257,7 @@ describe("query cache sqlite storage", () => {
     it("returns 0 when nothing matches", async ({ track }) => {
       const { cache } = setup(track);
       await cache.write(
-        makeRow({ refName: "ref:a", argsHash: "h:a", receivedAt: 100 }),
+        buildRow({ refName: "ref:a", argsHash: "h:a", receivedAt: 100 }),
       );
 
       await expect(cache.pruneOlderThan(50)).resolves.toBe(0);

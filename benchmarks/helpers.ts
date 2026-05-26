@@ -52,7 +52,7 @@ export interface TaskRow {
 
 const STATUSES = ["active", "queued", "done", "blocked"] as const;
 
-export function makeRow(index: number): TaskRow {
+export function buildRow(index: number): TaskRow {
   return {
     title: `task-${index}`,
     body:
@@ -66,7 +66,7 @@ export function makeRow(index: number): TaskRow {
 }
 
 export function makeRows(count: number): TaskRow[] {
-  return Array.from({ length: count }, (_, index) => makeRow(index));
+  return Array.from({ length: count }, (_, index) => buildRow(index));
 }
 
 type Cleanup = () => void | Promise<void>;

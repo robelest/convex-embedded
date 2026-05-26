@@ -5,7 +5,7 @@ import { expect, it } from "@tests/testkit";
 import {
   closeTrackedResources,
   indexRangeQuery,
-  makeRow,
+  buildRow,
   seededSqliteRuntime,
   sizeByLabel,
 } from "./helpers";
@@ -96,7 +96,7 @@ it("profiles executeLocal hot path via in-memory OTel spans", async () => {
     return runtime.executeLocal({
       kind: "mutation",
       path: "tasks:insert",
-      args: { row: makeRow(counter) as unknown as Record<string, unknown> },
+      args: { row: buildRow(counter) as unknown as Record<string, unknown> },
       applyLocalEffects: false,
     });
   };

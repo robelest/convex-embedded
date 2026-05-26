@@ -385,7 +385,7 @@ export const activityTab: DevtoolsTab = {
       showContextMenu(items, event.clientX, event.clientY);
     }
 
-    function makeRow(op: OperationEntry): HTMLElement {
+    function buildRow(op: OperationEntry): HTMLElement {
       const meta = el(
         "div",
         {
@@ -467,7 +467,7 @@ export const activityTab: DevtoolsTab = {
         seen.add(op.id);
         let row = rowById.get(op.id);
         if (row === undefined) {
-          row = makeRow(op);
+          row = buildRow(op);
           rowById.set(op.id, row);
         }
         row.style.background =

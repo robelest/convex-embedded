@@ -118,7 +118,7 @@ export const subscriptionsTab: DevtoolsTab = {
       detail.appendChild(detailPane(entry));
     }
 
-    function makeRow(entry: SubscriptionEntry): HTMLElement {
+    function buildRow(entry: SubscriptionEntry): HTMLElement {
       const meta = el(
         "div",
         {
@@ -175,7 +175,7 @@ export const subscriptionsTab: DevtoolsTab = {
         feed.appendChild(empty("No active subscriptions."));
         return;
       }
-      for (const entry of entries) feed.appendChild(makeRow(entry));
+      for (const entry of entries) feed.appendChild(buildRow(entry));
       feed.scrollTop = scrollTop;
     }
 

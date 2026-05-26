@@ -2,7 +2,7 @@ import { afterAll, bench, describe } from "@tests/testkit";
 
 import {
   closeTrackedResources,
-  makeRow,
+  buildRow,
   seededSqliteRuntime,
   sizeByLabel,
   type TaskRow,
@@ -20,7 +20,7 @@ let insertCounter = medium.docs;
 
 function nextRow(): TaskRow {
   insertCounter += 1;
-  return makeRow(insertCounter);
+  return buildRow(insertCounter);
 }
 
 describe("local compute (real JS over indexed SQLite)", () => {

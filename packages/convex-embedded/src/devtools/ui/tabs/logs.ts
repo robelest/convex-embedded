@@ -138,7 +138,7 @@ export const logsTab: DevtoolsTab = {
     root.appendChild(feed);
     host.appendChild(root);
 
-    function makeRow(line: DevtoolsLogLine): HTMLElement {
+    function buildRow(line: DevtoolsLogLine): HTMLElement {
       const children: HTMLElement[] = [
         text(formatTime(line.timeMs), { color: palette.fgDim }),
         text(line.severity, { color: severityColor(line.severity) }),
@@ -196,7 +196,7 @@ export const logsTab: DevtoolsTab = {
         feed.appendChild(empty("No logs captured yet."));
         return;
       }
-      for (const line of visible) feed.appendChild(makeRow(line));
+      for (const line of visible) feed.appendChild(buildRow(line));
       feed.scrollTop = scrollTop;
     }
 

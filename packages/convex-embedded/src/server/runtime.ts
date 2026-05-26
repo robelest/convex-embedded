@@ -539,7 +539,7 @@ export function bindTableRuntime(
       ),
     );
 
-    if (collectionChanges.mode === "full") {
+    const resolveFullMode = async () => {
       const scoped = args.scopeArgs && Object.keys(args.scopeArgs).length > 0;
       const knownDocIds = args.documents.map((doc) => doc.docId);
       const scopeArgs = scoped
@@ -651,6 +651,10 @@ export function bindTableRuntime(
         isDone: page.isDone,
         documents: [...scopedDocuments, ...missingRequestedDeletes],
       };
+    };
+
+    if (collectionChanges.mode === "full") {
+      return await resolveFullMode();
     }
 
     const remoteOnlyChanges =

@@ -1072,7 +1072,7 @@ const authStateSetActive: SystemFunctionDef = {
       }
     }
 
-    db.putDocument("_resolve_auth_state", {
+    db.writeDocument("_resolve_auth_state", {
       _id: AUTH_STATE_DOCUMENT_ID,
       _creationTime:
         typeof seed?._creationTime === "number"

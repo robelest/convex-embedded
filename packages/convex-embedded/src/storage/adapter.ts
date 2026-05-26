@@ -107,7 +107,7 @@ export type SchemaOp =
  */
 export interface StorageAdapter {
   getBlob(id: string): Promise<Blob | null>;
-  putBlob(id: string, blob: Blob): Promise<void>;
+  storeBlob(id: string, blob: Blob): Promise<void>;
   deleteBlob(id: string): Promise<void>;
   clearAll(): Promise<void>;
   close?(): Promise<void>;

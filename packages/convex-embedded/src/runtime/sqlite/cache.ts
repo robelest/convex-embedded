@@ -13,7 +13,7 @@ export interface SqliteCacheRow {
 
 export interface QueryCacheStorage {
   initSchema(): Promise<void>;
-  upsert(row: SqliteCacheRow): Promise<void>;
+  write(row: SqliteCacheRow): Promise<void>;
   delete(refName: string, argsHash: string): Promise<void>;
   load(refName: string, argsHash: string): Promise<SqliteCacheRow | null>;
   loadAll(): Promise<SqliteCacheRow[]>;
@@ -209,7 +209,7 @@ export function createQueryCacheStorage(
   return {
     initSchema,
 
-    async upsert(row: SqliteCacheRow): Promise<void> {
+    async write(row: SqliteCacheRow): Promise<void> {
       const key = `${row.refName} ${row.argsHash}`;
       pendingDeletes.delete(key);
       const normalized: SqliteCacheRow = {

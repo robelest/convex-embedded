@@ -285,7 +285,7 @@ describe.concurrent("QueryEngine — vector search", () => {
   it("breaks score ties by _id ascending", () => {
     const db = new Database(schemaWithVectorIndex);
     db.startTransaction();
-    db.putDocument("tasks", {
+    db.writeDocument("tasks", {
       _id: "bbb",
       _creationTime: 1,
       title: "second",
@@ -293,7 +293,7 @@ describe.concurrent("QueryEngine — vector search", () => {
       priority: 1,
       embedding: [1, 0],
     });
-    db.putDocument("tasks", {
+    db.writeDocument("tasks", {
       _id: "aaa",
       _creationTime: 2,
       title: "first",
@@ -311,7 +311,7 @@ describe.concurrent("QueryEngine — vector search", () => {
   it("returns zero scores for a zero query vector", () => {
     const db = new Database(schemaWithVectorIndex);
     db.startTransaction();
-    db.putDocument("tasks", {
+    db.writeDocument("tasks", {
       _id: "bbb",
       _creationTime: 1,
       title: "second",
@@ -319,7 +319,7 @@ describe.concurrent("QueryEngine — vector search", () => {
       priority: 1,
       embedding: [0, 1],
     });
-    db.putDocument("tasks", {
+    db.writeDocument("tasks", {
       _id: "aaa",
       _creationTime: 2,
       title: "first",

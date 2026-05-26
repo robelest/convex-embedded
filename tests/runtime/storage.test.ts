@@ -79,7 +79,7 @@ function createStorage(
     getMetadata: vi.fn(async () => ({ timestamp: 1, lastCreationTime: 1 })),
     listBlobs: vi.fn(async () => []),
     write: vi.fn(async () => undefined),
-    putBlob: vi.fn(async () => undefined),
+    storeBlob: vi.fn(async () => undefined),
     deleteBlob: vi.fn(async () => undefined),
     clearAll: vi.fn(async () => undefined),
     close: vi.fn(async () => undefined),

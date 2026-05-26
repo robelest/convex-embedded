@@ -84,7 +84,7 @@ function sqlAdapter(
             })),
           }
         : undefined,
-    putBlob: async () => undefined,
+    storeBlob: async () => undefined,
     deleteBlob: async () => undefined,
     clearAll: async () => undefined,
     ...overrides,
@@ -778,7 +778,7 @@ describe("Database — hydrate", () => {
       deletes: [],
       meta: { timestamp: 1, lastCreationTime: 1 },
     });
-    await storage1.putBlob(storageId, new Blob(["one"]));
+    await storage1.storeBlob(storageId, new Blob(["one"]));
 
     const storage2 = mockAdapter();
     await storage2.write({
@@ -786,7 +786,7 @@ describe("Database — hydrate", () => {
       deletes: [],
       meta: { timestamp: 1, lastCreationTime: 1 },
     });
-    await storage2.putBlob(storageId, new Blob(["two"]));
+    await storage2.storeBlob(storageId, new Blob(["two"]));
 
     const db = new Database(null);
     db.setStorage(storage1);

@@ -155,7 +155,7 @@ describe("Database storage", () => {
         getMetadata: () => backing.getMetadata(),
         listBlobs: () => backing.listBlobs(),
         write: vi.fn().mockRejectedValue(new Error("disk full")),
-        putBlob: (id, blob) => backing.putBlob(id, blob),
+        storeBlob: (id, blob) => backing.storeBlob(id, blob),
         deleteBlob: (id) => backing.deleteBlob(id),
         clearAll: () => backing.clearAll(),
       });

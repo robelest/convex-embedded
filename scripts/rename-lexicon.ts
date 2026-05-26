@@ -52,6 +52,19 @@ const FAMILIES: ReadonlyArray<RenameFamily> = [
       ["collectRows", "readRows"],
     ],
   },
+  {
+    id: 3,
+    name: "writes: put/persist/upsert/update → store/write/insert/apply (Convex-aligned)",
+    renames: [
+      ["putBlob", "storeBlob"],
+      ["putDocument", "writeDocument"],
+      ["persistEntry", "writeEntry"],
+      ["persistResolveMetadata", "writeResolveMetadata"],
+      ["upsert", "write"],
+      ["upsertSideTableEntryStatements", "buildSideTableWriteStatements"],
+      ["updateRegistry", "applyIndexDefinitions"],
+    ],
+  },
 ];
 
 function repoRoot(): string {
@@ -60,10 +73,6 @@ function repoRoot(): string {
 
 function loadProject(): Project {
   const root = repoRoot();
-  // Anchor on the package tsconfig so the `@/...` path alias resolves and the
-  // language service can follow cross-file imports. Then pull in the rest of
-  // the monorepo's TS sources so renames propagate into consumers (tests,
-  // convex/, demos/, benchmarks/, scripts/) too.
   const project = new Project({
     tsConfigFilePath: `${root}/packages/convex-embedded/tsconfig.json`,
     skipAddingFilesFromTsConfig: false,
@@ -123,6 +132,18 @@ function findDeclarations(
       const method = cls2.getMethod(oldName);
       if (method) {
         declarations.push({ filePath: file.getFilePath(), node: method });
+        break;
+      }
+    }
+    for (const iface2 of file.getInterfaces()) {
+      const method = iface2.getMethod(oldName);
+      if (method) {
+        declarations.push({ filePath: file.getFilePath(), node: method });
+        break;
+      }
+      const prop = iface2.getProperty(oldName);
+      if (prop) {
+        declarations.push({ filePath: file.getFilePath(), node: prop });
         break;
       }
     }

@@ -224,7 +224,7 @@ function createSqlStorage(rowsByTable: RowsByTable): {
         return result;
       }
     },
-    putBlob: async () => undefined,
+    storeBlob: async () => undefined,
     deleteBlob: async () => undefined,
     clearAll: async () => undefined,
   });
@@ -315,7 +315,7 @@ describe("Construction", () => {
         getMetadata: async () => null,
         listBlobs: async () => [],
         write: async () => undefined,
-        putBlob: async () => undefined,
+        storeBlob: async () => undefined,
         deleteBlob: async () => undefined,
         clearAll: async () => undefined,
       }),
@@ -404,7 +404,7 @@ describe("Blob storage", () => {
         getMetadata: async () => ({ timestamp: 0, lastCreationTime: 0 }),
         listBlobs: async () => [],
         write: async () => undefined,
-        putBlob: async () => {
+        storeBlob: async () => {
           throw new Error("disk full");
         },
         deleteBlob: async () => undefined,
@@ -745,7 +745,7 @@ describe("sql storage hydration", () => {
         listBlobs: async () => [],
         getBlob: async () => null,
         write: async () => undefined,
-        putBlob: async () => undefined,
+        storeBlob: async () => undefined,
         deleteBlob: async () => undefined,
         clearAll: async () => undefined,
       }),
@@ -785,7 +785,7 @@ describe("sql storage hydration", () => {
         listBlobs: async () => [],
         getBlob: async () => null,
         write: async () => undefined,
-        putBlob: async () => undefined,
+        storeBlob: async () => undefined,
         deleteBlob: async () => undefined,
         clearAll: async () => undefined,
       }),
@@ -1353,7 +1353,7 @@ describe("watchLocalQuery", () => {
         getMetadata: async () => null,
         listBlobs: async () => [],
         write: async () => undefined,
-        putBlob: async () => undefined,
+        storeBlob: async () => undefined,
         deleteBlob: async () => undefined,
         clearAll: async () => undefined,
       }),
@@ -1446,7 +1446,7 @@ describe("watchLocalQuery", () => {
         getMetadata: async () => null,
         listBlobs: async () => [],
         write: async () => undefined,
-        putBlob: async () => undefined,
+        storeBlob: async () => undefined,
         deleteBlob: async () => undefined,
         clearAll: async () => undefined,
       }),

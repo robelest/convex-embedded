@@ -829,7 +829,7 @@ class CachePipeline {
     if (!storage) return;
     const argsHash = stableValueKey(entry.args);
     try {
-      await storage.upsert({
+      await storage.write({
         refName: entry.refName,
         argsHash,
         argsJson: safeJsonStringify(entry.args),

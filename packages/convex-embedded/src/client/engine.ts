@@ -3144,7 +3144,7 @@ function createEngine(config: EngineConfig): EngineInstance {
       resolvableDocIds.has(entry.docId),
     );
 
-    await persistResolveMetadata({
+    await writeResolveMetadata({
       tableConfig,
       tableName,
       resolveResult,
@@ -3437,7 +3437,7 @@ function createEngine(config: EngineConfig): EngineInstance {
         typeof doc._id === "string" ? [String(doc._id)] : [],
       ),
     );
-    await persistResolveMetadata({
+    await writeResolveMetadata({
       tableConfig,
       tableName: input.tableName,
       resolveResult,
@@ -3721,7 +3721,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     }
 
     if (finalResolveResult) {
-      await persistResolveMetadata({
+      await writeResolveMetadata({
         tableConfig,
         tableName,
         resolveResult: finalResolveResult,
@@ -4151,7 +4151,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     };
   }
 
-  async function persistResolveMetadata(input: {
+  async function writeResolveMetadata(input: {
     tableConfig: TableConfig;
     tableName: string;
     resolveResult: ResolveResponse;

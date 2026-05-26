@@ -144,7 +144,7 @@ describe("ephemeralStorage", () => {
   describe("blob storage", () => {
     it("round-trips a stored blob", async ({ storage }) => {
       const blob = new Blob(["test content"], { type: "text/plain" });
-      await storage.putBlob("blob-1", blob);
+      await storage.storeBlob("blob-1", blob);
 
       const blobs = await storage.listBlobs();
       expect(blobs).toHaveLength(1);
@@ -153,15 +153,15 @@ describe("ephemeralStorage", () => {
     });
 
     it("deletes a blob", async ({ storage }) => {
-      await storage.putBlob("blob-1", new Blob(["data"]));
+      await storage.storeBlob("blob-1", new Blob(["data"]));
       await storage.deleteBlob("blob-1");
 
       expect(await storage.listBlobs()).toEqual([]);
     });
 
     it("stores multiple blobs independently", async ({ storage }) => {
-      await storage.putBlob("a", new Blob(["aaa"]));
-      await storage.putBlob("b", new Blob(["bbb"]));
+      await storage.storeBlob("a", new Blob(["aaa"]));
+      await storage.storeBlob("b", new Blob(["bbb"]));
 
       const blobs = await storage.listBlobs();
       expect(blobs.map((entry) => entry.id)).toEqual(
@@ -173,7 +173,7 @@ describe("ephemeralStorage", () => {
   describe("clear", () => {
     it("wipes all documents, meta, and blobs", async ({ storage }) => {
       await storage.write(batch([batchPut(doc("1"), "tasks")]));
-      await storage.putBlob("blob-1", new Blob(["data"]));
+      await storage.storeBlob("blob-1", new Blob(["data"]));
 
       await storage.clearAll();
 

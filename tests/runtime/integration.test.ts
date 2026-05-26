@@ -800,21 +800,21 @@ describe("Integration: Vector Search", () => {
   function vectorDb(): Database {
     const db = new Database(vectorSchema());
     db.startTransaction();
-    db.putDocument("embeddings", {
+    db.writeDocument("embeddings", {
       _id: "alpha",
       _creationTime: 1,
       category: "news",
       status: "active",
       embedding: [1, 0],
     });
-    db.putDocument("embeddings", {
+    db.writeDocument("embeddings", {
       _id: "beta",
       _creationTime: 2,
       category: "notes",
       status: "draft",
       embedding: [0.9, 0.1],
     });
-    db.putDocument("embeddings", {
+    db.writeDocument("embeddings", {
       _id: "gamma",
       _creationTime: 3,
       category: "archive",

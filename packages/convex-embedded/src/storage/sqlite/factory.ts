@@ -1014,7 +1014,7 @@ function deleteSideTableEntryStatements(
   ];
 }
 
-function upsertSideTableEntryStatements(input: {
+function buildSideTableWriteStatements(input: {
   kind: SideTableKind;
   tableName: string;
   definition: SideTableDefinition;
@@ -1113,7 +1113,7 @@ async function rebuildSideTableFromDocuments<
   for (const doc of docs) {
     for (const definition of definitions) {
       statements.push(
-        ...upsertSideTableEntryStatements({ kind, tableName, definition, doc }),
+        ...buildSideTableWriteStatements({ kind, tableName, definition, doc }),
       );
     }
   }
@@ -1307,7 +1307,7 @@ async function applyCommitBatch(
     if (searchDefs && searchDefs.length > 0) {
       for (const definition of searchDefs) {
         statements.push(
-          ...upsertSideTableEntryStatements({
+          ...buildSideTableWriteStatements({
             kind: "search",
             tableName,
             definition,
@@ -1320,7 +1320,7 @@ async function applyCommitBatch(
     if (vectorDefs && vectorDefs.length > 0) {
       for (const definition of vectorDefs) {
         statements.push(
-          ...upsertSideTableEntryStatements({
+          ...buildSideTableWriteStatements({
             kind: "vector",
             tableName,
             definition,
@@ -1457,7 +1457,7 @@ export async function createSqliteStorage(input: {
     );
   }
 
-  function updateRegistry(options: SqlWriteOptions | undefined): void {
+  function applyIndexDefinitions(options: SqlWriteOptions | undefined): void {
     if (options?.tableSearchIndexes) {
       for (const [tableName, definitions] of Object.entries(
         options.tableSearchIndexes,
@@ -1784,7 +1784,7 @@ export async function createSqliteStorage(input: {
       batch: CommitBatch,
       options: SqlWriteOptions,
     ): Promise<SqlWriteResult> {
-      updateRegistry(options);
+      applyIndexDefinitions(options);
       for (const { tableName } of batch.puts) {
         await ensurePhysicalTableRoute(tableName);
       }

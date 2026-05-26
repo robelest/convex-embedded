@@ -46,7 +46,7 @@ export interface OpaqueTestAdapterOptions {
   hasDocuments?: (table: string) => Promise<boolean | null>;
   clearAll?: () => Promise<void>;
   getBlob?: (id: string) => Promise<Blob | null>;
-  putBlob?: (id: string, blob: Blob) => Promise<void>;
+  storeBlob?: (id: string, blob: Blob) => Promise<void>;
   deleteBlob?: (id: string) => Promise<void>;
   close?: () => Promise<void>;
 
@@ -169,8 +169,8 @@ export class OpaqueTestAdapter implements StorageAdapter {
     return this._blobs.get(id) ?? null;
   }
 
-  async putBlob(id: string, blob: Blob): Promise<void> {
-    if (this.opts.putBlob) return this.opts.putBlob(id, blob);
+  async storeBlob(id: string, blob: Blob): Promise<void> {
+    if (this.opts.storeBlob) return this.opts.storeBlob(id, blob);
     this._blobs.set(id, blob);
   }
 

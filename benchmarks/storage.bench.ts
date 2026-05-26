@@ -45,7 +45,7 @@ async function seedBlobs(
     (_, index) => `${prefix}-${index}`,
   );
   for (const key of keys) {
-    await store.putBlob(key, blob);
+    await store.storeBlob(key, blob);
   }
   return keys;
 }
@@ -82,11 +82,11 @@ describe("storage substrate", () => {
   );
 
   bench(
-    "blob putBlob 64KB",
+    "blob storeBlob 64KB",
     async () => {
       if (!blobStore) throw new Error("blob store not initialized");
       blobCounter += 1;
-      await blobStore.putBlob(
+      await blobStore.storeBlob(
         `blob-64k-${blobCounter % PUT_KEY_WINDOW}`,
         BLOB_64K,
       );
@@ -103,11 +103,11 @@ describe("storage substrate", () => {
   );
 
   bench(
-    "blob putBlob 1MB",
+    "blob storeBlob 1MB",
     async () => {
       if (!blobStore) throw new Error("blob store not initialized");
       blobCounter += 1;
-      await blobStore.putBlob(
+      await blobStore.storeBlob(
         `blob-1m-${blobCounter % PUT_KEY_WINDOW}`,
         BLOB_1M,
       );
@@ -173,7 +173,7 @@ describe("storage substrate", () => {
       if (!deleteStore) throw new Error("delete store not initialized");
       blobCounter += 1;
       const key = `churn-64k-${blobCounter}`;
-      await deleteStore.putBlob(key, BLOB_64K);
+      await deleteStore.storeBlob(key, BLOB_64K);
       await deleteStore.deleteBlob(key);
     },
     {

@@ -1261,7 +1261,7 @@ export class EmbeddedRuntime {
       this.db.startTransaction();
       try {
         for (const doc of toUpsert) {
-          this.db.putDocument(table, doc);
+          this.db.writeDocument(table, doc);
         }
         for (const id of toDelete) {
           this.db.removeDocument(table, id as unknown as DocumentId);
@@ -1424,7 +1424,7 @@ export class EmbeddedRuntime {
     try {
       for (const doc of merged) {
         try {
-          this.db.putDocument(table, doc, { validate: false });
+          this.db.writeDocument(table, doc, { validate: false });
         } catch {
           /* skip per-doc errors (id collision across tables, etc.) */
         }
@@ -1496,7 +1496,7 @@ export class EmbeddedRuntime {
         );
 
         for (const doc of toUpsert) {
-          db.putDocument(currentTableName, doc, { validate: false });
+          db.writeDocument(currentTableName, doc, { validate: false });
         }
         for (const id of toDelete) {
           db.removeDocument(currentTableName, id as DocumentId);

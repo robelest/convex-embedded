@@ -103,7 +103,7 @@ describe("query cache sqlite storage", () => {
     }) => {
       const { cache } = setup(track);
       const row = makeRow({ refName: "ref:auto", argsHash: "h:auto" });
-      await cache.upsert(row);
+      await cache.write(row);
 
       const loaded = await cache.load(row.refName, row.argsHash);
       expect(loaded?.refName).toBe("ref:auto");
@@ -114,7 +114,7 @@ describe("query cache sqlite storage", () => {
     it("inserts a new row that load returns verbatim", async ({ track }) => {
       const { cache } = setup(track);
       const row = makeRow();
-      await cache.upsert(row);
+      await cache.write(row);
 
       await expect(cache.load(row.refName, row.argsHash)).resolves.toEqual(row);
     });
@@ -123,7 +123,7 @@ describe("query cache sqlite storage", () => {
       track,
     }) => {
       const { cache } = setup(track);
-      await cache.upsert(makeRow({ valueJson: JSON.stringify({ v: 1 }) }));
+      await cache.write(makeRow({ valueJson: JSON.stringify({ v: 1 }) }));
 
       const updated = makeRow({
         valueJson: JSON.stringify({ v: 2 }),
@@ -132,7 +132,7 @@ describe("query cache sqlite storage", () => {
         paginationCursor: "cursor-1",
         paginationIsDone: 1,
       });
-      await cache.upsert(updated);
+      await cache.write(updated);
 
       await expect(
         cache.load(updated.refName, updated.argsHash),
@@ -151,9 +151,9 @@ describe("query cache sqlite storage", () => {
       track,
     }) => {
       const { cache } = setup(track);
-      await cache.upsert(makeRow({ refName: "ref:x", argsHash: "h:1" }));
-      await cache.upsert(makeRow({ refName: "ref:x", argsHash: "h:2" }));
-      await cache.upsert(makeRow({ refName: "ref:x", argsHash: "h:3" }));
+      await cache.write(makeRow({ refName: "ref:x", argsHash: "h:1" }));
+      await cache.write(makeRow({ refName: "ref:x", argsHash: "h:2" }));
+      await cache.write(makeRow({ refName: "ref:x", argsHash: "h:3" }));
 
       await expect(cache.loadAll()).resolves.toHaveLength(3);
 
@@ -165,7 +165,7 @@ describe("query cache sqlite storage", () => {
     it("normalizes truthy paginationIsDone values to 1", async ({ track }) => {
       const { cache } = setup(track);
       const row = makeRow({ paginationIsDone: 7 as unknown as number });
-      await cache.upsert(row);
+      await cache.write(row);
 
       const loaded = await cache.load(row.refName, row.argsHash);
       expect(loaded?.paginationIsDone).toBe(1);
@@ -174,7 +174,7 @@ describe("query cache sqlite storage", () => {
     it("preserves null pagination fields when unset", async ({ track }) => {
       const { cache } = setup(track);
       const row = makeRow({ paginationCursor: null, paginationIsDone: null });
-      await cache.upsert(row);
+      await cache.write(row);
 
       const loaded = await cache.load(row.refName, row.argsHash);
       expect(loaded?.paginationCursor).toBeNull();
@@ -187,8 +187,8 @@ describe("query cache sqlite storage", () => {
       const { cache } = setup(track);
       const a = makeRow({ refName: "ref:a", argsHash: "h:a" });
       const b = makeRow({ refName: "ref:b", argsHash: "h:b" });
-      await cache.upsert(a);
-      await cache.upsert(b);
+      await cache.write(a);
+      await cache.write(b);
 
       await cache.delete(a.refName, a.argsHash);
 
@@ -208,9 +208,9 @@ describe("query cache sqlite storage", () => {
   describe("loadAll", () => {
     it("returns every row", async ({ track }) => {
       const { cache } = setup(track);
-      await cache.upsert(makeRow({ refName: "ref:a", argsHash: "h:a" }));
-      await cache.upsert(makeRow({ refName: "ref:b", argsHash: "h:b" }));
-      await cache.upsert(makeRow({ refName: "ref:c", argsHash: "h:c" }));
+      await cache.write(makeRow({ refName: "ref:a", argsHash: "h:a" }));
+      await cache.write(makeRow({ refName: "ref:b", argsHash: "h:b" }));
+      await cache.write(makeRow({ refName: "ref:c", argsHash: "h:c" }));
 
       const rows = await cache.loadAll();
       const refs = rows.map((r) => `${r.refName}:${r.argsHash}`).sort();
@@ -221,13 +221,13 @@ describe("query cache sqlite storage", () => {
   describe("clear", () => {
     it("removes all rows but keeps the schema usable", async ({ track }) => {
       const { cache } = setup(track);
-      await cache.upsert(makeRow({ refName: "ref:a", argsHash: "h:a" }));
-      await cache.upsert(makeRow({ refName: "ref:b", argsHash: "h:b" }));
+      await cache.write(makeRow({ refName: "ref:a", argsHash: "h:a" }));
+      await cache.write(makeRow({ refName: "ref:b", argsHash: "h:b" }));
 
       await cache.clear();
       await expect(cache.loadAll()).resolves.toHaveLength(0);
 
-      await cache.upsert(makeRow({ refName: "ref:c", argsHash: "h:c" }));
+      await cache.write(makeRow({ refName: "ref:c", argsHash: "h:c" }));
       await expect(cache.loadAll()).resolves.toHaveLength(1);
     });
   });
@@ -237,13 +237,13 @@ describe("query cache sqlite storage", () => {
       track,
     }) => {
       const { cache } = setup(track);
-      await cache.upsert(
+      await cache.write(
         makeRow({ refName: "ref:a", argsHash: "h:a", receivedAt: 100 }),
       );
-      await cache.upsert(
+      await cache.write(
         makeRow({ refName: "ref:b", argsHash: "h:b", receivedAt: 500 }),
       );
-      await cache.upsert(
+      await cache.write(
         makeRow({ refName: "ref:c", argsHash: "h:c", receivedAt: 1_000 }),
       );
 
@@ -256,7 +256,7 @@ describe("query cache sqlite storage", () => {
 
     it("returns 0 when nothing matches", async ({ track }) => {
       const { cache } = setup(track);
-      await cache.upsert(
+      await cache.write(
         makeRow({ refName: "ref:a", argsHash: "h:a", receivedAt: 100 }),
       );
 

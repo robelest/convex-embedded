@@ -61,7 +61,7 @@ function createSqlStorage(rowsByTable: Record<string, StoredDocument[]>) {
         ).filter((row) => row._id !== deletion.id);
       }
     },
-    putBlob: async () => undefined,
+    storeBlob: async () => undefined,
     deleteBlob: async () => undefined,
     clearAll: async () => undefined,
   });

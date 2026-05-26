@@ -1156,7 +1156,7 @@ export class Database {
    *
    * Must be called within an active transaction.
    */
-  putDocument(
+  writeDocument(
     table: TableName,
     doc: Record<string, unknown> & { _id: string; _creationTime: number },
     options: { validate?: boolean } = {},
@@ -1178,7 +1178,7 @@ export class Database {
     if (existingTable !== undefined) {
       if (existingTable !== table) {
         throw new Error(
-          `putDocument: ID "${_id}" belongs to table "${existingTable}", ` +
+          `writeDocument: ID "${_id}" belongs to table "${existingTable}", ` +
             `not "${table}"`,
         );
       }
@@ -1356,7 +1356,7 @@ export class Database {
     this._blobStorage.set(storageId, blob);
 
     if (this._storage) {
-      await this._storage.putBlob(storageId as string, blob);
+      await this._storage.storeBlob(storageId as string, blob);
     }
   }
 

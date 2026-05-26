@@ -133,8 +133,8 @@ export class SqliteAdapter implements QueryableAdapter {
     });
   }
 
-  async putBlob(id: string, blob: Blob): Promise<void> {
-    return withSpan("convex-embedded.storage.putBlob", async (span) => {
+  async storeBlob(id: string, blob: Blob): Promise<void> {
+    return withSpan("convex-embedded.storage.storeBlob", async (span) => {
       span.setAttribute("convex.id", id);
       const impl = await this.ready();
       return impl.storeBlob(id, blob);

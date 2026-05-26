@@ -2788,6 +2788,12 @@ export class Database {
       });
       if (sourceResults !== null) {
         this._rememberCommittedLookup(queryTable, sourceResults);
+        if (query.source.type !== "Search") {
+          const stripped = this._stripIdentityScopes(sourceResults);
+          const ordered =
+            query.source.order === "desc" ? [...stripped].reverse() : stripped;
+          return this._filterOrderedDocs(ordered, filters, limit ?? null);
+        }
       }
     }
 

@@ -33,7 +33,7 @@
     };
     activeTab: "issues" | "settings";
     selectedProjectSlug: string | null;
-    client: ConvexClient;
+    client: ConvexClient | null;
     groupId: string;
   }>();
 
@@ -103,6 +103,7 @@
     const name = newProjectName.trim();
     const identifier = newProjectIdentifier.trim();
     if (!name || !identifier) return;
+    if (!client) return;
     createProjectRequests += 1;
     newProjectError = null;
     newProjectName = "";

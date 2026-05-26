@@ -51,25 +51,33 @@ export function usePaginatedQuery<T>(
       return;
     }
     const capable = getClient() as unknown as PaginatedCapableClient;
-    const sub = capable.onPaginatedUpdate_experimental<T>(
+    // `sub` is forward-declared because `onPaginatedUpdate_experimental` may
+    // invoke these callbacks synchronously during setup (before it returns).
+    // Guarding on `sub` makes that initial emit a no-op; the value is captured
+    // right after via `getCurrentValue()`. Referencing `sub` directly here would
+    // throw a temporal-dead-zone ReferenceError and wedge the subscription.
+    let sub: PaginatedSubscription<T> | undefined;
+    const apply = () => {
+      if (sub) {
+        value = sub.getCurrentValue();
+      }
+    };
+    sub = capable.onPaginatedUpdate_experimental<T>(
       query,
       args,
       { initialNumItems: options.initialNumItems },
-      () => {
-        value = sub.getCurrentValue();
-      },
-      () => {
-        value = sub.getCurrentValue();
-      },
+      apply,
+      apply,
     );
     subscription = sub;
     const initial = sub.getCurrentValue();
     if (initial !== undefined) {
       value = initial;
     }
+    const active = sub;
     return () => {
-      sub.unsubscribe();
-      if (subscription === sub) {
+      active.unsubscribe();
+      if (subscription === active) {
         subscription = undefined;
       }
     };

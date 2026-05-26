@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { browser } from "$app/environment";
-	import { useQuery, useConvexClient } from "convex-svelte";
+	import { useConvexClient } from "convex-svelte";
+	import { usePreloadedQuery } from "$lib/usePreloadedQuery.svelte";
 	import { api } from "$convex/_generated/api.js";
 	import { members, permissions, mapUser, GROUP_ID } from "$convex/access";
 	import AppSidebar from "$lib/components/AppSidebar.svelte";
@@ -52,9 +53,7 @@
 	let activeTab = $state<"issues" | "settings">("issues");
 	let selectedProjectSlug = $state<string | null>(null);
 
-	const projectsQuery = browser
-		? useQuery(api.projects.list, () => ({}))
-		: null;
+	const projectsQuery = usePreloadedQuery(data.preloadedProjects);
 
 	const allTeams = teams.flatMap((team) => [
 		{ groupId: team.groupId, name: team.name },
@@ -62,7 +61,7 @@
 	]);
 
 	const projectsData = $derived(
-		((browser ? projectsQuery?.data ?? data.projects ?? [] : data.projects ?? []) as Project[])
+		((projectsQuery.current ?? []) as Project[])
 			.map((project) => ({
 				_id: project._id,
 				name: project.name,
@@ -78,12 +77,6 @@
 			})),
 	);
 
-	const dashboardLoading = $derived(
-		browser
-			? Boolean(projectsQuery?.isLoading && projectsData.length === 0)
-			: data.projects === null,
-	);
-
 	const dashboardLogs = $derived(
 		browser
 			? ((client as typeof client & { localQueryLogs?: (ref: unknown, args: unknown) => string[] | undefined }).localQueryLogs?.(
@@ -94,11 +87,7 @@
 	);
 
 	const dashboardErrorMessage = $derived(
-		browser && projectsQuery?.error instanceof Error
-			? projectsQuery.error.message
-			: browser && projectsQuery?.error
-				? String(projectsQuery.error)
-				: null,
+		projectsQuery.error ? projectsQuery.error.message : null,
 	);
 
 	const selectedProject = $derived.by(() => {
@@ -115,24 +104,36 @@
 	});
 </script>
 
-{#if dashboardLoading || (!hydrated || !client)}
-	<main class="p-5 px-6 overflow-y-auto max-md:p-4">
-		<p class="muted">Loading...</p>
+{#if hydrated && !client}
+	<main class="col-span-full p-5 px-6 overflow-y-auto max-md:p-4">
+		<p class="muted">Unable to load the embedded demo state.</p>
+		{#if dashboardErrorMessage}
+			<pre class="mt-3 overflow-x-auto rounded border border-red-200 bg-red-50 p-3 text-xs text-red-700"
+			>{dashboardErrorMessage}</pre>
+		{/if}
+		{#if dashboardLogs.length > 0}
+			<pre class="mt-3 overflow-x-auto rounded border border-gray-200 bg-gray-50 p-3 text-xs text-gray-600"
+			>{dashboardLogs.join("\n")}</pre>
+		{/if}
 	</main>
-	{:else if client}
+{:else}
+	{#if projectsData.length > 0}
 		<AppSidebar
 			projects={projectsData}
-		{teams}
-		{permissions}
-		bind:activeTab
-		bind:selectedProjectSlug
-		{client}
-		groupId={GROUP_ID}
-	/>
+			{teams}
+			{permissions}
+			bind:activeTab
+			bind:selectedProjectSlug
+			{client}
+			groupId={GROUP_ID}
+		/>
+	{/if}
 	<main class="p-5 px-6 overflow-y-auto max-md:p-4">
-		{#if activeTab === "issues"}
+		{#if !hydrated || !client}
+			<p class="muted">Loading...</p>
+		{:else if activeTab === "issues"}
 			{#if selectedProject}
-			{#key selectedProject._id}
+				{#key selectedProject._id}
 					<IssueListPanel
 						project={{
 							_id: selectedProject._id,
@@ -165,18 +166,6 @@
 					canManageSso: permissions.canManageSso,
 				}}
 			/>
-		{/if}
-	</main>
-{:else}
-	<main class="col-span-full p-5 px-6 overflow-y-auto max-md:p-4">
-		<p class="muted">Unable to load the embedded demo state.</p>
-		{#if dashboardErrorMessage}
-			<pre class="mt-3 overflow-x-auto rounded border border-red-200 bg-red-50 p-3 text-xs text-red-700"
-			>{dashboardErrorMessage}</pre>
-		{/if}
-		{#if dashboardLogs.length > 0}
-			<pre class="mt-3 overflow-x-auto rounded border border-gray-200 bg-gray-50 p-3 text-xs text-gray-600"
-			>{dashboardLogs.join("\n")}</pre>
 		{/if}
 	</main>
 {/if}

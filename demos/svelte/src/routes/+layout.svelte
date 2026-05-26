@@ -35,7 +35,6 @@
 			convex,
 			schema: schemaModule,
 			name: "convex-embedded-svelte-demo",
-			prefetch: data.embedded,
 			auth: {
 				fetchToken: async () => data.auth.token,
 				getUserIdentity: async () => getBrowserIdentity(),

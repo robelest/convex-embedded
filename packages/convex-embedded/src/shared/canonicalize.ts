@@ -12,118 +12,127 @@ export function unwrapSchemaField(field: unknown): unknown {
   return field;
 }
 
+type RewriteValidator = Record<string, unknown> & { kind?: string };
+type RewriteResult = { value: unknown; changed: boolean };
+
+function rewriteArray(
+  value: unknown,
+  element: unknown,
+  localId: string,
+  remoteId: string,
+): RewriteResult {
+  if (!Array.isArray(value)) return { value, changed: false };
+  let changed = false;
+  const items = value.map((entry) => {
+    const rewritten = rewriteKnownIdsResult(entry, element, localId, remoteId);
+    changed = changed || rewritten.changed;
+    return rewritten.value;
+  });
+  return { value: changed ? items : value, changed };
+}
+
+function rewriteRecord(
+  value: unknown,
+  inner: unknown,
+  localId: string,
+  remoteId: string,
+): RewriteResult {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return { value, changed: false };
+  }
+  let changed = false;
+  const next = Object.fromEntries(
+    Object.entries(value).map(([key, entryValue]) => {
+      const rewritten = rewriteKnownIdsResult(
+        entryValue,
+        inner,
+        localId,
+        remoteId,
+      );
+      changed = changed || rewritten.changed;
+      return [key, rewritten.value];
+    }),
+  );
+  return { value: changed ? next : value, changed };
+}
+
+function rewriteObject(
+  value: unknown,
+  fields: Record<string, unknown> | undefined,
+  localId: string,
+  remoteId: string,
+): RewriteResult {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return { value, changed: false };
+  }
+  if (!fields) return { value, changed: false };
+  let changed = false;
+  const next = Object.fromEntries(
+    Object.entries(fields).map(([key, entryField]) => {
+      const rewritten = rewriteKnownIdsResult(
+        (value as Record<string, unknown>)[key],
+        entryField,
+        localId,
+        remoteId,
+      );
+      changed = changed || rewritten.changed;
+      return [key, rewritten.value];
+    }),
+  );
+  return {
+    value: changed ? { ...(value as Record<string, unknown>), ...next } : value,
+    changed,
+  };
+}
+
+function rewriteUnion(
+  value: unknown,
+  members: unknown,
+  localId: string,
+  remoteId: string,
+): RewriteResult {
+  if (!Array.isArray(members)) return { value, changed: false };
+  for (const member of members) {
+    const rewritten = rewriteKnownIdsResult(value, member, localId, remoteId);
+    if (rewritten.changed) return rewritten;
+  }
+  return { value, changed: false };
+}
+
 function rewriteKnownIdsResult(
   value: unknown,
   field: unknown,
   localId: string,
   remoteId: string,
-): { value: unknown; changed: boolean } {
+): RewriteResult {
   const unwrappedField = unwrapSchemaField(field);
-
-  if (value === null || value === undefined) {
-    return { value, changed: false };
-  }
-
+  if (value === null || value === undefined) return { value, changed: false };
   if (typeof unwrappedField === "string") {
     return unwrappedField === "id" && value === localId
       ? { value: remoteId, changed: true }
       : { value, changed: false };
   }
+  if (typeof unwrappedField !== "object") return { value, changed: false };
 
-  if (typeof unwrappedField !== "object") {
-    return { value, changed: false };
-  }
-
-  const validator = unwrappedField as Record<string, unknown> & {
-    kind?: string;
-  };
+  const validator = unwrappedField as RewriteValidator;
   switch (validator.kind) {
     case "id":
       return value === localId
         ? { value: remoteId, changed: true }
         : { value, changed: false };
-    case "array": {
-      if (!Array.isArray(value)) {
-        return { value, changed: false };
-      }
-      let changed = false;
-      const items = value.map((entry) => {
-        const rewritten = rewriteKnownIdsResult(
-          entry,
-          validator.element,
-          localId,
-          remoteId,
-        );
-        changed = changed || rewritten.changed;
-        return rewritten.value;
-      });
-      return { value: changed ? items : value, changed };
-    }
-    case "record": {
-      if (typeof value !== "object" || value === null || Array.isArray(value)) {
-        return { value, changed: false };
-      }
-      let changed = false;
-      const next = Object.fromEntries(
-        Object.entries(value).map(([key, entryValue]) => {
-          const rewritten = rewriteKnownIdsResult(
-            entryValue,
-            validator.value,
-            localId,
-            remoteId,
-          );
-          changed = changed || rewritten.changed;
-          return [key, rewritten.value];
-        }),
+    case "array":
+      return rewriteArray(value, validator.element, localId, remoteId);
+    case "record":
+      return rewriteRecord(value, validator.value, localId, remoteId);
+    case "object":
+      return rewriteObject(
+        value,
+        validator.fields as Record<string, unknown> | undefined,
+        localId,
+        remoteId,
       );
-      return { value: changed ? next : value, changed };
-    }
-    case "object": {
-      if (typeof value !== "object" || value === null || Array.isArray(value)) {
-        return { value, changed: false };
-      }
-      const fields = validator.fields as Record<string, unknown> | undefined;
-      if (!fields) {
-        return { value, changed: false };
-      }
-      let changed = false;
-      const next = Object.fromEntries(
-        Object.entries(fields).map(([key, entryField]) => {
-          const rewritten = rewriteKnownIdsResult(
-            (value as Record<string, unknown>)[key],
-            entryField,
-            localId,
-            remoteId,
-          );
-          changed = changed || rewritten.changed;
-          return [key, rewritten.value];
-        }),
-      );
-      return {
-        value: changed
-          ? { ...(value as Record<string, unknown>), ...next }
-          : value,
-        changed,
-      };
-    }
-    case "union": {
-      const members = validator.members;
-      if (!Array.isArray(members)) {
-        return { value, changed: false };
-      }
-      for (const member of members) {
-        const rewritten = rewriteKnownIdsResult(
-          value,
-          member,
-          localId,
-          remoteId,
-        );
-        if (rewritten.changed) {
-          return rewritten;
-        }
-      }
-      return { value, changed: false };
-    }
+    case "union":
+      return rewriteUnion(value, validator.members, localId, remoteId);
     case "optional":
       return rewriteKnownIdsResult(value, validator.field, localId, remoteId);
     default:

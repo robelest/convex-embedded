@@ -1299,6 +1299,104 @@ export class EmbeddedRuntime {
     }
   }
 
+  private _planCacheMergeFor(
+    table: string,
+    doc: Record<string, unknown> & { _id: string },
+    requiredFields: string[],
+    knownFields: Set<string> | null,
+  ):
+    | {
+        next: Record<string, unknown> & { _id: string; _creationTime: number };
+        isNew: boolean;
+      }
+    | "missing-required"
+    | "unchanged" {
+    const docHasRequired = (d: Record<string, unknown>): boolean => {
+      if (requiredFields.length === 0) return true;
+      for (const field of requiredFields) {
+        if (d[field] === undefined || d[field] === null) return false;
+      }
+      return true;
+    };
+    const stripUnknownFields = (
+      d: Record<string, unknown>,
+    ): Record<string, unknown> => {
+      if (!knownFields) return d;
+      const out: Record<string, unknown> = {};
+      for (const key of Object.keys(d)) {
+        if (key === "_id" || key === "_creationTime" || knownFields.has(key)) {
+          out[key] = d[key];
+        }
+      }
+      return out;
+    };
+
+    const existing = this.db.get(
+      table,
+      doc._id as unknown as DocumentId,
+    ) as Record<string, unknown> | null;
+    const existingCt =
+      typeof existing?._creationTime === "number"
+        ? (existing._creationTime as number)
+        : null;
+    const docCt =
+      typeof doc._creationTime === "number"
+        ? (doc._creationTime as number)
+        : null;
+
+    if (existing === null) {
+      if (!docHasRequired(doc)) return "missing-required";
+      const stripped = stripUnknownFields(doc);
+      const next = (
+        docCt !== null ? stripped : { ...stripped, _creationTime: 0 }
+      ) as Record<string, unknown> & { _id: string; _creationTime: number };
+      return { next, isNew: true };
+    }
+
+    const candidateNext = {
+      ...existing,
+      ...doc,
+      _id: doc._id,
+      _creationTime: docCt ?? existingCt ?? 0,
+    };
+    const next = stripUnknownFields(candidateNext) as Record<
+      string,
+      unknown
+    > & {
+      _id: string;
+      _creationTime: number;
+    };
+    if (!docHasRequired(next)) return "missing-required";
+    if (structuralEqual(existing, next)) return "unchanged";
+    return { next, isNew: false };
+  }
+
+  private async _commitMergedCacheDocs(
+    table: string,
+    merged: Array<
+      Record<string, unknown> & { _id: string; _creationTime: number }
+    >,
+  ): Promise<void> {
+    this.db.startTransaction();
+    try {
+      for (const doc of merged) {
+        try {
+          this.db.writeDocument(table, doc, { validate: false });
+        } catch {
+          /* skip per-doc errors (id collision across tables, etc.) */
+        }
+      }
+      const commit = await this.db.commitAsync();
+      this.db.bumpTableVersions(commit.tablesWritten);
+      const tablesWritten = commit.invalidation.tables;
+      if (tablesWritten.size > 0) {
+        this.subscriptions.invalidate(tablesWritten);
+      }
+    } catch {
+      this.db.rollbackWrites();
+    }
+  }
+
   async writeDocsFromCache(
     table: string,
     docs: Array<Record<string, unknown>>,
@@ -1327,90 +1425,24 @@ export class EmbeddedRuntime {
       ? new Set(Object.keys(tableSpec.fields))
       : null;
 
-    const docHasRequired = (doc: Record<string, unknown>): boolean => {
-      if (requiredFields.length === 0) return true;
-      for (const field of requiredFields) {
-        if (doc[field] === undefined || doc[field] === null) return false;
-      }
-      return true;
-    };
-
-    const stripUnknownFields = (
-      doc: Record<string, unknown>,
-    ): Record<string, unknown> => {
-      if (!knownFields) return doc;
-      const out: Record<string, unknown> = {};
-      for (const key of Object.keys(doc)) {
-        if (key === "_id" || key === "_creationTime" || knownFields.has(key)) {
-          out[key] = doc[key];
-        }
-      }
-      return out;
-    };
-
     const diffStart = nowMs();
     const merged: Array<
       Record<string, unknown> & { _id: string; _creationTime: number }
     > = [];
     let skippedPartial = 0;
     for (const doc of candidates) {
-      const existing = this.db.get(
+      const plan = this._planCacheMergeFor(
         table,
-        doc._id as unknown as DocumentId,
-      ) as Record<string, unknown> | null;
-      const existingCreationTime =
-        typeof existing?._creationTime === "number"
-          ? (existing._creationTime as number)
-          : null;
-      const docCreationTime =
-        typeof doc._creationTime === "number"
-          ? (doc._creationTime as number)
-          : null;
-
-      if (existing === null) {
-        if (!docHasRequired(doc)) {
-          skippedPartial += 1;
-          continue;
-        }
-        const stripped = stripUnknownFields(doc);
-        if (docCreationTime !== null) {
-          merged.push(
-            stripped as Record<string, unknown> & {
-              _id: string;
-              _creationTime: number;
-            },
-          );
-        } else {
-          merged.push({
-            ...stripped,
-            _creationTime: 0,
-          } as Record<string, unknown> & {
-            _id: string;
-            _creationTime: number;
-          });
-        }
-        continue;
-      }
-
-      const candidateNext = {
-        ...existing,
-        ...doc,
-        _id: doc._id,
-        _creationTime: docCreationTime ?? existingCreationTime ?? 0,
-      };
-      const next = stripUnknownFields(candidateNext) as Record<
-        string,
-        unknown
-      > & { _id: string; _creationTime: number };
-
-      if (!docHasRequired(next)) {
+        doc,
+        requiredFields,
+        knownFields,
+      );
+      if (plan === "missing-required") {
         skippedPartial += 1;
         continue;
       }
-
-      if (!structuralEqual(existing, next)) {
-        merged.push(next);
-      }
+      if (plan === "unchanged") continue;
+      merged.push(plan.next);
     }
     const diffMs = nowMs() - diffStart;
 
@@ -1422,24 +1454,7 @@ export class EmbeddedRuntime {
     }
 
     const writeStart = nowMs();
-    this.db.startTransaction();
-    try {
-      for (const doc of merged) {
-        try {
-          this.db.writeDocument(table, doc, { validate: false });
-        } catch {
-          /* skip per-doc errors (id collision across tables, etc.) */
-        }
-      }
-      const commit = await this.db.commitAsync();
-      this.db.bumpTableVersions(commit.tablesWritten);
-      const tablesWritten = commit.invalidation.tables;
-      if (tablesWritten.size > 0) {
-        this.subscriptions.invalidate(tablesWritten);
-      }
-    } catch {
-      this.db.rollbackWrites();
-    }
+    await this._commitMergedCacheDocs(table, merged);
     runtimeLog.debug(
       `writeDocsFromCache ${table} candidates=${candidates.length} merged=${merged.length} skipped_partial=${skippedPartial} diff_ms=${diffMs.toFixed(1)} write_ms=${(nowMs() - writeStart).toFixed(1)} total_ms=${(nowMs() - totalStart).toFixed(1)}`,
     );

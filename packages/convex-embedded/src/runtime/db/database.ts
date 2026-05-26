@@ -2579,10 +2579,12 @@ export class Database {
       return null;
     }
     const tableName = sourceTableName(source);
+    const indexParts =
+      source.type === "IndexRange" ? splitIndexName(source.indexName) : null;
     const indexFields =
-      source.type === "IndexRange"
-        ? (this._getIndexDefinitions(splitIndexName(source.indexName)[0]).find(
-            (entry) => entry.indexName === splitIndexName(source.indexName)[1],
+      indexParts !== null
+        ? (this._getIndexDefinitions(indexParts[0]).find(
+            (entry) => entry.indexName === indexParts[1],
           )?.fields ?? null)
         : null;
     const committed = await this._store.source(source, {
@@ -2612,9 +2614,7 @@ export class Database {
     }
     const merged = this._stripIdentityScopes([...byId.values()]);
     const sortIndexName =
-      source.type === "IndexRange"
-        ? splitIndexName(source.indexName)[1]
-        : "by_creation_time";
+      indexParts !== null ? indexParts[1] : "by_creation_time";
     const sortFields =
       source.type === "IndexRange" && indexFields
         ? indexFields
@@ -2680,10 +2680,8 @@ export class Database {
         "upper",
       );
       const predicate = this._buildRangePredicate(query.source.range);
-      if (
-        this._hasPendingWritesForTable(tableName) &&
-        query.source.order === "asc"
-      ) {
+      const hasPending = this._hasPendingWritesForTable(tableName);
+      if (hasPending && query.source.order === "asc") {
         return this._collectMergedIndexRangeDocs(
           tableName,
           indexName,
@@ -2696,7 +2694,7 @@ export class Database {
         );
       }
 
-      const docs = this._hasPendingWritesForTable(tableName)
+      const docs = hasPending
         ? this._getMergedIndexedDocuments(tableName, indexName)
         : this.getIndexedDocuments(tableName, indexName);
       const start = lower
@@ -2749,6 +2747,10 @@ export class Database {
       query.operators,
     );
     const queryTable = sourceTableName(query.source);
+    const indexFields = this._indexFieldsForSource(query.source);
+    const hasPendingForAnySource = this._hasPendingWritesForAnySource(
+      query.source,
+    );
 
     if (
       query.source.type !== "Search" &&
@@ -2761,37 +2763,31 @@ export class Database {
     if (
       (query.source.type === "FullTableScan" ||
         query.source.type === "IndexRange") &&
-      !this._hasPendingWritesForAnySource(query.source)
+      !hasPendingForAnySource
     ) {
       const pushedDown = await this._store.query({
         source: query.source,
         filters,
         limit: limit ?? null,
-        indexFields: this._indexFieldsForSource(query.source) ?? undefined,
+        indexFields: indexFields ?? undefined,
         searchDefinition: undefined,
         activeIdentityKey: this._activeIdentityKey,
       });
       if (pushedDown !== null) {
-        this._rememberCommittedLookup(
-          sourceTableName(query.source),
-          pushedDown,
-        );
+        this._rememberCommittedLookup(queryTable, pushedDown);
         return this._stripIdentityScopes(pushedDown);
       }
     }
 
-    if (!this._hasPendingWritesForAnySource(query.source)) {
+    if (!hasPendingForAnySource) {
       const sourceResults = await this._store.source(query.source, {
         limit,
-        indexFields: this._indexFieldsForSource(query.source) ?? undefined,
+        indexFields: indexFields ?? undefined,
         searchDefinition: this._searchDefinitionForSource(query.source),
         activeIdentityKey: this._activeIdentityKey,
       });
       if (sourceResults !== null) {
-        this._rememberCommittedLookup(
-          sourceTableName(query.source),
-          sourceResults,
-        );
+        this._rememberCommittedLookup(queryTable, sourceResults);
       }
     }
 
@@ -2816,7 +2812,7 @@ export class Database {
     if (
       (query.source.type === "FullTableScan" ||
         query.source.type === "IndexRange") &&
-      this._hasPendingWritesForAnySource(query.source) &&
+      hasPendingForAnySource &&
       this._isQueryableTable(queryTable) &&
       !this.isTableHydrationAttempted(queryTable)
     ) {

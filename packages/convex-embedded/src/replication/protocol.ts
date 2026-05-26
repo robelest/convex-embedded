@@ -316,7 +316,7 @@ export interface ProtocolAuth {
   verifyToken(token: string): Promise<VerifiedIdentity>;
 }
 
-export interface SyncProtocolHandlerOptions {
+export interface ReplicationProtocolHandlerOptions {
   /** Function executor for running queries, mutations, and actions. */
   executor: ProtocolExecutor;
   queryStore: RuntimeProtocolQueryRegistry;
@@ -331,7 +331,7 @@ export interface SyncProtocolHandlerOptions {
  * handler and one or more {@link ServerMessage}s are returned to be sent
  * back over the wire.
  */
-export class SyncProtocolHandler {
+export class ReplicationProtocolHandler {
   private _executor: ProtocolExecutor;
   private _queryStore: RuntimeProtocolQueryRegistry;
   private _auth: ProtocolAuth;
@@ -345,7 +345,7 @@ export class SyncProtocolHandler {
   /** Monotonically increasing internal timestamp. */
   private _ts = 0;
 
-  constructor(opts: SyncProtocolHandlerOptions) {
+  constructor(opts: ReplicationProtocolHandlerOptions) {
     this._executor = opts.executor;
     this._queryStore = opts.queryStore;
     this._auth = opts.auth;

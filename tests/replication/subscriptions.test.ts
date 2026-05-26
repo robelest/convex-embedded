@@ -1,6 +1,6 @@
+import { SubscriptionManager } from "@embedded/replication/subscriptions";
 import type { DocumentId, StoredDocument } from "@embedded/runtime/db/types";
 import type { QueryDependency } from "@embedded/runtime/db/types";
-import { SubscriptionManager } from "@embedded/sync/subscriptions";
 import { describe, expect, it, vi } from "@tests/testkit";
 
 function docId(value: string): DocumentId {

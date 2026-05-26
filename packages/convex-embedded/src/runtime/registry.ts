@@ -1,7 +1,7 @@
+import type { ProtocolChange } from "@/replication/protocol";
+import type { SubscriptionManager } from "@/replication/subscriptions";
 import type { QueryDependency } from "@/runtime/db/types";
 import { structuralEqual } from "@/shared/equals";
-import type { ProtocolChange } from "@/sync/protocol";
-import type { SubscriptionManager } from "@/sync/subscriptions";
 
 export type QueryEvaluation = {
   result: unknown;
@@ -255,7 +255,7 @@ export class RuntimeQueryObserverRegistry<TMeta> {
         try {
           const evaluation = await observer.evaluate();
           if (observer.pendingDelete) return;
-          this.syncState(observer, evaluation, { notify: false });
+          this.replicationState(observer, evaluation, { notify: false });
           this._captureDepVersions(observer);
         } catch (error) {
           if (observer.pendingDelete) return;
@@ -309,7 +309,7 @@ export class RuntimeQueryObserverRegistry<TMeta> {
     await observer.evaluation;
   }
 
-  syncState(
+  replicationState(
     tokenOrObserver: string | RuntimeQueryObserver<TMeta>,
     state: QueryObserverStateInput,
     options: { notify?: boolean } = {},

@@ -102,6 +102,26 @@ const FAMILIES: ReadonlyArray<RenameFamily> = [
       ["lookupExplicitOptimistic", "getExplicitOptimistic"],
     ],
   },
+  {
+    id: 8,
+    name: "sync → replication (subsystem only; *Sync/*Async suffix kept)",
+    renames: [
+      ["SyncProtocolHandler", "ReplicationProtocolHandler"],
+      ["SyncProtocolHandlerOptions", "ReplicationProtocolHandlerOptions"],
+      ["SyncSnapshot", "ReplicationSnapshot"],
+      ["SyncWriteOp", "ReplicationWriteOp"],
+      ["SyncCycleRoute", "ReplicationCycleRoute"],
+      ["SyncParams", "ReplicationParams"],
+      ["syncTable", "replicateTable"],
+      ["syncState", "replicationState"],
+      ["syncCyclePromise", "replicationCyclePromise"],
+      ["syncMetaTagged", "replicationMetaTagged"],
+      ["syncTab", "replicationTab"],
+      ["runSyncCycle", "runReplicationCycle"],
+      ["getTableRemoteSyncState", "getTableReplicationState"],
+      ["getSyncCycleRoute", "getReplicationCycleRoute"],
+    ],
+  },
 ];
 
 function repoRoot(): string {

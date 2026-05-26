@@ -586,7 +586,7 @@ describe("onMutationCommit", () => {
     await runtimeA.hydrate();
     await runtimeB.hydrate();
 
-    const syncSpy = vi.spyOn(runtimeB.db, "syncTable").mockResolvedValue();
+    const syncSpy = vi.spyOn(runtimeB.db, "replicateTable").mockResolvedValue();
     const reevalSpy = vi
       .spyOn(runtimeB.syncProtocol, "reEvaluateQueries")
       .mockResolvedValue(new Map());
@@ -626,7 +626,7 @@ describe("onMutationCommit", () => {
     await runtimeA.hydrate();
     await runtimeB.hydrate();
 
-    const syncSpy = vi.spyOn(runtimeB.db, "syncTable").mockResolvedValue();
+    const syncSpy = vi.spyOn(runtimeB.db, "replicateTable").mockResolvedValue();
     runtimeA.onMutationCommit(
       makeCommit({
         tablesWritten: new Set(["tasks"]),

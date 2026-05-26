@@ -21,14 +21,14 @@ interface CollectionTransaction<TItem extends object> {
   mutations: Array<CollectionTransactionMutation<TItem>>;
 }
 
-interface SyncWriteOp<TItem extends object> {
+interface ReplicationWriteOp<TItem extends object> {
   type: "insert" | "update" | "delete";
   value: TItem;
 }
 
-interface SyncParams<TItem extends object> {
+interface ReplicationParams<TItem extends object> {
   begin: () => void;
-  write: (op: SyncWriteOp<TItem>) => void;
+  write: (op: ReplicationWriteOp<TItem>) => void;
   commit: () => void;
   markReady: () => void;
   collection: unknown;
@@ -164,7 +164,7 @@ export function convexEmbeddedCollectionOptions<
 ): {
   id: string;
   getKey: (doc: TItem) => string;
-  sync: { sync: (params: SyncParams<TItem>) => () => void };
+  sync: { sync: (params: ReplicationParams<TItem>) => () => void };
   onInsert?: MutationHandler<TItem>;
   onUpdate?: MutationHandler<TItem>;
   onDelete?: MutationHandler<TItem>;

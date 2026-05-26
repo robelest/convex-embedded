@@ -1,10 +1,10 @@
 import { UdfExecutor } from "@embedded/kernel/udf";
+import { SubscriptionManager } from "@embedded/replication/subscriptions";
 import { createAmbientCryptoProvider } from "@embedded/runtime/crypto";
 import { Database } from "@embedded/runtime/db/database";
 import type { DocumentId } from "@embedded/runtime/db/types";
 import { EmbeddedRuntime } from "@embedded/runtime/embedded";
 import { SchedulerExecutor } from "@embedded/scheduler/executor";
-import { SubscriptionManager } from "@embedded/sync/subscriptions";
 import { bench, describe } from "@tests/testkit";
 
 const STUB_MODULES: Record<string, () => Promise<Record<string, unknown>>> = {

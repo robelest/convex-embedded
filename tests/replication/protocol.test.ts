@@ -1,13 +1,13 @@
-import { RuntimeProtocolQueryRegistry } from "@embedded/runtime/registry";
 import type {
   ClientMessage,
   ProtocolAuth,
   ProtocolExecutor,
   ProtocolSessionContext,
   ServerMessage,
-} from "@embedded/sync/protocol";
-import { SyncProtocolHandler } from "@embedded/sync/protocol";
-import { SubscriptionManager } from "@embedded/sync/subscriptions";
+} from "@embedded/replication/protocol";
+import { ReplicationProtocolHandler } from "@embedded/replication/protocol";
+import { SubscriptionManager } from "@embedded/replication/subscriptions";
+import { RuntimeProtocolQueryRegistry } from "@embedded/runtime/registry";
 import { flushMicrotasks } from "@tests/helpers/time";
 import { describe, expect, it, vi, type Mock } from "@tests/testkit";
 import { ConvexError } from "convex/values";
@@ -69,8 +69,8 @@ function createMocks(): Mocks {
 
 function createHandler(
   mocks: Mocks = createMocks(),
-): { handler: SyncProtocolHandler } & Mocks {
-  const handler = new SyncProtocolHandler({
+): { handler: ReplicationProtocolHandler } & Mocks {
+  const handler = new ReplicationProtocolHandler({
     executor: mocks.executor as unknown as ProtocolExecutor,
     queryStore: mocks.queryStore,
     auth: mocks.auth as unknown as ProtocolAuth,
@@ -136,7 +136,7 @@ function connect(sessionId: string, connectionCount = 0): ClientMessage {
   };
 }
 
-describe("SyncProtocolHandler", () => {
+describe("ReplicationProtocolHandler", () => {
   describe("Connect", () => {
     it("returns a single Transition with matching start and end version", async () => {
       const { handler } = createHandler();

@@ -20,5 +20,5 @@ export type {
   RunFunctionInput,
   SchemaTable,
   SubscriptionEntry,
-  SyncSnapshot,
+  ReplicationSnapshot,
 } from "@/devtools/core/types";

@@ -1,3 +1,4 @@
+import { SubscriptionManager } from "@embedded/replication/subscriptions";
 /**
  * Integration tests for the embedded Convex runtime.
  *
@@ -12,7 +13,6 @@ import type {
   SerializedQuery,
   VectorSearchExpression,
 } from "@embedded/runtime/db/types";
-import { SubscriptionManager } from "@embedded/sync/subscriptions";
 import { describe, expect, it, vi } from "@tests/testkit";
 
 const MISSING_ID = "00000000-0000-4000-8000-000000000000" as DocumentId;

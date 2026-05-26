@@ -175,7 +175,7 @@ function scanModuleExports(
   const STORAGE_UPLOAD_URL_META = Symbol.for(
     "convex-embedded:storageUploadUrlMeta",
   );
-  let syncMetaTagged = false;
+  let replicationMetaTagged = false;
 
   for (const [exportName, exportValue] of Object.entries(mod)) {
     if (
@@ -201,11 +201,11 @@ function scanModuleExports(
         }
       | undefined;
     if (
-      !syncMetaTagged &&
+      !replicationMetaTagged &&
       meta &&
       meta.__brand === "convex-embedded:remoteMeta"
     ) {
-      syncMetaTagged = true;
+      replicationMetaTagged = true;
       accumulator.tables[meta.table] = {
         resolve: `${moduleName}:${meta.resolveExport}`,
         schema: meta.schema,

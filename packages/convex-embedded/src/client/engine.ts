@@ -722,7 +722,7 @@ export interface EngineConfig {
 
 type ChangeListener = (status: EngineStatus) => void;
 
-type SyncCycleRoute =
+type ReplicationCycleRoute =
   | { _tag: "Skip" }
   | { _tag: "DeferUntilQueueDrains" }
   | { _tag: "Resolve" };
@@ -900,7 +900,7 @@ function inferTableFromRef(
   return null;
 }
 
-function getSyncCycleRoute(input: {
+function getReplicationCycleRoute(input: {
   aborted: boolean;
   forceResolve: boolean;
   hasPending: boolean;
@@ -908,7 +908,7 @@ function getSyncCycleRoute(input: {
   started: boolean;
   offlineTransitionsSinceBoot: number;
   hasDirtyCrdtRows: boolean;
-}): SyncCycleRoute {
+}): ReplicationCycleRoute {
   if (input.aborted) return { _tag: "Skip" };
   if (!input.forceResolve && (!input.started || !input.isOnline)) {
     return { _tag: "Skip" };
@@ -1894,7 +1894,7 @@ function createEngine(config: EngineConfig): EngineInstance {
 
   let queueProcessingPromise: Promise<Set<string>> | null = null;
   let queueProcessingRequestedWhileActive = false;
-  let syncCyclePromise: Promise<void> | null = null;
+  let replicationCyclePromise: Promise<void> | null = null;
   let activeEntry: PendingEntry | null = null;
 
   let onOnline: (() => void) | null = null;
@@ -2146,7 +2146,7 @@ function createEngine(config: EngineConfig): EngineInstance {
   }
   const tableRemoteSyncStateMap = new Map<string, TableRemoteSyncState>();
 
-  function getTableRemoteSyncState(
+  function getTableReplicationState(
     tableName: string,
     scopeArgs?: Record<string, unknown>,
   ): TableRemoteSyncState {
@@ -2334,7 +2334,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     docs: Array<Record<string, unknown>>,
     scopeArgs?: Record<string, unknown>,
   ): Promise<void> {
-    const state = getTableRemoteSyncState(tableName, scopeArgs);
+    const state = getTableReplicationState(tableName, scopeArgs);
     state.bufferedSnapshot = docs;
     state.retryCount = 0;
     scheduleBufferedSnapshotFlush();
@@ -2372,7 +2372,7 @@ function createEngine(config: EngineConfig): EngineInstance {
           state.bufferedSnapshot = null;
         }
         if (!hasActiveSubscriptions() && started) {
-          void runSyncCycle();
+          void runReplicationCycle();
         }
         return;
       }
@@ -2877,25 +2877,27 @@ function createEngine(config: EngineConfig): EngineInstance {
     }
   }
 
-  function runSyncCycle(options?: { forceResolve?: boolean }): Promise<void> {
-    if (syncCyclePromise) {
+  function runReplicationCycle(options?: {
+    forceResolve?: boolean;
+  }): Promise<void> {
+    if (replicationCyclePromise) {
       if (options?.forceResolve) {
-        return syncCyclePromise.then(() => runSyncCycle(options));
+        return replicationCyclePromise.then(() => runReplicationCycle(options));
       }
-      return syncCyclePromise;
+      return replicationCyclePromise;
     }
 
     abortController?.abort();
     abortController = new AbortController();
     const signal = abortController.signal;
 
-    syncCyclePromise = (async () => {
+    replicationCyclePromise = (async () => {
       try {
         await processUploadQueue(signal);
         const deadLettered = await processQueue(signal);
         await rollbackDeadLetteredTables(deadLettered, signal);
 
-        const route = getSyncCycleRoute({
+        const route = getReplicationCycleRoute({
           aborted: signal.aborted,
           forceResolve: options?.forceResolve ?? false,
           hasPending: !pendingQueue.isEmpty,
@@ -2946,13 +2948,13 @@ function createEngine(config: EngineConfig): EngineInstance {
         }
       }
     })().finally(() => {
-      syncCyclePromise = null;
+      replicationCyclePromise = null;
       if (abortController?.signal === signal) {
         abortController = null;
       }
     });
 
-    return syncCyclePromise;
+    return replicationCyclePromise;
   }
 
   async function resolveDirtyCrdtRows(signal?: AbortSignal): Promise<void> {
@@ -4028,7 +4030,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     isOnline = true;
     recordCounter("connectivity.transition", { state: "online" });
 
-    runDetached(() => runSyncCycle(), "[sync] handleOnline:");
+    runDetached(() => runReplicationCycle(), "[sync] handleOnline:");
   }
 
   function handleOffline() {
@@ -4463,7 +4465,7 @@ function createEngine(config: EngineConfig): EngineInstance {
       if (isOnline) {
         stopRemoteSubscriptions();
       }
-      return runSyncCycle({ forceResolve: true });
+      return runReplicationCycle({ forceResolve: true });
     },
 
     ensureTableReady(tableName: string): Promise<void> {
@@ -4509,7 +4511,7 @@ function createEngine(config: EngineConfig): EngineInstance {
 
       if (isOnline) {
         stopRemoteSubscriptions();
-        await runSyncCycle({ forceResolve: true });
+        await runReplicationCycle({ forceResolve: true });
         return;
       }
 

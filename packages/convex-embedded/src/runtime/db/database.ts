@@ -287,7 +287,7 @@ export class Database {
 
   /**
    * Maps each document UUID to its table name.
-   * Populated on insert (when UUID is generated) and on hydrate/syncTable
+   * Populated on insert (when UUID is generated) and on hydrate/replicateTable
    * (derived from stored documents).
    */
   private _idTableMap: Map<string, string> = new Map();
@@ -656,7 +656,7 @@ export class Database {
    *
    * No-op when running without a storage adapter.
    */
-  async syncTable(tableName: string): Promise<void> {
+  async replicateTable(tableName: string): Promise<void> {
     if (this._storage === null) return;
 
     const { docs, meta } = await this._store.refreshTable({ tableName });

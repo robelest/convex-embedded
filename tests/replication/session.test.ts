@@ -1,4 +1,4 @@
-import { Session, SessionManager } from "@embedded/sync/session";
+import { Session, SessionManager } from "@embedded/replication/session";
 import { describe, expect, it, vi } from "@tests/testkit";
 
 describe.concurrent("Session", () => {

@@ -25,6 +25,15 @@ import { SYSTEM_FUNCTIONS } from "@/kernel/system";
 import type { SystemFunctionDef } from "@/kernel/system";
 import { TransactionManager } from "@/kernel/transaction";
 import { UdfExecutor } from "@/kernel/udf";
+import { ReplicationProtocolHandler } from "@/replication/protocol";
+import type {
+  ClientMessage,
+  ProtocolChange,
+  ProtocolExecutor,
+  ServerMessage,
+} from "@/replication/protocol";
+import { SessionManager } from "@/replication/session";
+import { SubscriptionManager } from "@/replication/subscriptions";
 import {
   blobShaBase64,
   createAmbientCryptoProvider,
@@ -72,15 +81,6 @@ import {
   buildUserTableSpecs,
   type InternalTableSpec,
 } from "@/storage/sqlite/factory";
-import { SyncProtocolHandler } from "@/sync/protocol";
-import type {
-  ClientMessage,
-  ProtocolChange,
-  ProtocolExecutor,
-  ServerMessage,
-} from "@/sync/protocol";
-import { SessionManager } from "@/sync/session";
-import { SubscriptionManager } from "@/sync/subscriptions";
 import { captureValueAttr, withSpan } from "@/tracing/spans";
 import { runDetached } from "@/utils/detached";
 import { DisposableScope } from "@/utils/scope";
@@ -230,7 +230,7 @@ type RuntimeState = {
   localPaginatedQueryWatches: RuntimeQueryObserverRegistry<LocalPaginatedWatchRecord>;
   protocolQueries: RuntimeProtocolQueryRegistry;
   auth: AuthResolver;
-  syncProtocol: SyncProtocolHandler;
+  syncProtocol: ReplicationProtocolHandler;
   sessions: SessionManager;
   writeFanout: WriteBroadcast;
   scheduler: SchedulerExecutor;
@@ -353,7 +353,7 @@ export class EmbeddedRuntime {
   readonly transactionManager: TransactionManager;
   readonly subscriptions: SubscriptionManager;
   readonly protocolQueries: RuntimeProtocolQueryRegistry;
-  readonly syncProtocol: SyncProtocolHandler;
+  readonly syncProtocol: ReplicationProtocolHandler;
   readonly sessions: SessionManager;
   readonly writeFanout: WriteBroadcast;
   readonly auth: AuthResolver;
@@ -1180,7 +1180,9 @@ export class EmbeddedRuntime {
             this._storageAdapter != null && isQueryable(this._storageAdapter)
           ) || this.db.isTableHydrationAttempted(table),
       );
-      await Promise.all(tablesToSync.map((table) => this.db.syncTable(table)));
+      await Promise.all(
+        tablesToSync.map((table) => this.db.replicateTable(table)),
+      );
 
       const updates = await this.syncProtocol.reEvaluateQueries(
         Array.from(tablesWritten).map((tableName) => ({
@@ -2626,7 +2628,7 @@ export class EmbeddedRuntime {
   }
 
   /**
-   * Build the executor facade that {@link SyncProtocolHandler} expects.
+   * Build the executor facade that {@link ReplicationProtocolHandler} expects.
    *
    * The protocol calls:
    *   - `executor.runQuery(udfPath, ...args)`
@@ -2689,7 +2691,7 @@ export class EmbeddedRuntime {
   }
 
   /**
-   * Build the auth facade that {@link SyncProtocolHandler} expects.
+   * Build the auth facade that {@link ReplicationProtocolHandler} expects.
    *
    * The protocol calls `auth.verifyToken(token)`. Since AuthResolver
    * is a simple identity holder (no actual JWT verification for the
@@ -2784,7 +2786,7 @@ export class EmbeddedRuntime {
       activeTimers: runtime._activeTimers,
       runWithTransactionLock: (fn) => runtime._runWithTransactionLock(fn),
     });
-    const syncProtocol = new SyncProtocolHandler({
+    const syncProtocol = new ReplicationProtocolHandler({
       executor: runtime._buildProtocolExecutor(),
       queryStore: protocolQueries,
       auth: runtime._buildProtocolAuth(),

@@ -51,7 +51,7 @@ export interface SubscriptionEntry {
   lastUpdateMs: number;
 }
 
-export interface SyncSnapshot {
+export interface ReplicationSnapshot {
   status: string;
   online: boolean;
   detail?: Record<string, unknown>;
@@ -99,7 +99,7 @@ export interface DevtoolsSnapshot {
   performance: PerfSummary;
   logs: DevtoolsLogLine[];
   subscriptions: SubscriptionEntry[];
-  sync: SyncSnapshot;
+  sync: ReplicationSnapshot;
   pending: PendingEntry[];
   auth: AuthSnapshot;
   data: DataTable[];

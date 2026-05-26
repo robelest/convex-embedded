@@ -1,8 +1,8 @@
+import type { ProtocolExecutor } from "@embedded/replication/protocol";
+import { ReplicationProtocolHandler } from "@embedded/replication/protocol";
+import { SubscriptionManager } from "@embedded/replication/subscriptions";
 import type { DocumentId } from "@embedded/runtime/db/types";
 import { RuntimeProtocolQueryRegistry } from "@embedded/runtime/registry";
-import type { ProtocolExecutor } from "@embedded/sync/protocol";
-import { SyncProtocolHandler } from "@embedded/sync/protocol";
-import { SubscriptionManager } from "@embedded/sync/subscriptions";
 import { bench, describe } from "@tests/testkit";
 
 function createExecutor(): ProtocolExecutor {
@@ -42,9 +42,11 @@ function createExecutor(): ProtocolExecutor {
   };
 }
 
-async function seedProtocol(queryCount: number): Promise<SyncProtocolHandler> {
+async function seedProtocol(
+  queryCount: number,
+): Promise<ReplicationProtocolHandler> {
   const subscriptions = new SubscriptionManager();
-  const protocol = new SyncProtocolHandler({
+  const protocol = new ReplicationProtocolHandler({
     executor: createExecutor(),
     queryStore: new RuntimeProtocolQueryRegistry(subscriptions),
     auth: { verifyToken: async () => ({ identity: null, identityKey: null }) },

@@ -71,7 +71,7 @@ export {
 
 export type { SqliteDriver, SqliteStatement } from "@/storage/sqlite/driver";
 
-export { SubscriptionManager } from "@/sync/subscriptions";
+export { SubscriptionManager } from "@/replication/subscriptions";
 
 export { SystemPaths } from "@/kernel/system";
 

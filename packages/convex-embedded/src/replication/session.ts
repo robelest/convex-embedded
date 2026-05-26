@@ -6,7 +6,7 @@
  * creates, retrieves, and tears down sessions.
  */
 
-import type { StateVersion } from "@/sync/protocol";
+import type { StateVersion } from "@/replication/protocol";
 
 export interface ActiveQuery {
   tableName: string;

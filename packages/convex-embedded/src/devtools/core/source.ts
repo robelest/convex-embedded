@@ -28,7 +28,7 @@ import type {
   RunFunctionInput,
   SchemaTable,
   SubscriptionEntry,
-  SyncSnapshot,
+  ReplicationSnapshot,
 } from "@/devtools/core/types";
 import type { SerializedQuery } from "@/runtime/db/types";
 import type { EmbeddedRuntime } from "@/runtime/embedded";
@@ -53,7 +53,7 @@ function getRuntime(client: ConvexClient): EmbeddedRuntime | null {
   return getEmbeddedClientEntry(client)?.runtime ?? null;
 }
 
-function mapRemoteState(state: RemoteState): SyncSnapshot {
+function mapRemoteState(state: RemoteState): ReplicationSnapshot {
   const online = state.status === "resolved" || state.status === "resolving";
   const detail: Record<string, unknown> = {};
   if (state.status === "resolving" && state.progress) {

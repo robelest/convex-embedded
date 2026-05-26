@@ -17,7 +17,7 @@ import {
 } from "@/devtools/ui/dom";
 import type { DevtoolsTab } from "@/devtools/ui/tab";
 
-export const syncTab: DevtoolsTab = {
+export const replicationTab: DevtoolsTab = {
   id: "sync",
   name: "Sync",
   countView: "pending",

@@ -486,7 +486,8 @@ export function bindTableRuntime(
         );
     };
 
-    const pullByDocIds = async (docIds: string[]) => {
+    if (args.docIds && args.docIds.length > 0) {
+      const docIds = args.docIds;
       const rawLiveStates = (await ctx.runQuery(
         component!.public.getLiveStates,
         {
@@ -518,9 +519,142 @@ export function bindTableRuntime(
         isDone: true,
         continueCursor: null,
       };
+    }
+
+    const collectionChanges = (await ctx.runQuery(
+      component!.public.getCollectionChanges,
+      {
+        collection: tableName,
+        sinceSeq: args.collectionSeq ?? null,
+      },
+    )) as {
+      mode: "full" | "incremental";
+      collectionSeq: number;
+      changes: Array<{ docId: string; kind: "upsert" | "delete" }>;
     };
 
-    const pullIncrementalMode = async () => {
+    const requestedIds = new Set(args.documents.map((doc) => doc.docId));
+    const changedById = new Map(
+      collectionChanges.changes.map(
+        (change) => [change.docId, change.kind] as const,
+      ),
+    );
+
+    if (collectionChanges.mode === "full") {
+      const scoped = args.scopeArgs && Object.keys(args.scopeArgs).length > 0;
+      const knownDocIds = args.documents.map((doc) => doc.docId);
+      const scopeArgs = scoped
+        ? (args.scopeArgs as Record<string, unknown>)
+        : undefined;
+
+      if (args.queryPageRange) {
+        const ranged = await getRangeDocIds(ctx, args.queryPageRange);
+        if (ranged !== null) {
+          const rawLiveStates =
+            ranged.orderedDocIds.length === 0
+              ? []
+              : ((await ctx.runQuery(component!.public.getLiveStates, {
+                  collection: tableName,
+                  docIds: ranged.orderedDocIds,
+                })) as Array<LiveStateRecord | null>);
+          const sliceStates = rawLiveStates.filter(
+            (state): state is LiveStateRecord =>
+              Boolean(state && typeof state.docId === "string"),
+          );
+          const hydrated = await materializeStates(sliceStates, scopeArgs);
+          const hydratedById = new Map(
+            hydrated.map((entry) => [entry.docId, entry] as const),
+          );
+          const documents = ranged.orderedDocIds.flatMap((docId) => {
+            const entry = hydratedById.get(docId);
+            return entry ? [entry] : [];
+          });
+          return {
+            mode: "full" as const,
+            collectionSeq: collectionChanges.collectionSeq,
+            continueCursor: ranged.continueCursor,
+            isDone: ranged.isDone,
+            documents,
+          };
+        }
+      }
+
+      let docIdsToHydrate: string[] | null = null;
+      if (scoped && scopeArgs) {
+        docIdsToHydrate = await getScopedDocIds(ctx, scopeArgs);
+      }
+
+      if (docIdsToHydrate !== null) {
+        const SCOPE_FETCH_PAGE = 32;
+        const fullCursor = args.fullCursor ?? null;
+        const cursorOffset = parseScopeCursor(fullCursor);
+        const sliceStart = cursorOffset;
+        const sliceEnd = Math.min(
+          docIdsToHydrate.length,
+          sliceStart + SCOPE_FETCH_PAGE,
+        );
+        const sliceIds = docIdsToHydrate.slice(sliceStart, sliceEnd);
+
+        const rawLiveStates =
+          sliceIds.length === 0
+            ? []
+            : ((await ctx.runQuery(component!.public.getLiveStates, {
+                collection: tableName,
+                docIds: sliceIds,
+              })) as Array<LiveStateRecord | null>);
+        const sliceStates = rawLiveStates.filter(
+          (state): state is LiveStateRecord =>
+            Boolean(state && typeof state.docId === "string"),
+        );
+        const documents = await materializeStates(sliceStates, scopeArgs);
+
+        const isDone = sliceEnd >= docIdsToHydrate.length;
+        const continueCursor = isDone ? null : encodeScopeCursor(sliceEnd);
+
+        return {
+          mode: "full" as const,
+          collectionSeq: collectionChanges.collectionSeq,
+          continueCursor,
+          isDone,
+          documents,
+        };
+      }
+
+      const page = (await ctx.runQuery(component!.public.getLiveStatesPage, {
+        collection: tableName,
+        cursor: args.fullCursor ?? null,
+        limit: 64,
+      })) as {
+        page: Array<LiveStateRecord>;
+        continueCursor: string | null;
+        isDone: boolean;
+      };
+      const scopedDocuments = await materializeStates(page.page, scopeArgs);
+
+      const missingRequestedDeletes =
+        scoped && knownDocIds.length > 0 && page.isDone
+          ? args.documents
+              .filter(
+                (doc) =>
+                  !scopedDocuments.some((entry) => entry.docId === doc.docId),
+              )
+              .map((doc) => ({
+                docId: doc.docId,
+                deleted: true as const,
+                seq: null,
+              }))
+          : [];
+
+      return {
+        mode: collectionChanges.mode,
+        collectionSeq: collectionChanges.collectionSeq,
+        continueCursor: page.continueCursor,
+        isDone: page.isDone,
+        documents: [...scopedDocuments, ...missingRequestedDeletes],
+      };
+    }
+
+    {
       const remoteOnlyChanges =
         typeof ctx.db?.get !== "function"
           ? []
@@ -678,150 +812,7 @@ export function bindTableRuntime(
         collectionSeq: collectionChanges.collectionSeq,
         documents: [...requestedResults, ...remoteOnlyResults],
       };
-    };
-
-    if (args.docIds && args.docIds.length > 0) {
-      return await pullByDocIds(args.docIds);
     }
-
-    const collectionChanges = (await ctx.runQuery(
-      component!.public.getCollectionChanges,
-      {
-        collection: tableName,
-        sinceSeq: args.collectionSeq ?? null,
-      },
-    )) as {
-      mode: "full" | "incremental";
-      collectionSeq: number;
-      changes: Array<{ docId: string; kind: "upsert" | "delete" }>;
-    };
-
-    const requestedIds = new Set(args.documents.map((doc) => doc.docId));
-    const changedById = new Map(
-      collectionChanges.changes.map(
-        (change) => [change.docId, change.kind] as const,
-      ),
-    );
-
-    const pullFullMode = async () => {
-      const scoped = args.scopeArgs && Object.keys(args.scopeArgs).length > 0;
-      const knownDocIds = args.documents.map((doc) => doc.docId);
-      const scopeArgs = scoped
-        ? (args.scopeArgs as Record<string, unknown>)
-        : undefined;
-
-      if (args.queryPageRange) {
-        const ranged = await getRangeDocIds(ctx, args.queryPageRange);
-        if (ranged !== null) {
-          const rawLiveStates =
-            ranged.orderedDocIds.length === 0
-              ? []
-              : ((await ctx.runQuery(component!.public.getLiveStates, {
-                  collection: tableName,
-                  docIds: ranged.orderedDocIds,
-                })) as Array<LiveStateRecord | null>);
-          const sliceStates = rawLiveStates.filter(
-            (state): state is LiveStateRecord =>
-              Boolean(state && typeof state.docId === "string"),
-          );
-          const hydrated = await materializeStates(sliceStates, scopeArgs);
-          const hydratedById = new Map(
-            hydrated.map((entry) => [entry.docId, entry] as const),
-          );
-          const documents = ranged.orderedDocIds.flatMap((docId) => {
-            const entry = hydratedById.get(docId);
-            return entry ? [entry] : [];
-          });
-          return {
-            mode: "full" as const,
-            collectionSeq: collectionChanges.collectionSeq,
-            continueCursor: ranged.continueCursor,
-            isDone: ranged.isDone,
-            documents,
-          };
-        }
-      }
-
-      let docIdsToHydrate: string[] | null = null;
-      if (scoped && scopeArgs) {
-        docIdsToHydrate = await getScopedDocIds(ctx, scopeArgs);
-      }
-
-      if (docIdsToHydrate !== null) {
-        const SCOPE_FETCH_PAGE = 32;
-        const fullCursor = args.fullCursor ?? null;
-        const cursorOffset = parseScopeCursor(fullCursor);
-        const sliceStart = cursorOffset;
-        const sliceEnd = Math.min(
-          docIdsToHydrate.length,
-          sliceStart + SCOPE_FETCH_PAGE,
-        );
-        const sliceIds = docIdsToHydrate.slice(sliceStart, sliceEnd);
-
-        const rawLiveStates =
-          sliceIds.length === 0
-            ? []
-            : ((await ctx.runQuery(component!.public.getLiveStates, {
-                collection: tableName,
-                docIds: sliceIds,
-              })) as Array<LiveStateRecord | null>);
-        const sliceStates = rawLiveStates.filter(
-          (state): state is LiveStateRecord =>
-            Boolean(state && typeof state.docId === "string"),
-        );
-        const documents = await materializeStates(sliceStates, scopeArgs);
-
-        const isDone = sliceEnd >= docIdsToHydrate.length;
-        const continueCursor = isDone ? null : encodeScopeCursor(sliceEnd);
-
-        return {
-          mode: "full" as const,
-          collectionSeq: collectionChanges.collectionSeq,
-          continueCursor,
-          isDone,
-          documents,
-        };
-      }
-
-      const page = (await ctx.runQuery(component!.public.getLiveStatesPage, {
-        collection: tableName,
-        cursor: args.fullCursor ?? null,
-        limit: 64,
-      })) as {
-        page: Array<LiveStateRecord>;
-        continueCursor: string | null;
-        isDone: boolean;
-      };
-      const scopedDocuments = await materializeStates(page.page, scopeArgs);
-
-      const missingRequestedDeletes =
-        scoped && knownDocIds.length > 0 && page.isDone
-          ? args.documents
-              .filter(
-                (doc) =>
-                  !scopedDocuments.some((entry) => entry.docId === doc.docId),
-              )
-              .map((doc) => ({
-                docId: doc.docId,
-                deleted: true as const,
-                seq: null,
-              }))
-          : [];
-
-      return {
-        mode: collectionChanges.mode,
-        collectionSeq: collectionChanges.collectionSeq,
-        continueCursor: page.continueCursor,
-        isDone: page.isDone,
-        documents: [...scopedDocuments, ...missingRequestedDeletes],
-      };
-    };
-
-    if (collectionChanges.mode === "full") {
-      return await pullFullMode();
-    }
-
-    return await pullIncrementalMode();
   };
 
   log.debug(`bindTableRuntime("${tableName}") — version=${schemaDef.version}`);

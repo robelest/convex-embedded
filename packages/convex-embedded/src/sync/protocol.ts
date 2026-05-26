@@ -445,7 +445,7 @@ export class SyncProtocolHandler {
     return result;
   }
 
-  removeSession(sessionId: string): void {
+  deleteSession(sessionId: string): void {
     this._queryStore.clearSession(sessionId);
     this._sessions.delete(sessionId);
     this._sessionQueues.delete(sessionId);

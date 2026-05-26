@@ -122,7 +122,7 @@ describe.concurrent("SessionManager", () => {
     });
   });
 
-  describe("removeSession", () => {
+  describe("deleteSession", () => {
     it("cleans up the session's active queries", () => {
       const manager = new SessionManager();
       const id = manager.createSession();
@@ -134,7 +134,7 @@ describe.concurrent("SessionManager", () => {
       });
       session.identity = { subject: "user1" };
 
-      manager.removeSession(id);
+      manager.deleteSession(id);
 
       expect(unsub).toHaveBeenCalledOnce();
       expect(session.activeQueries.size).toBe(0);
@@ -145,14 +145,14 @@ describe.concurrent("SessionManager", () => {
       const manager = new SessionManager();
       const id = manager.createSession();
 
-      manager.removeSession(id);
+      manager.deleteSession(id);
 
       expect(() => manager.getSession(id)).toThrow("Session not found");
     });
 
     it("is a no-op for unknown session IDs", () => {
       expect(() =>
-        new SessionManager().removeSession("nonexistent"),
+        new SessionManager().deleteSession("nonexistent"),
       ).not.toThrow();
     });
   });
@@ -180,7 +180,7 @@ describe.concurrent("SessionManager", () => {
       const id1 = manager.createSession();
       const id2 = manager.createSession();
 
-      manager.removeSession(id1);
+      manager.deleteSession(id1);
 
       expect(manager.getSession(id2).id).toBe(id2);
     });

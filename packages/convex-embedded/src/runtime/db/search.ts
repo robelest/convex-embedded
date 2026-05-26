@@ -223,7 +223,7 @@ function insertLexiconTerm(lexicon: string[], term: string): void {
   }
 }
 
-function removeLexiconTerm(lexicon: string[], term: string): void {
+function deleteLexiconTerm(lexicon: string[], term: string): void {
   const index = binarySearchLexiconTerm(lexicon, term);
   if (lexicon[index] === term) {
     lexicon.splice(index, 1);
@@ -280,7 +280,7 @@ export function addDocumentToSearchIndexState(
     state.docCount === 0 ? 0 : totalDocLength / state.docCount;
 }
 
-export function removeDocumentFromSearchIndexState(
+export function deleteDocumentFromSearchIndexState(
   state: SearchIndexState,
   docId: string,
 ): void {
@@ -297,7 +297,7 @@ export function removeDocumentFromSearchIndexState(
     termPostings.delete(docId);
     if (termPostings.size === 0) {
       state.postings.delete(term);
-      removeLexiconTerm(state.lexicon, term);
+      deleteLexiconTerm(state.lexicon, term);
     }
   }
 

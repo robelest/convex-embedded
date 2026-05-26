@@ -76,7 +76,7 @@ export class SessionManager {
   }
 
   /** Remove a session, cleaning up its subscriptions. */
-  removeSession(id: string): void {
+  deleteSession(id: string): void {
     const session = this._sessions.get(id);
     if (session) {
       session.cleanup();

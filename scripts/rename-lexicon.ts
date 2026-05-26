@@ -65,6 +65,24 @@ const FAMILIES: ReadonlyArray<RenameFamily> = [
       ["updateRegistry", "applyIndexDefinitions"],
     ],
   },
+  {
+    id: 4,
+    name: "removal: remove* → delete* for records; keep `remove` only for detach",
+    renames: [
+      ["removeDocument", "deleteDocument"],
+      [
+        "removeDocumentFromSearchIndexState",
+        "deleteDocumentFromSearchIndexState",
+      ],
+      [
+        "removeDocumentFromVectorIndexState",
+        "deleteDocumentFromVectorIndexState",
+      ],
+      ["removeSession", "deleteSession"],
+      ["removeLexiconTerm", "deleteLexiconTerm"],
+      ["removeSocketFromSession", "detachSocketFromSession"],
+    ],
+  },
 ];
 
 function repoRoot(): string {

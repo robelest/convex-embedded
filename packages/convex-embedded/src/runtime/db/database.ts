@@ -32,7 +32,7 @@ import {
   buildSearchIndexState,
   executeSearch,
   executeOverlaySearch,
-  removeDocumentFromSearchIndexState,
+  deleteDocumentFromSearchIndexState,
   resolveSearchIndexDefinition,
   type SearchOverlayState,
   type SearchIndexState,
@@ -55,7 +55,7 @@ import {
   buildVectorIndexState,
   executeOverlayVectorSearch,
   executeVectorSearch,
-  removeDocumentFromVectorIndexState,
+  deleteDocumentFromVectorIndexState,
   resolveVectorIndexDefinition,
   type VectorOverlayState,
   type VectorIndexState,
@@ -1219,7 +1219,7 @@ export class Database {
    *
    * Must be called within an active transaction.
    */
-  removeDocument(table: TableName, id: DocumentId): boolean {
+  deleteDocument(table: TableName, id: DocumentId): boolean {
     const existingTable = this._idTableMap.get(id as string);
     if (existingTable === undefined) {
       return false;
@@ -1227,7 +1227,7 @@ export class Database {
 
     if (existingTable !== table) {
       throw new Error(
-        `removeDocument: ID "${id}" belongs to table "${existingTable}", ` +
+        `deleteDocument: ID "${id}" belongs to table "${existingTable}", ` +
           `not "${table}"`,
       );
     }
@@ -3681,7 +3681,7 @@ export class Database {
       }
 
       for (const change of changes) {
-        removeDocumentFromVectorIndexState(state, change.id as string);
+        deleteDocumentFromVectorIndexState(state, change.id as string);
       }
       for (const change of changes) {
         if (change.after !== null) {
@@ -3709,7 +3709,7 @@ export class Database {
       }
 
       for (const change of changes) {
-        removeDocumentFromSearchIndexState(state, change.id as string);
+        deleteDocumentFromSearchIndexState(state, change.id as string);
       }
       for (const change of changes) {
         if (change.after !== null) {

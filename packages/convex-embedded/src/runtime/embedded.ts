@@ -910,7 +910,7 @@ export class EmbeddedRuntime {
    * @param sessionId - Protocol session id to tear down.
    */
   teardownSession(sessionId: string): void {
-    this.syncProtocol.removeSession(sessionId);
+    this.syncProtocol.deleteSession(sessionId);
   }
 
   private async _buildLocalDocumentMap(
@@ -1264,7 +1264,7 @@ export class EmbeddedRuntime {
           this.db.writeDocument(table, doc);
         }
         for (const id of toDelete) {
-          this.db.removeDocument(table, id as unknown as DocumentId);
+          this.db.deleteDocument(table, id as unknown as DocumentId);
         }
         const commit = await this.db.commitAsync();
 
@@ -1499,7 +1499,7 @@ export class EmbeddedRuntime {
           db.writeDocument(currentTableName, doc, { validate: false });
         }
         for (const id of toDelete) {
-          db.removeDocument(currentTableName, id as DocumentId);
+          db.deleteDocument(currentTableName, id as DocumentId);
         }
       }
 

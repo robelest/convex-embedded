@@ -31,7 +31,7 @@ function addSocketToSession(
   const existingSession = registry.sessionBySocket.get(socket);
   if (existingSession === sessionId) return;
   if (existingSession !== undefined) {
-    removeSocketFromSession(registry, existingSession, socket);
+    detachSocketFromSession(registry, existingSession, socket);
   }
 
   const sockets = registry.socketsBySession.get(sessionId) ?? new Set();
@@ -40,7 +40,7 @@ function addSocketToSession(
   registry.sessionBySocket.set(socket, sessionId);
 }
 
-function removeSocketFromSession(
+function detachSocketFromSession(
   registry: SessionSocketRegistry,
   sessionId: string,
   socket: LoopbackWebSocket,
@@ -160,7 +160,7 @@ export function createTransport(
         const sessionId = sessionRegistry.sessionBySocket.get(socket);
         if (sessionId === undefined) return;
 
-        const removedLastSocket = removeSocketFromSession(
+        const removedLastSocket = detachSocketFromSession(
           sessionRegistry,
           sessionId,
           socket,

@@ -449,7 +449,7 @@ export function buildVectorIndexState(input: {
   };
 }
 
-export function removeDocumentFromVectorIndexState(
+export function deleteDocumentFromVectorIndexState(
   state: VectorIndexState,
   docId: string,
 ): void {

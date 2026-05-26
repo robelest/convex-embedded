@@ -79,6 +79,9 @@ importers:
       '@typescript/native-preview':
         specifier: 7.0.0-dev.20260326.1
         version: 7.0.0-dev.20260326.1
+      fallow:
+        specifier: ^2.80.0
+        version: 2.80.0
       vite:
         specifier: npm:@voidzero-dev/vite-plus-core@^0.1.14
         version: '@voidzero-dev/vite-plus-core@0.1.14(@types/node@25.6.2)(esbuild@0.27.3)(jiti@2.6.1)(terser@5.46.1)(typescript@5.9.3)(yaml@2.8.3)'
@@ -311,7 +314,7 @@ importers:
         version: '@voidzero-dev/vite-plus-core@0.1.14(@types/node@25.5.0)(esbuild@0.27.3)(jiti@2.6.1)(terser@5.46.1)(typescript@5.9.3)(yaml@2.8.3)'
       vite-plus:
         specifier: 'catalog:'
-        version: 0.1.14(@edge-runtime/vm@5.0.0)(@opentelemetry/api@1.9.0)(@types/node@25.5.0)(@voidzero-dev/vite-plus-core@0.1.14(@types/node@25.5.0)(esbuild@0.27.3)(jiti@2.6.1)(terser@5.46.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(happy-dom@20.8.9)(jiti@2.6.1)(terser@5.46.1)(typescript@5.9.3)(yaml@2.8.3)
+        version: 0.1.14(@edge-runtime/vm@5.0.0)(@opentelemetry/api@1.9.0)(@types/node@25.5.0)(esbuild@0.27.3)(happy-dom@20.8.9)(jiti@2.6.1)(terser@5.46.1)(typescript@5.9.3)(vite@8.0.3(@types/node@25.5.0)(esbuild@0.27.3)(jiti@2.6.1)(terser@5.46.1)(yaml@2.8.3))(yaml@2.8.3)
       wrangler:
         specifier: ^4.80.0
         version: 4.80.0(@cloudflare/workers-types@4.20260403.1)
@@ -432,7 +435,7 @@ importers:
         version: 2.3.11
       wa-sqlite:
         specifier: github:rhashimoto/wa-sqlite
-        version: https://codeload.github.com/rhashimoto/wa-sqlite/tar.gz/c25cefe7086e4d1a7899ad0595d8dc9142475099
+        version: https://codeload.github.com/rhashimoto/wa-sqlite/tar.gz/e596fddfcbc5494f8cf1a46096540920eed884d6
       yjs:
         specifier: ^13.6.0
         version: 13.6.30
@@ -1640,6 +1643,46 @@ packages:
   '@expo/xcpretty@4.4.1':
     resolution: {integrity: sha512-KZNxZvnGCtiM2aYYZ6Wz0Ix5r47dAvpNLApFtZWnSoERzAdOMzVBOPysBoM0JlF6FKWZ8GPqgn6qt3dV/8Zlpg==}
     hasBin: true
+
+  '@fallow-cli/darwin-arm64@2.80.0':
+    resolution: {integrity: sha512-+wRfU4YlOoPEqOA6Usc4w5O4r4xiQSS6lpFN5j9gA+0ZbcHn9JvizXh+91trfIDqXt0CYRvSwjTURiUzsrAQOg==}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@fallow-cli/darwin-x64@2.80.0':
+    resolution: {integrity: sha512-6ZLStpogktaAJQzRcLllTRlYbrSJYktN+RsHzR1cb/aa3Iw4mmgoT6PFBnvvu009K/q8jHkQkCf9194NwdkNow==}
+    cpu: [x64]
+    os: [darwin]
+
+  '@fallow-cli/linux-arm64-gnu@2.80.0':
+    resolution: {integrity: sha512-/3hqjlSDi7EO90tefuIde2n1wV3MoN8YPYX2SfeKa0iulOh0xVplZw4QHyVV+lCQQnogqzdM2y8mh1zISpJ70g==}
+    cpu: [arm64]
+    os: [linux]
+
+  '@fallow-cli/linux-arm64-musl@2.80.0':
+    resolution: {integrity: sha512-qv29jC+eOAKCpFnfnhc/ZyO50RfGhNt96Jlt8iw5Y3MwfDqMRzvtA5E8p6t6Ymau6wCJuhCrcphPpjVBIEOcqQ==}
+    cpu: [arm64]
+    os: [linux]
+
+  '@fallow-cli/linux-x64-gnu@2.80.0':
+    resolution: {integrity: sha512-NyYciuZQyBNaiz8hvNJgPpYjZuBAHpzp+AjRPGlbcUCSJEov5Nqmrv6cSFRFITa6JmzQ5Vbg64X+Iq2OuiFMEg==}
+    cpu: [x64]
+    os: [linux]
+
+  '@fallow-cli/linux-x64-musl@2.80.0':
+    resolution: {integrity: sha512-BBH1PJgJGzGrdLk/0Nl9CsVr1GzovtSvZlpQ2XJndXEqNaaEEBJHdlQFcJM4AGePjzsvriKVjPqDpyZ5uMICTQ==}
+    cpu: [x64]
+    os: [linux]
+
+  '@fallow-cli/win32-arm64-msvc@2.80.0':
+    resolution: {integrity: sha512-2N9itgnTYS6VB8VL5PlwSuHloZoj86NfR6IbvpdYQ6v1ciPOjpC54hbgJEvMnCQCuKD/zEc9+U8+pOXGS/iLfQ==}
+    cpu: [arm64]
+    os: [win32]
+
+  '@fallow-cli/win32-x64-msvc@2.80.0':
+    resolution: {integrity: sha512-vbk/bA7EFqR2ECz/mYup7+D2zwv5MVUlKhm/6/n6V+9eeyFW2ZwyTQXYdfzsby/3r/w/uZ+OHjVo9/WANBZMMg==}
+    cpu: [x64]
+    os: [win32]
 
   '@floating-ui/core@1.7.5':
     resolution: {integrity: sha512-1Ih4WTWyw0+lKyFMcBHGbb5U5FtuHJuujoyyr5zTaWS5EYMeT6Jb2AuDeftsCsEuchO+mM2ij5+q9crhydzLhQ==}
@@ -5262,6 +5305,11 @@ packages:
   exponential-backoff@3.1.3:
     resolution: {integrity: sha512-ZgEeZXj30q+I0EN+CbSSpIyPaJ5HVQD18Z1m+u1FXbAeT94mr1zw50q4q6jiiC447Nl/YTcIYSAftiGqetwXCA==}
 
+  fallow@2.80.0:
+    resolution: {integrity: sha512-TnBj6P/UF7DgaKjZFz1e69DkGyvlYABE7V9n98cbUmEq+Y+RsOq/rQVBnvbw+8jj7MhNuRRleheULCPQg4GgZA==}
+    engines: {node: '>=16'}
+    hasBin: true
+
   fast-base64-decode@1.0.0:
     resolution: {integrity: sha512-qwaScUgUGBYeDNRnbc/KyllVU88Jk1pRHPStuF/lO7B0/RTRLj7U0lkdTAutlBblY08rwZDff6tNU9cjv6j//Q==}
 
@@ -7858,8 +7906,8 @@ packages:
   w3c-keyname@2.2.8:
     resolution: {integrity: sha512-dpojBhNsCNN7T82Tm7k26A6G9ML3NkhDsnw9n/eoxSRlVBB4CEtIQ/KTCLI2Fwf3ataSXRhYFkQi3SlnFwPvPQ==}
 
-  wa-sqlite@https://codeload.github.com/rhashimoto/wa-sqlite/tar.gz/c25cefe7086e4d1a7899ad0595d8dc9142475099:
-    resolution: {tarball: https://codeload.github.com/rhashimoto/wa-sqlite/tar.gz/c25cefe7086e4d1a7899ad0595d8dc9142475099}
+  wa-sqlite@https://codeload.github.com/rhashimoto/wa-sqlite/tar.gz/e596fddfcbc5494f8cf1a46096540920eed884d6:
+    resolution: {tarball: https://codeload.github.com/rhashimoto/wa-sqlite/tar.gz/e596fddfcbc5494f8cf1a46096540920eed884d6}
     version: 1.1.1
 
   walker@1.0.8:
@@ -9336,7 +9384,7 @@ snapshots:
       postcss: 8.4.49
       resolve-from: 5.0.0
     optionalDependencies:
-      expo: 54.0.33(@babel/core@7.29.0)(@expo/metro-runtime@6.1.2)(expo-router@6.0.23)(react-native-webview@13.15.0(react-native@0.81.5(@babel/core@7.29.0)(@types/react@19.1.17)(react@19.1.0))(react@19.1.0))(react-native@0.81.5(@babel/core@7.29.0)(@types/react@19.1.17)(react@19.1.0))(react@19.1.0)
+      expo: 54.0.33(@babel/core@7.29.0)(@expo/metro-runtime@6.1.2)(expo-router@6.0.23)(react-native-webview@13.16.1(react-native@0.81.5(@babel/core@7.29.0)(@types/react@19.2.14)(react@19.1.0))(react@19.1.0))(react-native@0.81.5(@babel/core@7.29.0)(@types/react@19.2.14)(react@19.1.0))(react@19.1.0)
     transitivePeerDependencies:
       - bufferutil
       - supports-color
@@ -9416,7 +9464,7 @@ snapshots:
       '@expo/json-file': 10.0.13
       '@react-native/normalize-colors': 0.81.5
       debug: 4.4.3
-      expo: 54.0.33(@babel/core@7.29.0)(@expo/metro-runtime@6.1.2)(expo-router@6.0.23)(react-native-webview@13.15.0(react-native@0.81.5(@babel/core@7.29.0)(@types/react@19.1.17)(react@19.1.0))(react@19.1.0))(react-native@0.81.5(@babel/core@7.29.0)(@types/react@19.1.17)(react@19.1.0))(react@19.1.0)
+      expo: 54.0.33(@babel/core@7.29.0)(@expo/metro-runtime@6.1.2)(expo-router@6.0.23)(react-native-webview@13.16.1(react-native@0.81.5(@babel/core@7.29.0)(@types/react@19.2.14)(react@19.1.0))(react@19.1.0))(react-native@0.81.5(@babel/core@7.29.0)(@types/react@19.2.14)(react@19.1.0))(react@19.1.0)
       resolve-from: 5.0.0
       semver: 7.7.4
       xml2js: 0.6.0
@@ -9452,6 +9500,30 @@ snapshots:
       '@babel/code-frame': 7.29.0
       chalk: 4.1.2
       js-yaml: 4.1.1
+
+  '@fallow-cli/darwin-arm64@2.80.0':
+    optional: true
+
+  '@fallow-cli/darwin-x64@2.80.0':
+    optional: true
+
+  '@fallow-cli/linux-arm64-gnu@2.80.0':
+    optional: true
+
+  '@fallow-cli/linux-arm64-musl@2.80.0':
+    optional: true
+
+  '@fallow-cli/linux-x64-gnu@2.80.0':
+    optional: true
+
+  '@fallow-cli/linux-x64-musl@2.80.0':
+    optional: true
+
+  '@fallow-cli/win32-arm64-msvc@2.80.0':
+    optional: true
+
+  '@fallow-cli/win32-x64-msvc@2.80.0':
+    optional: true
 
   '@floating-ui/core@1.7.5':
     dependencies:
@@ -11861,48 +11933,6 @@ snapshots:
       - utf-8-validate
       - yaml
 
-  '@voidzero-dev/vite-plus-test@0.1.14(@edge-runtime/vm@5.0.0)(@opentelemetry/api@1.9.0)(@types/node@25.5.0)(@voidzero-dev/vite-plus-core@0.1.14(@types/node@25.5.0)(esbuild@0.27.3)(jiti@2.6.1)(terser@5.46.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(happy-dom@20.8.9)(jiti@2.6.1)(terser@5.46.1)(typescript@5.9.3)(yaml@2.8.3)':
-    dependencies:
-      '@standard-schema/spec': 1.1.0
-      '@types/chai': 5.2.3
-      '@voidzero-dev/vite-plus-core': 0.1.14(@types/node@25.5.0)(esbuild@0.27.3)(jiti@2.6.1)(terser@5.46.1)(typescript@5.9.3)(yaml@2.8.3)
-      es-module-lexer: 1.7.0
-      obug: 2.1.1
-      pixelmatch: 7.1.0
-      pngjs: 7.0.0
-      sirv: 3.0.2
-      std-env: 4.0.0
-      tinybench: 2.9.0
-      tinyexec: 1.0.4
-      tinyglobby: 0.2.15
-      vite: '@voidzero-dev/vite-plus-core@0.1.14(@types/node@25.5.0)(esbuild@0.27.3)(jiti@2.6.1)(terser@5.46.1)(typescript@5.9.3)(yaml@2.8.3)'
-      ws: 8.20.0
-    optionalDependencies:
-      '@edge-runtime/vm': 5.0.0
-      '@opentelemetry/api': 1.9.0
-      '@types/node': 25.5.0
-      happy-dom: 20.8.9
-    transitivePeerDependencies:
-      - '@arethetypeswrong/core'
-      - '@tsdown/css'
-      - '@tsdown/exe'
-      - '@vitejs/devtools'
-      - bufferutil
-      - esbuild
-      - jiti
-      - less
-      - publint
-      - sass
-      - sass-embedded
-      - stylus
-      - sugarss
-      - terser
-      - tsx
-      - typescript
-      - unplugin-unused
-      - utf-8-validate
-      - yaml
-
   '@voidzero-dev/vite-plus-test@0.1.14(@edge-runtime/vm@5.0.0)(@opentelemetry/api@1.9.0)(@types/node@25.5.0)(esbuild@0.27.3)(happy-dom@20.8.9)(jiti@2.6.1)(terser@5.46.1)(typescript@5.9.3)(vite@8.0.3(@types/node@25.5.0)(esbuild@0.27.3)(jiti@2.6.1)(terser@5.46.1)(yaml@2.8.3))(yaml@2.8.3)':
     dependencies:
       '@standard-schema/spec': 1.1.0
@@ -12326,7 +12356,7 @@ snapshots:
       resolve-from: 5.0.0
     optionalDependencies:
       '@babel/runtime': 7.29.2
-      expo: 54.0.33(@babel/core@7.29.0)(@expo/metro-runtime@6.1.2)(expo-router@6.0.23)(react-native-webview@13.15.0(react-native@0.81.5(@babel/core@7.29.0)(@types/react@19.1.17)(react@19.1.0))(react@19.1.0))(react-native@0.81.5(@babel/core@7.29.0)(@types/react@19.1.17)(react@19.1.0))(react@19.1.0)
+      expo: 54.0.33(@babel/core@7.29.0)(@expo/metro-runtime@6.1.2)(expo-router@6.0.23)(react-native-webview@13.16.1(react-native@0.81.5(@babel/core@7.29.0)(@types/react@19.2.14)(react@19.1.0))(react@19.1.0))(react-native@0.81.5(@babel/core@7.29.0)(@types/react@19.2.14)(react@19.1.0))(react@19.1.0)
     transitivePeerDependencies:
       - '@babel/core'
       - supports-color
@@ -13480,7 +13510,7 @@ snapshots:
 
   expo-keep-awake@15.0.8(expo@54.0.33)(react@19.1.0):
     dependencies:
-      expo: 54.0.33(@babel/core@7.29.0)(@expo/metro-runtime@6.1.2)(expo-router@6.0.23)(react-native-webview@13.15.0(react-native@0.81.5(@babel/core@7.29.0)(@types/react@19.1.17)(react@19.1.0))(react@19.1.0))(react-native@0.81.5(@babel/core@7.29.0)(@types/react@19.1.17)(react@19.1.0))(react@19.1.0)
+      expo: 54.0.33(@babel/core@7.29.0)(@expo/metro-runtime@6.1.2)(expo-router@6.0.23)(react-native-webview@13.16.1(react-native@0.81.5(@babel/core@7.29.0)(@types/react@19.2.14)(react@19.1.0))(react@19.1.0))(react-native@0.81.5(@babel/core@7.29.0)(@types/react@19.2.14)(react@19.1.0))(react@19.1.0)
       react: 19.1.0
 
   expo-linking@8.0.11(expo@54.0.33)(react-native@0.81.5(@babel/core@7.29.0)(@types/react@19.1.17)(react@19.1.0))(react@19.1.0):
@@ -13536,7 +13566,7 @@ snapshots:
 
   expo-network@8.0.8(expo@54.0.33)(react@19.1.0):
     dependencies:
-      expo: 54.0.33(@babel/core@7.29.0)(@expo/metro-runtime@6.1.2)(expo-router@6.0.23)(react-native-webview@13.15.0(react-native@0.81.5(@babel/core@7.29.0)(@types/react@19.1.17)(react@19.1.0))(react@19.1.0))(react-native@0.81.5(@babel/core@7.29.0)(@types/react@19.1.17)(react@19.1.0))(react@19.1.0)
+      expo: 54.0.33(@babel/core@7.29.0)(@expo/metro-runtime@6.1.2)(expo-router@6.0.23)(react-native-webview@13.16.1(react-native@0.81.5(@babel/core@7.29.0)(@types/react@19.2.14)(react@19.1.0))(react@19.1.0))(react-native@0.81.5(@babel/core@7.29.0)(@types/react@19.2.14)(react@19.1.0))(react@19.1.0)
       react: 19.1.0
 
   expo-router@6.0.23(@expo/metro-runtime@6.1.2)(@types/react-dom@19.2.3(@types/react@19.1.17))(@types/react@19.1.17)(expo-constants@18.0.13)(expo-linking@8.0.11)(expo@54.0.33)(react-dom@19.2.0(react@19.1.0))(react-native-gesture-handler@2.28.0(react-native@0.81.5(@babel/core@7.29.0)(@types/react@19.1.17)(react@19.1.0))(react@19.1.0))(react-native-reanimated@4.1.7(react-native-worklets@0.5.1(@babel/core@7.29.0)(react-native@0.81.5(@babel/core@7.29.0)(@types/react@19.1.17)(react@19.1.0))(react@19.1.0))(react-native@0.81.5(@babel/core@7.29.0)(@types/react@19.1.17)(react@19.1.0))(react@19.1.0))(react-native-safe-area-context@5.6.2(react-native@0.81.5(@babel/core@7.29.0)(@types/react@19.1.17)(react@19.1.0))(react@19.1.0))(react-native-screens@4.16.0(react-native@0.81.5(@babel/core@7.29.0)(@types/react@19.1.17)(react@19.1.0))(react@19.1.0))(react-native-web@0.21.2(react-dom@19.2.0(react@19.1.0))(react@19.1.0))(react-native@0.81.5(@babel/core@7.29.0)(@types/react@19.1.17)(react@19.1.0))(react@19.1.0):
@@ -13745,6 +13775,19 @@ snapshots:
       - utf-8-validate
 
   exponential-backoff@3.1.3: {}
+
+  fallow@2.80.0:
+    dependencies:
+      detect-libc: 2.1.2
+    optionalDependencies:
+      '@fallow-cli/darwin-arm64': 2.80.0
+      '@fallow-cli/darwin-x64': 2.80.0
+      '@fallow-cli/linux-arm64-gnu': 2.80.0
+      '@fallow-cli/linux-arm64-musl': 2.80.0
+      '@fallow-cli/linux-x64-gnu': 2.80.0
+      '@fallow-cli/linux-x64-musl': 2.80.0
+      '@fallow-cli/win32-arm64-msvc': 2.80.0
+      '@fallow-cli/win32-x64-msvc': 2.80.0
 
   fast-base64-decode@1.0.0: {}
 
@@ -16962,54 +17005,6 @@ snapshots:
       - vite
       - yaml
 
-  vite-plus@0.1.14(@edge-runtime/vm@5.0.0)(@opentelemetry/api@1.9.0)(@types/node@25.5.0)(@voidzero-dev/vite-plus-core@0.1.14(@types/node@25.5.0)(esbuild@0.27.3)(jiti@2.6.1)(terser@5.46.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(happy-dom@20.8.9)(jiti@2.6.1)(terser@5.46.1)(typescript@5.9.3)(yaml@2.8.3):
-    dependencies:
-      '@oxc-project/types': 0.122.0
-      '@voidzero-dev/vite-plus-core': 0.1.14(@types/node@25.5.0)(esbuild@0.27.3)(jiti@2.6.1)(terser@5.46.1)(typescript@5.9.3)(yaml@2.8.3)
-      '@voidzero-dev/vite-plus-test': 0.1.14(@edge-runtime/vm@5.0.0)(@opentelemetry/api@1.9.0)(@types/node@25.5.0)(@voidzero-dev/vite-plus-core@0.1.14(@types/node@25.5.0)(esbuild@0.27.3)(jiti@2.6.1)(terser@5.46.1)(typescript@5.9.3)(yaml@2.8.3))(esbuild@0.27.3)(happy-dom@20.8.9)(jiti@2.6.1)(terser@5.46.1)(typescript@5.9.3)(yaml@2.8.3)
-      cac: 7.0.0
-      cross-spawn: 7.0.6
-      oxfmt: 0.42.0
-      oxlint: 1.57.0(oxlint-tsgolint@0.17.3)
-      oxlint-tsgolint: 0.17.3
-      picocolors: 1.1.1
-    optionalDependencies:
-      '@voidzero-dev/vite-plus-darwin-arm64': 0.1.14
-      '@voidzero-dev/vite-plus-darwin-x64': 0.1.14
-      '@voidzero-dev/vite-plus-linux-arm64-gnu': 0.1.14
-      '@voidzero-dev/vite-plus-linux-arm64-musl': 0.1.14
-      '@voidzero-dev/vite-plus-linux-x64-gnu': 0.1.14
-      '@voidzero-dev/vite-plus-linux-x64-musl': 0.1.14
-      '@voidzero-dev/vite-plus-win32-arm64-msvc': 0.1.14
-      '@voidzero-dev/vite-plus-win32-x64-msvc': 0.1.14
-    transitivePeerDependencies:
-      - '@arethetypeswrong/core'
-      - '@edge-runtime/vm'
-      - '@opentelemetry/api'
-      - '@tsdown/css'
-      - '@tsdown/exe'
-      - '@types/node'
-      - '@vitejs/devtools'
-      - '@vitest/ui'
-      - bufferutil
-      - esbuild
-      - happy-dom
-      - jiti
-      - jsdom
-      - less
-      - publint
-      - sass
-      - sass-embedded
-      - stylus
-      - sugarss
-      - terser
-      - tsx
-      - typescript
-      - unplugin-unused
-      - utf-8-validate
-      - vite
-      - yaml
-
   vite-plus@0.1.14(@edge-runtime/vm@5.0.0)(@opentelemetry/api@1.9.0)(@types/node@25.5.0)(esbuild@0.27.3)(happy-dom@20.8.9)(jiti@2.6.1)(terser@5.46.1)(typescript@5.9.3)(vite@8.0.3(@types/node@25.5.0)(esbuild@0.27.3)(jiti@2.6.1)(terser@5.46.1)(yaml@2.8.3))(yaml@2.8.3):
     dependencies:
       '@oxc-project/types': 0.122.0
@@ -17288,7 +17283,7 @@ snapshots:
 
   w3c-keyname@2.2.8: {}
 
-  wa-sqlite@https://codeload.github.com/rhashimoto/wa-sqlite/tar.gz/c25cefe7086e4d1a7899ad0595d8dc9142475099: {}
+  wa-sqlite@https://codeload.github.com/rhashimoto/wa-sqlite/tar.gz/e596fddfcbc5494f8cf1a46096540920eed884d6: {}
 
   walker@1.0.8:
     dependencies:

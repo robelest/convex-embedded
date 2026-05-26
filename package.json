@@ -28,6 +28,8 @@
     "deploy:demo": "vp exec convex deploy --cmd 'vp run build:demo' --cmd-url-env-var-name CONVEX_URL && vp run --filter demo-svelte deploy",
     "dev:convex": "vp exec convex dev",
     "dev:svelte": "vp run --filter demo-svelte dev",
+    "fallow:audit": "fallow audit",
+    "fallow:health": "fallow health --score",
     "test:live": "vp exec convex deploy --preview-create=embedded-live --cmd-url-env-var-name CONVEX_URL --cmd 'RUN_CONVEX_LIVE=1 vp test --run --project live'",
     "test:live:url": "RUN_CONVEX_LIVE=1 vp test --run --project live",
     "prepare": "vp config"
@@ -42,6 +44,7 @@
     "@convex-dev/action-retrier": "^0.3.0",
     "@robelest/convex-embedded": "workspace:*",
     "@typescript/native-preview": "7.0.0-dev.20260326.1",
+    "fallow": "^2.80.0",
     "vite": "catalog:",
     "vite-plus": "catalog:",
     "wrangler": "^4.80.0"

@@ -56,7 +56,7 @@ export async function discoverCronJobs(
 
   const jobs: CronJobDefinition[] = [];
   for (const [identifier, raw] of Object.entries(shape.crons)) {
-    const job = await resolveCronJobDefinition(moduleLoader, identifier, raw);
+    const job = await getCronJobDefinition(moduleLoader, identifier, raw);
     if (job !== null) {
       jobs.push(job);
     }
@@ -64,7 +64,7 @@ export async function discoverCronJobs(
   return jobs;
 }
 
-async function resolveCronJobDefinition(
+async function getCronJobDefinition(
   moduleLoader: ModuleLoader,
   identifier: string,
   raw: CronJobShape,
@@ -81,7 +81,7 @@ async function resolveCronJobDefinition(
   const args = parseArgs(raw.args);
   let resolved: { type: CronFunctionType; routeMode: RouteMode | null };
   try {
-    resolved = await resolveFunction(moduleLoader, raw.name);
+    resolved = await getFunction(moduleLoader, raw.name);
   } catch (error) {
     log.warn(
       `cron "${identifier}" target "${raw.name}" could not be resolved; skipping`,
@@ -186,7 +186,7 @@ function parseArgs(raw: unknown): Record<string, unknown> {
   return {};
 }
 
-async function resolveFunction(
+async function getFunction(
   moduleLoader: ModuleLoader,
   functionPath: string,
 ): Promise<{ type: CronFunctionType; routeMode: RouteMode | null }> {

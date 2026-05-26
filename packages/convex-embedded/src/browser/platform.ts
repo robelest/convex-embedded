@@ -61,7 +61,7 @@ async function removeEntryWithRetry(
   }
 }
 
-async function resolveOpfsDirectory(name: string): Promise<{
+async function getOpfsDirectory(name: string): Promise<{
   directory: FileSystemDirectoryHandle;
   baseName: string;
 } | null> {
@@ -92,7 +92,7 @@ async function resolveOpfsDirectory(name: string): Promise<{
 }
 
 async function clearBrowserSqliteFiles(name: string): Promise<boolean> {
-  const resolved = await resolveOpfsDirectory(name);
+  const resolved = await getOpfsDirectory(name);
   if (!resolved) {
     return false;
   }

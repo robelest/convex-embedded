@@ -68,7 +68,7 @@ export function getFunctionFromHandle(handle: string): FunctionPath {
  * - `{ reference: "_reference/childComponent/aggregate/path/to/file/fn" }`
  * - `{ functionHandle: "function://..." }` — opaque handle
  */
-export function resolveFunctionPath(
+export function getFunctionPath(
   address: FunctionAddress,
   currentComponentPath = "",
 ): FunctionPath {

@@ -79,7 +79,7 @@ export function wrapConvexBrowserClientForReact(client: ConvexClient) {
   return wrapConvexClientForReact(client);
 }
 
-function resolveEmbeddedBrowserClient(
+function getEmbeddedBrowserClient(
   client: ConvexClient | ConvexReactClient,
 ): ConvexClient {
   return unwrapEmbeddedBrowserClient(client);
@@ -94,7 +94,7 @@ function resolveEmbeddedBrowserClient(
  * @see subscribeRemoteState
  */
 export function getRemoteState(client: ConvexClient | ConvexReactClient) {
-  return getBrowserRemoteState(resolveEmbeddedBrowserClient(client));
+  return getBrowserRemoteState(getEmbeddedBrowserClient(client));
 }
 
 /**
@@ -111,7 +111,7 @@ export function subscribeRemoteState(
   callback: (state: RemoteState) => void,
 ) {
   return subscribeBrowserRemoteState(
-    resolveEmbeddedBrowserClient(client),
+    getEmbeddedBrowserClient(client),
     callback,
   );
 }
@@ -125,7 +125,7 @@ export function subscribeRemoteState(
  * @see subscribeAuthState
  */
 export function getAuthState(client: ConvexClient | ConvexReactClient) {
-  return getBrowserAuthState(resolveEmbeddedBrowserClient(client));
+  return getBrowserAuthState(getEmbeddedBrowserClient(client));
 }
 
 /**
@@ -141,10 +141,7 @@ export function subscribeAuthState(
   client: ConvexClient | ConvexReactClient,
   callback: (state: AuthState) => void,
 ) {
-  return subscribeBrowserAuthState(
-    resolveEmbeddedBrowserClient(client),
-    callback,
-  );
+  return subscribeBrowserAuthState(getEmbeddedBrowserClient(client), callback);
 }
 
 /**
@@ -154,7 +151,7 @@ export function subscribeAuthState(
  * @returns The current embedded identity, or `null` when unauthenticated.
  */
 export function getAuthIdentity(client: ConvexClient | ConvexReactClient) {
-  return getBrowserAuthIdentity(resolveEmbeddedBrowserClient(client));
+  return getBrowserAuthIdentity(getEmbeddedBrowserClient(client));
 }
 
 /**
@@ -164,7 +161,7 @@ export function getAuthIdentity(client: ConvexClient | ConvexReactClient) {
  * @returns A promise that resolves once auth reconciliation completes.
  */
 export function reauthenticate(client: ConvexClient | ConvexReactClient) {
-  return reauthenticateBrowserClient(resolveEmbeddedBrowserClient(client));
+  return reauthenticateBrowserClient(getEmbeddedBrowserClient(client));
 }
 
 /**
@@ -178,7 +175,7 @@ export function setAuthIdentity(
   client: ConvexClient | ConvexReactClient,
   identity: Parameters<typeof setBrowserAuthIdentity>[1],
 ) {
-  return setBrowserAuthIdentity(resolveEmbeddedBrowserClient(client), identity);
+  return setBrowserAuthIdentity(getEmbeddedBrowserClient(client), identity);
 }
 
 /**
@@ -188,7 +185,7 @@ export function setAuthIdentity(
  * @returns A promise that resolves once auth state is cleared.
  */
 export function logout(client: ConvexClient | ConvexReactClient) {
-  return logoutBrowserClient(resolveEmbeddedBrowserClient(client));
+  return logoutBrowserClient(getEmbeddedBrowserClient(client));
 }
 
 /**
@@ -202,5 +199,5 @@ export function switchIdentity(
   client: ConvexClient | ConvexReactClient,
   identity: Parameters<typeof switchBrowserIdentity>[1],
 ) {
-  return switchBrowserIdentity(resolveEmbeddedBrowserClient(client), identity);
+  return switchBrowserIdentity(getEmbeddedBrowserClient(client), identity);
 }

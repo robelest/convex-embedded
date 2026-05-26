@@ -81,9 +81,9 @@ function createPatchedClient(result: IssuesResult) {
     getRefName: (ref) => String(ref),
     asError: (error) =>
       error instanceof Error ? error : new Error(String(error)),
-    resolveMutationPlan: () => ({ kind: "local", enqueueForReplay: false }),
-    resolveReadPlan: () => ({ kind: "local" }),
-    resolveReadPlanByName: () => ({ kind: "local" }),
+    planMutation: () => ({ kind: "local", enqueueForReplay: false }),
+    planRead: () => ({ kind: "local" }),
+    planReadByName: () => ({ kind: "local" }),
     executeLocalMutation: vi.fn(async () => null),
     translateLocalResultToClient: translateLocalIssueIds,
   });

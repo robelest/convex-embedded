@@ -1,4 +1,4 @@
-import { resolveFunctionPath, type FunctionPath } from "@/kernel/modules";
+import { getFunctionPath, type FunctionPath } from "@/kernel/modules";
 import { getFunctionName } from "@/shared/refs";
 
 export function asError(err: unknown): Error {
@@ -41,7 +41,7 @@ export function getFunctionRefName(ref: unknown): string {
 
 export function getFunctionRefPath(ref: unknown): FunctionPath | null {
   if (typeof ref === "string") {
-    return resolveFunctionPath({ name: ref });
+    return getFunctionPath({ name: ref });
   }
 
   if (ref === null || typeof ref !== "object") {
@@ -60,7 +60,7 @@ export function getFunctionRefPath(ref: unknown): FunctionPath | null {
     candidate.functionHandle === undefined
   ) {
     try {
-      return resolveFunctionPath({
+      return getFunctionPath({
         name: getFunctionName(ref as Parameters<typeof getFunctionName>[0]),
       });
     } catch {
@@ -69,7 +69,7 @@ export function getFunctionRefPath(ref: unknown): FunctionPath | null {
   }
 
   try {
-    return resolveFunctionPath(candidate);
+    return getFunctionPath(candidate);
   } catch {
     return null;
   }

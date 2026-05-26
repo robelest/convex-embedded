@@ -1,13 +1,13 @@
 import type { ConvexClient } from "convex/browser";
 
 import type { AuthEntry } from "@/client/auth";
-import type { ResolveEntry, RemoteOptions } from "@/client/remote";
+import type { PullEntry, RemoteOptions } from "@/client/remote";
 import type { ConvexInput } from "@/kernel/modules";
 import type { EmbeddedRuntime } from "@/runtime/embedded";
 import type { ConnectivityAdapter } from "@/runtime/platform";
 
-export interface ResolveInput {
-  readonly entry: ResolveEntry;
+export interface PullInput {
+  readonly entry: PullEntry;
   readonly authEntry: AuthEntry;
   readonly embedded: {
     client: ConvexClient;

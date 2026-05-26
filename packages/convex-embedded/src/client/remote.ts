@@ -27,7 +27,7 @@ import {
   getFunctionRefPath,
   matchTag,
 } from "@/client/routing/refs";
-import type { ResolveInput } from "@/client/services/resolve";
+import type { PullInput } from "@/client/services/pull";
 import type { ConvexInput } from "@/kernel/modules";
 import type { EmbeddedRuntime } from "@/runtime/embedded";
 import type { ConnectivityAdapter } from "@/runtime/platform";
@@ -106,7 +106,7 @@ export interface EngineInstance {
     options?: { enqueueForReplay?: boolean },
   ): Promise<unknown>;
   on(event: "change", cb: (status: EngineStatus) => void): void;
-  resolveNow?(): Promise<void>;
+  pullNow?(): Promise<void>;
   ensureTableReady?(tableName: string): Promise<void>;
   ensureScopeReady?(
     tableName: string,
@@ -165,7 +165,7 @@ function deriveQueryScope(
  * Internal control hooks returned when remote sync is attached to a client.
  * @internal
  */
-export interface ResolveAttachment {
+export interface PullAttachment {
   /** Forward `setAuth(...)` calls to the hidden remote Convex client. */
   forwardSetAuth: (...args: Parameters<ConvexClient["setAuth"]>) => void;
   /** Forward `clearAuth()` calls to the hidden remote Convex client. */
@@ -191,7 +191,7 @@ interface RemoteAuthClient {
  * Internal remote-sync entry stored per browser client.
  * @internal
  */
-export interface ResolveEntry {
+export interface PullEntry {
   engine: EngineInstance | null;
   state: RemoteState;
   stateHub: PubSub<RemoteState>;
@@ -218,12 +218,10 @@ type DiscoveryResult =
       tables: Record<string, { resolve: string; schema?: unknown }>;
     };
 
-const RESOLVE_ENTRIES = Symbol.for(
-  "convex-embedded:client/remote:resolveEntries",
-);
+const PULL_ENTRIES = Symbol.for("convex-embedded:client/remote:pullEntries");
 
 type RemoteGlobal = typeof globalThis & {
-  [RESOLVE_ENTRIES]?: WeakMap<ConvexClient, ResolveEntry>;
+  [PULL_ENTRIES]?: WeakMap<ConvexClient, PullEntry>;
 };
 
 async function closeRemoteClientSafely(
@@ -237,10 +235,10 @@ async function closeRemoteClientSafely(
   ]);
 }
 
-function getResolveEntriesStore() {
+function getPullEntriesStore() {
   const globalState = globalThis as RemoteGlobal;
-  globalState[RESOLVE_ENTRIES] ??= new WeakMap<ConvexClient, ResolveEntry>();
-  return globalState[RESOLVE_ENTRIES];
+  globalState[PULL_ENTRIES] ??= new WeakMap<ConvexClient, PullEntry>();
+  return globalState[PULL_ENTRIES];
 }
 
 /**
@@ -250,7 +248,7 @@ function getResolveEntriesStore() {
  * @returns The current remote sync state snapshot.
  */
 export function getRemoteState(client: ConvexClient): RemoteState {
-  return getResolveEntriesStore().get(client)?.state ?? { status: "idle" };
+  return getPullEntriesStore().get(client)?.state ?? { status: "idle" };
 }
 
 /**
@@ -264,7 +262,7 @@ export function subscribeRemoteState(
   client: ConvexClient,
   callback: (state: RemoteState) => void,
 ): () => void {
-  const entry = getResolveEntriesStore().get(client);
+  const entry = getPullEntriesStore().get(client);
   if (!entry) return () => {};
 
   return entry.stateHub.subscribe((state) => {
@@ -299,7 +297,7 @@ export function whenPreloaded<Query extends FunctionReference<"query">>(
   client: ConvexClient,
   preloaded: Preloaded<Query>,
 ): Promise<void> {
-  const entry = getResolveEntriesStore().get(client);
+  const entry = getPullEntriesStore().get(client);
   if (!entry) return Promise.resolve();
 
   return new Promise<void>((resolve) => {
@@ -352,8 +350,8 @@ export function whenPreloaded<Query extends FunctionReference<"query">>(
  * @param client - Browser `ConvexClient` instance.
  * @internal
  */
-export function deleteResolveEntry(client: ConvexClient): void {
-  getResolveEntriesStore().delete(client);
+export function deletePullEntry(client: ConvexClient): void {
+  getPullEntriesStore().delete(client);
 }
 
 async function loadEngine(): Promise<{
@@ -365,7 +363,7 @@ async function loadEngine(): Promise<{
   };
 }
 
-function resolveMutationRoute(entry: ResolveEntry, ref: unknown) {
+function routeMutation(entry: PullEntry, ref: unknown) {
   const refName = getFunctionRefName(ref);
   const refPath = getFunctionRefPath(ref);
   const routeMode =
@@ -373,7 +371,7 @@ function resolveMutationRoute(entry: ResolveEntry, ref: unknown) {
   return planMutationExecution({ refName, refPath, routeMode });
 }
 
-function resolveReadRoute(entry: ResolveEntry, ref: unknown) {
+function routeRead(entry: PullEntry, ref: unknown) {
   const refName = getFunctionRefName(ref);
   const refPath = getFunctionRefPath(ref);
   const routeMode =
@@ -382,7 +380,7 @@ function resolveReadRoute(entry: ResolveEntry, ref: unknown) {
 }
 
 async function executeLocalMutation(
-  entry: ResolveEntry,
+  entry: PullEntry,
   runtime: EmbeddedRuntime,
   ref: unknown,
   args: Record<string, unknown>,
@@ -401,7 +399,7 @@ async function executeLocalMutation(
 }
 
 async function deferUntilDiscovery<T>(
-  entry: ResolveEntry,
+  entry: PullEntry,
   run: () => Promise<T>,
 ): Promise<T> {
   if (entry.discovery) {
@@ -414,7 +412,7 @@ async function deferUntilDiscovery<T>(
 }
 
 function toDiscoveryResult(
-  entry: ResolveEntry,
+  entry: PullEntry,
   accumulator: DiscoveredRemoteMetadata,
 ): DiscoveryResult {
   if (entry.closed) {
@@ -437,7 +435,7 @@ function toDiscoveryResult(
       };
 }
 
-function notifyResolveListeners(entry: ResolveEntry, state: RemoteState): void {
+function notifyPullListeners(entry: PullEntry, state: RemoteState): void {
   entry.state = state;
   entry.stateHub.publish(state);
 }
@@ -453,7 +451,7 @@ function toErrorMessage(error: unknown): string {
   }
 }
 
-function toResolvePhase(
+function toPullPhase(
   status: EngineStatus | null | undefined,
 ): BrowserResolvePhase {
   if (!status) return { _tag: "Idle" };
@@ -479,7 +477,7 @@ function toResolvePhase(
 }
 
 function mapStatus(s: EngineStatus): RemoteState {
-  const phase = toResolvePhase(s);
+  const phase = toPullPhase(s);
   return matchTag(phase, "_tag", {
     Idle: (): RemoteState => ({ status: "idle" }),
     Syncing: (current): RemoteState => ({
@@ -495,7 +493,7 @@ function mapStatus(s: EngineStatus): RemoteState {
   });
 }
 
-async function discoverAndStart(input: ResolveInput): Promise<void> {
+async function discoverAndStart(input: PullInput): Promise<void> {
   const {
     entry,
     authEntry,
@@ -563,7 +561,7 @@ async function discoverAndStart(input: ResolveInput): Promise<void> {
         });
         engine.on("change", (monitorStatus) => {
           if (entry.closed) return;
-          notifyResolveListeners(entry, mapStatus(monitorStatus));
+          notifyPullListeners(entry, mapStatus(monitorStatus));
 
           if (monitorStatus?.status === "offline") {
             setOfflineStaleIfNeeded(authEntry);
@@ -584,7 +582,7 @@ async function discoverAndStart(input: ResolveInput): Promise<void> {
     if (entry.closed) return;
     const error = err instanceof Error ? err : new Error(toErrorMessage(err));
     log.error("resolve setup failed", error);
-    notifyResolveListeners(entry, { status: "error", error });
+    notifyPullListeners(entry, { status: "error", error });
   }
 }
 
@@ -610,7 +608,7 @@ export function attachResolve(input: {
   getCacheStorage?: () => QueryCacheStorage | null;
   knownTables?: ReadonlySet<string>;
   leaderLock?: <T>(fn: () => Promise<T>) => Promise<T>;
-}): ResolveAttachment {
+}): PullAttachment {
   const {
     client,
     runtime,
@@ -634,7 +632,7 @@ export function attachResolve(input: {
     registerUploadUrlSource: runtime.registerUploadUrlSource.bind(runtime),
   };
 
-  const entry: ResolveEntry = {
+  const entry: PullEntry = {
     engine: null,
     state: { status: "idle" },
     stateHub: new PubSub<RemoteState>(),
@@ -669,9 +667,9 @@ export function attachResolve(input: {
     remoteClient,
     getRefName: getFunctionRefName,
     asError,
-    resolveMutationPlan: (ref) => resolveMutationRoute(entry, ref),
-    resolveReadPlan: (ref) => resolveReadRoute(entry, ref),
-    resolveReadPlanByName: (refName) =>
+    planMutation: (ref) => routeMutation(entry, ref),
+    planRead: (ref) => routeRead(entry, ref),
+    planReadByName: (refName) =>
       planReadExecution({
         refName,
         refPath: getFunctionRefPath(refName),
@@ -718,7 +716,7 @@ export function attachResolve(input: {
   });
   entry.scope.addFinalizer(() => patchHandle.dispose());
 
-  getResolveEntriesStore().set(client, entry);
+  getPullEntriesStore().set(client, entry);
 
   const discoverInput = {
     entry,
@@ -740,30 +738,30 @@ export function attachResolve(input: {
   });
 
   if (leaderLock) {
-    let resolveDiscovery: () => void = () => {};
+    let pullDiscovery: () => void = () => {};
     entry.discovery = new Promise<void>((resolve) => {
-      resolveDiscovery = resolve;
+      pullDiscovery = resolve;
     });
     let enteredLeaderCallback = false;
     void leaderLock(async () => {
       enteredLeaderCallback = true;
       if (entry.closed) {
-        resolveDiscovery();
+        pullDiscovery();
         return;
       }
       try {
         await discoverAndStart(discoverInput);
         entry.discoveryReady = true;
       } finally {
-        resolveDiscovery();
+        pullDiscovery();
       }
       await entryClosedPromise;
     }).catch(() => {
-      resolveDiscovery();
+      pullDiscovery();
     });
     setTimeout(() => {
       if (!enteredLeaderCallback) {
-        resolveDiscovery();
+        pullDiscovery();
       }
     }, 50);
   } else {

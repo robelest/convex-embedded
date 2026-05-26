@@ -64,11 +64,11 @@ export interface ProseJson {
 export type TypedFieldDescriptor<
   Type extends CrdtTypeValue,
   ValidatorType = unknown,
-  ResolveType = unknown,
+  PullType = unknown,
 > = Omit<CrdtFieldDescriptor, "type" | "validator" | "resolve"> & {
   type: Type;
   validator: ValidatorType;
-  resolve?: ResolveType;
+  resolve?: PullType;
 };
 
 /** Prose CRDT field descriptor. */

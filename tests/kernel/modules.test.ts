@@ -2,7 +2,7 @@ import {
   ModuleLoader,
   createFunctionHandle,
   getFunctionFromHandle,
-  resolveFunctionPath,
+  getFunctionPath,
   type ConvexModuleRegistry,
 } from "@embedded/kernel/modules";
 import { describe, expect, it } from "@tests/testkit";
@@ -136,18 +136,15 @@ describe.concurrent("getFunctionFromHandle", () => {
   });
 });
 
-describe.concurrent("resolveFunctionPath", () => {
+describe.concurrent("getFunctionPath", () => {
   it('resolves { name } with currentComponentPath defaulting to ""', () => {
-    const result = resolveFunctionPath({ name: "messages:list" });
+    const result = getFunctionPath({ name: "messages:list" });
 
     expect(result).toEqual({ componentPath: "", udfPath: "messages:list" });
   });
 
   it("resolves { name } using the provided currentComponentPath", () => {
-    const result = resolveFunctionPath(
-      { name: "messages:list" },
-      "myComponent",
-    );
+    const result = getFunctionPath({ name: "messages:list" }, "myComponent");
 
     expect(result).toEqual({
       componentPath: "myComponent",
@@ -156,7 +153,7 @@ describe.concurrent("resolveFunctionPath", () => {
   });
 
   it("resolves { reference } to componentPath and udfPath", () => {
-    const result = resolveFunctionPath({
+    const result = getFunctionPath({
       reference: "_reference/childComponent/aggregate/path/to/file/fnName",
     });
 
@@ -167,7 +164,7 @@ describe.concurrent("resolveFunctionPath", () => {
   });
 
   it("resolves { reference } and prepends currentComponentPath", () => {
-    const result = resolveFunctionPath(
+    const result = getFunctionPath(
       { reference: "_reference/childComponent/sub/module/func" },
       "parent",
     );
@@ -184,13 +181,13 @@ describe.concurrent("resolveFunctionPath", () => {
       udfPath: "mod:fn",
     });
 
-    const result = resolveFunctionPath({ functionHandle: handle });
+    const result = getFunctionPath({ functionHandle: handle });
 
     expect(result).toEqual({ componentPath: "comp", udfPath: "mod:fn" });
   });
 
   it("throws when no address field is provided", () => {
-    expect(() => resolveFunctionPath({})).toThrow(
+    expect(() => getFunctionPath({})).toThrow(
       /Function address must have at least one of/,
     );
   });
@@ -201,7 +198,7 @@ describe.concurrent("resolveFunctionPath", () => {
       udfPath: "handle:fn",
     });
 
-    const result = resolveFunctionPath({
+    const result = getFunctionPath({
       functionHandle: handle,
       name: "name:fn",
     });

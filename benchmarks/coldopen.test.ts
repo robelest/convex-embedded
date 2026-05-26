@@ -206,12 +206,12 @@ it("profiles a 499-doc scoped cold open", async () => {
   }
 
   const resolveTableSpans = spans.filter(
-    (span) => span.name === "convex-embedded.resolveTable",
+    (span) => span.name === "convex-embedded.getTableSpec",
   );
   const queryCalls = harness.remoteClient.query.mock.calls.length;
 
   console.log(
-    `\n[COLD-OPEN] resolveTable invocations: ${resolveTableSpans.length}`,
+    `\n[COLD-OPEN] getTableSpec invocations: ${resolveTableSpans.length}`,
   );
   console.log(`[COLD-OPEN] remoteClient.query calls: ${queryCalls}`);
   console.log(

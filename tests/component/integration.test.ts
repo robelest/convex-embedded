@@ -6,7 +6,7 @@ import type {
   ConvexModuleRegistry,
   FunctionPath,
 } from "@embedded/kernel/modules";
-import { resolveFunctionPath } from "@embedded/kernel/modules";
+import { getFunctionPath } from "@embedded/kernel/modules";
 import { EmbeddedRuntime } from "@embedded/runtime/embedded";
 import { describe, expect, it } from "@tests/testkit";
 import { ConvexError } from "convex/values";
@@ -25,7 +25,7 @@ interface RunUdfRuntime {
 
 describe.concurrent("component path resolution", () => {
   it("leaves componentPath empty for direct UDF names", () => {
-    const path = resolveFunctionPath({ name: "messages:send" });
+    const path = getFunctionPath({ name: "messages:send" });
 
     expect(path.componentPath).toBe("");
     expect(path.udfPath).toBe("messages:send");

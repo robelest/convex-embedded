@@ -9,7 +9,7 @@ import {
   getRegisterConflict,
   getSetMembers,
   materializeYjsDoc,
-  resolveRegister,
+  getRegister,
 } from "@resolve/client/schema";
 import { createEmptyProseContent } from "@resolve/crdt/prose/content";
 import {
@@ -106,10 +106,10 @@ describe("getRegisterConflict()", () => {
   });
 });
 
-describe("resolveRegister()", () => {
+describe("getRegister()", () => {
   it("returns undefined for missing field", () => {
     const doc = createEmptyDoc();
-    expect(resolveRegister(doc, "missing")).toBeUndefined();
+    expect(getRegister(doc, "missing")).toBeUndefined();
   });
 
   it("returns value for single entry", () => {
@@ -119,7 +119,7 @@ describe("resolveRegister()", () => {
     registerMap.set("_init", { value: "hello", timestamp: 100 });
     fields.set("title", registerMap);
 
-    expect(resolveRegister<string>(doc, "title")).toBe("hello");
+    expect(getRegister<string>(doc, "title")).toBe("hello");
   });
 
   it("uses latest() for multi-entry without custom resolver", () => {
@@ -130,7 +130,7 @@ describe("resolveRegister()", () => {
     registerMap.set("c2", { value: "new", timestamp: 200 });
     fields.set("title", registerMap);
 
-    expect(resolveRegister<string>(doc, "title")).toBe("new");
+    expect(getRegister<string>(doc, "title")).toBe("new");
   });
 
   it("uses custom resolver for multi-entry", () => {
@@ -142,7 +142,7 @@ describe("resolveRegister()", () => {
     fields.set("title", registerMap);
 
     // Custom resolver: pick longest string
-    const result = resolveRegister<string>(doc, "title", (conflict) => {
+    const result = getRegister<string>(doc, "title", (conflict) => {
       return conflict.values.reduce((a, b) => (a.length >= b.length ? a : b));
     });
 
@@ -155,7 +155,7 @@ describe("resolveRegister()", () => {
     const registerMap = new Y.Map();
     fields.set("title", registerMap);
 
-    expect(resolveRegister(doc, "title")).toBeUndefined();
+    expect(getRegister(doc, "title")).toBeUndefined();
   });
 });
 

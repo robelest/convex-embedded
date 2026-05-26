@@ -388,7 +388,7 @@ class TopKHeap {
   }
 }
 
-export function resolveVectorIndexDefinition(
+export function getVectorIndexDefinition(
   vectorIndexes: ReadonlyArray<VectorIndexDefinition> | undefined,
   tableName: string,
   indexName: string,

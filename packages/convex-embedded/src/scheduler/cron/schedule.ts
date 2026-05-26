@@ -233,10 +233,10 @@ function parseCronField(
       end = max;
     } else if (body.includes("-")) {
       const dashIdx = body.indexOf("-");
-      start = resolveCronAtom(body.slice(0, dashIdx), aliases);
-      end = resolveCronAtom(body.slice(dashIdx + 1), aliases);
+      start = getCronAtom(body.slice(0, dashIdx), aliases);
+      end = getCronAtom(body.slice(dashIdx + 1), aliases);
     } else {
-      start = resolveCronAtom(body, aliases);
+      start = getCronAtom(body, aliases);
       end = start;
     }
     if (start < min || end > max || start > end) {
@@ -249,10 +249,7 @@ function parseCronField(
   return Array.from(out).sort((a, b) => a - b);
 }
 
-function resolveCronAtom(
-  raw: string,
-  aliases?: Record<string, number>,
-): number {
+function getCronAtom(raw: string, aliases?: Record<string, number>): number {
   const trimmed = raw.trim();
   if (aliases) {
     const lookup = aliases[trimmed.toLowerCase()];

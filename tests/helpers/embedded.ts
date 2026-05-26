@@ -33,7 +33,7 @@
 
 import {
   ModuleLoader,
-  resolveFunctionPath,
+  getFunctionPath,
   type ConvexModule,
   type ConvexModuleRegistry,
   type FunctionPath,
@@ -275,21 +275,21 @@ export function embeddedTest<M extends Record<string, ModuleValue>>(
   return {
     async query(path, ...args) {
       const result = await executor.executeQuery(
-        resolveFunctionPath({ name: path }),
+        getFunctionPath({ name: path }),
         toArgs(args[0]),
       );
       return result as ReturnOf<M[typeof path]>;
     },
     async mutation(path, ...args) {
       const { result } = await executor.executeMutation(
-        resolveFunctionPath({ name: path }),
+        getFunctionPath({ name: path }),
         toArgs(args[0]),
       );
       return result as ReturnOf<M[typeof path]>;
     },
     async action(path, ...args) {
       const result = await executor.executeAction(
-        resolveFunctionPath({ name: path }),
+        getFunctionPath({ name: path }),
         toArgs(args[0]),
       );
       return result as ReturnOf<M[typeof path]>;

@@ -13,7 +13,7 @@ import type { ParsedSchema } from "@/runtime/db/schema";
 import {
   buildSearchIndexState,
   executeSearch,
-  resolveSearchIndexDefinition,
+  getSearchIndexDefinition,
 } from "@/runtime/db/search";
 import type { GenericDocument } from "@/runtime/db/types";
 import type {
@@ -30,7 +30,7 @@ import type {
 import {
   buildVectorIndexState,
   executeVectorSearch,
-  resolveVectorIndexDefinition,
+  getVectorIndexDefinition,
 } from "@/runtime/db/vector";
 import { matchTag } from "@/shared/match";
 
@@ -1127,7 +1127,7 @@ export class QueryEngine {
       string,
       string,
     ];
-    const definition = resolveVectorIndexDefinition(
+    const definition = getVectorIndexDefinition(
       this._schema?.tables.get(tableName)?.vectorIndexes,
       tableName,
       indexName,
@@ -1336,7 +1336,7 @@ export class QueryEngine {
       string,
       string,
     ];
-    const definition = resolveSearchIndexDefinition(
+    const definition = getSearchIndexDefinition(
       this._schema?.tables.get(tableName)?.searchIndexes,
       tableName,
       indexName,

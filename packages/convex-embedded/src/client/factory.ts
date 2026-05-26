@@ -28,9 +28,9 @@ import {
 import { ID_MAP_STORE_MIGRATIONS } from "@/client/ids";
 import {
   attachResolve,
-  deleteResolveEntry,
+  deletePullEntry,
   type RemoteOptions,
-  type ResolveAttachment,
+  type PullAttachment,
 } from "@/client/remote";
 import { discoverPendingReplayMetadata } from "@/client/replay";
 import { asError, getFunctionRefName } from "@/client/routing/refs";
@@ -147,7 +147,7 @@ function createAuthEntry(
   };
 }
 
-function createResolveAttachment(input: {
+function createPullAttachment(input: {
   client: ConvexClient;
   authEntry: AuthEntry;
   resolveOpts: RemoteOptions;
@@ -160,7 +160,7 @@ function createResolveAttachment(input: {
   knownTables: ReadonlySet<string>;
   uploadFetch?: typeof globalThis.fetch;
   leaderLock?: <T>(fn: () => Promise<T>) => Promise<T>;
-}): ResolveAttachment {
+}): PullAttachment {
   const { runtime, connectivity, processorId } = input.platformConfig;
 
   return attachResolve({
@@ -375,8 +375,8 @@ export function createEmbeddedClient(input: {
     runtime.shutdown();
   });
 
-  const resolveAttachment: ResolveAttachment | null = options.remote
-    ? createResolveAttachment({
+  const pullAttachment: PullAttachment | null = options.remote
+    ? createPullAttachment({
         client,
         authEntry,
         resolveOpts: options.remote,
@@ -393,11 +393,11 @@ export function createEmbeddedClient(input: {
       })
     : null;
 
-  if (resolveAttachment) {
+  if (pullAttachment) {
     rootScope.addFinalizer(async () => {
       try {
-        await resolveAttachment.close();
-        deleteResolveEntry(client);
+        await pullAttachment.close();
+        deletePullEntry(client);
       } catch (err) {
         log.warn("error during resolve teardown", err);
       }
@@ -410,9 +410,9 @@ export function createEmbeddedClient(input: {
       runtime,
       getRefName: getFunctionRefName,
       asError,
-      resolveMutationPlan: () => ({ kind: "local", enqueueForReplay: false }),
-      resolveReadPlan: () => ({ kind: "local" }),
-      resolveReadPlanByName: () => ({ kind: "local" }),
+      planMutation: () => ({ kind: "local", enqueueForReplay: false }),
+      planRead: () => ({ kind: "local" }),
+      planReadByName: () => ({ kind: "local" }),
       executeLocalMutation: (ref, args) =>
         runtime.executeLocal({
           kind: "mutation",
@@ -428,21 +428,21 @@ export function createEmbeddedClient(input: {
     rootScope.addFinalizer(() => patchHandle.dispose());
   }
 
-  authEntry.getPendingCount = () => resolveAttachment?.getPendingCount?.() ?? 0;
+  authEntry.getPendingCount = () => pullAttachment?.getPendingCount?.() ?? 0;
   authEntry.refreshSync = () =>
-    resolveAttachment?.refresh?.() ?? Promise.resolve();
+    pullAttachment?.refresh?.() ?? Promise.resolve();
   authEntry.getUserIdentitySource = options.auth?.getUserIdentity;
 
   installAuthController(client, runtime, authEntry, {
     authOptions: options.auth,
-    forwardSetAuth: resolveAttachment?.forwardSetAuth
-      ? (...args) => resolveAttachment.forwardSetAuth(...args)
+    forwardSetAuth: pullAttachment?.forwardSetAuth
+      ? (...args) => pullAttachment.forwardSetAuth(...args)
       : undefined,
-    forwardClearAuth: resolveAttachment?.forwardClearAuth
-      ? () => resolveAttachment.forwardClearAuth()
+    forwardClearAuth: pullAttachment?.forwardClearAuth
+      ? () => pullAttachment.forwardClearAuth()
       : undefined,
-    forwardSetAdminAuth: resolveAttachment?.forwardSetAdminAuth
-      ? (...args) => resolveAttachment.forwardSetAdminAuth(...args)
+    forwardSetAdminAuth: pullAttachment?.forwardSetAdminAuth
+      ? (...args) => pullAttachment.forwardSetAdminAuth(...args)
       : undefined,
   });
 

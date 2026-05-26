@@ -155,7 +155,7 @@ export function extractImports(
 }
 
 /** @internal — codegen-internal table-name resolver for `bindTable()`. */
-export async function resolveEmbeddedTableName(input: {
+export async function getEmbeddedTableName(input: {
   convexRoot: string;
   schemaModule?: string;
   schemaExport?: string;
@@ -202,7 +202,7 @@ export async function fetchRemoteManifest(input: {
     const tableBinding = bindMatch[1]!;
     const imported = imports.get(tableBinding);
     const tableName =
-      (await resolveEmbeddedTableName({
+      (await getEmbeddedTableName({
         convexRoot: input.convexRoot,
         schemaModule: imported?.moduleId,
         schemaExport: imported?.exportName,

@@ -78,7 +78,7 @@ function searchFilterValueToBucketKey(value: JSONValue): string {
   return JSON.stringify(value);
 }
 
-export function resolveSearchIndexDefinition(
+export function getSearchIndexDefinition(
   searchIndexes: ReadonlyArray<SearchIndexDefinition> | undefined,
   tableName: string,
   indexName: string,

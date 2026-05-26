@@ -20,7 +20,7 @@ import { AuthResolver, getIdentityKey } from "@/auth";
 import type { UserIdentity } from "@/auth";
 import { ModuleLoader } from "@/kernel/modules";
 import type { ConvexInput, FunctionPath } from "@/kernel/modules";
-import { resolveFunctionPath } from "@/kernel/modules";
+import { getFunctionPath } from "@/kernel/modules";
 import { SYSTEM_FUNCTIONS } from "@/kernel/system";
 import type { SystemFunctionDef } from "@/kernel/system";
 import { TransactionManager } from "@/kernel/transaction";
@@ -1753,7 +1753,7 @@ export class EmbeddedRuntime {
     }
     return matchTag(request, "kind", {
       query: async (current) => {
-        const path = resolveFunctionPath({ name: current.path });
+        const path = getFunctionPath({ name: current.path });
         const systemFn = SYSTEM_FUNCTIONS[path.udfPath];
         if (systemFn !== undefined) {
           return this._runSystemFunction(systemFn, "query", current.args);
@@ -1767,7 +1767,7 @@ export class EmbeddedRuntime {
         });
       },
       mutation: async (current) => {
-        const functionPath = resolveFunctionPath({ name: current.path });
+        const functionPath = getFunctionPath({ name: current.path });
         const systemFn = SYSTEM_FUNCTIONS[functionPath.udfPath];
         if (systemFn !== undefined) {
           return await this._runSystemFunction(
@@ -1803,7 +1803,7 @@ export class EmbeddedRuntime {
       action: (current) =>
         this._runUdf(
           "action",
-          resolveFunctionPath({ name: current.path }),
+          getFunctionPath({ name: current.path }),
           current.args,
         ),
     });
@@ -2148,7 +2148,7 @@ export class EmbeddedRuntime {
       "convex-embedded.evaluateLocalQuery",
       async (span) => {
         const startedAt = nowMs();
-        const path = resolveFunctionPath({ name: pathName });
+        const path = getFunctionPath({ name: pathName });
         const systemFn = SYSTEM_FUNCTIONS[path.udfPath];
 
         if (systemFn !== undefined) {
@@ -2567,11 +2567,7 @@ export class EmbeddedRuntime {
 
           let finalState: string;
           try {
-            await runUdf(
-              "mutation",
-              resolveFunctionPath({ name: udfPath }),
-              args,
-            );
+            await runUdf("mutation", getFunctionPath({ name: udfPath }), args);
             finalState = "success";
           } catch (error) {
             runtimeLog.error(`recovered scheduled function ${udfPath}:`, error);
@@ -2644,7 +2640,7 @@ export class EmbeddedRuntime {
   private _buildProtocolExecutor(): ProtocolExecutor {
     return {
       runQuery: async (context, udfPath: string, ...args: unknown[]) => {
-        const path = resolveFunctionPath({ name: udfPath });
+        const path = getFunctionPath({ name: udfPath });
         const convexArgs = (args[0] ?? {}) as Record<string, unknown>;
         const dependencies: QueryDependency[] = [];
         const result = (await this._runWithTransactionLock(() =>
@@ -2662,7 +2658,7 @@ export class EmbeddedRuntime {
       },
 
       runMutation: async (context, udfPath: string, ...args: unknown[]) => {
-        const path = resolveFunctionPath({ name: udfPath });
+        const path = getFunctionPath({ name: udfPath });
         const convexArgs = (args[0] ?? {}) as Record<string, unknown>;
         const { result, commit } = await this._runWithTransactionLock(() =>
           this.executor.executeMutation(path, convexArgs, {
@@ -2680,7 +2676,7 @@ export class EmbeddedRuntime {
       },
 
       runAction: async (context, udfPath: string, ...args: unknown[]) => {
-        const path = resolveFunctionPath({ name: udfPath });
+        const path = getFunctionPath({ name: udfPath });
         const convexArgs = (args[0] ?? {}) as Record<string, unknown>;
         return (await this._runUdf("action", path, convexArgs, {
           identity: context.identity,
@@ -2798,7 +2794,7 @@ export class EmbeddedRuntime {
       runFunction: async (path: string, args: Record<string, unknown>) => {
         await runtime._runUdf(
           "mutation",
-          resolveFunctionPath({ name: path }),
+          getFunctionPath({ name: path }),
           args,
         );
       },
@@ -2809,7 +2805,7 @@ export class EmbeddedRuntime {
       runFunction: async (type, functionName, args) => {
         await runtime._runUdf(
           type,
-          resolveFunctionPath({ name: functionName }),
+          getFunctionPath({ name: functionName }),
           args,
         );
       },

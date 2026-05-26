@@ -1358,7 +1358,7 @@ function createRuntimeLocalPaginatedOnUpdate(input: {
 function patchBaseClientLocalQueryAccess(input: {
   client: ConvexClient;
   runtime: EmbeddedRuntime;
-  resolveReadPlanByName: (refName: string) => ReadPlan;
+  planReadByName: (refName: string) => ReadPlan;
   ensureReadReady?: (
     refName: string,
     readArgs?: Record<string, unknown>,
@@ -1383,7 +1383,7 @@ function patchBaseClientLocalQueryAccess(input: {
       refName: string,
       args: Record<string, unknown>,
     ) => {
-      if (input.resolveReadPlanByName(refName).kind !== "local") {
+      if (input.planReadByName(refName).kind !== "local") {
         return originalLocalQueryResult(refName, args);
       }
 
@@ -1412,7 +1412,7 @@ function patchBaseClientLocalQueryAccess(input: {
       refName: string,
       args: Record<string, unknown>,
     ) => {
-      if (input.resolveReadPlanByName(refName).kind !== "local") {
+      if (input.planReadByName(refName).kind !== "local") {
         return originalLocalQueryLogs(refName, args);
       }
 
@@ -1530,9 +1530,9 @@ export function patchRoutedConvexClient(input: {
   remoteClient?: ConvexClient | null;
   getRefName: (ref: unknown) => string;
   asError: (error: unknown) => Error;
-  resolveMutationPlan: (ref: unknown) => MutationPlan;
-  resolveReadPlan: (ref: unknown) => ReadPlan;
-  resolveReadPlanByName: (refName: string) => ReadPlan;
+  planMutation: (ref: unknown) => MutationPlan;
+  planRead: (ref: unknown) => ReadPlan;
+  planReadByName: (refName: string) => ReadPlan;
   executeLocalMutation: (
     ref: unknown,
     args: Record<string, unknown>,
@@ -1560,7 +1560,7 @@ export function patchRoutedConvexClient(input: {
   patchBaseClientLocalQueryAccess({
     client: input.client,
     runtime: input.runtime,
-    resolveReadPlanByName: input.resolveReadPlanByName,
+    planReadByName: input.planReadByName,
     ensureReadReady: input.ensureReadReady,
     translateLocalArgsToRuntime: input.translateLocalArgsToRuntime,
     translateLocalResultToClient: input.translateLocalResultToClient,
@@ -1751,7 +1751,7 @@ export function patchRoutedConvexClient(input: {
     errorArgIndex: number,
   ) => {
     const subscribeWithRoute = (...args: unknown[]): unknown => {
-      const route = input.resolveReadPlan(args[0]);
+      const route = input.planRead(args[0]);
       if (route.kind === "local") {
         return localSubscribe(...args);
       }
@@ -1829,7 +1829,7 @@ export function patchRoutedConvexClient(input: {
     }
 
     return waitUntilReady(async () => {
-      const route = input.resolveMutationPlan(args[0]);
+      const route = input.planMutation(args[0]);
       if (route.kind === "error") {
         throw route.error;
       }
@@ -1867,7 +1867,7 @@ export function patchRoutedConvexClient(input: {
     ...args: unknown[]
   ): Promise<unknown> {
     return waitUntilReady(async () => {
-      const route = input.resolveReadPlan(args[0]);
+      const route = input.planRead(args[0]);
       if (route.kind === "error") {
         throw route.error;
       }
@@ -1909,7 +1909,7 @@ export function patchRoutedConvexClient(input: {
     ...args: unknown[]
   ): Promise<unknown> {
     return waitUntilReady(async () => {
-      const route = input.resolveReadPlan(args[0]);
+      const route = input.planRead(args[0]);
       if (route.kind === "error") {
         throw route.error;
       }

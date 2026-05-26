@@ -33,7 +33,7 @@ import {
   executeSearch,
   executeOverlaySearch,
   deleteDocumentFromSearchIndexState,
-  resolveSearchIndexDefinition,
+  getSearchIndexDefinition,
   type SearchOverlayState,
   type SearchIndexState,
 } from "@/runtime/db/search";
@@ -56,7 +56,7 @@ import {
   executeOverlayVectorSearch,
   executeVectorSearch,
   deleteDocumentFromVectorIndexState,
-  resolveVectorIndexDefinition,
+  getVectorIndexDefinition,
   type VectorOverlayState,
   type VectorIndexState,
 } from "@/runtime/db/vector";
@@ -1664,7 +1664,7 @@ export class Database {
     ];
     const state = this._vectorIndexes.get(`${tableName}.${indexName}`);
     if (state) {
-      resolveVectorIndexDefinition(
+      getVectorIndexDefinition(
         this._schema?.tables.get(tableName)?.vectorIndexes,
         tableName,
         indexName,
@@ -1709,7 +1709,7 @@ export class Database {
       string,
       string,
     ];
-    const definition = resolveVectorIndexDefinition(
+    const definition = getVectorIndexDefinition(
       this._schema?.tables.get(tableName)?.vectorIndexes,
       tableName,
       indexName,
@@ -2529,7 +2529,7 @@ export class Database {
     if (!this._hasPendingWritesForAnySource(source)) {
       const searchDefinition =
         source.type === "Search"
-          ? resolveSearchIndexDefinition(
+          ? getSearchIndexDefinition(
               this._schema?.tables.get(splitIndexName(source.indexName)[0])
                 ?.searchIndexes,
               splitIndexName(source.indexName)[0],
@@ -2815,7 +2815,7 @@ export class Database {
     ) {
       const searchDefinition =
         query.source.type === "Search"
-          ? resolveSearchIndexDefinition(
+          ? getSearchIndexDefinition(
               this._schema?.tables.get(
                 splitIndexName(query.source.indexName)[0],
               )?.searchIndexes,
@@ -3503,7 +3503,7 @@ export class Database {
             doc: this._stripIdentityScope(doc),
             identityKey: doc[IDENTITY_SCOPE_FIELD] ?? null,
           })),
-          definition: resolveSearchIndexDefinition(
+          definition: getSearchIndexDefinition(
             searchIndexes,
             tableName,
             definition.indexDescriptor,
@@ -3541,7 +3541,7 @@ export class Database {
             doc: this._stripIdentityScope(doc),
             identityKey: doc[IDENTITY_SCOPE_FIELD] ?? null,
           })),
-          definition: resolveVectorIndexDefinition(
+          definition: getVectorIndexDefinition(
             vectorIndexes,
             tableName,
             definition.indexDescriptor,

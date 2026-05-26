@@ -1451,7 +1451,7 @@ export async function createSqliteStorage(input: {
     vector: new Map(),
   };
 
-  function resolveInternalSpec(tableName: string): InternalTableSpec | null {
+  function getInternalSpec(tableName: string): InternalTableSpec | null {
     return (
       INTERNAL_TABLE_SPECS[tableName] ?? userTableSpecs?.get(tableName) ?? null
     );
@@ -1498,7 +1498,7 @@ export async function createSqliteStorage(input: {
       tableName,
       physicalTableName,
       fromClause: quoteIdentifier(physicalTableName),
-      internalSpec: resolveInternalSpec(tableName),
+      internalSpec: getInternalSpec(tableName),
     };
   }
 
@@ -1530,7 +1530,7 @@ export async function createSqliteStorage(input: {
         tableName: route.table_name,
         physicalTableName: route.physical_table_name,
         fromClause: quoteIdentifier(route.physical_table_name),
-        internalSpec: resolveInternalSpec(route.table_name),
+        internalSpec: getInternalSpec(route.table_name),
       };
       const tableRows = await readTableDocuments(driver, target);
       for (const doc of tableRows) {

@@ -251,7 +251,7 @@ export function bindTableRuntime(
    * read on the user's own table. Returns `null` when no index covers the
    * scope args (runtime falls back to paginated full snapshot).
    */
-  async function resolveScopedDocIds(
+  async function getScopedDocIds(
     ctx: GenericQueryCtx<GenericDataModel>,
     scopeArgs: Record<string, unknown>,
   ): Promise<string[] | null> {
@@ -282,14 +282,14 @@ export function bindTableRuntime(
       return ids;
     } catch (error) {
       log.warn(
-        `resolveScopedDocIds(${tableName}, ${match.indexName}): failed`,
+        `getScopedDocIds(${tableName}, ${match.indexName}): failed`,
         error,
       );
       return null;
     }
   }
 
-  async function resolveRangeDocIds(
+  async function getRangeDocIds(
     ctx: GenericQueryCtx<GenericDataModel>,
     range: QueryPageRange,
   ): Promise<{
@@ -321,7 +321,7 @@ export function bindTableRuntime(
       };
     } catch (error) {
       log.warn(
-        `resolveRangeDocIds(${tableName}, ${range.indexName}): failed`,
+        `getRangeDocIds(${tableName}, ${range.indexName}): failed`,
         error,
       );
       return null;
@@ -547,7 +547,7 @@ export function bindTableRuntime(
         : undefined;
 
       if (args.queryPageRange) {
-        const ranged = await resolveRangeDocIds(ctx, args.queryPageRange);
+        const ranged = await getRangeDocIds(ctx, args.queryPageRange);
         if (ranged !== null) {
           const rawLiveStates =
             ranged.orderedDocIds.length === 0
@@ -580,7 +580,7 @@ export function bindTableRuntime(
 
       let docIdsToHydrate: string[] | null = null;
       if (scoped && scopeArgs) {
-        docIdsToHydrate = await resolveScopedDocIds(ctx, scopeArgs);
+        docIdsToHydrate = await getScopedDocIds(ctx, scopeArgs);
       }
 
       if (docIdsToHydrate !== null) {
@@ -830,12 +830,12 @@ export function bindTable(
   component?: ComponentBinding,
 ): RegisteredQuery<"public", DefaultFunctionArgs, unknown> {
   bindTableRuntime(table, component);
-  const resolveQuery = (
+  const planQuery = (
     table as EmbeddedTableRuntimeHandle & {
       _resolveRaw: RegisteredQuery<"public", DefaultFunctionArgs, unknown>;
     }
   )._resolveRaw;
-  Object.defineProperty(resolveQuery, REMOTE_META, {
+  Object.defineProperty(planQuery, REMOTE_META, {
     value: {
       __brand: "convex-embedded:remoteMeta" as const,
       table: table.table,
@@ -845,5 +845,5 @@ export function bindTable(
     enumerable: false,
     configurable: false,
   });
-  return resolveQuery;
+  return planQuery;
 }

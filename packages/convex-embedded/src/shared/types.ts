@@ -53,14 +53,14 @@ export interface ConflictEntry<T> {
 export type EngineStatus =
   | { status: "idle" }
   | { status: "offline" }
-  | { status: "resolving"; progress: ResolveProgress }
+  | { status: "resolving"; progress: PullProgress }
   | { status: "resolved" }
   | { status: "error"; error: Error };
 
 /**
  * Progress metadata for a table resolve cycle.
  */
-export interface ResolveProgress {
+export interface PullProgress {
   /** Tables currently being resolved. */
   tables: string[];
   /** Number of tables completed so far. */
@@ -169,11 +169,11 @@ export interface QueryPageRange {
  * Sent during reconnect / resolve reconciliation to reconcile local Yjs documents with the
  * authoritative remote embedded state.
  */
-export interface ResolveRequest {
+export interface PullRequest {
   /** Last acknowledged collection sequence for the table, or `null` for a full resolve sync. */
   collectionSeq: number | null;
   /** Requested document vectors and per-document sequence cursors. */
-  documents: ResolveDocumentRequest[];
+  documents: PullDocumentRequest[];
   /** Optional bound query arguments for scoped resolve queries. */
   scopeArgs?: Record<string, unknown>;
   /** Cursor for paged full fallback responses. */
@@ -185,7 +185,7 @@ export interface ResolveRequest {
 /**
  * Per-document resolve request payload.
  */
-export interface ResolveDocumentRequest {
+export interface PullDocumentRequest {
   /** Embedded document id. */
   docId: string;
   /** Y.encodeStateVector(localDoc) */
@@ -201,13 +201,13 @@ export interface ResolveDocumentRequest {
  * Full responses stream a paged authoritative snapshot until `isDone` becomes
  * `true`.
  */
-export interface ResolveResponse {
+export interface PullResponse {
   /** Whether the response is incremental or a full snapshot fallback. */
   mode: "full" | "incremental";
   /** Latest collection atomic sequence observed by the server. */
   collectionSeq: number;
   /** Document updates for the current page. */
-  documents: ResolveDocumentResponse[];
+  documents: PullDocumentResponse[];
   /** Cursor for the next full snapshot page, if any. */
   continueCursor?: string | null;
   /** Whether the full snapshot stream is complete. */
@@ -217,7 +217,7 @@ export interface ResolveResponse {
 /**
  * Per-document resolve response payload.
  */
-export interface ResolveDocumentResponse {
+export interface PullDocumentResponse {
   /** Embedded document id. */
   docId: string;
   /** Latest atomic sequence for the document, or `null` when deleted. */

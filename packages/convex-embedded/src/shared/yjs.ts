@@ -96,7 +96,7 @@ export function isDiffEmpty(update: Uint8Array): boolean {
   );
 }
 
-function resolveRegisterValue(
+function getRegisterValue(
   doc: Y.Doc,
   fieldName: string,
   resolver?: (conflict: { latest(): unknown; values: unknown[] }) => unknown,
@@ -178,7 +178,7 @@ export function materializeYjsDoc(
           ? yDocToProseContent(doc, key)
           : createEmptyProseContent();
     } else if (crdtType === CrdtType.Register) {
-      result[key] = resolveRegisterValue(
+      result[key] = getRegisterValue(
         doc,
         key,
         (

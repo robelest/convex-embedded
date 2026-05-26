@@ -663,7 +663,7 @@ describe("engine.create()", () => {
     expect(m).toHaveProperty("stop");
     expect(m).toHaveProperty("on");
     expect(m).toHaveProperty("getStatus");
-    expect(m).toHaveProperty("resolveNow");
+    expect(m).toHaveProperty("pullNow");
     expect(m).toHaveProperty("mutation");
     expect(m).toHaveProperty("pendingCount");
     expect(m).toHaveProperty("idMap");
@@ -758,7 +758,7 @@ describe("engine.create()", () => {
 
     await settle();
 
-    await m.resolveNow();
+    await m.pullNow();
 
     expect(remoteClient.query).toHaveBeenCalledTimes(1);
 
@@ -826,7 +826,7 @@ describe("engine.create()", () => {
 
     m.start();
     await settle();
-    await m.resolveNow();
+    await m.pullNow();
 
     expect(remoteClient.query).toHaveBeenCalledTimes(2);
     expect(remoteClient.query).toHaveBeenCalledWith("tasks.resolve", {
@@ -977,7 +977,7 @@ describe("engine.create()", () => {
 
     m.start();
     await settle();
-    void m.resolveNow().catch(() => {});
+    void m.pullNow().catch(() => {});
     await settle(200);
 
     expect(statuses).toContain("error");
@@ -1423,10 +1423,10 @@ describe("engine.create()", () => {
   });
 
   // -------------------------------------------------------------------------
-  // resolveNow
+  // pullNow
   // -------------------------------------------------------------------------
 
-  it("resolveNow() triggers a resolve cycle", async () => {
+  it("pullNow() triggers a resolve cycle", async () => {
     const { embedded } = createMockEmbedded();
     const remoteClient = createMockRemoteClient();
 
@@ -1436,13 +1436,13 @@ describe("engine.create()", () => {
       tables: { tasks: tableConfig("resolve_ref") },
     });
 
-    await m.resolveNow();
+    await m.pullNow();
 
     expect(remoteClient.query).toHaveBeenCalledTimes(1);
     expect(m.getStatus()).toEqual({ status: "resolved" });
   });
 
-  it("resolveNow() ingests remote-only documents returned by resolve", async () => {
+  it("pullNow() ingests remote-only documents returned by resolve", async () => {
     const { embedded } = createMockEmbedded();
     const remoteClient = createMockRemoteClient();
     remoteClient.query.mockResolvedValue([
@@ -1463,7 +1463,7 @@ describe("engine.create()", () => {
       tables: { tasks: tableConfig("resolve_ref") },
     });
 
-    await m.resolveNow();
+    await m.pullNow();
 
     expect(embedded.ingestDocuments).toHaveBeenCalledWith(
       "tasks",
@@ -1480,7 +1480,7 @@ describe("engine.create()", () => {
     );
   });
 
-  it("resolveNow() strips omitted fields from remote-only documents", async () => {
+  it("pullNow() strips omitted fields from remote-only documents", async () => {
     const { embedded } = createMockEmbedded();
     const remoteClient = createMockRemoteClient();
     const schemaWithOmit = createMockSchema({
@@ -1507,7 +1507,7 @@ describe("engine.create()", () => {
       },
     });
 
-    await m.resolveNow();
+    await m.pullNow();
 
     expect(embedded.ingestDocuments).toHaveBeenCalledWith(
       "tasks",
@@ -1524,7 +1524,7 @@ describe("engine.create()", () => {
     );
   });
 
-  it("resolveNow() preserves local doc shape when resolve returns no diff", async () => {
+  it("pullNow() preserves local doc shape when resolve returns no diff", async () => {
     const { embedded } = createMockEmbedded();
     const remoteClient = createMockRemoteClient();
     const proseSchema = define({
@@ -1563,7 +1563,7 @@ describe("engine.create()", () => {
       },
     });
 
-    await m.resolveNow();
+    await m.pullNow();
 
     expect(embedded.ingestDocuments).toHaveBeenCalledWith(
       "tasks",
@@ -1573,7 +1573,7 @@ describe("engine.create()", () => {
     );
   });
 
-  it("resolveNow() replaces local table state when the server falls back to full mode", async () => {
+  it("pullNow() replaces local table state when the server falls back to full mode", async () => {
     const { embedded, getDocs } = createStatefulEmbedded([
       {
         _id: "stale-local",
@@ -1613,7 +1613,7 @@ describe("engine.create()", () => {
       tables: { tasks: tableConfig("resolve_ref") },
     });
 
-    await m.resolveNow();
+    await m.pullNow();
 
     expect(getDocs()).toEqual([
       {
@@ -1625,7 +1625,7 @@ describe("engine.create()", () => {
     ]);
   });
 
-  it("resolveNow() streams paged full-mode results and prunes stale local docs", async () => {
+  it("pullNow() streams paged full-mode results and prunes stale local docs", async () => {
     const { embedded, getDocs } = createStatefulEmbedded([
       {
         _id: "stale-local",
@@ -1681,7 +1681,7 @@ describe("engine.create()", () => {
       tables: { tasks: tableConfig("resolve_ref") },
     });
 
-    await m.resolveNow();
+    await m.pullNow();
 
     expect(remoteClient.query).toHaveBeenNthCalledWith(
       1,
@@ -1934,7 +1934,7 @@ describe("engine.create()", () => {
 
     m.start();
     await settle();
-    await m.resolveNow();
+    await m.pullNow();
 
     expect(embedded.getDocumentsForTable).toHaveBeenCalledWith("tasks");
 
@@ -1958,7 +1958,7 @@ describe("engine.create()", () => {
 
     m.start();
     await settle();
-    await m.resolveNow();
+    await m.pullNow();
 
     expect(remoteClient.query).toHaveBeenCalledTimes(1);
     const resolveArgs = remoteClient.query.mock.calls[0]![1] as {
@@ -1992,7 +1992,7 @@ describe("engine.create()", () => {
 
     m.start();
     await settle();
-    await m.resolveNow();
+    await m.pullNow();
 
     expect(embedded.ingestDocuments).toHaveBeenCalledWith(
       "tasks",
@@ -2036,7 +2036,7 @@ describe("engine.create()", () => {
     const onUpdateCallback = getSnapshotHandler(remoteClient);
 
     // Simulate a remote resolve-endpoint update. The subscription target is
-    // the resolve query; the handler receives ResolveResponse-shaped data
+    // the resolve query; the handler receives PullResponse-shaped data
     // and unwraps the `document` fields before ingesting.
     onUpdateCallback({
       mode: "full",
@@ -3552,7 +3552,7 @@ describe("engine.create()", () => {
         expect(getPendingEntries()[0]?.state).toBe("processing");
 
         now += 200;
-        await engineB.resolveNow();
+        await engineB.pullNow();
         await settle(120);
 
         expect(remoteClientB.mutation).toHaveBeenCalledTimes(1);
@@ -3566,14 +3566,14 @@ describe("engine.create()", () => {
     });
 
     it("coalesces duplicate online events into a single active remote cycle", async () => {
-      let resolveQuery!: (value: unknown[]) => void;
+      let planQuery!: (value: unknown[]) => void;
       const { embedded } = createMockEmbedded();
       const remoteClient: MockRemoteClient = {
         ...createMockRemoteClient(),
         query: vi.fn(
           () =>
             new Promise<unknown[]>((resolve) => {
-              resolveQuery = resolve;
+              planQuery = resolve;
             }),
         ),
       };
@@ -3591,7 +3591,7 @@ describe("engine.create()", () => {
       // the assertions measure only the coalesced online cycle.
       const ready = m.ensureTableReady("tasks");
       await settle();
-      resolveQuery([]);
+      planQuery([]);
       await ready;
       await settle();
       remoteClient.query.mockClear();
@@ -3610,7 +3610,7 @@ describe("engine.create()", () => {
 
       expect(remoteClient.query).toHaveBeenCalledTimes(1);
 
-      resolveQuery([]);
+      planQuery([]);
       await settle(100);
 
       expect(remoteClient.onUpdate).toHaveBeenCalledTimes(

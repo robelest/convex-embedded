@@ -105,7 +105,7 @@ describe("remote engine", () => {
     });
 
     instance.start();
-    await instance.resolveNow();
+    await instance.pullNow();
     instance.stop();
   });
 

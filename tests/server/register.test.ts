@@ -58,7 +58,7 @@ interface RegisteredFn {
   _handler: (ctx: object, args: Record<string, unknown>) => Promise<unknown>;
 }
 
-type ResolveArgs = Parameters<NonNullable<RuntimeHooks["resolveHandler"]>>[1];
+type PullArgs = Parameters<NonNullable<RuntimeHooks["resolveHandler"]>>[1];
 type ResolveResult = Awaited<
   ReturnType<NonNullable<RuntimeHooks["resolveHandler"]>>
 >;
@@ -66,7 +66,7 @@ type ResolveResult = Awaited<
 interface ResolveFn {
   isQuery?: boolean;
   isPublic?: boolean;
-  _handler: (ctx: object, args: ResolveArgs) => Promise<ResolveResult>;
+  _handler: (ctx: object, args: PullArgs) => Promise<ResolveResult>;
 }
 
 // ---------------------------------------------------------------------------

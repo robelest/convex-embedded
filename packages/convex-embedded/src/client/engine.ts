@@ -36,9 +36,9 @@ import { getFunctionName, makeFunctionReference } from "@/shared/refs";
 import { getCrdtType, type Definition } from "@/shared/schema";
 import type {
   EngineStatus,
-  ResolveDocumentResponse,
-  ResolveProgress,
-  ResolveResponse,
+  PullDocumentResponse,
+  PullProgress,
+  PullResponse,
 } from "@/shared/types";
 import { initYjsDoc } from "@/shared/yjs";
 import { recordCounter, registerGauge } from "@/tracing/metrics";
@@ -144,7 +144,7 @@ function toErrorMessage(error: unknown): string {
   }
 }
 
-function isUnsupportedDocIdsResolveError(error: unknown): boolean {
+function isUnsupportedDocIdsPullError(error: unknown): boolean {
   const message = toErrorMessage(error).toLowerCase();
   return (
     message.includes("extra field") &&
@@ -465,7 +465,7 @@ function registerRemoteSubscription(input: {
     docs: Array<Record<string, unknown>>,
   ) => Array<Record<string, unknown>>;
   onUnsubscribe: (unsub: () => void) => void;
-  resolveServices: EngineResolveInput;
+  pullServices: EngineResolveInput;
   tableConfig: TableConfig;
   tableName: string;
   scopeArgs?: Record<string, unknown>;
@@ -480,18 +480,18 @@ function registerRemoteSubscription(input: {
     runHandler: () => void;
   }) => void;
   onPartialResponse?: () => void;
-  shouldSkipRedundantPartialResolve?: (
+  shouldSkipRedundantPartialPull?: (
     tableName: string,
     scopeArgs: Record<string, unknown> | undefined,
     signalSeq: number,
   ) => boolean;
 }) {
-  const remoteClient = input.resolveServices.remoteClient;
+  const remoteClient = input.pullServices.remoteClient;
   const baseHandler = createRemoteUpdateHandler({
     ingestDocuments: (table, documents, scopeArgs) =>
-      input.resolveServices.ingestDocuments(table, documents, scopeArgs),
+      input.pullServices.ingestDocuments(table, documents, scopeArgs),
     getDocumentsForTable: (table) =>
-      input.resolveServices.getDocumentsForTable(table),
+      input.pullServices.getDocumentsForTable(table),
     getPendingEntries: input.getPendingEntries,
     getAliases: input.getAliases,
     bufferRemoteSnapshot: input.bufferRemoteSnapshot,
@@ -501,7 +501,7 @@ function registerRemoteSubscription(input: {
     tableName: input.tableName,
   });
 
-  const unwrapResolveResponse = (response: unknown) => {
+  const unwrapPullResponse = (response: unknown) => {
     const res = response as {
       documents?: Array<{ document?: unknown }>;
       collectionSeq?: number;
@@ -520,7 +520,7 @@ function registerRemoteSubscription(input: {
 
     if (res?.mode === "full" && res?.isDone === false) {
       if (
-        input.shouldSkipRedundantPartialResolve?.(
+        input.shouldSkipRedundantPartialPull?.(
           input.tableName,
           input.scopeArgs,
           signalSeq,
@@ -564,7 +564,7 @@ function registerRemoteSubscription(input: {
         ? { scopeArgs: input.scopeArgs }
         : {}),
     },
-    unwrapResolveResponse,
+    unwrapPullResponse,
     createRemoteSubscriptionErrorHandler(input.tableName),
   );
 
@@ -740,23 +740,23 @@ type LocalYjsEntry = {
   localDoc: Record<string, unknown>;
 };
 
-type ResolveDocument = {
+type PullDocument = {
   docId: string;
   vector: ArrayBuffer;
   lastSeq: number | null;
 };
 
-type ResolveArgs = {
+type PullArgs = {
   collectionSeq: number | null;
-  documents: Array<ResolveDocument>;
+  documents: Array<PullDocument>;
   docIds?: string[];
   scopeArgs?: Record<string, unknown>;
   fullCursor?: string | null;
 };
 
-type ResolveResultRow = ResolveDocumentResponse;
+type PullResultRow = PullDocumentResponse;
 
-type ResolveMetadata = {
+type PullMetadata = {
   collectionSeq: number | null;
   documentSeqById: Map<string, number>;
 };
@@ -764,7 +764,7 @@ type ResolveMetadata = {
 type PreparedResolveInput = {
   localDocs: Array<Record<string, unknown>>;
   localYjsMap: Map<string, LocalYjsEntry>;
-  resolveDocuments: Array<ResolveDocument>;
+  pullDocuments: Array<PullDocument>;
   schemaDef: Definition;
 };
 
@@ -786,10 +786,10 @@ type MissingReference = {
   id: string;
 };
 
-function normalizeResolveResponse(
-  response: ResolveResponse | Array<ResolveResultRow>,
+function canonicalizePullResponse(
+  response: PullResponse | Array<PullResultRow>,
   fallbackCollectionSeq: number | null,
-): ResolveResponse {
+): PullResponse {
   if (Array.isArray(response)) {
     return {
       mode: "incremental",
@@ -827,7 +827,7 @@ export interface EngineInstance {
   mutation(ref: unknown, args: Record<string, unknown>): Promise<unknown>;
 
   /** Manually trigger a resolve cycle (e.g., after coming back online). */
-  resolveNow(): Promise<void>;
+  pullNow(): Promise<void>;
 
   /** Ensure a table is hydrated/resolved before first use. */
   ensureTableReady(tableName: string): Promise<void>;
@@ -1470,10 +1470,10 @@ async function uploadBlobToRemote(input: {
   );
 }
 
-function prepareResolveInput(
+function preparePullInput(
   schemaDef: Definition,
   localDocs: Array<Record<string, unknown>>,
-  metadata: ResolveMetadata,
+  metadata: PullMetadata,
 ): PreparedResolveInput {
   return localDocs.reduce<PreparedResolveInput>(
     (acc, doc) => {
@@ -1486,7 +1486,7 @@ function prepareResolveInput(
       const vector = toArrayBuffer(Y.encodeStateVector(yjsDoc));
       yjsDoc.destroy();
       acc.localYjsMap.set(docId, { localDoc: doc });
-      acc.resolveDocuments.push({
+      acc.pullDocuments.push({
         docId,
         lastSeq: metadata.documentSeqById.get(docId) ?? null,
         vector,
@@ -1497,12 +1497,12 @@ function prepareResolveInput(
       localDocs,
       schemaDef,
       localYjsMap: new Map<string, LocalYjsEntry>(),
-      resolveDocuments: [],
+      pullDocuments: [],
     },
   );
 }
 
-function createResolveRetrySchedule(input: {
+function createPullRetrySchedule(input: {
   maxRetries: number;
   retryDelayMs: number;
   signal?: AbortSignal;
@@ -1538,10 +1538,10 @@ function mergeCrdtFieldsWithPlain(
   return merged;
 }
 
-function mergeResolveResult(input: {
+function mergePullResult(input: {
   localDocs: Array<Record<string, unknown>>;
   localYjsMap: Map<string, LocalYjsEntry>;
-  resolveResult: ResolveResponse;
+  pullResult: PullResponse;
   schemaDef: Definition;
   tableName: string;
   localSeqsByDocId: Map<string, number>;
@@ -1551,17 +1551,17 @@ function mergeResolveResult(input: {
 }): MergeResolveOutput {
   const seqAdvanced = (docId: string, seq: number): boolean =>
     seq > (input.localSeqsByDocId.get(docId) ?? -Infinity);
-  if (input.resolveResult.mode === "full") {
-    const mergedDocs = input.resolveResult.documents.flatMap((row) => {
+  if (input.pullResult.mode === "full") {
+    const mergedDocs = input.pullResult.documents.flatMap((row) => {
       if (!row.document) {
         return [];
       }
       return [input.translateRemoteDocument(row.document)];
     });
-    const deletedDocIds = input.resolveResult.documents.flatMap((row) =>
+    const deletedDocIds = input.pullResult.documents.flatMap((row) =>
       row.deleted ? [row.docId] : [],
     );
-    const metadataEntries = input.resolveResult.documents.flatMap((row) =>
+    const metadataEntries = input.pullResult.documents.flatMap((row) =>
       typeof row.seq === "number" && seqAdvanced(row.docId, row.seq)
         ? [{ docId: row.docId, seq: row.seq }]
         : [],
@@ -1582,7 +1582,7 @@ function mergeResolveResult(input: {
       ),
   );
 
-  const output = input.resolveResult.documents.reduce<MergeResolveOutput>(
+  const output = input.pullResult.documents.reduce<MergeResolveOutput>(
     (acc, { docId, deleted, diff, document, seq }) => {
       if (deleted) {
         mergedDocsById.delete(docId);
@@ -1786,7 +1786,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     }
     return active;
   }
-  const resolveServices: EngineResolveInput = {
+  const pullServices: EngineResolveInput = {
     remoteClient,
     ingestDocuments,
     getDocumentsForTable,
@@ -1912,7 +1912,7 @@ function createEngine(config: EngineConfig): EngineInstance {
   const expectedSelfCausedSignals = new Map<string, number[]>();
   const lastKnownCollectionSeqByTable = new Map<string, number>();
   const lastResolvedScopeSeq = new Map<string, number>();
-  const resolveInFlight = new Map<string, Promise<void>>();
+  const pullInFlight = new Map<string, Promise<void>>();
   const resolveRerun = new Set<string>();
   // Scopes that have completed a resolve from remote at least once since
   // activation. Used to gate preloaded/SSR values until the local rows for a
@@ -1977,7 +1977,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     return true;
   }
 
-  function recordResolvedScopeSeq(
+  function recordPulledScopeSeq(
     tableName: string,
     scopeArgs: Record<string, unknown> | undefined,
     collectionSeq: number | null,
@@ -2043,7 +2043,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     };
   }
 
-  function shouldSkipRedundantPartialResolve(
+  function shouldSkipRedundantPartialPull(
     tableName: string,
     scopeArgs: Record<string, unknown> | undefined,
     signalSeq: number,
@@ -2131,7 +2131,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     expectedSelfCausedSignals.clear();
     lastKnownCollectionSeqByTable.clear();
     lastResolvedScopeSeq.clear();
-    resolveInFlight.clear();
+    pullInFlight.clear();
     resolveRerun.clear();
   }
 
@@ -2866,7 +2866,7 @@ function createEngine(config: EngineConfig): EngineInstance {
       const tableConfig = tables[tableName];
       if (!tableConfig) continue;
       try {
-        await resolveTable(tableName, tableConfig, signal);
+        await getTableSpec(tableName, tableConfig, signal);
       } catch (err) {
         if (err instanceof DOMException && err.name === "AbortError") break;
         log.error(
@@ -2922,9 +2922,9 @@ function createEngine(config: EngineConfig): EngineInstance {
             dirtyCrdtRows.size > 0 &&
             offlineTransitionsSinceBoot > 0
           ) {
-            await resolveDirtyCrdtRows(signal);
+            await mergeDirtyCrdtRows(signal);
           } else {
-            await resolveAll(signal);
+            await pullAll(signal);
             if (!signal.aborted) {
               dirtyCrdtRows.clear();
             }
@@ -2957,13 +2957,13 @@ function createEngine(config: EngineConfig): EngineInstance {
     return replicationCyclePromise;
   }
 
-  async function resolveDirtyCrdtRows(signal?: AbortSignal): Promise<void> {
-    return withSpan("convex-embedded.resolveDirtyCrdtRows", () =>
-      resolveDirtyCrdtRowsImpl(signal),
+  async function mergeDirtyCrdtRows(signal?: AbortSignal): Promise<void> {
+    return withSpan("convex-embedded.mergeDirtyCrdtRows", () =>
+      mergeDirtyCrdtRowsImpl(signal),
     );
   }
 
-  async function resolveDirtyCrdtRowsImpl(signal?: AbortSignal): Promise<void> {
+  async function mergeDirtyCrdtRowsImpl(signal?: AbortSignal): Promise<void> {
     if (dirtyCrdtRows.size === 0) {
       return;
     }
@@ -3014,7 +3014,7 @@ function createEngine(config: EngineConfig): EngineInstance {
           completed += 1;
           continue;
         }
-        await resolveDirtyRowsForTable(tableName, tableConfig, docIds, signal);
+        await mergeDirtyRowsForTable(tableName, tableConfig, docIds, signal);
         completed += 1;
         emit({
           status: "resolving",
@@ -3040,7 +3040,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     }
   }
 
-  async function resolveDirtyRowsForTable(
+  async function mergeDirtyRowsForTable(
     tableName: string,
     tableConfig: TableConfig,
     docIds: Set<string>,
@@ -3060,32 +3060,32 @@ function createEngine(config: EngineConfig): EngineInstance {
     const dirtyDocIds = dirtyLocalDocs.flatMap((doc) =>
       typeof doc._id === "string" ? [String(doc._id)] : [],
     );
-    const metadata = await readResolveMetadata(
+    const metadata = await readPullMetadata(
       tableName,
       tableConfig,
       dirtyDocIds,
     );
-    const { schemaDef, localYjsMap, resolveDocuments } = prepareResolveInput(
+    const { schemaDef, localYjsMap, pullDocuments } = preparePullInput(
       tableConfig.schema,
       dirtyLocalDocs,
       metadata,
     );
 
-    if (resolveDocuments.length === 0) {
+    if (pullDocuments.length === 0) {
       for (const docId of docIds) {
         clearCrdtRowDirty(tableName, docId);
       }
       return;
     }
 
-    const retrySchedule = createResolveRetrySchedule({
+    const retrySchedule = createPullRetrySchedule({
       maxRetries,
       retryDelayMs,
       signal,
     });
     let attempts = 0;
     const rawResolveResult = await retrySchedule<
-      ResolveResponse | Array<ResolveResultRow>
+      PullResponse | Array<PullResultRow>
     >(async () => {
       if (signal?.aborted) {
         throw new DOMException("Aborted", "AbortError");
@@ -3096,9 +3096,9 @@ function createEngine(config: EngineConfig): EngineInstance {
           tableConfig.resolve,
           {
             collectionSeq: metadata.collectionSeq,
-            documents: resolveDocuments,
-          } satisfies ResolveArgs,
-        ) as Promise<ResolveResponse | Array<ResolveResultRow>>;
+            documents: pullDocuments,
+          } satisfies PullArgs,
+        ) as Promise<PullResponse | Array<PullResultRow>>;
       } catch (err) {
         if (!(err instanceof DOMException && err.name === "AbortError")) {
           log.warn(
@@ -3109,15 +3109,15 @@ function createEngine(config: EngineConfig): EngineInstance {
         throw err;
       }
     });
-    const resolveResult = normalizeResolveResponse(
+    const pullResult = canonicalizePullResponse(
       rawResolveResult,
       metadata.collectionSeq,
     );
 
-    const { mergedDocs, metadataEntries, deletedDocIds } = mergeResolveResult({
+    const { mergedDocs, metadataEntries, deletedDocIds } = mergePullResult({
       localDocs: dirtyLocalDocs,
       localYjsMap,
-      resolveResult,
+      pullResult,
       schemaDef,
       tableName,
       localSeqsByDocId: metadata.documentSeqById,
@@ -3146,10 +3146,10 @@ function createEngine(config: EngineConfig): EngineInstance {
       resolvableDocIds.has(entry.docId),
     );
 
-    await writeResolveMetadata({
+    await writePullMetadata({
       tableConfig,
       tableName,
-      resolveResult,
+      pullResult,
       metadataEntries: resolvableMetadataEntries,
       deletedDocIds,
     });
@@ -3159,11 +3159,11 @@ function createEngine(config: EngineConfig): EngineInstance {
     }
   }
 
-  async function resolveAll(signal?: AbortSignal): Promise<void> {
-    return withSpan("convex-embedded.resolveAll", () => resolveAllImpl(signal));
+  async function pullAll(signal?: AbortSignal): Promise<void> {
+    return withSpan("convex-embedded.pullAll", () => pullAllImpl(signal));
   }
 
-  async function resolveAllImpl(signal?: AbortSignal): Promise<void> {
+  async function pullAllImpl(signal?: AbortSignal): Promise<void> {
     const remoteApplyOrder = getRemoteApplyOrder();
     const scopedResolves = Array.from(activeScopes.values())
       .filter((entry) => Object.keys(entry.scopeArgs).length > 0)
@@ -3172,7 +3172,7 @@ function createEngine(config: EngineConfig): EngineInstance {
           orderedTables.indexOf(left.tableName) -
           orderedTables.indexOf(right.tableName),
       );
-    const progress: ResolveProgress = {
+    const progress: PullProgress = {
       tables: [
         ...remoteApplyOrder,
         ...scopedResolves.map((entry) =>
@@ -3190,7 +3190,7 @@ function createEngine(config: EngineConfig): EngineInstance {
         if (signal?.aborted) {
           throw new DOMException("Aborted", "AbortError");
         }
-        await resolveTable(tableName, tables[tableName]!, signal);
+        await getTableSpec(tableName, tables[tableName]!, signal);
         progress.completed++;
         emit({ status: "resolving", progress: { ...progress } });
         await yieldToEventLoop();
@@ -3199,7 +3199,7 @@ function createEngine(config: EngineConfig): EngineInstance {
         if (signal?.aborted) {
           throw new DOMException("Aborted", "AbortError");
         }
-        await resolveTable(
+        await getTableSpec(
           entry.tableName,
           tables[entry.tableName]!,
           signal,
@@ -3224,14 +3224,14 @@ function createEngine(config: EngineConfig): EngineInstance {
     }
   }
 
-  async function resolveTable(
+  async function getTableSpec(
     tableName: string,
     tableConfig: TableConfig,
     signal?: AbortSignal,
     scopeArgs?: Record<string, unknown>,
   ): Promise<void> {
     const key = buildScopeKey(tableName, scopeArgs ?? {});
-    const inFlight = resolveInFlight.get(key);
+    const inFlight = pullInFlight.get(key);
     if (inFlight) {
       resolveRerun.add(key);
       return inFlight;
@@ -3239,9 +3239,8 @@ function createEngine(config: EngineConfig): EngineInstance {
     const run = (async () => {
       try {
         await withSpan(
-          "convex-embedded.resolveTable",
-          () =>
-            resolveTablePaginated(tableName, tableConfig, signal, scopeArgs),
+          "convex-embedded.getTableSpec",
+          () => getTablePagePlan(tableName, tableConfig, signal, scopeArgs),
           {
             attributes: {
               "convex.table": tableName,
@@ -3253,13 +3252,13 @@ function createEngine(config: EngineConfig): EngineInstance {
           },
         );
       } finally {
-        resolveInFlight.delete(key);
+        pullInFlight.delete(key);
       }
       if (resolveRerun.delete(key)) {
-        await resolveTable(tableName, tableConfig, signal, scopeArgs);
+        await getTableSpec(tableName, tableConfig, signal, scopeArgs);
       }
     })();
-    resolveInFlight.set(key, run);
+    pullInFlight.set(key, run);
     return run;
   }
 
@@ -3378,41 +3377,37 @@ function createEngine(config: EngineConfig): EngineInstance {
     const localDocs = (await getDocumentsForTable(input.tableName)).filter(
       (doc) => typeof doc._id === "string" && idSet.has(String(doc._id)),
     );
-    const metadata = await readResolveMetadata(
-      input.tableName,
-      tableConfig,
-      ids,
-    );
-    const { schemaDef, localYjsMap, resolveDocuments } = prepareResolveInput(
+    const metadata = await readPullMetadata(input.tableName, tableConfig, ids);
+    const { schemaDef, localYjsMap, pullDocuments } = preparePullInput(
       tableConfig.schema,
       localDocs,
       metadata,
     );
 
-    let rawResolveResult: ResolveResponse | Array<ResolveResultRow>;
+    let rawResolveResult: PullResponse | Array<PullResultRow>;
     try {
       rawResolveResult = (await (
         remoteClient as unknown as RemoteCallable
       ).query(tableConfig.resolve, {
         collectionSeq: null,
-        documents: resolveDocuments,
+        documents: pullDocuments,
         docIds: ids,
-      } satisfies ResolveArgs)) as ResolveResponse | Array<ResolveResultRow>;
+      } satisfies PullArgs)) as PullResponse | Array<PullResultRow>;
     } catch (error) {
-      if (!isUnsupportedDocIdsResolveError(error)) {
+      if (!isUnsupportedDocIdsPullError(error)) {
         throw error;
       }
       log.warn(
         `sync: remote resolve for "${input.tableName}" does not support exact doc hydration; falling back to full table resolve`,
       );
-      await resolveTable(input.tableName, tableConfig, input.signal);
+      await getTableSpec(input.tableName, tableConfig, input.signal);
       return;
     }
-    const resolveResult = normalizeResolveResponse(rawResolveResult, null);
-    const { deletedDocIds, mergedDocs, metadataEntries } = mergeResolveResult({
+    const pullResult = canonicalizePullResponse(rawResolveResult, null);
+    const { deletedDocIds, mergedDocs, metadataEntries } = mergePullResult({
       localDocs,
       localYjsMap,
-      resolveResult,
+      pullResult,
       schemaDef,
       tableName: input.tableName,
       localSeqsByDocId: metadata.documentSeqById,
@@ -3439,10 +3434,10 @@ function createEngine(config: EngineConfig): EngineInstance {
         typeof doc._id === "string" ? [String(doc._id)] : [],
       ),
     );
-    await writeResolveMetadata({
+    await writePullMetadata({
       tableConfig,
       tableName: input.tableName,
-      resolveResult,
+      pullResult,
       metadataEntries: metadataEntries.filter((entry) =>
         acceptedDocIds.has(entry.docId),
       ),
@@ -3457,14 +3452,14 @@ function createEngine(config: EngineConfig): EngineInstance {
     }
   }
 
-  async function resolveTablePaginated(
+  async function getTablePagePlan(
     tableName: string,
     tableConfig: TableConfig,
     signal?: AbortSignal,
     scopeArgs?: Record<string, unknown>,
   ): Promise<void> {
     let attempts = 0;
-    const retrySchedule = createResolveRetrySchedule({
+    const retrySchedule = createPullRetrySchedule({
       maxRetries,
       retryDelayMs,
       signal,
@@ -3491,7 +3486,7 @@ function createEngine(config: EngineConfig): EngineInstance {
 
     let schemaDef: Definition;
     let localYjsMap: Map<string, LocalYjsEntry>;
-    let resolveDocuments: Array<ResolveDocument>;
+    let pullDocuments: Array<PullDocument>;
     let metadataCollectionSeq: number | null = null;
     let localSeqsByDocId: Map<string, number> = new Map();
 
@@ -3501,23 +3496,23 @@ function createEngine(config: EngineConfig): EngineInstance {
       const cachedCollectionSeq = lastKnownCollectionSeqByTable.get(tableName);
       const metadata =
         hasPendingSelfCausedSignal && typeof cachedCollectionSeq === "number"
-          ? await readResolveMetadataFastPath(
+          ? await readPullMetadataFastPath(
               tableName,
               tableConfig,
               docIds,
               cachedCollectionSeq,
             )
-          : await readResolveMetadata(tableName, tableConfig, docIds);
+          : await readPullMetadata(tableName, tableConfig, docIds);
       metadataCollectionSeq = metadata.collectionSeq;
       localSeqsByDocId = metadata.documentSeqById;
-      ({ schemaDef, localYjsMap, resolveDocuments } = await runSpan({
+      ({ schemaDef, localYjsMap, pullDocuments } = await runSpan({
         name: "convex_embedded.resolve.prepareInput",
         attributes: {
           table: tableName,
           local_doc_count: scopedLocalDocs.length,
         },
         run: () =>
-          prepareResolveInput(tableConfig.schema, scopedLocalDocs, metadata),
+          preparePullInput(tableConfig.schema, scopedLocalDocs, metadata),
       }));
     }
 
@@ -3528,21 +3523,21 @@ function createEngine(config: EngineConfig): EngineInstance {
     const effectiveCollectionSeq = isNewScope ? null : metadataCollectionSeq;
 
     log.debug(
-      `sync: resolving "${tableName}" with ${resolveDocuments.length} local doc(s)`,
+      `sync: resolving "${tableName}" with ${pullDocuments.length} local doc(s)`,
     );
 
-    const fetchResolvePage = async (cursor?: string | null) => {
+    const fetchPullPage = async (cursor?: string | null) => {
       const rawResolveResult = await retrySchedule<
-        ResolveResponse | Array<ResolveResultRow>
+        PullResponse | Array<PullResultRow>
       >(async () => {
         if (signal?.aborted) {
           throw new DOMException("Aborted", "AbortError");
         }
         attempts++;
         try {
-          const args: ResolveArgs = {
+          const args: PullArgs = {
             collectionSeq: effectiveCollectionSeq,
-            documents: resolveDocuments,
+            documents: pullDocuments,
             ...(scopeArgs && Object.keys(scopeArgs).length > 0
               ? { scopeArgs }
               : {}),
@@ -3551,7 +3546,7 @@ function createEngine(config: EngineConfig): EngineInstance {
           return (remoteClient as unknown as RemoteCallable).query(
             tableConfig.resolve,
             args,
-          ) as Promise<ResolveResponse | Array<ResolveResultRow>>;
+          ) as Promise<PullResponse | Array<PullResultRow>>;
         } catch (err) {
           if (!(err instanceof DOMException && err.name === "AbortError")) {
             log.warn(
@@ -3562,7 +3557,7 @@ function createEngine(config: EngineConfig): EngineInstance {
           throw err;
         }
       });
-      return normalizeResolveResponse(rawResolveResult, effectiveCollectionSeq);
+      return canonicalizePullResponse(rawResolveResult, effectiveCollectionSeq);
     };
 
     const accumulatedMetadataEntries: Array<{ docId: string; seq: number }> =
@@ -3571,10 +3566,10 @@ function createEngine(config: EngineConfig): EngineInstance {
     const ingestedRemoteIds = new Set<string>();
     let totalResolvedDocs = 0;
     let totalDiffCount = 0;
-    let finalResolveResult: ResolveResponse | null = null;
+    let finalResolveResult: PullResponse | null = null;
 
     const processPage = async (
-      page: ResolveResponse,
+      page: PullResponse,
       pageNumber: number,
       streamingFullMode: boolean,
     ): Promise<void> => {
@@ -3588,10 +3583,10 @@ function createEngine(config: EngineConfig): EngineInstance {
             mode: page.mode,
           },
           run: () =>
-            mergeResolveResult({
+            mergePullResult({
               localDocs: scopedLocalDocs,
               localYjsMap,
-              resolveResult: page,
+              pullResult: page,
               schemaDef,
               tableName,
               localSeqsByDocId,
@@ -3666,7 +3661,7 @@ function createEngine(config: EngineConfig): EngineInstance {
       const firstResolveResult = await runSpan({
         name: "convex_embedded.resolve.fetch",
         attributes: { table: tableName, page: 0 },
-        run: () => fetchResolvePage(),
+        run: () => fetchPullPage(),
       });
       const isStreamingFullMode =
         firstResolveResult.mode === "full" &&
@@ -3687,7 +3682,7 @@ function createEngine(config: EngineConfig): EngineInstance {
           const page = await runSpan({
             name: "convex_embedded.resolve.fetch",
             attributes: { table: tableName, page: pageNumber },
-            run: () => fetchResolvePage(cursor),
+            run: () => fetchPullPage(cursor),
           });
           if (page.mode !== "full") {
             throw new Error(
@@ -3723,17 +3718,17 @@ function createEngine(config: EngineConfig): EngineInstance {
     }
 
     if (finalResolveResult) {
-      await writeResolveMetadata({
+      await writePullMetadata({
         tableConfig,
         tableName,
-        resolveResult: finalResolveResult,
+        pullResult: finalResolveResult,
         metadataEntries: accumulatedMetadataEntries,
         deletedDocIds: accumulatedDeletedDocIds,
         clearCollection: false,
         advanceCollectionSeq: fullyDrained,
       });
 
-      recordResolvedScopeSeq(
+      recordPulledScopeSeq(
         tableName,
         scopeArgs,
         finalResolveResult.collectionSeq,
@@ -3790,17 +3785,17 @@ function createEngine(config: EngineConfig): EngineInstance {
         onUnsubscribe: (unsub) => {
           entry.unsubscribe = unsub;
         },
-        resolveServices,
+        pullServices,
         tableConfig,
         tableName: entry.tableName,
         scopeArgs: entry.scopeArgs,
         consumeExpectedSelfCausedSignal,
         scheduleTableCoalesce,
-        shouldSkipRedundantPartialResolve,
+        shouldSkipRedundantPartialPull,
         onPartialResponse: () => {
           runDetached(
             () =>
-              resolveTable(
+              getTableSpec(
                 entry.tableName,
                 tableConfig,
                 undefined,
@@ -3813,7 +3808,7 @@ function createEngine(config: EngineConfig): EngineInstance {
       if (!lastResolvedScopeSeq.has(key)) {
         runDetached(
           () =>
-            resolveTable(
+            getTableSpec(
               entry.tableName,
               tableConfig,
               undefined,
@@ -3972,7 +3967,7 @@ function createEngine(config: EngineConfig): EngineInstance {
 
     const activation = (async () => {
       if (!lastResolvedScopeSeq.has(key)) {
-        await resolveTable(
+        await getTableSpec(
           tableName,
           tableConfig,
           abortController?.signal ?? undefined,
@@ -3994,17 +3989,17 @@ function createEngine(config: EngineConfig): EngineInstance {
         onUnsubscribe: (unsub) => {
           entry.unsubscribe = unsub;
         },
-        resolveServices,
+        pullServices,
         tableConfig,
         tableName,
         scopeArgs: normalizedScope,
         consumeExpectedSelfCausedSignal,
         scheduleTableCoalesce,
-        shouldSkipRedundantPartialResolve,
+        shouldSkipRedundantPartialPull,
         onPartialResponse: () => {
           runDetached(
             () =>
-              resolveTable(tableName, tableConfig, undefined, normalizedScope),
+              getTableSpec(tableName, tableConfig, undefined, normalizedScope),
             `[sync] paginated resolve for scoped "${tableName}":`,
           );
         },
@@ -4096,11 +4091,11 @@ function createEngine(config: EngineConfig): EngineInstance {
     )) as T;
   }
 
-  async function readResolveMetadata(
+  async function readPullMetadata(
     tableName: string,
     tableConfig: TableConfig,
     docIds: string[],
-  ): Promise<ResolveMetadata> {
+  ): Promise<PullMetadata> {
     const schemaVersion = tableConfig.schema.version;
     const identityKey = getCurrentIdentityKey();
     const [collectionSeq, documentEntries] = await Promise.all([
@@ -4128,12 +4123,12 @@ function createEngine(config: EngineConfig): EngineInstance {
     };
   }
 
-  async function readResolveMetadataFastPath(
+  async function readPullMetadataFastPath(
     tableName: string,
     tableConfig: TableConfig,
     docIds: string[],
     knownCollectionSeq: number,
-  ): Promise<ResolveMetadata> {
+  ): Promise<PullMetadata> {
     const schemaVersion = tableConfig.schema.version;
     const identityKey = getCurrentIdentityKey();
     const documentEntries = await runLocalSystemQuery<
@@ -4153,10 +4148,10 @@ function createEngine(config: EngineConfig): EngineInstance {
     };
   }
 
-  async function writeResolveMetadata(input: {
+  async function writePullMetadata(input: {
     tableConfig: TableConfig;
     tableName: string;
-    resolveResult: ResolveResponse;
+    pullResult: PullResponse;
     metadataEntries: Array<{ docId: string; seq: number }>;
     deletedDocIds: string[];
     clearCollection?: boolean;
@@ -4165,12 +4160,12 @@ function createEngine(config: EngineConfig): EngineInstance {
     const schemaVersion = input.tableConfig.schema.version;
     const identityKey = getCurrentIdentityKey();
 
-    const currentMeta = await readResolveMetadata(
+    const currentMeta = await readPullMetadata(
       input.tableName,
       input.tableConfig,
       [],
     );
-    const newCollectionSeq = input.resolveResult.collectionSeq;
+    const newCollectionSeq = input.pullResult.collectionSeq;
     const operations: Array<Promise<void>> = [];
     if (
       input.advanceCollectionSeq !== false &&
@@ -4187,10 +4182,7 @@ function createEngine(config: EngineConfig): EngineInstance {
       );
     }
 
-    if (
-      input.resolveResult.mode === "full" &&
-      input.clearCollection !== false
-    ) {
+    if (input.pullResult.mode === "full" && input.clearCollection !== false) {
       operations.push(
         runLocalSystemMutation(SystemPaths.documentMetadataClearCollection, {
           collection: input.tableName,
@@ -4461,7 +4453,7 @@ function createEngine(config: EngineConfig): EngineInstance {
       return localResult;
     },
 
-    resolveNow(): Promise<void> {
+    pullNow(): Promise<void> {
       if (isOnline) {
         stopRemoteSubscriptions();
       }

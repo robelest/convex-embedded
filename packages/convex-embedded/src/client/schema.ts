@@ -89,7 +89,7 @@ export function getRegisterConflict<T>(
  * Resolve a register field's value, using the custom resolver if one exists,
  * or falling back to latest-timestamp-wins.
  */
-export function resolveRegister<T>(
+export function getRegister<T>(
   doc: Y.Doc,
   fieldName: string,
   resolver?: (conflict: Conflict<T>) => T,

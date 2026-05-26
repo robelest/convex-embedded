@@ -13,7 +13,7 @@ import type { JSONValue, Value } from "convex/values";
 import { ConvexError, convexToJson, jsonToConvex } from "convex/values";
 
 import type { FunctionPath } from "@/kernel/modules";
-import { resolveFunctionPath, createFunctionHandle } from "@/kernel/modules";
+import { getFunctionPath, createFunctionHandle } from "@/kernel/modules";
 import {
   blobShaBase64,
   createAmbientCryptoProvider,
@@ -243,7 +243,7 @@ export function createAsyncSyscall(
 ): (op: string, jsonArgs: string) => Promise<string> {
   const runLocked =
     options?.runWithTransactionLock ?? (<T>(fn: () => Promise<T>) => fn());
-  const resolveTableForWrite = async (
+  const getTableForWrite = async (
     database: Database,
     table: string | undefined,
     id: string,
@@ -279,7 +279,7 @@ export function createAsyncSyscall(
       args: unknown;
       ts: number;
     };
-    const functionPath = resolveFunctionPath({
+    const functionPath = getFunctionPath({
       name,
       reference,
       functionHandle,
@@ -402,7 +402,7 @@ export function createAsyncSyscall(
         name: string;
         args: Record<string, unknown>;
       };
-      const functionPath = resolveFunctionPath({ name });
+      const functionPath = getFunctionPath({ name });
       const result = await runUdf(type, functionPath, udfArgs);
       return JSON.stringify(convexToJson(result as Value));
     };
@@ -474,7 +474,7 @@ export function createAsyncSyscall(
         id: string;
         value: Record<string, unknown>;
       };
-      const resolvedTable = await resolveTableForWrite(db, table, id);
+      const resolvedTable = await getTableForWrite(db, table, id);
       await db.ensureCommittedDocumentForWrite(resolvedTable, id as DocumentId);
       db.patch(resolvedTable, id as DocumentId, value);
       return JSON.stringify({});
@@ -485,14 +485,14 @@ export function createAsyncSyscall(
         id: string;
         value: Record<string, unknown>;
       };
-      const resolvedTable = await resolveTableForWrite(db, table, id);
+      const resolvedTable = await getTableForWrite(db, table, id);
       await db.ensureCommittedDocumentForWrite(resolvedTable, id as DocumentId);
       db.replace(resolvedTable, id as DocumentId, value);
       return JSON.stringify({});
     },
     "1.0/remove": async (args) => {
       const { table, id } = args as { table: string | undefined; id: string };
-      const resolvedTable = await resolveTableForWrite(db, table, id);
+      const resolvedTable = await getTableForWrite(db, table, id);
       await db.ensureCommittedDocumentForWrite(resolvedTable, id as DocumentId);
       db.delete(resolvedTable, id as DocumentId);
       return JSON.stringify({});
@@ -559,7 +559,7 @@ export function createAsyncSyscall(
         string,
         unknown
       >;
-      const functionPath = resolveFunctionPath({
+      const functionPath = getFunctionPath({
         name,
         reference,
         functionHandle,
@@ -584,7 +584,7 @@ export function createAsyncSyscall(
         reference?: string;
         functionHandle?: string;
       };
-      const functionPath = resolveFunctionPath({
+      const functionPath = getFunctionPath({
         name,
         reference,
         functionHandle,

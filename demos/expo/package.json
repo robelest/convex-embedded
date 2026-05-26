@@ -14,8 +14,6 @@
   "dependencies": {
     "@expo/vector-icons": "^15.0.3",
     "@op-engineering/op-sqlite": "^15.2.12",
-    "@react-navigation/bottom-tabs": "^7.4.0",
-    "@react-navigation/elements": "^2.9.14",
     "@react-navigation/native": "^7.1.8",
     "@robelest/convex-embedded": "workspace:*",
     "convex": "catalog:",
@@ -30,7 +28,6 @@
     "expo-splash-screen": "~31.0.13",
     "expo-status-bar": "~3.0.9",
     "expo-symbols": "~1.0.8",
-    "expo-web-browser": "~15.0.10",
     "react": "19.1.0",
     "react-dom": "19.1.0",
     "react-native": "0.81.5",

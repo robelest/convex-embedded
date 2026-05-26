@@ -934,21 +934,20 @@ export class QueryEngine {
     return { splitCursor, pageStatus };
   }
 
-  private async _paginateLinearAsync({
-    query,
-    cursor,
-    endCursor,
-    pageSize,
-    budget,
-  }: {
-    query: SerializedQuery;
-    cursor: string | null;
-    endCursor: string | null;
-    pageSize: number;
-    budget: ReadBudget;
-  }): Promise<PaginateResult> {
+  private async _drainLinearPageRows(
+    queryId: QueryId,
+    cursor: string | null,
+    endCursor: string | null,
+    pageSize: number,
+    budget: ReadBudget,
+  ): Promise<{
+    page: GenericDocument[];
+    isInPage: boolean;
+    isDone: boolean;
+    continueCursor: string;
+    budgetBounded: boolean;
+  }> {
     const pinnedEnd = endCursor !== null && endCursor !== "_end_cursor";
-    const queryId = this.startQueryAsync(query);
     const page: GenericDocument[] = [];
     let isInPage = cursor === null;
     let isDone = false;
@@ -961,10 +960,8 @@ export class QueryEngine {
       const { value, done } = await this.queryNextAsync(queryId);
       if (done) {
         isDone = true;
-        continueCursor = "_end_cursor";
         break;
       }
-
       const current = value!;
       rowsRead += 1;
       if (budget.maximumBytesRead !== null) {
@@ -977,7 +974,6 @@ export class QueryEngine {
           continueCursor = endCursor;
           break;
         }
-        isInPage = true;
       } else {
         const reachedLimit = isInPage && page.length + 1 >= pageSize;
         if (!pinnedEnd && reachedLimit) {
@@ -985,9 +981,7 @@ export class QueryEngine {
           continueCursor = current._id as string;
           break;
         }
-        if (isInPage) {
-          page.push(current);
-        }
+        if (isInPage) page.push(current);
         isInPage = isInPage || current._id === cursor;
       }
 
@@ -1005,15 +999,33 @@ export class QueryEngine {
       }
     }
 
+    return { page, isInPage, isDone, continueCursor, budgetBounded };
+  }
+
+  private async _paginateLinearAsync(input: {
+    query: SerializedQuery;
+    cursor: string | null;
+    endCursor: string | null;
+    pageSize: number;
+    budget: ReadBudget;
+  }): Promise<PaginateResult> {
+    const { query, cursor, endCursor, pageSize, budget } = input;
+    const pinnedEnd = endCursor !== null && endCursor !== "_end_cursor";
+    const queryId = this.startQueryAsync(query);
+    const result = await this._drainLinearPageRows(
+      queryId,
+      cursor,
+      endCursor,
+      pageSize,
+      budget,
+    );
     this.queryCleanup(queryId);
+    const { page, isInPage, isDone, continueCursor, budgetBounded } = result;
 
     if (cursor !== null && !isInPage && page.length === 0) {
       return this._paginateLinearAsync({
-        query,
+        ...input,
         cursor: null,
-        endCursor,
-        pageSize,
-        budget,
       });
     }
 

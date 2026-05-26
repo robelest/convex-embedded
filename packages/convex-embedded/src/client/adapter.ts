@@ -812,11 +812,11 @@ class CachePipeline {
       return;
     }
     const runtime = this.config.runtime;
-    if (!runtime || typeof runtime.upsertDocsFromCache !== "function") return;
+    if (!runtime || typeof runtime.writeDocsFromCache !== "function") return;
     log.debug(
       `extractDocsToStore ${refName} table=${tableName} docs=${docs.length} changed=${changed.length} collect_ms=${collectMs.toFixed(1)}`,
     );
-    void runtime.upsertDocsFromCache(tableName, changed).catch(() => {
+    void runtime.writeDocsFromCache(tableName, changed).catch(() => {
       /* swallow extraction errors */
     });
   }

@@ -1299,7 +1299,7 @@ export class EmbeddedRuntime {
     }
   }
 
-  async upsertDocsFromCache(
+  async writeDocsFromCache(
     table: string,
     docs: Array<Record<string, unknown>>,
   ): Promise<void> {
@@ -1416,7 +1416,7 @@ export class EmbeddedRuntime {
 
     if (merged.length === 0) {
       runtimeLog.debug(
-        `upsertDocsFromCache ${table} candidates=${candidates.length} merged=0 skipped_partial=${skippedPartial} diff_ms=${diffMs.toFixed(1)} total_ms=${(nowMs() - totalStart).toFixed(1)}`,
+        `writeDocsFromCache ${table} candidates=${candidates.length} merged=0 skipped_partial=${skippedPartial} diff_ms=${diffMs.toFixed(1)} total_ms=${(nowMs() - totalStart).toFixed(1)}`,
       );
       return;
     }
@@ -1441,7 +1441,7 @@ export class EmbeddedRuntime {
       this.db.rollbackWrites();
     }
     runtimeLog.debug(
-      `upsertDocsFromCache ${table} candidates=${candidates.length} merged=${merged.length} skipped_partial=${skippedPartial} diff_ms=${diffMs.toFixed(1)} write_ms=${(nowMs() - writeStart).toFixed(1)} total_ms=${(nowMs() - totalStart).toFixed(1)}`,
+      `writeDocsFromCache ${table} candidates=${candidates.length} merged=${merged.length} skipped_partial=${skippedPartial} diff_ms=${diffMs.toFixed(1)} write_ms=${(nowMs() - writeStart).toFixed(1)} total_ms=${(nowMs() - totalStart).toFixed(1)}`,
     );
   }
 

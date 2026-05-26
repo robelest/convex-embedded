@@ -40,6 +40,28 @@ function appendChild(parent: HTMLElement, child: Child): void {
   parent.appendChild(child);
 }
 
+function applyCommonProps(node: HTMLElement, props: ElProps): void {
+  if (props.text !== undefined) node.textContent = props.text;
+  if (props.className !== undefined) node.className = props.className;
+  if (props.title !== undefined) node.title = props.title;
+  if (props.style) Object.assign(node.style, props.style);
+  if (props.onClick) node.addEventListener("click", props.onClick);
+  if (props.onInput) node.addEventListener("input", props.onInput);
+  if (props.onChange) node.addEventListener("change", props.onChange);
+}
+
+function applyInputProps(node: HTMLInputElement, props: ElProps): void {
+  if (props.type !== undefined) node.type = props.type;
+  if (props.value !== undefined) node.value = props.value;
+  if (props.placeholder !== undefined) node.placeholder = props.placeholder;
+}
+
+function applyTextAreaProps(node: HTMLTextAreaElement, props: ElProps): void {
+  if (props.value !== undefined) node.value = props.value;
+  if (props.placeholder !== undefined) node.placeholder = props.placeholder;
+  if (props.rows !== undefined) node.rows = props.rows;
+}
+
 export function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
   props?: ElProps,
@@ -47,23 +69,9 @@ export function el<K extends keyof HTMLElementTagNameMap>(
 ): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
   if (props) {
-    if (props.text !== undefined) node.textContent = props.text;
-    if (props.className !== undefined) node.className = props.className;
-    if (props.title !== undefined) node.title = props.title;
-    if (props.style) Object.assign(node.style, props.style);
-    if (props.onClick) node.addEventListener("click", props.onClick);
-    if (props.onInput) node.addEventListener("input", props.onInput);
-    if (props.onChange) node.addEventListener("change", props.onChange);
-    if (node instanceof HTMLInputElement) {
-      if (props.type !== undefined) node.type = props.type;
-      if (props.value !== undefined) node.value = props.value;
-      if (props.placeholder !== undefined) node.placeholder = props.placeholder;
-    }
-    if (node instanceof HTMLTextAreaElement) {
-      if (props.value !== undefined) node.value = props.value;
-      if (props.placeholder !== undefined) node.placeholder = props.placeholder;
-      if (props.rows !== undefined) node.rows = props.rows;
-    }
+    applyCommonProps(node, props);
+    if (node instanceof HTMLInputElement) applyInputProps(node, props);
+    if (node instanceof HTMLTextAreaElement) applyTextAreaProps(node, props);
     if (node instanceof HTMLSelectElement && props.value !== undefined) {
       node.value = props.value;
     }

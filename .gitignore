@@ -23,3 +23,6 @@ tmp/
 
 # NOTE: Do NOT ignore _generated/ — convex-test needs those committed.
 # NOTE: Do NOT ignore bun.lock — it should be committed.
+
+# stray debug dumps
+/out.txt

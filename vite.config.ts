@@ -89,6 +89,26 @@ export default defineConfig({
           "typescript/no-empty-object-type": "error",
           "typescript/no-unused-expressions": "error",
           "no-console": "error",
+          "no-restricted-syntax": [
+            "error",
+            {
+              selector:
+                "FunctionDeclaration[id.name=/^(put|persist|upsert|fmt|unsub|resolve|find[A-Z]|lookup[A-Z])/]",
+              message:
+                "Banned leading verb. See AGENTS.md lexicon: put/persist/upsert → insert/replace/store/write; resolve → get/route/plan/pull; fmt → format; unsub → unsubscribe; find/lookup → get/gather.",
+            },
+            {
+              selector:
+                "MethodDefinition[key.name=/^(put|persist|upsert|fmt|unsub|resolve)/]",
+              message: "Banned leading verb on method. See AGENTS.md lexicon.",
+            },
+            {
+              selector:
+                "TSPropertySignature[key.name=/^(put|persist|upsert|fmt|unsub|resolve)/]",
+              message:
+                "Banned leading verb on interface property. See AGENTS.md lexicon.",
+            },
+          ],
         },
       },
       {

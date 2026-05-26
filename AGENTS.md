@@ -118,6 +118,62 @@ with a single action.
 - [ ] Run `vp check` and `vp test` to validate changes.
 <!--VITE PLUS END-->
 
+## Lexicon — canonical verb dictionary for `packages/convex-embedded`
+
+Matches the Convex SDK where the concept exists, internally consistent
+elsewhere. Enforced by `no-restricted-syntax` in the package's eslint overrides;
+new code that uses a banned verb fails `vp run check`.
+
+| Meaning                                  | Canonical                   | Banned → rewrite                                    |
+| ---------------------------------------- | --------------------------- | --------------------------------------------------- |
+| Read one record (logical)                | `get*`                      | —                                                   |
+| Read rows from durable store             | `read*`                     | —                                                   |
+| Bring a subsystem into memory (async)    | `load*`                     | —                                                   |
+| Network/remote retrieval                 | `fetch*`                    | (network only)                                      |
+| Gather a derived collection (non-query)  | `gather*`                   | `collect*`(non-query) · `find[A-Z]` · `lookup[A-Z]` |
+| Extract a sub-part of a value/AST        | `extract*`                  | —                                                   |
+| Convex query terminal                    | `collect`                   | **reserved** — never reuse                          |
+| Insert a logical document                | `insert*`                   | `put*`(doc) · `upsert*`                             |
+| Replace a logical document               | `replace*`                  | —                                                   |
+| Shallow update a logical document        | `patch*`                    | `update*`(doc) · `modify*`                          |
+| Delete a logical record                  | `delete*`                   | `remove*`(records)                                  |
+| Detach from in-memory set / listener     | `remove*` / `detach*`       | (kept)                                              |
+| Bulk reset in-memory state               | `clear*`                    | —                                                   |
+| Store blob/file content                  | `store*`                    | `put*`(blob)                                        |
+| Durably write metadata/rows to sqlite    | `write*`                    | `persist*`                                          |
+| Create a stateful/live instance          | `create*`                   | `make*`/`build*`(stateful)                          |
+| Assemble pure data (SQL, plans)          | `build*`                    | `make*`(pure)                                       |
+| Convert in-memory type→type              | `to*`                       | —                                                   |
+| Symmetric A↔B content conversion         | `aToB*`                     | (kept)                                              |
+| Decode/encode binary/wire                | `decode*`/`encode*`         | —                                                   |
+| Parse text→structured                    | `parse*`                    | —                                                   |
+| Boolean predicate                        | `is*`/`has*`/`should*`      | —                                                   |
+| Invoke at the Convex level               | `run*`                      | —                                                   |
+| Execute at the engine/SQL level          | `execute*`                  | —                                                   |
+| Event/message handler                    | `handle*`/`on*`             | —                                                   |
+| Schedule deferred work                   | `schedule*`                 | —                                                   |
+| Format for display                       | `format*`                   | `fmt`                                               |
+| Subscribe/unsubscribe                    | `subscribe*`/`unsubscribe*` | `unsub`                                             |
+| Offline↔remote synchronization subsystem | `replicate*`/`replication*` | `sync*`(subsystem)                                  |
+| Synchronous vs async variant             | `*Sync`/`*Async` suffix     | (kept — `fs.readFileSync` idiom)                    |
+| Remote→local data fetch/merge subsystem  | `pull*`                     | `resolve*`(subsystem) · `*Resolve*` noun            |
+| Turn a reference into the concrete thing | `get*`/`route*`/`plan*`     | `resolve*`(verb)                                    |
+| Merge CRDT/dirty rows                    | `merge*`                    | `resolveDirty*`                                     |
+
+**Documented exceptions** (never flagged): Convex seam (`query`, `mutation`,
+`action`, db `get/insert/patch/replace/delete`, `paginate`, `withIndex`,
+`useQuery`, `preloadQuery`, `makeFunctionReference`,
+`convexToJson`/`jsonToConvex`, `compareValues`); CRDT DSL (`prose`, `register`,
+`counter`, `set`, `omit`, `schema`, `define`, `view`, `migration`); native
+platform APIs (`removeEventListener`, `addEventListener`, `randomUUID`,
+`setTimeout`, …); symmetric `aToB` converters (`proseContentToYDoc`,
+`convexToJson`, …); third-party plugin hooks (Vite's
+`configResolved`/`configureServer`/`closeBundle`); kernel CRUD namespace
+(`tableGet`/`Insert`/`Patch`/`Replace`/`Delete`,
+`systemInsert`/`Patch`/`ReadByIndex`/`Delete` — they ARE the Convex db verbs
+under a noun namespace, kept this shape to avoid colliding with the existing
+`getTableForId`/`getTableNames` accessor family).
+
 <!-- convex-ai-start -->
 
 This project uses [Convex](https://convex.dev) as its backend.

@@ -22,6 +22,7 @@ import type {
   EmbeddedTableRuntimeHandle,
   RuntimeHooks,
 } from "@/server/schema";
+import { parseErrorMetadata } from "@/shared/errors";
 import { createLogger } from "@/shared/logger";
 import type { Definition } from "@/shared/schema";
 import { getCrdtType } from "@/shared/schema";
@@ -118,42 +119,8 @@ function extractDocId(
   return null;
 }
 
-function errorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (typeof error === "string") return error;
-  if (error == null) return "unknown error";
-  try {
-    return JSON.stringify(error);
-  } catch {
-    return "unknown error";
-  }
-}
-
-function parseRuntimeErrorDetails(error: unknown): {
-  code?: string;
-  message: string;
-} {
-  const fallback = errorMessage(error);
-  try {
-    const parsed = JSON.parse(fallback) as {
-      code?: unknown;
-      message?: unknown;
-    };
-    if (parsed && typeof parsed === "object") {
-      return {
-        code: typeof parsed.code === "string" ? parsed.code : undefined,
-        message:
-          typeof parsed.message === "string"
-            ? parsed.message.toLowerCase()
-            : fallback.toLowerCase(),
-      };
-    }
-  } catch {}
-  return { message: fallback.toLowerCase() };
-}
-
 function isComponentUnavailableError(error: unknown): boolean {
-  const { code, message } = parseRuntimeErrorDetails(error);
+  const { code, message } = parseErrorMetadata(error);
   if (code === "NESTED_COMPONENT_LOCAL_UNSUPPORTED") {
     return true;
   }

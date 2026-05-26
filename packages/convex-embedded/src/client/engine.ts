@@ -30,6 +30,7 @@ import {
   type ConnectivityAdapter,
 } from "@/runtime/platform";
 import { unwrapSchemaField } from "@/shared/canonicalize";
+import { parseErrorMetadata } from "@/shared/errors";
 import { createLogger } from "@/shared/logger";
 import { matchTag } from "@/shared/match";
 import { getFunctionName, makeFunctionReference } from "@/shared/refs";
@@ -260,29 +261,6 @@ class ReplayLeaseLostError extends Error {
     );
     this.name = "ReplayLeaseLostError";
   }
-}
-
-function parseErrorMetadata(error: Error): {
-  code?: string;
-  message: string;
-} {
-  const fallback = error.message ?? String(error);
-  try {
-    const parsed = JSON.parse(fallback) as {
-      code?: unknown;
-      message?: unknown;
-    };
-    if (parsed && typeof parsed === "object") {
-      return {
-        code: typeof parsed.code === "string" ? parsed.code : undefined,
-        message:
-          typeof parsed.message === "string"
-            ? parsed.message.toLowerCase()
-            : fallback.toLowerCase(),
-      };
-    }
-  } catch {}
-  return { message: fallback.toLowerCase() };
 }
 
 function projectRemoteSnapshot(input: {

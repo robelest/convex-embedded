@@ -87,6 +87,13 @@ type IdentityScopedDocument = StoredDocument & {
   [IDENTITY_SCOPE_FIELD]?: string | null;
 };
 
+type SourceEvaluationLike = {
+  results: StoredDocument[];
+  fieldPathsToSortBy: string[];
+  order: "asc" | "desc";
+  presorted: boolean;
+};
+
 type CommittedStateChange = {
   tableName: string;
   id: DocumentId;
@@ -2331,178 +2338,180 @@ export class Database {
     this._blobStorage.clear();
   }
 
+  private _readOptimizedFullTableScan(
+    source: Extract<SerializedQuery["source"], { type: "FullTableScan" }>,
+    limit: number | null | undefined,
+    seek: SeekBound | undefined,
+  ): SourceEvaluationLike {
+    const indexName =
+      source.order === "desc" ? "by_creation_time_desc" : "by_creation_time";
+    const order = source.order ?? "asc";
+    if (this._hasPendingWritesForTable(source.tableName)) {
+      return {
+        results: this._applySeekToOrderedDocs(
+          this._getMergedIndexedDocuments(source.tableName, indexName),
+          seek,
+        ),
+        fieldPathsToSortBy: [],
+        order,
+        presorted: true,
+      };
+    }
+    const ids = this._indexedIds(source.tableName, indexName);
+    if (ids === null) {
+      return {
+        results: this._applySeekToOrderedDocs(
+          this.getIndexedDocuments(source.tableName, indexName),
+          seek,
+        ),
+        fieldPathsToSortBy: [],
+        order,
+        presorted: true,
+      };
+    }
+    return {
+      results: this._readIndexWindow({
+        ids,
+        fields: ["_creationTime", "_id"],
+        lower: null,
+        upper: null,
+        predicate: () => true,
+        iterate: "forward",
+        seek,
+        limit: limit ?? null,
+      }),
+      fieldPathsToSortBy: [],
+      order,
+      presorted: true,
+    };
+  }
+
+  private _readOptimizedIndexRange(
+    source: Extract<SerializedQuery["source"], { type: "IndexRange" }>,
+    limit: number | null | undefined,
+    seek: SeekBound | undefined,
+  ): SourceEvaluationLike {
+    const [tableName, indexName] = source.indexName.split(".") as [
+      string,
+      string,
+    ];
+    const fields = this._getIndexDefinitions(tableName).find(
+      (entry) => entry.indexName === indexName,
+    )?.fields;
+    if (!fields) {
+      throw new Error(
+        `Cannot use index "${indexName}" for table "${tableName}" because it is not declared in the schema.`,
+      );
+    }
+
+    const lower = this._buildRangeBound([...source.range], fields, "lower");
+    const upper = this._buildRangeBound([...source.range], fields, "upper");
+    const predicate = this._buildRangePredicate(source.range);
+    const hasPending = this._hasPendingWritesForTable(tableName);
+
+    if (hasPending && source.order === "asc") {
+      return {
+        results: this._applySeekToOrderedDocs(
+          this._collectMergedIndexRangeDocs(
+            tableName,
+            indexName,
+            [],
+            null,
+            fields,
+            lower,
+            upper,
+            predicate,
+          ),
+          seek,
+        ),
+        fieldPathsToSortBy: [],
+        order: "asc",
+        presorted: true,
+      };
+    }
+
+    if (!hasPending) {
+      const ids = this._indexedIds(tableName, indexName);
+      if (ids !== null) {
+        return {
+          results: this._readIndexWindow({
+            ids,
+            fields,
+            lower,
+            upper,
+            predicate,
+            iterate: source.order === "desc" ? "backward" : "forward",
+            seek,
+            limit: limit ?? null,
+          }),
+          fieldPathsToSortBy: [],
+          order: "asc",
+          presorted: true,
+        };
+      }
+    }
+
+    const sourceDocs = hasPending
+      ? this._getMergedIndexedDocuments(tableName, indexName)
+      : this.getIndexedDocuments(tableName, indexName);
+    const start = lower
+      ? this._binarySearchLowerBound(sourceDocs, fields, lower)
+      : 0;
+    const end = upper
+      ? this._binarySearchUpperBound(sourceDocs, fields, upper)
+      : sourceDocs.length;
+    const filteredDocs = sourceDocs.slice(start, end).filter(predicate);
+    const ordered =
+      source.order === "desc" ? [...filteredDocs].reverse() : filteredDocs;
+    return {
+      results: this._applySeekToOrderedDocs(ordered, seek),
+      fieldPathsToSortBy: [],
+      order: "asc",
+      presorted: true,
+    };
+  }
+
+  private _readOptimizedSearch(
+    source: Extract<SerializedQuery["source"], { type: "Search" }>,
+    limit: number | null | undefined,
+  ): SourceEvaluationLike | null {
+    const [tableName, indexName] = source.indexName.split(".") as [
+      string,
+      string,
+    ];
+    const state = this._searchIndexes.get(`${tableName}.${indexName}`);
+    if (!state) return null;
+    const args = {
+      source,
+      activeIdentityKey: this._activeIdentityKey,
+      limit: limit ?? undefined,
+    };
+    const results = this._hasPendingWritesForTable(tableName)
+      ? executeOverlaySearch(
+          state,
+          this._buildPendingSearchOverlay(tableName, state),
+          args,
+        )
+      : executeSearch(state, args);
+    return {
+      results,
+      fieldPathsToSortBy: [],
+      order: "asc",
+      presorted: true,
+    };
+  }
+
   private _readOptimizedSource(
     source: SerializedQuery["source"],
     limit?: number | null,
     seek?: SeekBound,
-  ): {
-    results: StoredDocument[];
-    fieldPathsToSortBy: string[];
-    order: "asc" | "desc";
-    presorted: boolean;
-  } | null {
-    if (source.type === "FullTableScan") {
-      const indexName =
-        source.order === "desc" ? "by_creation_time_desc" : "by_creation_time";
-      if (this._hasPendingWritesForTable(source.tableName)) {
-        return {
-          results: this._applySeekToOrderedDocs(
-            this._getMergedIndexedDocuments(source.tableName, indexName),
-            seek,
-          ),
-          fieldPathsToSortBy: [],
-          order: source.order ?? "asc",
-          presorted: true,
-        };
-      }
-      const ids = this._indexedIds(source.tableName, indexName);
-      if (ids === null) {
-        return {
-          results: this._applySeekToOrderedDocs(
-            this.getIndexedDocuments(source.tableName, indexName),
-            seek,
-          ),
-          fieldPathsToSortBy: [],
-          order: source.order ?? "asc",
-          presorted: true,
-        };
-      }
-      return {
-        results: this._readIndexWindow({
-          ids,
-          fields: ["_creationTime", "_id"],
-          lower: null,
-          upper: null,
-          predicate: () => true,
-          iterate: "forward",
-          seek,
-          limit: limit ?? null,
-        }),
-        fieldPathsToSortBy: [],
-        order: source.order ?? "asc",
-        presorted: true,
-      };
-    }
-
-    if (source.type === "IndexRange") {
-      const [tableName, indexName] = source.indexName.split(".") as [
-        string,
-        string,
-      ];
-      const fields = this._getIndexDefinitions(tableName).find(
-        (entry) => entry.indexName === indexName,
-      )?.fields;
-
-      if (!fields) {
-        throw new Error(
-          `Cannot use index "${indexName}" for table "${tableName}" because it is not declared in the schema.`,
-        );
-      }
-
-      const lower = this._buildRangeBound([...source.range], fields, "lower");
-      const upper = this._buildRangeBound([...source.range], fields, "upper");
-      const predicate = this._buildRangePredicate(source.range);
-      if (this._hasPendingWritesForTable(tableName) && source.order === "asc") {
-        return {
-          results: this._applySeekToOrderedDocs(
-            this._collectMergedIndexRangeDocs(
-              tableName,
-              indexName,
-              [],
-              null,
-              fields,
-              lower,
-              upper,
-              predicate,
-            ),
-            seek,
-          ),
-          fieldPathsToSortBy: [],
-          order: "asc",
-          presorted: true,
-        };
-      }
-
-      if (!this._hasPendingWritesForTable(tableName)) {
-        const ids = this._indexedIds(tableName, indexName);
-        if (ids !== null) {
-          return {
-            results: this._readIndexWindow({
-              ids,
-              fields,
-              lower,
-              upper,
-              predicate,
-              iterate: source.order === "desc" ? "backward" : "forward",
-              seek,
-              limit: limit ?? null,
-            }),
-            fieldPathsToSortBy: [],
-            order: "asc",
-            presorted: true,
-          };
-        }
-      }
-
-      const sourceDocs = this._hasPendingWritesForTable(tableName)
-        ? this._getMergedIndexedDocuments(tableName, indexName)
-        : this.getIndexedDocuments(tableName, indexName);
-      const start = lower
-        ? this._binarySearchLowerBound(sourceDocs, fields, lower)
-        : 0;
-      const end = upper
-        ? this._binarySearchUpperBound(sourceDocs, fields, upper)
-        : sourceDocs.length;
-      const filteredDocs = sourceDocs.slice(start, end).filter(predicate);
-      const ordered =
-        source.order === "desc" ? [...filteredDocs].reverse() : filteredDocs;
-      return {
-        results: this._applySeekToOrderedDocs(ordered, seek),
-        fieldPathsToSortBy: [],
-        order: "asc",
-        presorted: true,
-      };
-    }
-
-    if (source.type === "Search") {
-      const [tableName, indexName] = source.indexName.split(".") as [
-        string,
-        string,
-      ];
-      const state = this._searchIndexes.get(`${tableName}.${indexName}`);
-      if (!state) {
-        return null;
-      }
-
-      if (this._hasPendingWritesForTable(tableName)) {
-        return {
-          results: executeOverlaySearch(
-            state,
-            this._buildPendingSearchOverlay(tableName, state),
-            {
-              source,
-              activeIdentityKey: this._activeIdentityKey,
-              limit: limit ?? undefined,
-            },
-          ),
-          fieldPathsToSortBy: [],
-          order: "asc",
-          presorted: true,
-        };
-      }
-
-      return {
-        results: executeSearch(state, {
-          source,
-          activeIdentityKey: this._activeIdentityKey,
-          limit: limit ?? undefined,
-        }),
-        fieldPathsToSortBy: [],
-        order: "asc",
-        presorted: true,
-      };
-    }
-
+  ): SourceEvaluationLike | null {
+    if (source.type === "FullTableScan")
+      return this._readOptimizedFullTableScan(source, limit, seek);
+    if (source.type === "IndexRange")
+      return this._readOptimizedIndexRange(source, limit, seek);
+    if (source.type === "Search")
+      return this._readOptimizedSearch(source, limit);
     return null;
   }
 
@@ -2510,12 +2519,7 @@ export class Database {
     source: SerializedQuery["source"],
     limit?: number | null,
     seek?: SeekBound,
-  ): Promise<{
-    results: StoredDocument[];
-    fieldPathsToSortBy: string[];
-    order: "asc" | "desc";
-    presorted: boolean;
-  } | null> {
+  ): Promise<SourceEvaluationLike | null> {
     const sourceTable = sourceTableName(source);
     if (
       this.isTableHydrationAttempted(sourceTable) &&
@@ -2608,12 +2612,7 @@ export class Database {
     source: SerializedQuery["source"],
     limit?: number | null,
     seek?: SeekBound,
-  ): Promise<{
-    results: StoredDocument[];
-    fieldPathsToSortBy: string[];
-    order: "asc" | "desc";
-    presorted: boolean;
-  } | null> {
+  ): Promise<SourceEvaluationLike | null> {
     if (source.type === "Search") {
       return null;
     }

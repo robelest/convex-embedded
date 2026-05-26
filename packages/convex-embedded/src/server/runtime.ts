@@ -729,7 +729,11 @@ export function bindTableRuntime(
               diff: toArrayBuffer(diff),
               seq: latest.seq,
             };
-          } catch {
+          } catch (error) {
+            log.error(
+              `pull: failed to compute diff for ${tableName}/${doc.docId}`,
+              error,
+            );
             return { docId: doc.docId, seq: latest.seq };
           }
         }
@@ -771,7 +775,7 @@ export function bindTableRuntime(
           };
         } catch (error) {
           log.error(
-            `resolve: failed to compute diff for ${tableName}/${doc.docId}`,
+            `pull: failed to compute diff for ${tableName}/${doc.docId}`,
             error,
           );
           return { docId: doc.docId, seq: latest.seq };

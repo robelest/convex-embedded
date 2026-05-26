@@ -9,7 +9,10 @@
  */
 
 import type { ConvexModuleRegistry } from "@/kernel/modules";
+import { createLogger } from "@/shared/logger";
 import { PENDING_REPLAY_META, type PendingReplayMeta } from "@/shared/symbols";
+
+const log = createLogger("convex-embedded:replay");
 
 const replayMetadataCache = new WeakMap<
   ConvexModuleRegistry,
@@ -38,7 +41,11 @@ export async function discoverPendingReplayMetadata(
       moduleEntries.map(async ([moduleId, loadModule]) => {
         try {
           return [moduleId, await loadModule()] as const;
-        } catch {
+        } catch (error) {
+          log.warn(
+            `replay metadata discovery: failed to load module "${moduleId}"; pending replay payloads for its exports cannot be versioned`,
+            error,
+          );
           return [moduleId, null] as const;
         }
       }),

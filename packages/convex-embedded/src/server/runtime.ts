@@ -27,6 +27,7 @@ import type { Definition } from "@/shared/schema";
 import { getCrdtType } from "@/shared/schema";
 import { REMOTE_META } from "@/shared/symbols";
 import type { RemoteMeta } from "@/shared/symbols";
+import type { QueryPageRange } from "@/shared/types";
 import {
   computeDiff,
   encodeDocumentState,
@@ -174,17 +175,30 @@ interface IndexEqChain {
   eq(field: string, value: unknown): IndexEqChain;
 }
 
+interface IndexPaginable {
+  paginate(opts: { cursor: string | null; numItems: number }): Promise<{
+    page: unknown[];
+    isDone: boolean;
+    continueCursor: string;
+  }>;
+}
+
 interface ScopedIndexReader {
   query(table: string): {
     withIndex(
       indexName: string,
       range: (q: IndexEqChain) => IndexEqChain,
-    ): {
-      paginate(opts: { cursor: string | null; numItems: number }): Promise<{
-        page: unknown[];
-        isDone: boolean;
-        continueCursor: string;
-      }>;
+    ): IndexPaginable;
+  };
+}
+
+interface RangeIndexReader {
+  query(table: string): {
+    withIndex(
+      indexName: string,
+      range: (q: IndexEqChain) => IndexEqChain,
+    ): IndexPaginable & {
+      order(direction: "asc" | "desc"): IndexPaginable;
     };
   };
 }
@@ -269,6 +283,45 @@ export function bindTableRuntime(
     } catch (error) {
       log.warn(
         `resolveScopedDocIds(${tableName}, ${match.indexName}): failed`,
+        error,
+      );
+      return null;
+    }
+  }
+
+  async function resolveRangeDocIds(
+    ctx: GenericQueryCtx<GenericDataModel>,
+    range: QueryPageRange,
+  ): Promise<{
+    orderedDocIds: string[];
+    continueCursor: string | null;
+    isDone: boolean;
+  } | null> {
+    if (!declaredIndexes.has(range.indexName)) return null;
+    const db = ctx.db as unknown as RangeIndexReader;
+    try {
+      const page = await db
+        .query(tableName)
+        .withIndex(range.indexName, (q) => {
+          let chain = q;
+          for (const { field, value } of range.eq) {
+            chain = chain.eq(field, value);
+          }
+          return chain;
+        })
+        .order(range.order)
+        .paginate({ cursor: range.cursor ?? null, numItems: range.numItems });
+      const orderedDocIds = page.page.map(
+        (doc) => (doc as { _id: string })._id,
+      );
+      return {
+        orderedDocIds,
+        continueCursor: page.isDone ? null : page.continueCursor,
+        isDone: page.isDone,
+      };
+    } catch (error) {
+      log.warn(
+        `resolveRangeDocIds(${tableName}, ${range.indexName}): failed`,
         error,
       );
       return null;
@@ -492,6 +545,38 @@ export function bindTableRuntime(
       const scopeArgs = scoped
         ? (args.scopeArgs as Record<string, unknown>)
         : undefined;
+
+      if (args.queryPageRange) {
+        const ranged = await resolveRangeDocIds(ctx, args.queryPageRange);
+        if (ranged !== null) {
+          const rawLiveStates =
+            ranged.orderedDocIds.length === 0
+              ? []
+              : ((await ctx.runQuery(component!.public.getLiveStates, {
+                  collection: tableName,
+                  docIds: ranged.orderedDocIds,
+                })) as Array<LiveStateRecord | null>);
+          const sliceStates = rawLiveStates.filter(
+            (state): state is LiveStateRecord =>
+              Boolean(state && typeof state.docId === "string"),
+          );
+          const hydrated = await materializeStates(sliceStates, scopeArgs);
+          const hydratedById = new Map(
+            hydrated.map((entry) => [entry.docId, entry] as const),
+          );
+          const documents = ranged.orderedDocIds.flatMap((docId) => {
+            const entry = hydratedById.get(docId);
+            return entry ? [entry] : [];
+          });
+          return {
+            mode: "full" as const,
+            collectionSeq: collectionChanges.collectionSeq,
+            continueCursor: ranged.continueCursor,
+            isDone: ranged.isDone,
+            documents,
+          };
+        }
+      }
 
       let docIdsToHydrate: string[] | null = null;
       if (scoped && scopeArgs) {

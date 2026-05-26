@@ -1,4 +1,6 @@
 import { ConvexClient } from "convex/browser";
+import type { FunctionReference } from "convex/server";
+import { jsonToConvex, type JSONValue } from "convex/values";
 
 import { patchRoutedConvexClient } from "@/client/adapter";
 import {
@@ -14,6 +16,7 @@ import {
   warnModuleLoadFailures,
 } from "@/client/discovery";
 import type { IdMap } from "@/client/ids";
+import type { Preloaded } from "@/client/preload";
 import {
   planMutationExecution,
   planReadExecution,
@@ -32,6 +35,7 @@ import type { QueryCacheStorage } from "@/runtime/sqlite/cache";
 import { createLogger } from "@/shared/logger";
 import type { RouteMode } from "@/shared/route";
 import type { EngineStatus } from "@/shared/types";
+import { stableValueKey } from "@/shared/valuekey";
 import { PubSub } from "@/utils/pubsub";
 import { DisposableScope } from "@/utils/scope";
 
@@ -107,12 +111,54 @@ export interface EngineInstance {
   ensureScopeReady?(
     tableName: string,
     scopeArgs?: Record<string, unknown>,
+    readKey?: string,
   ): Promise<void>;
+  releaseScopeRead?(
+    tableName: string,
+    scopeArgs: Record<string, unknown> | undefined,
+    readKey: string,
+  ): void;
+  onScopeResolved?(
+    tableName: string,
+    scopeArgs: Record<string, unknown> | undefined,
+    cb: () => void,
+  ): () => void;
   reloadIdentity?(): Promise<void>;
   start(): void;
   stop(): void;
   pendingCount?(): number;
   readonly idMap?: IdMap;
+}
+
+function readScopeArgs(
+  engine: EngineInstance,
+  readArgs?: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const filtered = readArgs
+    ? Object.fromEntries(
+        Object.entries(readArgs).filter(([key]) => key !== "paginationOpts"),
+      )
+    : undefined;
+  if (!filtered || Object.keys(filtered).length === 0) {
+    return undefined;
+  }
+  return engine.idMap?.translateLocalIdsToRemote(filtered) ?? filtered;
+}
+
+/**
+ * Derive the `(tableName, scopeArgs)` a query read maps to — the same mapping
+ * the live read path uses in `ensureReadReady`, so callers (e.g. preload
+ * gating) target the exact scope the query resolves.
+ */
+function deriveQueryScope(
+  engine: EngineInstance,
+  refName: string,
+  readArgs?: Record<string, unknown>,
+): { tableName: string; scopeArgs: Record<string, unknown> | undefined } {
+  return {
+    tableName: refName.split(":")[0] ?? "",
+    scopeArgs: readScopeArgs(engine, readArgs),
+  };
 }
 
 /**
@@ -226,6 +272,76 @@ export function subscribeRemoteState(
       callback(state);
     } catch {
       /* listener error */
+    }
+  });
+}
+
+function preloadedScope(
+  engine: EngineInstance,
+  preloaded: { _name: string; _argsJSON: JSONValue },
+): { tableName: string; scopeArgs: Record<string, unknown> | undefined } {
+  const args = jsonToConvex(preloaded._argsJSON) as Record<string, unknown>;
+  return deriveQueryScope(engine, preloaded._name, args);
+}
+
+/**
+ * Resolves once a preloaded query's value can hand off to the live local query —
+ * i.e. when that query's scope has resolved from remote at least once (so its
+ * local rows are no longer stale-only), or when the client is offline, or when
+ * there is no embedded sync engine attached (local-only). Use it to swap a
+ * `preloadQuery` value over to the live query without a stale-data flash.
+ *
+ * @param client - Browser `ConvexClient` instance.
+ * @param preloaded - The payload returned by `preloadQuery`.
+ * @returns A promise that resolves when the live query should take over.
+ */
+export function whenPreloaded<Query extends FunctionReference<"query">>(
+  client: ConvexClient,
+  preloaded: Preloaded<Query>,
+): Promise<void> {
+  const entry = getResolveEntriesStore().get(client);
+  if (!entry) return Promise.resolve();
+
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    const cleanups: Array<() => void> = [];
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      for (const cleanup of cleanups) cleanup();
+      resolve();
+    };
+
+    // Offline: the local rows are the source of truth, hand off immediately.
+    if (entry.state.status === "offline") {
+      finish();
+      return;
+    }
+    cleanups.push(
+      entry.stateHub.subscribe((state) => {
+        if (state.status === "offline") finish();
+      }),
+    );
+
+    const attach = () => {
+      if (settled) return;
+      const engine = entry.engine;
+      if (!engine?.onScopeResolved) return;
+      const { tableName, scopeArgs } = preloadedScope(engine, preloaded);
+      if (!tableName) {
+        finish();
+        return;
+      }
+      cleanups.push(engine.onScopeResolved(tableName, scopeArgs, finish));
+    };
+
+    if (entry.engine) {
+      attach();
+    } else if (entry.discovery) {
+      // Engine is wired during discovery; attach once it's available.
+      void entry.discovery.then(attach).catch(() => finish());
+    } else {
+      finish();
     }
   });
 }
@@ -562,21 +678,28 @@ export function attachResolve(input: {
         routeMode: entry.routeModes.get(refName) ?? null,
       }),
     ensureReadReady: async (refName, readArgs) => {
-      const tableName = refName.split(":")[0] ?? "";
+      const engine = entry.engine;
+      if (!engine) return;
+      const { tableName, scopeArgs } = deriveQueryScope(
+        engine,
+        refName,
+        readArgs,
+      );
       if (!tableName) return;
-      const filtered = readArgs
-        ? Object.fromEntries(
-            Object.entries(readArgs).filter(
-              ([key]) => key !== "paginationOpts",
-            ),
-          )
-        : undefined;
-      const scopeArgs =
-        filtered && Object.keys(filtered).length > 0
-          ? (entry.engine?.idMap?.translateLocalIdsToRemote(filtered) ??
-            filtered)
-          : undefined;
-      await entry.engine?.ensureScopeReady?.(tableName, scopeArgs);
+      const readKey = `${refName} ${stableValueKey(readArgs ?? {})}`;
+      await engine.ensureScopeReady?.(tableName, scopeArgs, readKey);
+    },
+    releaseRead: (refName, readArgs) => {
+      const engine = entry.engine;
+      if (!engine?.releaseScopeRead) return;
+      const { tableName, scopeArgs } = deriveQueryScope(
+        engine,
+        refName,
+        readArgs,
+      );
+      if (!tableName) return;
+      const readKey = `${refName} ${stableValueKey(readArgs ?? {})}`;
+      engine.releaseScopeRead(tableName, scopeArgs, readKey);
     },
     executeLocalMutation: (ref, args, enqueueForReplay) =>
       executeLocalMutation(entry, runtime, ref, args, enqueueForReplay),
@@ -617,13 +740,32 @@ export function attachResolve(input: {
   });
 
   if (leaderLock) {
-    entry.discovery = Promise.resolve();
+    let resolveDiscovery: () => void = () => {};
+    entry.discovery = new Promise<void>((resolve) => {
+      resolveDiscovery = resolve;
+    });
+    let enteredLeaderCallback = false;
     void leaderLock(async () => {
-      if (entry.closed) return;
-      await discoverAndStart(discoverInput);
-      entry.discoveryReady = true;
+      enteredLeaderCallback = true;
+      if (entry.closed) {
+        resolveDiscovery();
+        return;
+      }
+      try {
+        await discoverAndStart(discoverInput);
+        entry.discoveryReady = true;
+      } finally {
+        resolveDiscovery();
+      }
       await entryClosedPromise;
-    }).catch(() => {});
+    }).catch(() => {
+      resolveDiscovery();
+    });
+    setTimeout(() => {
+      if (!enteredLeaderCallback) {
+        resolveDiscovery();
+      }
+    }, 50);
   } else {
     const discovery = discoverAndStart(discoverInput).then(() => {
       entry.discoveryReady = true;

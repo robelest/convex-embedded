@@ -1,6 +1,6 @@
 import type { Definition } from "@/shared/schema";
 
-function unwrapSchemaField(field: unknown): unknown {
+export function unwrapSchemaField(field: unknown): unknown {
   if (
     typeof field === "object" &&
     field !== null &&

@@ -26,7 +26,6 @@ import {
   registerEmbeddedClientEntry,
 } from "@/client/entry";
 import { ID_MAP_STORE_MIGRATIONS } from "@/client/ids";
-import type { Prefetch } from "@/client/prefetch";
 import {
   attachResolve,
   deleteResolveEntry,
@@ -206,7 +205,6 @@ export interface EmbeddedClientOptions {
   name?: string;
   remote?: RemoteOptions;
   auth?: AuthOptions;
-  prefetch?: Prefetch;
 }
 
 export function createEmbeddedClient(input: {
@@ -232,7 +230,6 @@ export function createEmbeddedClient(input: {
   const runtime = new EmbeddedRuntime({
     convex,
     schema: options.schema as EmbeddedRuntimeOptions["schema"],
-    prefetch: options.prefetch,
     crypto: platform.crypto ?? createAmbientCryptoProvider(),
     verifyToken: options.auth?.verifyToken,
     writeBroadcast: writeBroadcast ?? undefined,
@@ -284,9 +281,7 @@ export function createEmbeddedClient(input: {
     runtime,
     platform,
     name: dbName,
-    prefetch: options.prefetch,
-    hasPrefetch: Boolean(options.prefetch),
-    fallbackIdentityKey: options.prefetch?.identityKey ?? null,
+    fallbackIdentityKey: null,
     readActiveIdentityKey: () => initializeActiveIdentityKey(runtime),
     setActiveIdentityKey: (identityKey) => {
       authEntry.activeIdentityKey = identityKey;
@@ -312,11 +307,7 @@ export function createEmbeddedClient(input: {
     onLoadError: (error) => {
       log.error("[factory] load migrations:", error);
     },
-    onRefreshError: (stage, error) => {
-      if (stage === "after-storage") {
-        log.error("[factory] refresh local watches after storage:", error);
-        return;
-      }
+    onRefreshError: (error) => {
       log.error("[factory] refresh local watches:", error);
     },
     onTiming: ({ replayMetadataMs, migrationsMs, totalMs }) => {
@@ -326,9 +317,7 @@ export function createEmbeddedClient(input: {
     },
   });
 
-  if (!options.prefetch) {
-    runtime.extendStorageReady(load.storageReady);
-  }
+  runtime.extendStorageReady(load.storageReady);
 
   let queryCacheStorage: QueryCacheStorage | null = null;
 

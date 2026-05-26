@@ -1,13 +1,18 @@
 import { BrowserWriteBroadcast } from "@embedded/browser/write";
 import type { ConvexModuleRegistry } from "@embedded/kernel/modules";
 import type { AsyncReadBackend } from "@embedded/runtime/db/backend";
-import type { DatabaseCommitResult } from "@embedded/runtime/db/database";
+import {
+  RUNTIME_SYSTEM_TABLES,
+  type DatabaseCommitResult,
+} from "@embedded/runtime/db/database";
 import type {
+  DocumentId,
   QueryDependency,
   Source,
   StoredDocument,
 } from "@embedded/runtime/db/types";
 import { EmbeddedRuntime } from "@embedded/runtime/embedded";
+import { LocalQueryEvaluationError } from "@embedded/runtime/registry";
 import type { Definition } from "@embedded/shared/schema";
 import type {
   WriteBatch,
@@ -719,57 +724,18 @@ describe("transaction locking", () => {
 });
 
 describe("sql storage hydration", () => {
-  it("does not hydrate sql-backed tables on demand for local query watches", async ({
+  it("does NOT eager-hydrate sql-backed user tables at open (lazy)", async ({
     broadcast: _broadcast,
     onTestFinished,
   }) => {
     const getDocumentsByTable = vi.fn(async () => []);
-    const localRuntime = new EmbeddedRuntime({
-      convex: { modules: STUB_MODULES },
-      storage: mockAdapter({
-        kind: "sql",
-        getDocuments: async (table?: string) =>
-          table === undefined ? [] : getDocumentsByTable(),
-        getDocument: async () => null,
-        hasDocuments: async () => false,
-        getMetadata: async () => ({ timestamp: 0, lastCreationTime: 0 }),
-        countDocuments: async () => 0,
-        source: async () => [],
-        query: async () => [],
-        listBlobs: async () => [],
-        getBlob: async () => null,
-        write: async () => undefined,
-        putBlob: async () => undefined,
-        deleteBlob: async () => undefined,
-        clearAll: async () => undefined,
-      }),
-    });
-    onTestFinished(() => localRuntime.shutdown());
-
-    await localRuntime.hydrate();
-    vi.spyOn(internals(localRuntime), "_evaluateLocalQuery").mockResolvedValue({
-      result: [],
-      tablesRead: new Set(["tasks"]),
-      dependencies: [{ type: "FullTableScan", tableName: "tasks" }],
-    });
-
-    localRuntime.watchLocalQuery("tasks:list", {});
-    await flushMicrotasks(10);
-
-    expect(getDocumentsByTable).not.toHaveBeenCalled();
-  });
-
-  it("eagerly hydrates via getDocuments during startup", async ({
-    broadcast: _broadcast,
-    onTestFinished,
-  }) => {
     const getAllDocuments = vi.fn(async () => []);
     const localRuntime = new EmbeddedRuntime({
       convex: { modules: STUB_MODULES },
       storage: mockAdapter({
         kind: "sql",
         getDocuments: async (table?: string) =>
-          table === undefined ? getAllDocuments() : [],
+          table === undefined ? getAllDocuments() : getDocumentsByTable(),
         getDocument: async () => null,
         hasDocuments: async () => false,
         getMetadata: async () => ({ timestamp: 0, lastCreationTime: 0 }),
@@ -787,20 +753,77 @@ describe("sql storage hydration", () => {
     onTestFinished(() => localRuntime.shutdown());
 
     await localRuntime.hydrate();
-    expect(getAllDocuments).toHaveBeenCalled();
+
+    // Open hydrates system tables only — never a no-arg full load, never the
+    // user `tasks` table.
+    expect(getAllDocuments).not.toHaveBeenCalled();
+    expect(getDocumentsByTable).not.toHaveBeenCalledWith("tasks");
+    expect(localRuntime.db.isTableHydrationAttempted("tasks")).toBe(false);
   });
 
-  it("ingestDocuments diffs against the in-memory snapshot without re-reading sql", async ({
+  it("hydrates system tables (by name) at open, not user tables", async ({
     broadcast: _broadcast,
     onTestFinished,
   }) => {
-    const {
-      storage,
-      list: getDocumentsByTable,
-      readSource,
-    } = createSqlStorage({
-      tasks: [doc("task-1", { title: "Persisted" })],
+    const tablesLoadedByName: string[] = [];
+    const getAllDocuments = vi.fn(async () => []);
+    const localRuntime = new EmbeddedRuntime({
+      convex: { modules: STUB_MODULES },
+      storage: mockAdapter({
+        kind: "sql",
+        getDocuments: async (table?: string) => {
+          if (table === undefined) return getAllDocuments();
+          tablesLoadedByName.push(table);
+          return [];
+        },
+        getDocument: async () => null,
+        hasDocuments: async () => false,
+        getMetadata: async () => ({ timestamp: 0, lastCreationTime: 0 }),
+        countDocuments: async () => 0,
+        source: async () => [],
+        query: async () => [],
+        listBlobs: async () => [],
+        getBlob: async () => null,
+        write: async () => undefined,
+        putBlob: async () => undefined,
+        deleteBlob: async () => undefined,
+        clearAll: async () => undefined,
+      }),
     });
+    onTestFinished(() => localRuntime.shutdown());
+
+    await localRuntime.hydrate();
+
+    expect(getAllDocuments).not.toHaveBeenCalled();
+    expect(tablesLoadedByName).toContain("_resolve_id_map");
+    expect(tablesLoadedByName.every((t) => t.startsWith("_"))).toBe(true);
+  });
+
+  it("RUNTIME_SYSTEM_TABLES covers replay/scheduled/metadata and is all system tables", () => {
+    expect(RUNTIME_SYSTEM_TABLES.every((t) => t.startsWith("_"))).toBe(true);
+    // Tables read at open / required for correctness must be eagerly hydrated.
+    for (const required of [
+      "_resolve_pending",
+      "_resolve_pending_uploads",
+      "_resolve_id_map",
+      "_resolve_processors",
+      "_resolve_collection_metadata",
+      "_resolve_document_metadata",
+      "_resolve_schema_versions",
+      "_resolve_store_versions",
+      "_resolve_auth_state",
+      "_scheduled_functions",
+      "_storage",
+    ]) {
+      expect(RUNTIME_SYSTEM_TABLES).toContain(required);
+    }
+  });
+
+  it("tableHydrated resolves immediately for queryable user tables (no gate hang)", async ({
+    broadcast: _broadcast,
+    onTestFinished,
+  }) => {
+    const { storage } = createSqlStorage({});
     const localRuntime = new EmbeddedRuntime({
       convex: { modules: STUB_MODULES },
       storage,
@@ -808,15 +831,16 @@ describe("sql storage hydration", () => {
     onTestFinished(() => localRuntime.shutdown());
 
     await localRuntime.hydrate();
-    const readSourceCallsBeforeIngest = readSource.mock.calls.length;
-    const listCallsBeforeIngest = getDocumentsByTable.mock.calls.length;
 
-    await localRuntime.ingestDocuments("tasks", [
-      { _id: "task-1", _creationTime: 1, title: "Persisted" },
+    // The user table is not hydrated under lazy hydration, but the per-table
+    // gate must resolve (reads are served by push-down) — never hang.
+    const outcome = await Promise.race([
+      localRuntime.db.tableHydrated("tasks").then(() => "resolved" as const),
+      new Promise<"timeout">((resolve) =>
+        setTimeout(() => resolve("timeout"), 50),
+      ),
     ]);
-
-    expect(readSource.mock.calls.length).toBe(readSourceCallsBeforeIngest);
-    expect(getDocumentsByTable.mock.calls.length).toBe(listCallsBeforeIngest);
+    expect(outcome).toBe("resolved");
   });
 });
 
@@ -999,6 +1023,90 @@ describe("ingestDocuments", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Lazy windowed ingest (Stage 3)
+// ---------------------------------------------------------------------------
+
+describe("lazy windowed ingest", () => {
+  function seedLargeTable(): {
+    storage: OpaqueTestAdapter;
+    list: ReturnType<typeof createSqlStorage>["list"];
+    getDocument: ReturnType<typeof createSqlStorage>["getDocument"];
+  } {
+    const rows = Array.from({ length: 50 }, (_, i) =>
+      doc(`t${i}`, { title: `old ${i}` }),
+    );
+    const { storage, list, getDocument } = createSqlStorage({ tasks: rows });
+    return { storage, list, getDocument };
+  }
+
+  it("reads only the candidate window, not the whole table, when deleteAbsent is false", async ({
+    broadcast: _broadcast,
+    onTestFinished,
+  }) => {
+    const { storage, list, getDocument } = seedLargeTable();
+    const localRuntime = new EmbeddedRuntime({
+      convex: { modules: STUB_MODULES },
+      storage,
+    });
+    onTestFinished(() => localRuntime.shutdown());
+
+    await localRuntime.hydrate();
+    expect(localRuntime.db.isTableHydrationAttempted("tasks")).toBe(false);
+
+    list.mockClear();
+    getDocument.mockClear();
+
+    await localRuntime.ingestDocuments(
+      "tasks",
+      [
+        { _id: "t1", _creationTime: 1, title: "new 1" },
+        { _id: "t99", _creationTime: 1, title: "brand new" },
+      ],
+      undefined,
+      { deleteAbsent: false },
+    );
+
+    // The diff map is built from per-id push-down for exactly the window ids —
+    // never a whole-table read.
+    expect(list).not.toHaveBeenCalledWith("tasks");
+    const taskGets = getDocument.mock.calls.filter(([t]) => t === "tasks");
+    expect(taskGets.map(([, id]) => id).sort()).toEqual(["t1", "t99"]);
+    // Still lazy after the windowed ingest.
+    expect(localRuntime.db.isTableHydrationAttempted("tasks")).toBe(false);
+
+    // The upsert committed for both the changed and the new document.
+    const t1 = await localRuntime.db.getAsync("tasks", "t1" as DocumentId);
+    const t99 = await localRuntime.db.getAsync("tasks", "t99" as DocumentId);
+    expect(t1?.title).toBe("new 1");
+    expect(t99?.title).toBe("brand new");
+  });
+
+  it("falls back to a whole-table read for a reconciling (delete-capable) ingest", async ({
+    broadcast: _broadcast,
+    onTestFinished,
+  }) => {
+    const { storage, list } = seedLargeTable();
+    const localRuntime = new EmbeddedRuntime({
+      convex: { modules: STUB_MODULES },
+      storage,
+    });
+    onTestFinished(() => localRuntime.shutdown());
+
+    await localRuntime.hydrate();
+    list.mockClear();
+
+    // No deleteAbsent: false — the reconcile must enumerate local ids to know
+    // which documents are absent from the remote snapshot, so it reads the
+    // whole (scoped) table.
+    await localRuntime.ingestDocuments("tasks", [
+      { _id: "t1", _creationTime: 1, title: "new 1" },
+    ]);
+
+    expect(list).toHaveBeenCalledWith("tasks");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Direct execution
 // ---------------------------------------------------------------------------
 
@@ -1038,7 +1146,11 @@ describe("executeLocal query", () => {
 
     await localRuntime.hydrate();
 
-    expect(getDocumentsByTable).not.toHaveBeenCalledWith("_resolve_id_map");
+    // System tables are hydrated eagerly at open (loaded by name).
+    expect(getDocumentsByTable).toHaveBeenCalledWith("_resolve_id_map");
+    const readsAfterOpen = getDocumentsByTable.mock.calls.filter(
+      ([t]) => t === "_resolve_id_map",
+    ).length;
 
     const result = await localRuntime.executeLocal({
       kind: "query",
@@ -1054,7 +1166,11 @@ describe("executeLocal query", () => {
         identityKey: "user:a",
       },
     ]);
-    expect(getDocumentsByTable).not.toHaveBeenCalledWith("_resolve_id_map");
+    // The system query reads from memory — no additional sql read.
+    expect(
+      getDocumentsByTable.mock.calls.filter(([t]) => t === "_resolve_id_map")
+        .length,
+    ).toBe(readsAfterOpen);
   });
 
   it("reads sql-backed collection and document metadata through system queries", async ({
@@ -1106,10 +1222,11 @@ describe("executeLocal query", () => {
 
     expect(collectionSeq).toBe(7);
     expect(docMetadata).toEqual([{ docId: "task-1", seq: 3 }]);
-    expect(getDocumentsByTable).not.toHaveBeenCalledWith(
+    // System metadata tables are hydrated eagerly at open; queries read memory.
+    expect(getDocumentsByTable).toHaveBeenCalledWith(
       "_resolve_collection_metadata",
     );
-    expect(getDocumentsByTable).not.toHaveBeenCalledWith(
+    expect(getDocumentsByTable).toHaveBeenCalledWith(
       "_resolve_document_metadata",
     );
   });
@@ -1217,197 +1334,6 @@ describe("runtime query helpers", () => {
       isDone: false,
       continueCursor: "cursor-2",
     });
-  });
-});
-
-describe("prefetch startup", () => {
-  it("seeds the runtime from prefetched data before first reads", async ({
-    broadcast: _broadcast,
-    onTestFinished,
-  }) => {
-    const seededRuntime = new EmbeddedRuntime({
-      convex: { modules: STUB_MODULES },
-      prefetch: {
-        identityKey: null,
-        tables: {
-          tasks: [{ _id: "task-1", _creationTime: 1, title: "From prefetch" }],
-        },
-        metadata: {
-          tasks: { collectionSeq: 1, documents: [{ docId: "task-1", seq: 1 }] },
-        },
-      },
-    });
-    onTestFinished(() => seededRuntime.shutdown());
-
-    await seededRuntime.hydrate();
-
-    expect(await seededRuntime.getDocumentsForTable("tasks")).toEqual([
-      { _id: "task-1", _creationTime: 1, title: "From prefetch" },
-    ]);
-  });
-
-  it("allows manual prefetch ingest when no initial prefetch is provided", async ({
-    broadcast: _broadcast,
-    onTestFinished,
-  }) => {
-    const deferredRuntime = new EmbeddedRuntime({
-      convex: { modules: STUB_MODULES },
-    });
-    onTestFinished(() => deferredRuntime.shutdown());
-
-    await deferredRuntime.hydrate();
-
-    expect(await deferredRuntime.getDocumentsForTable("tasks")).toEqual([]);
-    expect(deferredRuntime.getIdentityKey()).toBeNull();
-
-    await deferredRuntime.ingestPrefetch({
-      identityKey: "user-1",
-      tables: {
-        tasks: [
-          { _id: "task-1", _creationTime: 1, title: "Deferred prefetch" },
-        ],
-      },
-      metadata: {
-        tasks: { collectionSeq: 1, documents: [{ docId: "task-1", seq: 1 }] },
-      },
-    });
-
-    expect(await deferredRuntime.getDocumentsForTable("tasks")).toEqual([
-      { _id: "task-1", _creationTime: 1, title: "Deferred prefetch" },
-    ]);
-    expect(deferredRuntime.getIdentityKey()).toBe("user-1");
-  });
-
-  it("does not overwrite persisted local data with prefetched rows", async ({
-    broadcast: _broadcast,
-    onTestFinished,
-  }) => {
-    const persistedRuntime = new EmbeddedRuntime({
-      convex: { modules: STUB_MODULES },
-      storage: mockAdapter({
-        kind: "opaque",
-        getDocuments: async (table?: string) =>
-          table === undefined
-            ? [
-                {
-                  tableName: "tasks",
-                  doc: doc("task-local", { title: "Persisted local row" }),
-                },
-              ]
-            : table === "tasks"
-              ? [doc("task-local", { title: "Persisted local row" })]
-              : [],
-        hasDocuments: async (table: string) => table === "tasks",
-        getMetadata: async () => ({ timestamp: 1, lastCreationTime: 1 }),
-        listBlobs: async () => [],
-        write: async () => undefined,
-        putBlob: async () => undefined,
-        deleteBlob: async () => undefined,
-        clearAll: async () => undefined,
-      }),
-      prefetch: {
-        identityKey: "prefetch-user",
-        tables: {
-          tasks: [
-            { _id: "task-prefetch", _creationTime: 2, title: "Prefetched row" },
-          ],
-        },
-        metadata: {
-          tasks: {
-            collectionSeq: 2,
-            documents: [{ docId: "task-prefetch", seq: 2 }],
-          },
-        },
-      },
-    });
-    onTestFinished(() => persistedRuntime.shutdown());
-
-    await persistedRuntime.hydrate();
-
-    expect(await persistedRuntime.getDocumentsForTable("tasks")).toEqual([
-      { _id: "task-local", _creationTime: 1, title: "Persisted local row" },
-    ]);
-    expect(persistedRuntime.getIdentityKey()).toBeNull();
-  });
-
-  it("seeds resolve metadata from prefetched rows", async ({
-    broadcast: _broadcast,
-    onTestFinished,
-  }) => {
-    const seededRuntime = new EmbeddedRuntime({
-      convex: { modules: STUB_MODULES },
-      prefetch: {
-        identityKey: "user-1",
-        tables: {
-          tasks: [{ _id: "task-1", _creationTime: 1, title: "From prefetch" }],
-        },
-        metadata: {
-          tasks: { collectionSeq: 9, documents: [{ docId: "task-1", seq: 9 }] },
-        },
-      },
-    });
-    onTestFinished(() => seededRuntime.shutdown());
-
-    await seededRuntime.hydrate();
-
-    expect(
-      seededRuntime.db.getDocumentsForTable("_resolve_collection_metadata"),
-    ).toEqual([
-      expect.objectContaining({
-        collection: "tasks",
-        seq: 9,
-        identityKey: "user-1",
-        schemaVersion: 1,
-      }),
-    ]);
-    expect(
-      seededRuntime.db.getDocumentsForTable("_resolve_document_metadata"),
-    ).toEqual([
-      expect.objectContaining({
-        collection: "tasks",
-        docId: "task-1",
-        seq: 9,
-        identityKey: "user-1",
-        schemaVersion: 1,
-      }),
-    ]);
-  });
-
-  it("persists prefetched sql rows during direct runtime startup", async ({
-    broadcast: _broadcast,
-    onTestFinished,
-  }) => {
-    const rowsByTable: RowsByTable = {};
-    const { storage } = createSqlStorage(rowsByTable);
-    const localRuntime = new EmbeddedRuntime({
-      convex: { modules: STUB_MODULES },
-      storage,
-      prefetch: {
-        identityKey: null,
-        tables: {
-          tasks: [
-            { _id: "task-prefetch", _creationTime: 1, title: "Prefetched" },
-          ],
-        },
-        metadata: {
-          tasks: {
-            collectionSeq: 1,
-            documents: [{ docId: "task-prefetch", seq: 1 }],
-          },
-        },
-      },
-    });
-    onTestFinished(() => localRuntime.shutdown());
-
-    await localRuntime.hydrate();
-    expect(rowsByTable.tasks).toEqual([
-      {
-        __identityKey: null,
-        _id: "task-prefetch",
-        _creationTime: 1,
-        title: "Prefetched",
-      },
-    ]);
   });
 });
 
@@ -1586,6 +1512,109 @@ describe("watchLocalQuery", () => {
     ]);
   });
 
+  it("re-evaluates a thrown query once its partial-read tables are invalidated", async ({
+    runtime,
+  }) => {
+    await runtime.hydrate();
+
+    const evaluateSpy = vi
+      .spyOn(internals(runtime), "_evaluateLocalQuery")
+      .mockRejectedValueOnce(
+        new LocalQueryEvaluationError(
+          new Error("Project not found"),
+          new Set(["projects"]),
+          [{ type: "FullTableScan", tableName: "projects" }],
+        ),
+      )
+      .mockResolvedValueOnce({
+        result: [{ _id: "issue-1" }],
+        tablesRead: new Set(["projects", "issues"]),
+        dependencies: [
+          { type: "FullTableScan", tableName: "projects" },
+          { type: "FullTableScan", tableName: "issues" },
+        ],
+      });
+
+    const watch = runtime.watchLocalQuery("issues:forProject", {
+      projectId: "p1",
+    });
+    const callback = vi.fn();
+    watch.onUpdate(callback);
+
+    await flushMicrotasks(10);
+    expect(evaluateSpy).toHaveBeenCalledTimes(1);
+    expect(() => watch.localQueryResult()).toThrow("Project not found");
+
+    runtime.onMutationCommit(
+      makeCommit({
+        tablesWritten: new Set(["projects"]),
+        invalidation: {
+          tables: new Set(["projects"]),
+          changes: [
+            {
+              tableName: "projects",
+              before: null,
+              after: { _id: "p1" } as unknown as StoredDocument,
+            },
+          ],
+        },
+        timestamp: 1,
+      }),
+    );
+
+    await vi.waitFor(() => expect(evaluateSpy).toHaveBeenCalledTimes(2));
+    expect(watch.localQueryResult()).toEqual([{ _id: "issue-1" }]);
+    expect(callback).toHaveBeenCalledTimes(2);
+  });
+
+  it("recovers when a dep table is ingested mid-eval, before partial-deps are wired", async ({
+    runtime,
+  }) => {
+    await runtime.hydrate();
+
+    const evaluateSpy = vi
+      .spyOn(internals(runtime), "_evaluateLocalQuery")
+      .mockImplementationOnce(async () => {
+        runtime.onMutationCommit(
+          makeCommit({
+            tablesWritten: new Set(["projects"]),
+            invalidation: {
+              tables: new Set(["projects"]),
+              changes: [
+                {
+                  tableName: "projects",
+                  before: null,
+                  after: { _id: "p1" } as unknown as StoredDocument,
+                },
+              ],
+            },
+            timestamp: 1,
+          }),
+        );
+        throw new LocalQueryEvaluationError(
+          new Error("Project not found"),
+          new Set(["projects"]),
+          [{ type: "DocumentRead", tableName: "projects", id: "p1" }],
+        );
+      })
+      .mockResolvedValueOnce({
+        result: [{ _id: "issue-1" }],
+        tablesRead: new Set(["projects", "issues"]),
+        dependencies: [
+          { type: "DocumentRead", tableName: "projects", id: "p1" },
+          { type: "FullTableScan", tableName: "issues" },
+        ],
+      });
+
+    const watch = runtime.watchLocalQuery("issues:forProject", {
+      projectId: "p1",
+    });
+    watch.onUpdate(() => {});
+
+    await vi.waitFor(() => expect(evaluateSpy).toHaveBeenCalledTimes(2));
+    expect(watch.localQueryResult()).toEqual([{ _id: "issue-1" }]);
+  });
+
   it("updates local watches before storage settles for cold sql-backed tables", async ({
     runtime,
   }) => {
@@ -1705,6 +1734,66 @@ describe("watchLocalPaginatedQuery", () => {
     const second = watch.localQueryResult();
     expect(second?.results).toEqual([{ _id: "task-1" }, { _id: "task-2" }]);
     expect(second?.status).toBe("Exhausted");
+  });
+
+  it("re-evaluates a paginated watch that threw once partial-read tables ingest", async ({
+    runtime,
+  }) => {
+    await runtime.hydrate();
+
+    const spy = vi
+      .spyOn(internals(runtime), "_evaluateLocalPaginatedPage")
+      .mockRejectedValueOnce(
+        new LocalQueryEvaluationError(
+          new Error("Project not found"),
+          new Set(["projects"]),
+          [{ type: "DocumentRead", tableName: "projects", id: "p1" }],
+        ),
+      )
+      .mockResolvedValueOnce({
+        result: {
+          page: [{ _id: "issue-1" }],
+          isDone: true,
+          continueCursor: "_end_cursor",
+        },
+        tablesRead: new Set(["projects", "issues"]),
+        dependencies: [
+          { type: "DocumentRead", tableName: "projects", id: "p1" },
+          { type: "FullTableScan", tableName: "issues" },
+        ],
+      });
+
+    const watch = runtime.watchLocalPaginatedQuery(
+      "issues:forProject",
+      { projectId: "p1" },
+      { initialNumItems: 50 },
+    );
+    const callback = vi.fn();
+    watch.onUpdate(callback);
+
+    await flushMicrotasks(10);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(() => watch.localQueryResult()).toThrow("Project not found");
+
+    runtime.onMutationCommit(
+      makeCommit({
+        tablesWritten: new Set(["projects"]),
+        invalidation: {
+          tables: new Set(["projects"]),
+          changes: [
+            {
+              tableName: "projects",
+              before: null,
+              after: { _id: "p1" } as unknown as StoredDocument,
+            },
+          ],
+        },
+        timestamp: 1,
+      }),
+    );
+
+    await vi.waitFor(() => expect(spy).toHaveBeenCalledTimes(2));
+    expect(watch.localQueryResult()?.results).toEqual([{ _id: "issue-1" }]);
   });
 });
 

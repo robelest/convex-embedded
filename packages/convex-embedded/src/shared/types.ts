@@ -148,14 +148,29 @@ export interface FieldRef<
   readonly __kind?: Kind;
 }
 
+export type IndexBoundValue = string | number | boolean | null;
+
+export interface IndexBoundField {
+  field: string;
+  value: IndexBoundValue;
+}
+
+export interface QueryPageRange {
+  indexName: string;
+  order: "asc" | "desc";
+  numItems: number;
+  eq: IndexBoundField[];
+  cursor?: string | null;
+}
+
 /**
  * Client-to-server resolve request.
  *
- * Sent during reconnect / prefetch reconciliation to reconcile local Yjs documents with the
+ * Sent during reconnect / resolve reconciliation to reconcile local Yjs documents with the
  * authoritative remote embedded state.
  */
 export interface ResolveRequest {
-  /** Last acknowledged collection sequence for the table, or `null` for full prefetch sync. */
+  /** Last acknowledged collection sequence for the table, or `null` for a full resolve sync. */
   collectionSeq: number | null;
   /** Requested document vectors and per-document sequence cursors. */
   documents: ResolveDocumentRequest[];
@@ -163,6 +178,8 @@ export interface ResolveRequest {
   scopeArgs?: Record<string, unknown>;
   /** Cursor for paged full fallback responses. */
   fullCursor?: string | null;
+  /** Index range for windowed (demand-range) resolve; absent ⇒ whole-scope. */
+  queryPageRange?: QueryPageRange;
 }
 
 /**

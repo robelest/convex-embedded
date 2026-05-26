@@ -1,4 +1,3 @@
-import type { Prefetch } from "@/client/prefetch";
 import type { EmbeddedRuntime } from "@/runtime/embedded";
 import { runLocalMigrations } from "@/runtime/migrations/coordinator";
 import type { StoreMigrationManifest } from "@/runtime/migrations/types";
@@ -16,8 +15,6 @@ export interface LoadCoordinatorInput {
   runtime: EmbeddedRuntime;
   platform: EmbeddedPlatformAdapter;
   name: string;
-  prefetch?: Prefetch;
-  hasPrefetch: boolean;
   fallbackIdentityKey: string | null;
   readActiveIdentityKey: () => Promise<string | null>;
   setActiveIdentityKey: (identityKey: string | null) => void;
@@ -28,10 +25,7 @@ export interface LoadCoordinatorInput {
   withMigrationLock?: <T>(fn: () => Promise<T>) => Promise<T>;
   onIdentityError: (error: unknown) => void;
   onLoadError: (error: unknown) => void;
-  onRefreshError: (
-    stage: "after-storage" | "after-load",
-    error: unknown,
-  ) => void;
+  onRefreshError: (error: unknown) => void;
   onTiming: (timing: {
     replayMetadataMs: number;
     migrationsMs: number;
@@ -43,7 +37,6 @@ export async function attachPlatformStorage(input: {
   runtime: EmbeddedRuntime;
   platform: EmbeddedPlatformAdapter;
   name: string;
-  prefetch?: Prefetch;
 }): Promise<void> {
   return withSpan(
     "convex-embedded.attachPlatformStorage",
@@ -63,21 +56,10 @@ export async function attachPlatformStorage(input: {
         input.runtime.setStorage(storage);
         input.runtime.db.setStorage(storage);
 
-        const prefetchTableNames = input.prefetch
-          ? Object.keys(input.prefetch.tables)
-          : [];
         const hydrationStarted = now();
         await withSpan("convex-embedded.db.hydrate", () =>
-          input.runtime.db.hydrate(),
+          input.runtime.db.hydrateSystemTables(),
         );
-        const hasPersistedRows = prefetchTableNames.some((tableName) =>
-          input.runtime.db.hasDocumentsForTable(tableName),
-        );
-        if (input.prefetch && !hasPersistedRows) {
-          await withSpan("convex-embedded.ingestPrefetchUngated", () =>
-            input.runtime.ingestPrefetchUngated(input.prefetch!),
-          );
-        }
         await withSpan("convex-embedded.resumePersistedState", () =>
           input.runtime.resumePersistedState(),
         );
@@ -93,11 +75,6 @@ export async function attachPlatformStorage(input: {
         );
       } else {
         span.setAttributes({ "convex.attach.has_storage": false });
-        if (input.prefetch) {
-          await withSpan("convex-embedded.ingestPrefetchUngated", () =>
-            input.runtime.ingestPrefetchUngated(input.prefetch!),
-          );
-        }
         log.debug(
           `attach for ${input.name}: unavailable after ${(now() - started).toFixed(1)}ms`,
         );
@@ -117,7 +94,6 @@ export class LoadCoordinator {
       runtime: this.input.runtime,
       platform: this.input.platform,
       name: this.input.name,
-      prefetch: this.input.prefetch,
     });
 
     this.identityReady = this.storageReady.then(() =>
@@ -209,17 +185,9 @@ export class LoadCoordinator {
   }
 
   private bindReadiness(loadReady: Promise<void>): Promise<void> {
-    if (this.input.hasPrefetch) {
-      return this.storageReady.then(() =>
-        this.input.runtime.refreshLocalQueryWatches().catch((error) => {
-          this.input.onRefreshError("after-storage", error);
-        }),
-      );
-    }
-
     return loadReady.then(() =>
       this.input.runtime.refreshLocalQueryWatches().catch((error) => {
-        this.input.onRefreshError("after-load", error);
+        this.input.onRefreshError(error);
       }),
     );
   }

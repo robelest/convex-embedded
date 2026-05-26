@@ -141,6 +141,8 @@ runWhenRemote("bundler registry syncs remote data into local sqlite", () => {
     });
 
     await waitForResolved(client);
+
+    const unsubProjects = client.onUpdate(api.projects.list, {}, () => {});
     await pollLocalTable(client, "projects");
 
     const projects = (await client.query(api.projects.list, {})) as Array<{
@@ -148,7 +150,11 @@ runWhenRemote("bundler registry syncs remote data into local sqlite", () => {
     }>;
 
     for (const project of projects.slice(0, 2)) {
-      await client.query(api.issues.allForProject, { projectId: project._id });
+      const unsubIssues = client.onUpdate(
+        api.issues.allForProject,
+        { projectId: project._id },
+        () => {},
+      );
 
       const entry = getEmbeddedClientEntry(client)!;
       await vi.waitFor(
@@ -163,11 +169,14 @@ runWhenRemote("bundler registry syncs remote data into local sqlite", () => {
         },
         { timeout: 15_000, interval: 200 },
       );
+
+      unsubIssues();
     }
 
     userTableSpecs =
       getEmbeddedClientEntry(client)?.runtime.getUserTableSpecs() ?? undefined;
 
+    unsubProjects();
     await client.close();
   }, 60_000);
 

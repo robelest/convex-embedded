@@ -1001,6 +1001,9 @@ describe("engine.create()", () => {
 
     m.start();
     await settle();
+    // Whole-table subscriptions are on-demand; an unscoped read activates one.
+    await m.ensureTableReady("tasks");
+    await settle();
 
     // onUpdate should have been called for each table, subscribing to the
     // resolve endpoint with stable args.
@@ -1012,6 +1015,72 @@ describe("engine.create()", () => {
       expect.any(Function),
     );
 
+    m.stop();
+  });
+
+  it("clears resolved-once scopes on stop", async () => {
+    const { embedded } = createMockEmbedded();
+    const remoteClient = createMockRemoteClient();
+
+    const m = createEngine({
+      embedded,
+      remoteClient,
+      tables: { tasks: tableConfig("resolve_ref", "tasks_list") },
+    });
+
+    m.start();
+    await settle();
+    await m.ensureTableReady("tasks");
+    await settle();
+
+    // The scope resolved: a late subscriber fires immediately.
+    let beforeStop = 0;
+    m.onScopeResolved("tasks", undefined, () => {
+      beforeStop += 1;
+    })();
+    expect(beforeStop).toBe(1);
+
+    m.stop();
+
+    // After stop the resolved-once state is cleared: a new subscriber does not.
+    let afterStop = 0;
+    m.onScopeResolved("tasks", undefined, () => {
+      afterStop += 1;
+    })();
+    expect(afterStop).toBe(0);
+  });
+
+  it("onScopeResolved fires on first resolve and immediately for late subscribers", async () => {
+    const { embedded } = createMockEmbedded();
+    const remoteClient = createMockRemoteClient();
+
+    const m = createEngine({
+      embedded,
+      remoteClient,
+      tables: { tasks: tableConfig("resolve_ref", "tasks_list") },
+    });
+
+    let earlyCalls = 0;
+    const unsubEarly = m.onScopeResolved("tasks", undefined, () => {
+      earlyCalls += 1;
+    });
+
+    m.start();
+    await settle();
+    expect(earlyCalls).toBe(0);
+
+    await m.ensureTableReady("tasks");
+    await settle();
+    expect(earlyCalls).toBe(1);
+
+    let lateCalls = 0;
+    const unsubLate = m.onScopeResolved("tasks", undefined, () => {
+      lateCalls += 1;
+    });
+    expect(lateCalls).toBe(1);
+
+    unsubEarly();
+    unsubLate();
     m.stop();
   });
 
@@ -1030,6 +1099,8 @@ describe("engine.create()", () => {
     });
 
     m.start();
+    await settle();
+    await m.ensureTableReady("tasks");
     await settle();
     m.stop();
 
@@ -1194,6 +1265,8 @@ describe("engine.create()", () => {
 
     m.start();
     await settle();
+    await m.ensureTableReady("tasks");
+    await settle();
 
     expect(remoteClient.onUpdate).toHaveBeenCalledTimes(1);
     const onUpdateCallsBeforeMutation = remoteClient.onUpdate.mock.calls.length;
@@ -1233,6 +1306,8 @@ describe("engine.create()", () => {
     });
 
     m.start();
+    await settle();
+    await m.ensureTableReady("tasks");
     await settle();
 
     const onUpdateHandler = getSnapshotHandler(remoteClient);
@@ -1324,7 +1399,7 @@ describe("engine.create()", () => {
     expect(m.pendingCount()).toBe(1);
   });
 
-  it.skip("mutation() rejects when pending storage degrades to ephemeral queueing", async () => {
+  it("mutation() rejects when pending storage degrades to ephemeral queueing", async () => {
     const { embedded, localClient } = createMockEmbedded();
     localClient.mutation.mockImplementation((path: string) => {
       if (path === "_system:pendingPush") {
@@ -1953,6 +2028,8 @@ describe("engine.create()", () => {
 
     m.start();
     await settle();
+    await m.ensureTableReady("tasks");
+    await settle();
 
     // Get the onUpdate callback that was registered.
     expect(remoteClient.onUpdate).toHaveBeenCalledTimes(1);
@@ -2076,10 +2153,21 @@ describe("engine.create()", () => {
 
       m.start();
       await vi.advanceTimersByTimeAsync(1);
+      // Whole-table subscriptions are on-demand; activate both tables and let
+      // their resolve + subscribe complete under fake timers.
+      const ready = Promise.all([
+        m.ensureTableReady("projects"),
+        m.ensureTableReady("issues"),
+      ]);
+      await vi.advanceTimersByTimeAsync(50);
+      await ready;
+      await vi.advanceTimersByTimeAsync(5);
+      expect(updateHandlers.has("projects:bind")).toBe(true);
+      expect(updateHandlers.has("issues:bind")).toBe(true);
 
       updateHandlers.get("issues:bind")?.({
         mode: "full",
-        collectionSeq: 1,
+        collectionSeq: 100,
         protocolVersion: 1,
         documents: [
           {
@@ -2103,7 +2191,7 @@ describe("engine.create()", () => {
 
       updateHandlers.get("projects:bind")?.({
         mode: "full",
-        collectionSeq: 1,
+        collectionSeq: 100,
         protocolVersion: 1,
         documents: [
           {
@@ -2119,8 +2207,12 @@ describe("engine.create()", () => {
       });
       await vi.advanceTimersByTimeAsync(50);
 
-      expect(ingestOrder).toEqual(["projects"]);
-      expect(docsByTable.get("issues") ?? []).toEqual([]);
+      // Once the parent doc lands locally, the buffered child snapshot is
+      // flushed in the same pass (parent first, then child).
+      expect(ingestOrder).toEqual(["projects", "issues"]);
+      expect(docsByTable.get("issues")?.map((doc) => doc._id)).toEqual([
+        "issue-1",
+      ]);
       m.stop();
     });
   });
@@ -2142,6 +2234,8 @@ describe("engine.create()", () => {
 
       m.start();
       await vi.advanceTimersByTimeAsync(1);
+      void m.ensureTableReady("tasks");
+      await vi.advanceTimersByTimeAsync(5);
 
       expect(remoteClient.onUpdate).toHaveBeenCalledTimes(1);
       const onUpdateCallback = remoteClient.onUpdate.mock.calls[0]![2];
@@ -3492,6 +3586,16 @@ describe("engine.create()", () => {
 
       m.start();
       await settle();
+      // Activate the table on demand (no eager subscriptions); resolve its
+      // initial query so the subscription registers, then reset call counts so
+      // the assertions measure only the coalesced online cycle.
+      const ready = m.ensureTableReady("tasks");
+      await settle();
+      resolveQuery([]);
+      await ready;
+      await settle();
+      remoteClient.query.mockClear();
+      remoteClient.onUpdate.mockClear();
 
       const onUpdateCallsAfterStart = remoteClient.onUpdate.mock.calls.length;
 
@@ -3579,6 +3683,12 @@ describe("engine.create()", () => {
 
       m.start();
       await settle();
+      // Activate the table on demand (no eager subscriptions), then reset the
+      // call counts so the assertions measure only the online-cycle resolve.
+      await m.ensureTableReady("tasks");
+      await settle();
+      remoteClient.query.mockClear();
+      remoteClient.onUpdate.mockClear();
 
       const onUpdateCallsAfterStart = remoteClient.onUpdate.mock.calls.length;
 
@@ -3712,6 +3822,8 @@ describe("engine.create()", () => {
       });
 
       m.start();
+      await settle();
+      await m.ensureTableReady("tasks");
       await settle();
 
       // Subscriptions should be active

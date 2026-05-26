@@ -29,6 +29,7 @@ import {
   createAmbientConnectivityAdapter,
   type ConnectivityAdapter,
 } from "@/runtime/platform";
+import { unwrapSchemaField } from "@/shared/canonicalize";
 import { createLogger } from "@/shared/logger";
 import { matchTag } from "@/shared/match";
 import { getFunctionName, makeFunctionReference } from "@/shared/refs";
@@ -129,6 +130,7 @@ interface ActiveScope {
   scopeArgs: Record<string, unknown>;
   unsub?: () => void;
   pendingActivation?: Promise<void>;
+  readers?: Set<string>;
 }
 
 function toErrorMessage(error: unknown): string {
@@ -634,6 +636,17 @@ export interface EmbeddedClientLike {
    */
   getDocumentsForTable(table: string): Promise<Array<Record<string, unknown>>>;
 
+  /**
+   * Return only the documents matching `scopeArgs` from the local embedded
+   * database, using a matching index (O(scope) instead of O(table)). Returns
+   * `null` when no index covers the scope, so the caller can fall back to a
+   * whole-table read + filter.
+   */
+  getDocumentsForScope?(
+    table: string,
+    scopeArgs: Record<string, unknown>,
+  ): Promise<Array<Record<string, unknown>> | null>;
+
   /** Check whether a local document ID is currently present in the runtime. */
   hasLocalDocumentId?(id: string): boolean;
 
@@ -682,6 +695,12 @@ export interface EngineConfig {
 
   /** Delay between retries in ms (default: 1000). Doubles on each retry. */
   retryDelayMs?: number;
+
+  /**
+   * Delay before deactivating a scope whose last reader unsubscribed (default:
+   * 3000). Prevents thrash when switching back and forth quickly.
+   */
+  scopeTeardownDebounceMs?: number;
 
   /**
    * Returns the active identity key for identity-scoped local remote state.
@@ -824,7 +843,25 @@ export interface EngineInstance {
   ensureScopeReady(
     tableName: string,
     scopeArgs?: Record<string, unknown>,
+    readKey?: string,
   ): Promise<void>;
+
+  releaseScopeRead(
+    tableName: string,
+    scopeArgs: Record<string, unknown> | undefined,
+    readKey: string,
+  ): void;
+
+  /**
+   * Subscribe to the first resolve of `(tableName, scopeArgs)`. The callback
+   * fires once when the scope first resolves; if it has already resolved, it
+   * fires immediately. Returns an unsubscribe function.
+   */
+  onScopeResolved(
+    tableName: string,
+    scopeArgs: Record<string, unknown> | undefined,
+    cb: () => void,
+  ): () => void;
 
   /** Re-hydrate identity-scoped state and resume remote for the active identity. */
   reloadIdentity(): Promise<void>;
@@ -926,18 +963,6 @@ function createHydrationAwareOnlineHandler(input: {
       }
     });
   };
-}
-
-function unwrapSchemaField(field: unknown): unknown {
-  if (
-    typeof field === "object" &&
-    field !== null &&
-    "validator" in field &&
-    typeof (field as { validator?: unknown }).validator !== "undefined"
-  ) {
-    return (field as { validator: unknown }).validator;
-  }
-  return field;
 }
 
 function collectReferencedTables(
@@ -1522,10 +1547,13 @@ function mergeResolveResult(input: {
   resolveResult: ResolveResponse;
   schemaDef: Definition;
   tableName: string;
+  localSeqsByDocId: Map<string, number>;
   translateRemoteDocument: (
     document: Record<string, unknown>,
   ) => Record<string, unknown>;
 }): MergeResolveOutput {
+  const seqAdvanced = (docId: string, seq: number): boolean =>
+    seq > (input.localSeqsByDocId.get(docId) ?? -Infinity);
   if (input.resolveResult.mode === "full") {
     const mergedDocs = input.resolveResult.documents.flatMap((row) => {
       if (!row.document) {
@@ -1537,7 +1565,9 @@ function mergeResolveResult(input: {
       row.deleted ? [row.docId] : [],
     );
     const metadataEntries = input.resolveResult.documents.flatMap((row) =>
-      typeof row.seq === "number" ? [{ docId: row.docId, seq: row.seq }] : [],
+      typeof row.seq === "number" && seqAdvanced(row.docId, row.seq)
+        ? [{ docId: row.docId, seq: row.seq }]
+        : [],
     );
     return {
       deletedDocIds,
@@ -1567,7 +1597,7 @@ function mergeResolveResult(input: {
       if (!entry) {
         if (document) {
           mergedDocsById.set(docId, input.translateRemoteDocument(document));
-          if (typeof seq === "number") {
+          if (typeof seq === "number" && seqAdvanced(docId, seq)) {
             acc.metadataEntries.push({ docId, seq });
           }
           return acc;
@@ -1593,14 +1623,14 @@ function mergeResolveResult(input: {
         merged._id = entry.localDoc._id;
         merged._creationTime = entry.localDoc._creationTime;
         mergedDocsById.set(docId, input.translateRemoteDocument(merged));
-        if (typeof seq === "number") {
+        if (typeof seq === "number" && seqAdvanced(docId, seq)) {
           acc.metadataEntries.push({ docId, seq });
         }
         return acc;
       }
 
       mergedDocsById.set(docId, input.translateRemoteDocument(entry.localDoc));
-      if (typeof seq === "number") {
+      if (typeof seq === "number" && seqAdvanced(docId, seq)) {
         acc.metadataEntries.push({ docId, seq });
       }
       return acc;
@@ -1721,6 +1751,7 @@ function createEngine(config: EngineConfig): EngineInstance {
       );
     });
   const getDocumentsForTable = embedded.getDocumentsForTable.bind(embedded);
+  const getDocumentsForScope = embedded.getDocumentsForScope?.bind(embedded);
   const tableSchemas = Object.fromEntries(
     Object.entries(tables)
       .filter(([, tableConfig]) => tableConfig.schema !== undefined)
@@ -1877,11 +1908,20 @@ function createEngine(config: EngineConfig): EngineInstance {
   let bufferedFlushScheduled = false;
   let bufferedFlushTimer: ReturnType<typeof setTimeout> | null = null;
   const activeScopes = new Map<string, ActiveScope>();
+  const scopeTeardownTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const SCOPE_TEARDOWN_DEBOUNCE_MS = config.scopeTeardownDebounceMs ?? 3000;
 
   const RESOLVE_TABLE_COALESCE_MS = 32;
   const expectedSelfCausedSignals = new Map<string, number[]>();
   const lastKnownCollectionSeqByTable = new Map<string, number>();
   const lastResolvedScopeSeq = new Map<string, number>();
+  const resolveInFlight = new Map<string, Promise<void>>();
+  const resolveRerun = new Set<string>();
+  // Scopes that have completed a resolve from remote at least once since
+  // activation. Used to gate preloaded/SSR values until the local rows for a
+  // scope are no longer stale-only (see onScopeResolved).
+  const resolvedScopes = new Set<string>();
+  const scopeResolveListeners = new Map<string, Set<() => void>>();
   type TableCoalesceEntry = {
     signalSeqs: Set<number>;
     pendingThunks: Map<string, () => void>;
@@ -1953,6 +1993,57 @@ function createEngine(config: EngineConfig): EngineInstance {
     if (collectionSeq > prev) {
       lastResolvedScopeSeq.set(scopeKey, collectionSeq);
     }
+  }
+
+  function markScopeResolved(
+    tableName: string,
+    scopeArgs?: Record<string, unknown>,
+  ): void {
+    const scopeKey = makeScopeKey(tableName, scopeArgs ?? {});
+    if (resolvedScopes.has(scopeKey)) {
+      return;
+    }
+    resolvedScopes.add(scopeKey);
+    const ls = scopeResolveListeners.get(scopeKey);
+    if (ls) {
+      // A listener may unsubscribe itself here; deleting the current entry
+      // during a Set for-of is safe.
+      for (const cb of ls) {
+        try {
+          cb();
+        } catch (err) {
+          log.warn("sync: scope-resolved listener failed", err);
+        }
+      }
+    }
+  }
+
+  function onScopeResolved(
+    tableName: string,
+    scopeArgs: Record<string, unknown> | undefined,
+    cb: () => void,
+  ): () => void {
+    const scopeKey = makeScopeKey(tableName, scopeArgs ?? {});
+    let set = scopeResolveListeners.get(scopeKey);
+    if (!set) {
+      set = new Set();
+      scopeResolveListeners.set(scopeKey, set);
+    }
+    set.add(cb);
+    if (resolvedScopes.has(scopeKey)) {
+      try {
+        cb();
+      } catch (err) {
+        log.warn("sync: scope-resolved listener failed", err);
+      }
+    }
+    return () => {
+      const current = scopeResolveListeners.get(scopeKey);
+      current?.delete(cb);
+      if (current && current.size === 0) {
+        scopeResolveListeners.delete(scopeKey);
+      }
+    };
   }
 
   function shouldSkipRedundantPartialResolve(
@@ -2043,6 +2134,8 @@ function createEngine(config: EngineConfig): EngineInstance {
     expectedSelfCausedSignals.clear();
     lastKnownCollectionSeqByTable.clear();
     lastResolvedScopeSeq.clear();
+    resolveInFlight.clear();
+    resolveRerun.clear();
   }
 
   function getRemoteApplyOrder(): string[] {
@@ -2079,15 +2172,14 @@ function createEngine(config: EngineConfig): EngineInstance {
   }
 
   function scheduleBufferedSnapshotFlush(delayMs = 0): void {
-    if (bufferedFlushScheduled) {
-      return;
-    }
-
-    bufferedFlushScheduled = true;
     if (delayMs > 0) {
-      if (bufferedFlushTimer !== null) {
-        clearTimeout(bufferedFlushTimer);
+      // Backoff retry. Skip if any flush is already pending: a pending
+      // immediate flush will pick up the still-buffered docs, and we never
+      // stack multiple backoff timers.
+      if (bufferedFlushScheduled) {
+        return;
       }
+      bufferedFlushScheduled = true;
       bufferedFlushTimer = setTimeout(() => {
         bufferedFlushTimer = null;
         void flushBufferedSnapshots();
@@ -2095,6 +2187,17 @@ function createEngine(config: EngineConfig): EngineInstance {
       return;
     }
 
+    // Immediate flush. Preempt a pending backoff retry so a fresh snapshot for
+    // one table is not held back by another table's retry timer.
+    if (bufferedFlushTimer !== null) {
+      clearTimeout(bufferedFlushTimer);
+      bufferedFlushTimer = null;
+      bufferedFlushScheduled = false;
+    }
+    if (bufferedFlushScheduled) {
+      return;
+    }
+    bufferedFlushScheduled = true;
     runDetached(() => flushBufferedSnapshots(), "[sync] flush buffered:");
   }
 
@@ -3018,6 +3121,7 @@ function createEngine(config: EngineConfig): EngineInstance {
       resolveResult,
       schemaDef,
       tableName,
+      localSeqsByDocId: metadata.documentSeqById,
       translateRemoteDocument: (document) =>
         stripOmittedFields(schemaDef, [document])[0] ?? document,
     });
@@ -3127,18 +3231,37 @@ function createEngine(config: EngineConfig): EngineInstance {
     signal?: AbortSignal,
     scopeArgs?: Record<string, unknown>,
   ): Promise<void> {
-    return withSpan(
-      "convex-embedded.resolveTable",
-      () => resolveTablePaginated(tableName, tableConfig, signal, scopeArgs),
-      {
-        attributes: {
-          "convex.table": tableName,
-          "convex.resolve.scoped": Boolean(
-            scopeArgs && Object.keys(scopeArgs).length > 0,
-          ),
-        },
-      },
-    );
+    const key = makeScopeKey(tableName, scopeArgs ?? {});
+    const inFlight = resolveInFlight.get(key);
+    if (inFlight) {
+      resolveRerun.add(key);
+      return inFlight;
+    }
+    const run = (async () => {
+      try {
+        await withSpan(
+          "convex-embedded.resolveTable",
+          () =>
+            resolveTablePaginated(tableName, tableConfig, signal, scopeArgs),
+          {
+            attributes: {
+              "convex.table": tableName,
+              "convex.source": "remote",
+              "convex.resolve.scoped": Boolean(
+                scopeArgs && Object.keys(scopeArgs).length > 0,
+              ),
+            },
+          },
+        );
+      } finally {
+        resolveInFlight.delete(key);
+      }
+      if (resolveRerun.delete(key)) {
+        await resolveTable(tableName, tableConfig, signal, scopeArgs);
+      }
+    })();
+    resolveInFlight.set(key, run);
+    return run;
   }
 
   async function hydrateMissingReferences(input: {
@@ -3293,6 +3416,7 @@ function createEngine(config: EngineConfig): EngineInstance {
       resolveResult,
       schemaDef,
       tableName: input.tableName,
+      localSeqsByDocId: metadata.documentSeqById,
       translateRemoteDocument: (document) =>
         stripOmittedFields(schemaDef, [document])[0] ?? document,
     });
@@ -3347,52 +3471,68 @@ function createEngine(config: EngineConfig): EngineInstance {
       signal,
     });
 
-    const localDocs = await getDocumentsForTable(tableName);
+    const indexScopedDocs =
+      scopeArgs && Object.keys(scopeArgs).length > 0 && getDocumentsForScope
+        ? await getDocumentsForScope(tableName, scopeArgs)
+        : null;
     const scopedLocalDocs =
-      scopeArgs && Object.keys(scopeArgs).length > 0
-        ? localDocs.filter((doc) =>
+      indexScopedDocs ??
+      (scopeArgs && Object.keys(scopeArgs).length > 0
+        ? (await getDocumentsForTable(tableName)).filter((doc) =>
             Object.entries(scopeArgs).every(
               ([fieldPath, expected]) =>
                 getFieldValueByPath(doc, fieldPath) === expected,
             ),
           )
-        : localDocs;
+        : await getDocumentsForTable(tableName));
 
     const docIds = scopedLocalDocs.flatMap((doc) =>
       typeof doc._id === "string" ? [String(doc._id)] : [],
     );
 
-    const hasPendingSelfCausedSignal =
-      (expectedSelfCausedSignals.get(tableName)?.length ?? 0) > 0;
-    const cachedCollectionSeq = lastKnownCollectionSeqByTable.get(tableName);
-    const metadata =
-      hasPendingSelfCausedSignal && typeof cachedCollectionSeq === "number"
-        ? await readResolveMetadataFastPath(
-            tableName,
-            tableConfig,
-            docIds,
-            cachedCollectionSeq,
-          )
-        : await readResolveMetadata(tableName, tableConfig, docIds);
+    let schemaDef: Definition;
+    let localYjsMap: Map<string, LocalYjsEntry>;
+    let resolveDocuments: Array<ResolveDocument>;
+    let metadataCollectionSeq: number | null = null;
+    let localSeqsByDocId: Map<string, number> = new Map();
 
-    const { schemaDef, localYjsMap, resolveDocuments } = await runSpan({
-      name: "convex_embedded.resolve.prepareInput",
-      attributes: { table: tableName, local_doc_count: scopedLocalDocs.length },
-      run: () =>
-        prepareResolveInput(tableConfig.schema, scopedLocalDocs, metadata),
-    });
+    {
+      const hasPendingSelfCausedSignal =
+        (expectedSelfCausedSignals.get(tableName)?.length ?? 0) > 0;
+      const cachedCollectionSeq = lastKnownCollectionSeqByTable.get(tableName);
+      const metadata =
+        hasPendingSelfCausedSignal && typeof cachedCollectionSeq === "number"
+          ? await readResolveMetadataFastPath(
+              tableName,
+              tableConfig,
+              docIds,
+              cachedCollectionSeq,
+            )
+          : await readResolveMetadata(tableName, tableConfig, docIds);
+      metadataCollectionSeq = metadata.collectionSeq;
+      localSeqsByDocId = metadata.documentSeqById;
+      ({ schemaDef, localYjsMap, resolveDocuments } = await runSpan({
+        name: "convex_embedded.resolve.prepareInput",
+        attributes: {
+          table: tableName,
+          local_doc_count: scopedLocalDocs.length,
+        },
+        run: () =>
+          prepareResolveInput(tableConfig.schema, scopedLocalDocs, metadata),
+      }));
+    }
 
     const isNewScope =
       scopeArgs &&
       Object.keys(scopeArgs).length > 0 &&
       scopedLocalDocs.length === 0;
-    const effectiveCollectionSeq = isNewScope ? null : metadata.collectionSeq;
+    const effectiveCollectionSeq = isNewScope ? null : metadataCollectionSeq;
 
     log.debug(
       `sync: resolving "${tableName}" with ${resolveDocuments.length} local doc(s)`,
     );
 
-    const fetchResolvePage = async (fullCursor?: string | null) => {
+    const fetchResolvePage = async (cursor?: string | null) => {
       const rawResolveResult = await retrySchedule<
         ResolveResponse | Array<ResolveResultRow>
       >(async () => {
@@ -3401,16 +3541,17 @@ function createEngine(config: EngineConfig): EngineInstance {
         }
         attempts++;
         try {
+          const args: ResolveArgs = {
+            collectionSeq: effectiveCollectionSeq,
+            documents: resolveDocuments,
+            ...(scopeArgs && Object.keys(scopeArgs).length > 0
+              ? { scopeArgs }
+              : {}),
+            ...(cursor !== undefined ? { fullCursor: cursor } : {}),
+          };
           return (remoteClient as unknown as RemoteCallable).query(
             tableConfig.resolve,
-            {
-              collectionSeq: effectiveCollectionSeq,
-              documents: resolveDocuments,
-              ...(scopeArgs && Object.keys(scopeArgs).length > 0
-                ? { scopeArgs }
-                : {}),
-              ...(fullCursor !== undefined ? { fullCursor } : {}),
-            } satisfies ResolveArgs,
+            args,
           ) as Promise<ResolveResponse | Array<ResolveResultRow>>;
         } catch (err) {
           if (!(err instanceof DOMException && err.name === "AbortError")) {
@@ -3454,6 +3595,7 @@ function createEngine(config: EngineConfig): EngineInstance {
               resolveResult: page,
               schemaDef,
               tableName,
+              localSeqsByDocId,
               translateRemoteDocument: (document) =>
                 stripOmittedFields(schemaDef, [document])[0] ?? document,
             }),
@@ -3518,42 +3660,52 @@ function createEngine(config: EngineConfig): EngineInstance {
       });
     };
 
-    const firstResolveResult = await runSpan({
-      name: "convex_embedded.resolve.fetch",
-      attributes: { table: tableName, page: 0 },
-      run: () => fetchResolvePage(),
-    });
-    const isStreamingFullMode =
-      firstResolveResult.mode === "full" && firstResolveResult.isDone === false;
-    await processPage(firstResolveResult, 0, isStreamingFullMode);
-    finalResolveResult = firstResolveResult;
+    let fullyDrained: boolean;
+    let shouldPrune: boolean;
 
-    if (isStreamingFullMode) {
-      let continueCursor = firstResolveResult.continueCursor ?? null;
-      let pageIndex = 1;
+    {
+      const firstResolveResult = await runSpan({
+        name: "convex_embedded.resolve.fetch",
+        attributes: { table: tableName, page: 0 },
+        run: () => fetchResolvePage(),
+      });
+      const isStreamingFullMode =
+        firstResolveResult.mode === "full" &&
+        firstResolveResult.isDone === false;
+      await processPage(firstResolveResult, 0, isStreamingFullMode);
+      finalResolveResult = firstResolveResult;
 
-      while (continueCursor !== null) {
-        if (signal?.aborted) {
-          throw new DOMException("Aborted", "AbortError");
+      if (isStreamingFullMode) {
+        let continueCursor = firstResolveResult.continueCursor ?? null;
+        let pageIndex = 1;
+
+        while (continueCursor !== null) {
+          if (signal?.aborted) {
+            throw new DOMException("Aborted", "AbortError");
+          }
+          const cursor = continueCursor;
+          const pageNumber = pageIndex;
+          const page = await runSpan({
+            name: "convex_embedded.resolve.fetch",
+            attributes: { table: tableName, page: pageNumber },
+            run: () => fetchResolvePage(cursor),
+          });
+          if (page.mode !== "full") {
+            throw new Error(
+              `[convex-embedded] resolve pagination changed mode unexpectedly for "${tableName}".`,
+            );
+          }
+          await processPage(page, pageNumber, true);
+          continueCursor = page.continueCursor ?? null;
+          pageIndex += 1;
+          finalResolveResult = page;
         }
-        const cursor = continueCursor;
-        const pageNumber = pageIndex;
-        const page = await runSpan({
-          name: "convex_embedded.resolve.fetch",
-          attributes: { table: tableName, page: pageNumber },
-          run: () => fetchResolvePage(cursor),
-        });
-        if (page.mode !== "full") {
-          throw new Error(
-            `[convex-embedded] resolve pagination changed mode unexpectedly for "${tableName}".`,
-          );
-        }
-        await processPage(page, pageNumber, true);
-        continueCursor = page.continueCursor ?? null;
-        pageIndex += 1;
-        finalResolveResult = page;
       }
+      fullyDrained = true;
+      shouldPrune = isStreamingFullMode;
+    }
 
+    if (shouldPrune) {
       await runSpan({
         name: "convex_embedded.resolve.prune",
         attributes: {
@@ -3571,19 +3723,23 @@ function createEngine(config: EngineConfig): EngineInstance {
       });
     }
 
-    await persistResolveMetadata({
-      tableConfig,
-      tableName,
-      resolveResult: finalResolveResult,
-      metadataEntries: accumulatedMetadataEntries,
-      deletedDocIds: accumulatedDeletedDocIds,
-    });
+    if (finalResolveResult) {
+      await persistResolveMetadata({
+        tableConfig,
+        tableName,
+        resolveResult: finalResolveResult,
+        metadataEntries: accumulatedMetadataEntries,
+        deletedDocIds: accumulatedDeletedDocIds,
+        clearCollection: false,
+        advanceCollectionSeq: fullyDrained,
+      });
 
-    recordResolvedScopeSeq(
-      tableName,
-      scopeArgs,
-      finalResolveResult.collectionSeq,
-    );
+      recordResolvedScopeSeq(
+        tableName,
+        scopeArgs,
+        finalResolveResult.collectionSeq,
+      );
+    }
 
     log.debug(
       `sync: resolved table "${tableName}" — ` +
@@ -3607,19 +3763,7 @@ function createEngine(config: EngineConfig): EngineInstance {
   function startRemoteSubscriptions(): void {
     stopRemoteSubscriptions();
 
-    const remoteApplyOrder = getRemoteApplyOrder();
-    for (const tableName of remoteApplyOrder) {
-      const tableConfig = tables[tableName];
-      if (!tableConfig) {
-        continue;
-      }
-      const scopeArgs: Record<string, unknown> = {};
-      const key = makeScopeKey(tableName, scopeArgs);
-      if (!activeScopes.has(key)) {
-        activeScopes.set(key, { tableName, scopeArgs });
-      }
-    }
-
+    // (Re)subscribe the scopes that are already active — e.g. after a reconnect.
     const orderedScopes = Array.from(activeScopes.entries()).sort(
       ([leftKey, left], [rightKey, right]) => {
         const leftOrder = orderedTables.indexOf(left.tableName);
@@ -3631,7 +3775,7 @@ function createEngine(config: EngineConfig): EngineInstance {
       },
     );
 
-    for (const [, entry] of orderedScopes) {
+    for (const [key, entry] of orderedScopes) {
       if (entry.unsub) {
         continue;
       }
@@ -3667,6 +3811,18 @@ function createEngine(config: EngineConfig): EngineInstance {
           );
         },
       });
+      if (!lastResolvedScopeSeq.has(key)) {
+        runDetached(
+          () =>
+            resolveTable(
+              entry.tableName,
+              tableConfig,
+              undefined,
+              entry.scopeArgs,
+            ),
+          `[sync] cold resolve for "${entry.tableName}":`,
+        );
+      }
       void yieldToEventLoop();
     }
 
@@ -3677,6 +3833,11 @@ function createEngine(config: EngineConfig): EngineInstance {
    * Unsubscribe from all active remote reactive subscriptions.
    */
   function stopRemoteSubscriptions(): void {
+    for (const timer of scopeTeardownTimers.values()) {
+      clearTimeout(timer);
+    }
+    scopeTeardownTimers.clear();
+
     if (activeScopes.size === 0) return;
 
     scopeActivationEpoch++;
@@ -3690,8 +3851,10 @@ function createEngine(config: EngineConfig): EngineInstance {
       entry.unsub = undefined;
       entry.pendingActivation = undefined;
       const isScoped = Object.keys(entry.scopeArgs).length > 0;
-      if (isScoped) {
+      const hasReaders = (entry.readers?.size ?? 0) > 0;
+      if (isScoped && !hasReaders) {
         activeScopes.delete(key);
+        resolvedScopes.delete(key);
       }
     }
 
@@ -3700,6 +3863,78 @@ function createEngine(config: EngineConfig): EngineInstance {
 
   function yieldToEventLoop(): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  function registerScopeReader(
+    tableName: string,
+    scopeArgs: Record<string, unknown> | undefined,
+    readKey: string,
+  ): void {
+    const normalizedScope = canonicalizeScopeArgs(scopeArgs);
+    if (Object.keys(normalizedScope).length === 0) {
+      return;
+    }
+    const key = makeScopeKey(tableName, normalizedScope);
+    const pendingTeardown = scopeTeardownTimers.get(key);
+    if (pendingTeardown !== undefined) {
+      clearTimeout(pendingTeardown);
+      scopeTeardownTimers.delete(key);
+    }
+    let entry = activeScopes.get(key);
+    if (!entry) {
+      entry = { tableName, scopeArgs: normalizedScope };
+      activeScopes.set(key, entry);
+    }
+    (entry.readers ??= new Set<string>()).add(readKey);
+  }
+
+  function teardownScope(key: string): void {
+    scopeTeardownTimers.delete(key);
+    const entry = activeScopes.get(key);
+    if (!entry) {
+      return;
+    }
+    if ((entry.readers?.size ?? 0) > 0) {
+      return;
+    }
+    try {
+      entry.unsub?.();
+    } catch (err) {
+      log.warn("sync: error during scope teardown unsubscribe", err);
+    }
+    entry.unsub = undefined;
+    entry.pendingActivation = undefined;
+    activeScopes.delete(key);
+    resolvedScopes.delete(key);
+    log.debug(`sync: deactivated idle scope ${key}`);
+  }
+
+  function releaseScopeRead(
+    tableName: string,
+    scopeArgs: Record<string, unknown> | undefined,
+    readKey: string,
+  ): void {
+    const normalizedScope = canonicalizeScopeArgs(scopeArgs);
+    if (Object.keys(normalizedScope).length === 0) {
+      return;
+    }
+    const key = makeScopeKey(tableName, normalizedScope);
+    const entry = activeScopes.get(key);
+    if (!entry) {
+      return;
+    }
+    entry.readers?.delete(readKey);
+    if ((entry.readers?.size ?? 0) > 0) {
+      return;
+    }
+    const existing = scopeTeardownTimers.get(key);
+    if (existing !== undefined) {
+      clearTimeout(existing);
+    }
+    scopeTeardownTimers.set(
+      key,
+      setTimeout(() => teardownScope(key), SCOPE_TEARDOWN_DEBOUNCE_MS),
+    );
   }
 
   async function activateScope(
@@ -3737,12 +3972,15 @@ function createEngine(config: EngineConfig): EngineInstance {
     const epochAtStart = scopeActivationEpoch;
 
     const activation = (async () => {
-      await resolveTable(
-        tableName,
-        tableConfig,
-        abortController?.signal ?? undefined,
-        normalizedScope,
-      );
+      if (!lastResolvedScopeSeq.has(key)) {
+        await resolveTable(
+          tableName,
+          tableConfig,
+          abortController?.signal ?? undefined,
+          normalizedScope,
+        );
+      }
+      markScopeResolved(tableName, normalizedScope);
       await yieldToEventLoop();
 
       if (scopeActivationEpoch !== epochAtStart || !started) {
@@ -3923,6 +4161,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     metadataEntries: Array<{ docId: string; seq: number }>;
     deletedDocIds: string[];
     clearCollection?: boolean;
+    advanceCollectionSeq?: boolean;
   }): Promise<void> {
     const schemaVersion = input.tableConfig.schema.version;
     const identityKey = getCurrentIdentityKey();
@@ -3935,8 +4174,9 @@ function createEngine(config: EngineConfig): EngineInstance {
     const newCollectionSeq = input.resolveResult.collectionSeq;
     const operations: Array<Promise<void>> = [];
     if (
-      currentMeta.collectionSeq === null ||
-      newCollectionSeq > currentMeta.collectionSeq
+      input.advanceCollectionSeq !== false &&
+      (currentMeta.collectionSeq === null ||
+        newCollectionSeq > currentMeta.collectionSeq)
     ) {
       operations.push(
         runLocalSystemMutation(SystemPaths.collectionMetadataSet, {
@@ -4099,6 +4339,8 @@ function createEngine(config: EngineConfig): EngineInstance {
 
       stopRemoteSubscriptions();
       clearBufferedSnapshots();
+      resolvedScopes.clear();
+      scopeResolveListeners.clear();
 
       cleanupOnlineListener?.();
       cleanupOfflineListener?.();
@@ -4234,13 +4476,34 @@ function createEngine(config: EngineConfig): EngineInstance {
     ensureScopeReady(
       tableName: string,
       scopeArgs?: Record<string, unknown>,
+      readKey?: string,
     ): Promise<void> {
+      if (readKey !== undefined) {
+        registerScopeReader(tableName, scopeArgs, readKey);
+      }
       return activateScope(tableName, scopeArgs);
+    },
+
+    releaseScopeRead(
+      tableName: string,
+      scopeArgs: Record<string, unknown> | undefined,
+      readKey: string,
+    ): void {
+      releaseScopeRead(tableName, scopeArgs, readKey);
+    },
+
+    onScopeResolved(
+      tableName: string,
+      scopeArgs: Record<string, unknown> | undefined,
+      cb: () => void,
+    ): () => void {
+      return onScopeResolved(tableName, scopeArgs, cb);
     },
 
     async reloadIdentity(): Promise<void> {
       await hydrateIdentityState();
       clearBufferedSnapshots();
+      resolvedScopes.clear();
       await pendingQueue.unblockAll();
 
       if (!started) {

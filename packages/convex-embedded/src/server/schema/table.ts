@@ -16,7 +16,7 @@ import type { GenericValidator, PropertyValidators } from "convex/values";
 import { v } from "convex/values";
 
 import type { MigrationsMap } from "@/shared/migrations/types";
-import type { FieldRef } from "@/shared/types";
+import type { FieldRef, QueryPageRange } from "@/shared/types";
 
 import {
   define,
@@ -242,6 +242,7 @@ export interface RuntimeHooks {
       docIds?: string[];
       scopeArgs?: Record<string, unknown>;
       fullCursor?: string | null;
+      queryPageRange?: QueryPageRange;
     },
   ) => Promise<{
     mode: "full" | "incremental";
@@ -312,7 +313,7 @@ export function _resetRegistry(): void {
  * @typeParam Shape - Embedded field descriptor map.
  * @param tableName - Table name used for local storage and generated metadata.
  * @param shape - Embedded CRDT/schema field definition map.
- * @param options - Optional schema versioning, defaults, and migration config.
+ * @param options - Optional defaults and migration config.
  * @returns A typed embedded table handle with query/mutation builders and field refs.
  *
  * @example
@@ -432,6 +433,20 @@ export function embeddedTable<
       docIds: v.optional(v.array(v.string())),
       scopeArgs: v.optional(v.any()),
       fullCursor: v.optional(v.union(v.string(), v.null())),
+      queryPageRange: v.optional(
+        v.object({
+          indexName: v.string(),
+          order: v.union(v.literal("asc"), v.literal("desc")),
+          numItems: v.number(),
+          eq: v.array(
+            v.object({
+              field: v.string(),
+              value: v.union(v.string(), v.float64(), v.boolean(), v.null()),
+            }),
+          ),
+          cursor: v.optional(v.union(v.string(), v.null())),
+        }),
+      ),
     },
     returns: v.object({
       mode: v.union(v.literal("full"), v.literal("incremental")),
@@ -460,6 +475,7 @@ export function embeddedTable<
         docIds?: string[];
         scopeArgs?: Record<string, unknown>;
         fullCursor?: string | null;
+        queryPageRange?: QueryPageRange;
       },
     ) => {
       if (hooks.resolveHandler) {

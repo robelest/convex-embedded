@@ -190,6 +190,7 @@ interface CachePipelineConfig {
     refName: string,
     readArgs?: Record<string, unknown>,
   ) => Promise<void>;
+  releaseRead?: (refName: string, readArgs?: Record<string, unknown>) => void;
   translateLocalArgsToRuntime?: (
     args: Record<string, unknown>,
   ) => Record<string, unknown>;
@@ -288,11 +289,23 @@ class CachePipeline {
     this.changeListeners.clear();
   }
 
+  private opensRemoteSubscription(entry: ActiveSubscription): boolean {
+    const args = entry.args as Record<string, unknown> | undefined;
+    const isPaginated =
+      args !== undefined &&
+      typeof args.paginationOpts === "object" &&
+      args.paginationOpts !== null;
+    return !isPaginated;
+  }
+
   private openDeferredSubscriptions(): void {
     if (!this.config.remoteClient) return;
     if (isConnectivityOffline(this.config.connectivity)) return;
     for (const entry of this.active.values()) {
-      if (entry.remoteUnsubscribe === null) {
+      if (
+        entry.remoteUnsubscribe === null &&
+        this.opensRemoteSubscription(entry)
+      ) {
         this.openRemoteSubscription(entry);
       }
     }
@@ -459,6 +472,12 @@ class CachePipeline {
           current.localUnsubscribe = null;
         }
         this.active.delete(argsKey);
+        if (!isSystemRefName(current.refName)) {
+          this.config.releaseRead?.(
+            current.refName,
+            current.args as Record<string, unknown>,
+          );
+        }
         this.notifySubscriptionsChange();
       }
     };
@@ -488,7 +507,8 @@ class CachePipeline {
 
     if (
       this.config.remoteClient &&
-      !isConnectivityOffline(this.config.connectivity)
+      !isConnectivityOffline(this.config.connectivity) &&
+      this.opensRemoteSubscription(entry)
     ) {
       this.openRemoteSubscription(entry);
     }
@@ -999,6 +1019,7 @@ function createCachePaginatedOnUpdate(input: {
       | { results: unknown[]; isDone: boolean; continueCursor: string | null }
       | undefined => {
       const results: unknown[] = [];
+      const seenIds = new Set<string>();
       let last: PageResultShape | undefined;
       let splitChanged = false;
       for (let index = 0; index < pages.length; index += 1) {
@@ -1026,7 +1047,16 @@ function createCachePaginatedOnUpdate(input: {
           });
           splitChanged = true;
         }
-        results.push(...raw.page);
+        for (const doc of raw.page) {
+          const id = (doc as { _id?: unknown })._id;
+          if (typeof id === "string") {
+            if (seenIds.has(id)) {
+              continue;
+            }
+            seenIds.add(id);
+          }
+          results.push(doc);
+        }
         if (index === pages.length - 1 && raw.isDone) {
           break;
         }
@@ -1045,15 +1075,16 @@ function createCachePaginatedOnUpdate(input: {
     let currentSnapshot:
       | { results: unknown[]; isDone: boolean; continueCursor: string | null }
       | undefined;
+    // Until setup finishes, the snapshot is updated synchronously (so
+    // getCurrentValue() works) but the consumer callback is NOT invoked — it is
+    // delivered on a microtask after this factory returns. This matches stock
+    // Convex (initial value arrives on a later tick) and prevents a synchronous
+    // callback from firing mid-`onPaginatedUpdate_experimental(...)`, which would
+    // TDZ-throw in the common `const sub = onUpdate(..., () => sub.x)` pattern.
+    let setupComplete = false;
+    let initialEmitPending = false;
 
-    const emit = () => {
-      if (disposed) return;
-      const snapshot = buildSnapshot();
-      if (snapshot === undefined) {
-        return;
-      }
-      currentSnapshot = snapshot;
-      loadingMore = false;
+    const fireCallback = () => {
       try {
         callback(
           toClientResult(makeResult(), input.translateLocalResultToClient),
@@ -1070,6 +1101,21 @@ function createCachePaginatedOnUpdate(input: {
           log.error("unhandled subscription error", normalized);
         }
       }
+    };
+
+    const emit = () => {
+      if (disposed) return;
+      const snapshot = buildSnapshot();
+      if (snapshot === undefined) {
+        return;
+      }
+      currentSnapshot = snapshot;
+      loadingMore = false;
+      if (!setupComplete) {
+        initialEmitPending = true;
+        return;
+      }
+      fireCallback();
     };
 
     const fireError = (error: Error) => {
@@ -1160,6 +1206,13 @@ function createCachePaginatedOnUpdate(input: {
 
     resubscribeAll();
     emit();
+    setupComplete = true;
+    if (initialEmitPending) {
+      // Deliver the initial value asynchronously, after this factory returns.
+      queueMicrotask(() => {
+        if (!disposed) fireCallback();
+      });
+    }
 
     const unsubscribe = (() => {
       disposed = true;
@@ -1489,6 +1542,7 @@ export function patchRoutedConvexClient(input: {
     refName: string,
     readArgs?: Record<string, unknown>,
   ) => Promise<void>;
+  releaseRead?: (refName: string, readArgs?: Record<string, unknown>) => void;
   translateLocalArgsToRuntime?: (
     args: Record<string, unknown>,
   ) => Record<string, unknown>;
@@ -1546,6 +1600,7 @@ export function patchRoutedConvexClient(input: {
         asError: input.asError,
         runtime: input.runtime,
         ensureReadReady: input.ensureReadReady,
+        releaseRead: input.releaseRead,
         translateLocalArgsToRuntime: input.translateLocalArgsToRuntime,
       })
     : null;

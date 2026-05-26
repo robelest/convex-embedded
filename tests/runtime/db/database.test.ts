@@ -494,6 +494,115 @@ describe("Database — async read backend", () => {
     expect(results.map((result) => result._id)).toEqual(["a", "b"]);
     expect(results[0]?._score).toBeGreaterThan(results[1]?._score ?? 0);
   });
+
+  it("reads a queryable table with pending writes via push-down + overlay, never full-hydrate", async () => {
+    const committed: StoredDocument[] = [
+      { _id: "c1" as DocumentId, _creationTime: 1, status: "active" },
+      { _id: "c2" as DocumentId, _creationTime: 2, status: "active" },
+    ];
+    const source = vi.fn(async () => committed);
+    const getDocuments = vi.fn(async () => committed);
+    const db = indexedDb();
+    db.setReadBackendForTests({
+      source,
+      getDocuments,
+      getDocument: async () => null,
+      countDocuments: async () => committed.length,
+    });
+    db.setStorage(
+      sqlAdapter({
+        source,
+        getDocuments,
+        getDocument: async () => null,
+        countDocuments: async () => committed.length,
+      }),
+    );
+
+    db.startTransaction();
+    db.insert("tasks", { status: "active" });
+
+    const queryId = db.startQueryAsync({
+      source: {
+        type: "IndexRange",
+        indexName: "tasks.by_status",
+        range: [{ type: "Eq", fieldPath: "status", value: "active" }],
+        order: "asc",
+      },
+      operators: [],
+    });
+    const results: Array<Record<string, unknown>> = [];
+    for (;;) {
+      const next = await db.queryNextAsync(queryId);
+      if (next.done) break;
+      results.push(next.value as Record<string, unknown>);
+    }
+    db.queryCleanup(queryId);
+    db.rollbackWrites();
+
+    expect(source).toHaveBeenCalled();
+    expect(getDocuments).not.toHaveBeenCalled();
+    expect(db.isTableHydrationAttempted("tasks")).toBe(false);
+    expect(results).toHaveLength(3);
+    expect(results.filter((doc) => doc._id === "c1")).toHaveLength(1);
+    expect(results.filter((doc) => doc._id === "c2")).toHaveLength(1);
+    expect(
+      results.filter((doc) => doc._id !== "c1" && doc._id !== "c2"),
+    ).toHaveLength(1);
+  });
+
+  it("listDocumentsForScopeAsync reads only the scope via the index, not the whole table", async () => {
+    const active: StoredDocument[] = [
+      { _id: "a1" as DocumentId, _creationTime: 1, status: "active" },
+      { _id: "a2" as DocumentId, _creationTime: 2, status: "active" },
+    ];
+    const source = vi.fn(async () => active);
+    const getDocuments = vi.fn(async () => [
+      ...active,
+      { _id: "d1" as DocumentId, _creationTime: 3, status: "done" },
+    ]);
+    const db = indexedDb();
+    db.setReadBackendForTests({
+      source,
+      getDocuments,
+      getDocument: async () => null,
+      countDocuments: async () => active.length,
+    });
+    db.setStorage(
+      sqlAdapter({
+        source,
+        getDocuments,
+        getDocument: async () => null,
+        countDocuments: async () => active.length,
+      }),
+    );
+
+    const result = await db.listDocumentsForScopeAsync("tasks", {
+      status: "active",
+    });
+
+    expect(source).toHaveBeenCalled();
+    expect(getDocuments).not.toHaveBeenCalled();
+    expect(result?.map((doc) => doc._id)).toEqual(["a1", "a2"]);
+    expect(db.isTableHydrationAttempted("tasks")).toBe(false);
+  });
+
+  it("listDocumentsForScopeAsync returns null when no index covers the scope", async () => {
+    const db = indexedDb();
+    const getDocuments = vi.fn(async () => []);
+    db.setReadBackendForTests({
+      source: async () => [],
+      getDocuments,
+      getDocument: async () => null,
+      countDocuments: async () => 0,
+    });
+
+    const result = await db.listDocumentsForScopeAsync("tasks", {
+      priority: 5,
+    });
+
+    expect(result).toBeNull();
+    expect(getDocuments).not.toHaveBeenCalled();
+  });
 });
 
 describe("Database — tablesWritten", () => {

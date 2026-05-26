@@ -3,7 +3,7 @@
  *
  * The discovery pass extracts route modes, embedded-table bindings, and
  * storage upload URL metadata without executing any remote sync logic.
- * It is used by both live remote attachment and SSR prefetch flows.
+ * It is used by both live remote attachment and SSR preload flows.
  *
  * @internal
  */

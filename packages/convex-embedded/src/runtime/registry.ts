@@ -10,6 +10,32 @@ export type QueryEvaluation = {
   logs?: string[];
 };
 
+/**
+ * Thrown by `_evaluateLocalQuery` and `_evaluateLocalPaginatedWatch` when the
+ * underlying UDF rejects. Carries the partial dependency tracking the query
+ * accumulated before the throw so the observer registry can still subscribe to
+ * those tables — without this, an observer that errored on its first eval
+ * would subscribe to nothing and never re-evaluate when the missing data
+ * finally lands.
+ */
+export class LocalQueryEvaluationError extends Error {
+  readonly partialTablesRead: Set<string>;
+  readonly partialDependencies: QueryDependency[];
+
+  constructor(
+    cause: unknown,
+    partialTablesRead: Set<string>,
+    partialDependencies: QueryDependency[],
+  ) {
+    const message = cause instanceof Error ? cause.message : String(cause);
+    super(message);
+    this.name = "LocalQueryEvaluationError";
+    this.cause = cause;
+    this.partialTablesRead = partialTablesRead;
+    this.partialDependencies = partialDependencies;
+  }
+}
+
 type QueryObserverStateInput = {
   result: unknown;
   tablesRead: Set<string>;
@@ -222,6 +248,10 @@ export class RuntimeQueryObserverRegistry<TMeta> {
       do {
         observer.needsReevaluation = false;
         if (observer.pendingDelete) return;
+        const versionsBefore = new Map<string, number>();
+        for (const table of observer.tablesRead) {
+          versionsBefore.set(table, this._getTableVersion(table));
+        }
         try {
           const evaluation = await observer.evaluate();
           if (observer.pendingDelete) return;
@@ -234,7 +264,11 @@ export class RuntimeQueryObserverRegistry<TMeta> {
             error instanceof Error ? error : new Error(String(error));
           observer.currentLogs = [observer.currentError.message];
           observer.hasValue = true;
-          observer.tablesRead = new Set();
+          const partialTablesRead =
+            error instanceof LocalQueryEvaluationError
+              ? error.partialTablesRead
+              : new Set<string>();
+          observer.tablesRead = partialTablesRead;
           observer.dependencies = [];
           observer.depVersions = null;
           const entry = this._entries.get(observer.token);
@@ -243,11 +277,19 @@ export class RuntimeQueryObserverRegistry<TMeta> {
             observer,
             unsubscribe: this._subscriptions.subscribe(
               observer.token,
-              new Set(),
+              partialTablesRead,
               [],
               this._invalidateCallback(observer),
             ),
           });
+          for (const table of partialTablesRead) {
+            const before = versionsBefore.get(table);
+            const after = this._getTableVersion(table);
+            if (before === undefined ? after > 0 : before !== after) {
+              observer.needsReevaluation = true;
+              break;
+            }
+          }
         }
 
         if (observer.pendingDelete) return;

@@ -6,7 +6,8 @@
     "expo-network",
     "expo-splash-screen",
     "react-native-get-random-values",
-    "better-sqlite3"
+    "better-sqlite3",
+    "ts-morph"
   ],
   "ignorePatterns": [
     "packages/convex-embedded/consumer-types/**",
@@ -15,6 +16,9 @@
     "packages/convex-embedded/src/component/public/cleanup.ts",
     "packages/convex-embedded/src/component/public/marks.ts",
     "packages/convex-embedded/src/expo/shims/**",
-    "packages/convex-embedded/src/utils/cache.ts"
+    "packages/convex-embedded/src/utils/cache.ts",
+    "scripts/**",
+    "tests/setup.ts",
+    "demos/expo/src/global.css"
   ]
 }

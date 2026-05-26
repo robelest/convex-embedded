@@ -21,7 +21,7 @@ export function asRecord(value: unknown): Record<string, unknown> | null {
   return isSimpleObject(value) ? (value as Record<string, unknown>) : null;
 }
 
-export function isUndefinedMarker(value: JSONValue): boolean {
+function isUndefinedMarker(value: JSONValue): boolean {
   const record = asRecord(value);
   return record !== null && "$undefined" in record;
 }
@@ -29,7 +29,7 @@ export function isUndefinedMarker(value: JSONValue): boolean {
 const FIELD_PATH_PARTS_CACHE = new Map<string, string[]>();
 const FIELD_PATH_PARTS_CACHE_MAX_SIZE = 1_000;
 
-export function getFieldPathParts(fieldPath: string): string[] {
+function getFieldPathParts(fieldPath: string): string[] {
   let cached = FIELD_PATH_PARTS_CACHE.get(fieldPath);
   if (!cached) {
     if (FIELD_PATH_PARTS_CACHE.size >= FIELD_PATH_PARTS_CACHE_MAX_SIZE) {

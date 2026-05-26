@@ -32,7 +32,7 @@ export interface TransactionDatabase {
 }
 
 export const OCC_MAX_RETRIES = 5;
-export const OCC_BASE_DELAY_MS = 50;
+const OCC_BASE_DELAY_MS = 50;
 
 /**
  * Serializes function execution so that only one top-level mutation / query

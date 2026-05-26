@@ -263,25 +263,6 @@ export function row(children: Child[], gap = "8px"): HTMLElement {
   );
 }
 
-export function pre(value: string): HTMLElement {
-  return el("pre", {
-    text: value,
-    style: {
-      font: `12px ${palette.mono}`,
-      color: palette.fg,
-      background: palette.bg,
-      border: `1px solid ${palette.border}`,
-      borderRadius: "5px",
-      padding: "10px",
-      margin: "0",
-      overflow: "auto",
-      maxHeight: "320px",
-      whiteSpace: "pre-wrap",
-      wordBreak: "break-word",
-    },
-  });
-}
-
 export function input(props: ElProps): HTMLInputElement {
   const baseStyle: Partial<CSSStyleDeclaration> = {
     font: `12px ${palette.mono}`,

@@ -54,19 +54,10 @@ const ROUTING_SCHEMA_STATEMENTS = [
   )`,
 ] as const;
 
-export const SEARCH_ENTRIES_LOGICAL_NAME = "_search_entries";
-export const SEARCH_ENTRIES_PHYSICAL_NAME = "internal__search_entries";
-export const SEARCH_BUCKETS_LOGICAL_NAME = "_search_filter_buckets";
-export const SEARCH_BUCKETS_PHYSICAL_NAME = "internal__search_filter_buckets";
-export const VECTOR_ENTRIES_LOGICAL_NAME = "_vector_entries";
-export const VECTOR_ENTRIES_PHYSICAL_NAME = "internal__vector_entries";
-export const VECTOR_BUCKETS_LOGICAL_NAME = "_vector_filter_buckets";
-export const VECTOR_BUCKETS_PHYSICAL_NAME = "internal__vector_filter_buckets";
-
-const SEARCH_ENTRIES_PHYSICAL = SEARCH_ENTRIES_PHYSICAL_NAME;
-const SEARCH_BUCKETS_PHYSICAL = SEARCH_BUCKETS_PHYSICAL_NAME;
-const VECTOR_ENTRIES_PHYSICAL = VECTOR_ENTRIES_PHYSICAL_NAME;
-const VECTOR_BUCKETS_PHYSICAL = VECTOR_BUCKETS_PHYSICAL_NAME;
+const SEARCH_ENTRIES_PHYSICAL = "internal__search_entries";
+const SEARCH_BUCKETS_PHYSICAL = "internal__search_filter_buckets";
+const VECTOR_ENTRIES_PHYSICAL = "internal__vector_entries";
+const VECTOR_BUCKETS_PHYSICAL = "internal__vector_filter_buckets";
 
 const SEARCH_VECTOR_SCHEMA_STATEMENTS = [
   `CREATE TABLE IF NOT EXISTS ${quoteIdentifier(SEARCH_ENTRIES_PHYSICAL)} (

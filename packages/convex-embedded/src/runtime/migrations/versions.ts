@@ -5,7 +5,7 @@ import type {
   StoreVersionRecord,
 } from "@/runtime/migrations/types";
 
-export const STORE_VERSION_TABLE = "_resolve_store_versions";
+const STORE_VERSION_TABLE = "_resolve_store_versions";
 
 async function readVersionRows(
   db: Database,

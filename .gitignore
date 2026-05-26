@@ -26,3 +26,4 @@ tmp/
 
 # stray debug dumps
 /out.txt
+.fallow-baseline/

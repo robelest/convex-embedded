@@ -14,10 +14,6 @@ export function setLoggerDebug(enabled: boolean): void {
   debugEnabled = enabled;
 }
 
-export function isLoggerDebug(): boolean {
-  return debugEnabled;
-}
-
 function fmt(category: string, msg: string): string {
   return `[${PREFIX}:${category}] ${msg}`;
 }

@@ -1495,14 +1495,14 @@ function getActiveSubscriptionAccessorStore() {
   return globalState[ACTIVE_SUBSCRIPTION_ACCESSORS];
 }
 
-export function registerActiveSubscriptionsAccessor(
+function registerActiveSubscriptionsAccessor(
   client: ConvexClient,
   accessor: ActiveSubscriptionsAccessor,
 ): void {
   getActiveSubscriptionAccessorStore().set(client, accessor);
 }
 
-export function deleteActiveSubscriptionsAccessor(client: ConvexClient): void {
+function deleteActiveSubscriptionsAccessor(client: ConvexClient): void {
   getActiveSubscriptionAccessorStore().delete(client);
 }
 

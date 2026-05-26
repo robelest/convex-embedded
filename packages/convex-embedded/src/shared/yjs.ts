@@ -266,8 +266,3 @@ export function materializeDocumentFromUpdate(input: {
   materializeCache.set(cacheKey, materialized);
   return { ...materialized };
 }
-
-/** Test helper / shutdown hook. Drops every memoized materialization. */
-export function clearMaterializeCache(): void {
-  materializeCache.clear();
-}

@@ -184,16 +184,3 @@ export function applyUpdate(doc: Y.Doc, update: Uint8Array): void {
 export function encodeState(doc: Y.Doc): Uint8Array {
   return Y.encodeStateAsUpdateV2(doc);
 }
-
-export const clientSchema = {
-  extractProseText,
-  createEmptyDoc,
-  getRegisterConflict,
-  resolveRegister,
-  getCounterValue,
-  getSetMembers,
-  encodeStateVector,
-  applyUpdate,
-  encodeState,
-  materializeYjsDoc,
-};

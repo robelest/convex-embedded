@@ -142,5 +142,3 @@ export type VectorIndexInfo = {
  * Increments on each committed mutation.
  */
 export type Timestamp = number;
-
-export const FUNCTION_MAX_BANDWIDTH_BYTES = 1 << 24;

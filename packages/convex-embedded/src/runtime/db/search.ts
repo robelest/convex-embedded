@@ -57,14 +57,14 @@ function normalizeToken(token: string): string {
   return token.normalize("NFKC").toLowerCase().slice(0, MAX_TOKEN_LENGTH);
 }
 
-export function tokenizeText(text: string): string[] {
+function tokenizeText(text: string): string[] {
   const normalized = text.normalize("NFKC").toLowerCase();
   return Array.from(normalized.matchAll(TOKEN_RE), (match) =>
     normalizeToken(match[0]),
   ).filter((token) => token.length > 0);
 }
 
-export function tokenizeQueryText(query: string): string[] {
+function tokenizeQueryText(query: string): string[] {
   return tokenizeText(query).slice(0, MAX_QUERY_TERMS);
 }
 
@@ -96,7 +96,7 @@ export function resolveSearchIndexDefinition(
   return searchIndex;
 }
 
-export function buildSearchQueryPlan(
+function buildSearchQueryPlan(
   source: Extract<Source, { type: "Search" }>,
   definition: SearchIndexDefinition,
 ): SearchQueryPlan {
@@ -168,7 +168,7 @@ export function buildSearchIndexState(input: {
   return state;
 }
 
-export function buildSearchDocStats(input: {
+function buildSearchDocStats(input: {
   doc: StoredDocument;
   identityKey: string | null;
   definition: SearchIndexDefinition;

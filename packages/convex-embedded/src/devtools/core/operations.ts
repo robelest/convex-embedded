@@ -191,15 +191,3 @@ export function operationsToPerfSummary(
     slowest,
   };
 }
-
-/**
- * Convenience mapping straight from buffered spans + logs to a
- * {@link PerfSummary}.
- */
-export function spansToPerfSummary(
-  spans: BufferedSpan[],
-  logs: BufferedLog[],
-  slowestCount = DEFAULT_SLOWEST_COUNT,
-): PerfSummary {
-  return operationsToPerfSummary(spansToOperations(spans, logs), slowestCount);
-}

@@ -68,16 +68,6 @@ function vectorFilterValueToBucketKey(value: JSONValue): string {
   return JSON.stringify(value);
 }
 
-export function buildVectorFilterClauses(
-  filter: VectorSearchExpression | null,
-  definition: VectorIndexDefinition,
-): Array<{ fieldPath: string; bucketKey: string }> {
-  if (filter === null) {
-    return [];
-  }
-  return collectFilterClauses(filter, definition);
-}
-
 export function buildVectorFilterSqlClauseGroups(
   filter: VectorSearchExpression | null,
   definition: VectorIndexDefinition,
@@ -485,7 +475,7 @@ export function removeDocumentFromVectorIndexState(
   }
 }
 
-export function materializeVectorDocState(input: {
+function materializeVectorDocState(input: {
   definition: VectorIndexDefinition;
   doc: StoredDocument;
   identityKey: string | null;

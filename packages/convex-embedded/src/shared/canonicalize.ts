@@ -140,7 +140,7 @@ function rewriteKnownIds(
   return rewriteKnownIdsResult(value, field, localId, remoteId).value;
 }
 
-export function rewriteDocumentToCanonical(input: {
+function rewriteDocumentToCanonical(input: {
   doc: Record<string, unknown>;
   schema: Definition;
   localId: string;

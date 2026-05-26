@@ -719,106 +719,174 @@ export class QueryEngine {
 
     let readLimit = target + 1 + (filters.length > 0 ? target : 0);
     for (;;) {
-      const unboundedRead = pinnedEnd && endDecoded === null;
-      const cappedLimit =
-        rowCap === null
-          ? readLimit
-          : unboundedRead
-            ? rowCap
-            : Math.min(readLimit, rowCap);
-      const effectiveLimit =
-        unboundedRead && rowCap === null ? null : cappedLimit;
-      const source = await this._evaluateSourceAsync(
-        query.source,
-        effectiveLimit,
+      const fetched = await this._fetchSeekPage(
+        query,
         seek,
+        decoded,
+        orderKey,
+        {
+          filters,
+          readLimit,
+          rowCap,
+          budget,
+          pinnedEnd,
+          endDecodedIsNull: endDecoded === null,
+        },
       );
-      const rowsExceeded = rowCap !== null && source.results.length >= rowCap;
-      const { results: budgetedRaw, bytesExceeded } = applyByteBudget(
-        source.results,
-        budget.maximumBytesRead,
-      );
-      const budgetHit = rowsExceeded || bytesExceeded;
-      const ordered = this._sortResults(
-        budgetedRaw,
-        source.fieldPathsToSortBy,
-        source.order,
-      );
-      const filtered = this._applyFilters(ordered, filters);
-      const afterStart =
-        decoded === null
-          ? filtered
-          : filtered.filter(
-              (doc) => this._compareOrderKey(orderKey, doc, decoded) > 0,
-            );
-      const exhausted = source.results.length < cappedLimit;
+      const finalized = pinnedEnd
+        ? this._finalizePinnedSeekPage(fetched, orderKey, target, {
+            endCursor,
+            endDecoded,
+          })
+        : this._finalizeOpenSeekPage(fetched, orderKey, target);
+      if (finalized !== null) return finalized;
+      readLimit *= 2;
+    }
+  }
 
-      if (pinnedEnd) {
-        if (endDecoded === null) {
-          if (budgetHit) {
-            return this._budgetBoundedPage(orderKey, afterStart, target, {
-              continueCursor: null,
-            });
-          }
-          return {
-            page: afterStart,
-            isDone: true,
-            continueCursor: "_end_cursor",
-            ...this._pageSplit(orderKey, afterStart, target),
-          };
-        }
-        const inRange = afterStart.filter(
-          (doc) => this._compareOrderKey(orderKey, doc, endDecoded) <= 0,
-        );
-        const sawBeyondEnd = inRange.length < afterStart.length;
-        if (sawBeyondEnd || exhausted) {
-          return {
-            page: inRange,
-            isDone: false,
-            continueCursor: endCursor as string,
-            ...this._pageSplit(orderKey, inRange, target),
-          };
-        }
-        if (budgetHit) {
-          return this._budgetBoundedPage(orderKey, inRange, target, {
-            continueCursor: endCursor as string,
-          });
-        }
-        readLimit *= 2;
-        continue;
-      }
+  private async _fetchSeekPage(
+    query: SerializedQuery,
+    seek: SeekBound | undefined,
+    decoded: Array<Value | undefined> | null,
+    orderKey: OrderKey,
+    options: {
+      filters: FilterNode[];
+      readLimit: number;
+      rowCap: number | null;
+      budget: ReadBudget;
+      pinnedEnd: boolean;
+      endDecodedIsNull: boolean;
+    },
+  ): Promise<{
+    afterStart: GenericDocument[];
+    exhausted: boolean;
+    budgetHit: boolean;
+  }> {
+    const { filters, readLimit, rowCap, budget, pinnedEnd, endDecodedIsNull } =
+      options;
+    const unboundedRead = pinnedEnd && endDecodedIsNull;
+    const cappedLimit =
+      rowCap === null
+        ? readLimit
+        : unboundedRead
+          ? rowCap
+          : Math.min(readLimit, rowCap);
+    const effectiveLimit =
+      unboundedRead && rowCap === null ? null : cappedLimit;
+    const source = await this._evaluateSourceAsync(
+      query.source,
+      effectiveLimit,
+      seek,
+    );
+    const rowsExceeded = rowCap !== null && source.results.length >= rowCap;
+    const { results: budgetedRaw, bytesExceeded } = applyByteBudget(
+      source.results,
+      budget.maximumBytesRead,
+    );
+    const ordered = this._sortResults(
+      budgetedRaw,
+      source.fieldPathsToSortBy,
+      source.order,
+    );
+    const filtered = this._applyFilters(ordered, filters);
+    const afterStart =
+      decoded === null
+        ? filtered
+        : filtered.filter(
+            (doc) => this._compareOrderKey(orderKey, doc, decoded) > 0,
+          );
+    return {
+      afterStart,
+      exhausted: source.results.length < cappedLimit,
+      budgetHit: rowsExceeded || bytesExceeded,
+    };
+  }
 
-      if (afterStart.length > target) {
-        const page = afterStart.slice(0, target);
-        const last = page.at(-1) ?? null;
-        const continueCursor =
-          last === null ? "_end_cursor" : this._encodeCursor(orderKey, last);
-        return {
-          page,
-          isDone: false,
-          continueCursor,
-          ...this._pageSplit(orderKey, page, target),
-        };
-      }
-
-      if (exhausted) {
-        const page = afterStart.slice(0, target);
-        return {
-          page,
-          isDone: true,
-          continueCursor: "_end_cursor",
-          ...this._pageSplit(orderKey, page, target),
-        };
-      }
-
+  private _finalizePinnedSeekPage(
+    fetched: {
+      afterStart: GenericDocument[];
+      exhausted: boolean;
+      budgetHit: boolean;
+    },
+    orderKey: OrderKey,
+    target: number,
+    pinned: {
+      endCursor: string | null;
+      endDecoded: Array<Value | undefined> | null;
+    },
+  ): PaginateResult | null {
+    const { afterStart, exhausted, budgetHit } = fetched;
+    const { endCursor, endDecoded } = pinned;
+    if (endDecoded === null) {
       if (budgetHit) {
         return this._budgetBoundedPage(orderKey, afterStart, target, {
           continueCursor: null,
         });
       }
-
-      readLimit *= 2;
+      return {
+        page: afterStart,
+        isDone: true,
+        continueCursor: "_end_cursor",
+        ...this._pageSplit(orderKey, afterStart, target),
+      };
     }
+    const inRange = afterStart.filter(
+      (doc) => this._compareOrderKey(orderKey, doc, endDecoded) <= 0,
+    );
+    const sawBeyondEnd = inRange.length < afterStart.length;
+    if (sawBeyondEnd || exhausted) {
+      return {
+        page: inRange,
+        isDone: false,
+        continueCursor: endCursor as string,
+        ...this._pageSplit(orderKey, inRange, target),
+      };
+    }
+    if (budgetHit) {
+      return this._budgetBoundedPage(orderKey, inRange, target, {
+        continueCursor: endCursor as string,
+      });
+    }
+    return null;
+  }
+
+  private _finalizeOpenSeekPage(
+    fetched: {
+      afterStart: GenericDocument[];
+      exhausted: boolean;
+      budgetHit: boolean;
+    },
+    orderKey: OrderKey,
+    target: number,
+  ): PaginateResult | null {
+    const { afterStart, exhausted, budgetHit } = fetched;
+    if (afterStart.length > target) {
+      const page = afterStart.slice(0, target);
+      const last = page.at(-1) ?? null;
+      const continueCursor =
+        last === null ? "_end_cursor" : this._encodeCursor(orderKey, last);
+      return {
+        page,
+        isDone: false,
+        continueCursor,
+        ...this._pageSplit(orderKey, page, target),
+      };
+    }
+    if (exhausted) {
+      const page = afterStart.slice(0, target);
+      return {
+        page,
+        isDone: true,
+        continueCursor: "_end_cursor",
+        ...this._pageSplit(orderKey, page, target),
+      };
+    }
+    if (budgetHit) {
+      return this._budgetBoundedPage(orderKey, afterStart, target, {
+        continueCursor: null,
+      });
+    }
+    return null;
   }
 
   private _budgetBoundedPage(

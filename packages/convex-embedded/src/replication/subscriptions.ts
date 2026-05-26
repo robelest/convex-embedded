@@ -300,53 +300,49 @@ export class SubscriptionManager {
     this._indexRangeBroadSubscriptionsByTable.clear();
   }
 
-  private _unsubscribe(queryToken: string): void {
-    const existing = this._subscriptions.get(queryToken);
-    if (!existing) {
-      return;
-    }
-    this._subscriptions.delete(queryToken);
-    for (const table of existing.tables) {
+  private _detachFromTableIndexes(
+    queryToken: string,
+    tables: Set<string>,
+  ): void {
+    for (const table of tables) {
       const tokens = this._subscriptionsByTable.get(table);
-      if (!tokens) {
-        continue;
-      }
+      if (!tokens) continue;
       tokens.delete(queryToken);
-      if (tokens.size === 0) {
-        this._subscriptionsByTable.delete(table);
-      }
+      if (tokens.size === 0) this._subscriptionsByTable.delete(table);
 
-      const fallbackTokens = this._tableFallbackSubscriptionsByTable.get(table);
-      if (fallbackTokens) {
-        fallbackTokens.delete(queryToken);
-        if (fallbackTokens.size === 0) {
+      const fallback = this._tableFallbackSubscriptionsByTable.get(table);
+      if (fallback) {
+        fallback.delete(queryToken);
+        if (fallback.size === 0)
           this._tableFallbackSubscriptionsByTable.delete(table);
-        }
       }
     }
-    for (const dependency of getIndexRangeEqDependencies(
-      existing.dependencies,
-    )) {
+  }
+
+  private _detachFromIndexRangeEq(
+    queryToken: string,
+    dependencies: QueryDependency[],
+  ): void {
+    for (const dependency of getIndexRangeEqDependencies(dependencies)) {
       const fieldMap = this._subscriptionsByIndexRangeEq.get(
         dependency.tableName,
       );
       const valueMap = fieldMap?.get(dependency.fieldPath);
       const tokens = valueMap?.get(dependency.valueKey);
-      if (!fieldMap || !valueMap || !tokens) {
-        continue;
-      }
+      if (!fieldMap || !valueMap || !tokens) continue;
       tokens.delete(queryToken);
-      if (tokens.size === 0) {
-        valueMap.delete(dependency.valueKey);
-      }
-      if (valueMap.size === 0) {
-        fieldMap.delete(dependency.fieldPath);
-      }
-      if (fieldMap.size === 0) {
+      if (tokens.size === 0) valueMap.delete(dependency.valueKey);
+      if (valueMap.size === 0) fieldMap.delete(dependency.fieldPath);
+      if (fieldMap.size === 0)
         this._subscriptionsByIndexRangeEq.delete(dependency.tableName);
-      }
     }
-    for (const dependency of existing.dependencies) {
+  }
+
+  private _detachFromIndexRangeBroad(
+    queryToken: string,
+    dependencies: QueryDependency[],
+  ): void {
+    for (const dependency of dependencies) {
       if (
         dependency.type !== "IndexRange" ||
         dependency.range.length === 0 ||
@@ -355,16 +351,22 @@ export class SubscriptionManager {
         const tokens = this._indexRangeBroadSubscriptionsByTable.get(
           dependency.tableName,
         );
-        if (!tokens) {
-          continue;
-        }
+        if (!tokens) continue;
         tokens.delete(queryToken);
-        if (tokens.size === 0) {
+        if (tokens.size === 0)
           this._indexRangeBroadSubscriptionsByTable.delete(
             dependency.tableName,
           );
-        }
       }
     }
+  }
+
+  private _unsubscribe(queryToken: string): void {
+    const existing = this._subscriptions.get(queryToken);
+    if (!existing) return;
+    this._subscriptions.delete(queryToken);
+    this._detachFromTableIndexes(queryToken, existing.tables);
+    this._detachFromIndexRangeEq(queryToken, existing.dependencies);
+    this._detachFromIndexRangeBroad(queryToken, existing.dependencies);
   }
 }

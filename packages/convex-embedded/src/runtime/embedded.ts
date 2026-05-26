@@ -1382,8 +1382,10 @@ export class EmbeddedRuntime {
       for (const doc of merged) {
         try {
           this.db.writeDocument(table, doc, { validate: false });
-        } catch {
-          /* skip per-doc errors (id collision across tables, etc.) */
+        } catch (err) {
+          runtimeLog.debug(
+            `writeDocsFromCache skip ${table}/${doc._id}: ${err instanceof Error ? err.message : String(err)}`,
+          );
         }
       }
       const commit = await this.db.commitAsync();
@@ -1392,7 +1394,10 @@ export class EmbeddedRuntime {
       if (tablesWritten.size > 0) {
         this.subscriptions.invalidate(tablesWritten);
       }
-    } catch {
+    } catch (err) {
+      runtimeLog.warn(
+        `writeDocsFromCache rollback (${table}): ${err instanceof Error ? err.message : String(err)}`,
+      );
       this.db.rollbackWrites();
     }
   }

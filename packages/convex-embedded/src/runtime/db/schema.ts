@@ -168,52 +168,6 @@ function assertType(check: boolean, expected: string, value: Value): void {
   }
 }
 
-function validateObject(
-  validator: Extract<ValidatorJSON, { type: "object" }>,
-  value: Value,
-  idLookup?: (id: string) => string | undefined,
-): void {
-  assertType(typeof value === "object", "object", value);
-  if (!isSimpleObject(value)) {
-    throw new Error(
-      `Validator error: Expected a plain old JavaScript \`object\`, got \`${formatValueForError(value)}\``,
-    );
-  }
-  const obj = value as Record<string, Value | undefined>;
-  for (const [k, { fieldType, optional }] of Object.entries(validator.value)) {
-    if (obj[k] === undefined) {
-      if (!optional) {
-        throw new Error(
-          `Validator error: Missing required field \`${k}\` in object`,
-        );
-      }
-    } else {
-      validateValidator(fieldType, obj[k]!, idLookup);
-    }
-  }
-  for (const k of Object.keys(obj)) {
-    if (validator.value[k] === undefined) {
-      throw new Error(`Validator error: Unexpected field \`${k}\` in object`);
-    }
-  }
-}
-
-function validateUnion(
-  validator: Extract<ValidatorJSON, { type: "union" }>,
-  value: Value,
-  idLookup?: (id: string) => string | undefined,
-): void {
-  for (const v of validator.value) {
-    try {
-      validateValidator(v, value, idLookup);
-      return;
-    } catch {}
-  }
-  throw new Error(
-    `Validator error: Expected one of ${validator.value.map((v) => v.type).join(", ")}, got \`${JSON.stringify(convexToJson(value))}\``,
-  );
-}
-
 export function validateValidator(
   validator: ValidatorJSON,
   value: Value,
@@ -254,10 +208,47 @@ export function validateValidator(
         validateValidator(validator.value, v, idLookup);
       }
       return;
-    case "union":
-      return validateUnion(validator, value, idLookup);
-    case "object":
-      return validateObject(validator, value, idLookup);
+    case "union": {
+      for (const v of validator.value) {
+        try {
+          validateValidator(v, value, idLookup);
+          return;
+        } catch {}
+      }
+      throw new Error(
+        `Validator error: Expected one of ${validator.value.map((v) => v.type).join(", ")}, got \`${JSON.stringify(convexToJson(value))}\``,
+      );
+    }
+    case "object": {
+      assertType(typeof value === "object", "object", value);
+      if (!isSimpleObject(value)) {
+        throw new Error(
+          `Validator error: Expected a plain old JavaScript \`object\`, got \`${formatValueForError(value)}\``,
+        );
+      }
+      const obj = value as Record<string, Value | undefined>;
+      for (const [k, { fieldType, optional }] of Object.entries(
+        validator.value,
+      )) {
+        if (obj[k] === undefined) {
+          if (!optional) {
+            throw new Error(
+              `Validator error: Missing required field \`${k}\` in object`,
+            );
+          }
+        } else {
+          validateValidator(fieldType, obj[k]!, idLookup);
+        }
+      }
+      for (const k of Object.keys(obj)) {
+        if (validator.value[k] === undefined) {
+          throw new Error(
+            `Validator error: Unexpected field \`${k}\` in object`,
+          );
+        }
+      }
+      return;
+    }
   }
 }
 

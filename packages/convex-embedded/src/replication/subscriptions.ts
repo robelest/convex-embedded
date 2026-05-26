@@ -224,51 +224,6 @@ export class SubscriptionManager {
     return relevantTokens;
   }
 
-  private _addTableLevelTokens(
-    table: string,
-    changes: ProtocolChangeLike[] | null,
-    out: Set<string>,
-  ): void {
-    const tableHasNonPreciseChange =
-      changes !== null &&
-      changes.some(
-        (change) => change.tableName === table && !hasPreciseChange(change),
-      );
-    if (changes === null || tableHasNonPreciseChange) {
-      for (const token of this._subscriptionsByTable.get(table) ?? []) {
-        out.add(token);
-      }
-    }
-    if (changes === null) return;
-    for (const token of this._tableFallbackSubscriptionsByTable.get(table) ??
-      []) {
-      out.add(token);
-    }
-    for (const token of this._indexRangeBroadSubscriptionsByTable.get(table) ??
-      []) {
-      out.add(token);
-    }
-  }
-
-  private _addIndexRangeEqTokens(
-    changes: ProtocolChangeLike[],
-    out: Set<string>,
-  ): void {
-    for (const change of changes) {
-      const fieldMap = this._subscriptionsByIndexRangeEq.get(change.tableName);
-      if (!fieldMap) continue;
-      for (const [fieldPath, valueMap] of fieldMap) {
-        for (const doc of [change.before, change.after]) {
-          if (doc === null) continue;
-          const valueKey = stableValueKey(evaluateFieldPath(fieldPath, doc));
-          for (const token of valueMap.get(valueKey) ?? []) {
-            out.add(token);
-          }
-        }
-      }
-    }
-  }
-
   private _gatherRelevantSubscriptions(
     changesOrTables: Set<string> | ProtocolChangeLike[],
   ): {
@@ -282,12 +237,51 @@ export class SubscriptionManager {
       : changesOrTables;
 
     const candidateTokens = new Set<string>();
-    for (const table of tablesWritten) {
-      this._addTableLevelTokens(table, changes, candidateTokens);
-    }
     if (changes !== null) {
-      this._addIndexRangeEqTokens(changes, candidateTokens);
+      for (const table of tablesWritten) {
+        if (
+          changes.some(
+            (change) => change.tableName === table && !hasPreciseChange(change),
+          )
+        ) {
+          for (const token of this._subscriptionsByTable.get(table) ?? []) {
+            candidateTokens.add(token);
+          }
+        }
+        for (const token of this._tableFallbackSubscriptionsByTable.get(
+          table,
+        ) ?? []) {
+          candidateTokens.add(token);
+        }
+        for (const token of this._indexRangeBroadSubscriptionsByTable.get(
+          table,
+        ) ?? []) {
+          candidateTokens.add(token);
+        }
+      }
+      for (const change of changes) {
+        const fieldMap = this._subscriptionsByIndexRangeEq.get(
+          change.tableName,
+        );
+        if (!fieldMap) continue;
+        for (const [fieldPath, valueMap] of fieldMap) {
+          for (const doc of [change.before, change.after]) {
+            if (doc === null) continue;
+            const valueKey = stableValueKey(evaluateFieldPath(fieldPath, doc));
+            for (const token of valueMap.get(valueKey) ?? []) {
+              candidateTokens.add(token);
+            }
+          }
+        }
+      }
+    } else {
+      for (const table of tablesWritten) {
+        for (const token of this._subscriptionsByTable.get(table) ?? []) {
+          candidateTokens.add(token);
+        }
+      }
     }
+
     return { candidateTokens, changes, tablesWritten };
   }
 
@@ -300,11 +294,11 @@ export class SubscriptionManager {
     this._indexRangeBroadSubscriptionsByTable.clear();
   }
 
-  private _detachFromTableIndexes(
-    queryToken: string,
-    tables: Set<string>,
-  ): void {
-    for (const table of tables) {
+  private _unsubscribe(queryToken: string): void {
+    const existing = this._subscriptions.get(queryToken);
+    if (!existing) return;
+    this._subscriptions.delete(queryToken);
+    for (const table of existing.tables) {
       const tokens = this._subscriptionsByTable.get(table);
       if (!tokens) continue;
       tokens.delete(queryToken);
@@ -317,13 +311,9 @@ export class SubscriptionManager {
           this._tableFallbackSubscriptionsByTable.delete(table);
       }
     }
-  }
-
-  private _detachFromIndexRangeEq(
-    queryToken: string,
-    dependencies: QueryDependency[],
-  ): void {
-    for (const dependency of getIndexRangeEqDependencies(dependencies)) {
+    for (const dependency of getIndexRangeEqDependencies(
+      existing.dependencies,
+    )) {
       const fieldMap = this._subscriptionsByIndexRangeEq.get(
         dependency.tableName,
       );
@@ -336,13 +326,7 @@ export class SubscriptionManager {
       if (fieldMap.size === 0)
         this._subscriptionsByIndexRangeEq.delete(dependency.tableName);
     }
-  }
-
-  private _detachFromIndexRangeBroad(
-    queryToken: string,
-    dependencies: QueryDependency[],
-  ): void {
-    for (const dependency of dependencies) {
+    for (const dependency of existing.dependencies) {
       if (
         dependency.type !== "IndexRange" ||
         dependency.range.length === 0 ||
@@ -359,14 +343,5 @@ export class SubscriptionManager {
           );
       }
     }
-  }
-
-  private _unsubscribe(queryToken: string): void {
-    const existing = this._subscriptions.get(queryToken);
-    if (!existing) return;
-    this._subscriptions.delete(queryToken);
-    this._detachFromTableIndexes(queryToken, existing.tables);
-    this._detachFromIndexRangeEq(queryToken, existing.dependencies);
-    this._detachFromIndexRangeBroad(queryToken, existing.dependencies);
   }
 }

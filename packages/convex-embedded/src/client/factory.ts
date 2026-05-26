@@ -5,7 +5,7 @@
  * standard `ConvexClient` instance.
  */
 
-import { ConvexClient } from "convex/browser";
+import type { ConvexClient } from "convex/browser";
 import type { BaseConvexClientOptions } from "convex/browser";
 
 import { patchRoutedConvexClient } from "@/client/adapter";
@@ -21,6 +21,7 @@ import {
   registerAuthEntry,
 } from "@/client/auth";
 import { EmbeddedQueryCache } from "@/client/cache";
+import { EmbeddedClient } from "@/client/embedded";
 import {
   deleteEmbeddedClientEntry,
   registerEmbeddedClientEntry,
@@ -339,7 +340,7 @@ export function createEmbeddedClient(input: {
     });
 
   const transport = runtime.createTransport(load.ready);
-  client = new ConvexClient(transport.url, {
+  client = new EmbeddedClient(transport.url, {
     ...options.clientOptions,
     webSocketConstructor:
       transport.webSocketConstructor as unknown as typeof WebSocket,

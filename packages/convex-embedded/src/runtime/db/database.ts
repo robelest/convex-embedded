@@ -2515,6 +2515,63 @@ export class Database {
     return null;
   }
 
+  private async _tryStorePushdownSource(
+    source: SerializedQuery["source"],
+    limit: number | null | undefined,
+    seek: SeekBound | undefined,
+  ): Promise<SourceEvaluationLike | null> {
+    if (this._hasPendingWritesForAnySource(source)) return null;
+    const results = await this._store.source(source, {
+      limit,
+      indexFields: this._indexFieldsForSource(source) ?? undefined,
+      searchDefinition: this._searchDefinitionForSource(source),
+      activeIdentityKey: this._activeIdentityKey,
+      seek: source.type === "Search" ? undefined : seek,
+    });
+    if (results === null) return null;
+    this._rememberCommittedLookup(sourceTableName(source), results);
+    const order = source.type === "Search" ? "asc" : (source.order ?? "asc");
+    return {
+      results: this._stripIdentityScopes(results),
+      fieldPathsToSortBy:
+        source.type === "FullTableScan" ? ["_creationTime"] : [],
+      order,
+      presorted: true,
+    };
+  }
+
+  private async _tryFullTableFetchSource(
+    source: SerializedQuery["source"],
+  ): Promise<SourceEvaluationLike | null> {
+    if (source.type !== "FullTableScan") return null;
+    if (this._hasPendingWritesForTable(source.tableName)) return null;
+    const docs = await this._store.getDocuments(
+      source.tableName,
+      this._storageReadOptions(source.tableName),
+    );
+    if (docs === null) return null;
+    this._rememberCommittedLookup(source.tableName, docs);
+    const order = source.order ?? "asc";
+    return {
+      results: this._stripIdentityScopes(docs),
+      fieldPathsToSortBy: ["_creationTime"],
+      order,
+      presorted: order === "asc",
+    };
+  }
+
+  private async _tryPendingOverlaySource(
+    source: SerializedQuery["source"],
+    sourceTable: string,
+    limit: number | null | undefined,
+    seek: SeekBound | undefined,
+  ): Promise<SourceEvaluationLike | null> {
+    if (!this._hasPendingWritesForAnySource(source)) return null;
+    if (!this._isQueryableTable(sourceTable)) return null;
+    if (this.isTableHydrationAttempted(sourceTable)) return null;
+    return this._readPushdownWithPendingOverlay(source, limit, seek);
+  }
+
   private async _readOptimizedSourceAsync(
     source: SerializedQuery["source"],
     limit?: number | null,
@@ -2526,85 +2583,19 @@ export class Database {
       source.type !== "Search"
     ) {
       const inMemory = this._readOptimizedSource(source, limit, seek);
-      if (inMemory !== null) {
-        return inMemory;
-      }
+      if (inMemory !== null) return inMemory;
     }
-    if (!this._hasPendingWritesForAnySource(source)) {
-      const searchDefinition =
-        source.type === "Search"
-          ? getSearchIndexDefinition(
-              this._schema?.tables.get(splitIndexName(source.indexName)[0])
-                ?.searchIndexes,
-              splitIndexName(source.indexName)[0],
-              splitIndexName(source.indexName)[1],
-            )
-          : undefined;
-      const indexFields =
-        source.type === "IndexRange"
-          ? (this._getIndexDefinitions(
-              splitIndexName(source.indexName)[0],
-            ).find(
-              (entry) =>
-                entry.indexName === splitIndexName(source.indexName)[1],
-            )?.fields ?? null)
-          : null;
-      const results = await this._store.source(source, {
-        limit,
-        indexFields: indexFields ?? undefined,
-        searchDefinition,
-        activeIdentityKey: this._activeIdentityKey,
-        seek: source.type === "Search" ? undefined : seek,
-      });
-      if (results !== null) {
-        this._rememberCommittedLookup(sourceTableName(source), results);
-        const order =
-          source.type === "Search" ? "asc" : (source.order ?? "asc");
-        return {
-          results: this._stripIdentityScopes(results),
-          fieldPathsToSortBy:
-            source.type === "FullTableScan" ? ["_creationTime"] : [],
-          order,
-          presorted: true,
-        };
-      }
-    }
-
-    if (
-      source.type === "FullTableScan" &&
-      !this._hasPendingWritesForTable(source.tableName)
-    ) {
-      const docs = await this._store.getDocuments(
-        source.tableName,
-        this._storageReadOptions(source.tableName),
-      );
-      if (docs !== null) {
-        this._rememberCommittedLookup(source.tableName, docs);
-        const order = source.order ?? "asc";
-        return {
-          results: this._stripIdentityScopes(docs),
-          fieldPathsToSortBy: ["_creationTime"],
-          order,
-          presorted: order === "asc",
-        };
-      }
-    }
-
-    if (
-      this._hasPendingWritesForAnySource(source) &&
-      this._isQueryableTable(sourceTable) &&
-      !this.isTableHydrationAttempted(sourceTable)
-    ) {
-      const overlaid = await this._readPushdownWithPendingOverlay(
-        source,
-        limit,
-        seek,
-      );
-      if (overlaid !== null) {
-        return overlaid;
-      }
-    }
-
+    const pushed = await this._tryStorePushdownSource(source, limit, seek);
+    if (pushed !== null) return pushed;
+    const full = await this._tryFullTableFetchSource(source);
+    if (full !== null) return full;
+    const overlaid = await this._tryPendingOverlaySource(
+      source,
+      sourceTable,
+      limit,
+      seek,
+    );
+    if (overlaid !== null) return overlaid;
     return this._readOptimizedSource(source, limit);
   }
 

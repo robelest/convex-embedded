@@ -1172,6 +1172,26 @@ function hasResolvableReferences(
   return true;
 }
 
+type ReferenceValidator = Record<string, unknown> & { kind?: string };
+
+function recordMissingId(
+  value: unknown,
+  validator: ReferenceValidator,
+  hasDocumentId: (id: string) => boolean,
+  getAliases: (id: string) => Set<string>,
+  missing: Map<string, Set<string>>,
+): void {
+  const tableName = validator.tableName;
+  if (typeof value !== "string" || typeof tableName !== "string") return;
+  if (hasDocumentId(value)) return;
+  if (Array.from(getAliases(value)).some((alias) => hasDocumentId(alias))) {
+    return;
+  }
+  const ids = missing.get(tableName) ?? new Set<string>();
+  ids.add(value);
+  missing.set(tableName, ids);
+}
+
 function gatherMissingReferences(
   value: unknown,
   field: unknown,
@@ -1180,78 +1200,49 @@ function gatherMissingReferences(
   missing: Map<string, Set<string>>,
 ): void {
   const unwrapped = unwrapSchemaField(field);
-  if (value === null || value === undefined) {
-    return;
-  }
-  if (typeof unwrapped !== "object" || unwrapped === null) {
-    return;
-  }
+  if (value === null || value === undefined) return;
+  if (typeof unwrapped !== "object" || unwrapped === null) return;
+  const validator = unwrapped as ReferenceValidator;
+  const recurse = (innerValue: unknown, innerField: unknown): void =>
+    gatherMissingReferences(
+      innerValue,
+      innerField,
+      hasDocumentId,
+      getAliases,
+      missing,
+    );
 
-  const validator = unwrapped as Record<string, unknown> & { kind?: string };
-  if (validator.kind === "id") {
-    const tableName = validator.tableName;
-    if (
-      typeof value === "string" &&
-      typeof tableName === "string" &&
-      !hasDocumentId(value) &&
-      !Array.from(getAliases(value)).some((alias) => hasDocumentId(alias))
-    ) {
-      const ids = missing.get(tableName) ?? new Set<string>();
-      ids.add(value);
-      missing.set(tableName, ids);
-    }
-    return;
-  }
-  if (validator.kind === "array") {
-    if (Array.isArray(value)) {
-      for (const entry of value) {
-        gatherMissingReferences(
-          entry,
-          validator.element,
-          hasDocumentId,
-          getAliases,
-          missing,
-        );
-      }
-    }
-    return;
-  }
-  if (validator.kind === "record") {
-    if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-      for (const entry of Object.values(value)) {
-        gatherMissingReferences(
-          entry,
-          validator.value,
-          hasDocumentId,
-          getAliases,
-          missing,
-        );
-      }
-    }
-    return;
-  }
-  if (validator.kind === "object") {
-    if (typeof value !== "object" || value === null || Array.isArray(value)) {
-      return;
-    }
-    const fields = validator.fields as Record<string, unknown> | undefined;
-    if (!fields) {
-      return;
-    }
-    for (const [key, nestedField] of Object.entries(fields)) {
-      gatherMissingReferences(
-        (value as Record<string, unknown>)[key],
-        nestedField,
+  switch (validator.kind) {
+    case "id":
+      return recordMissingId(
+        value,
+        validator,
         hasDocumentId,
         getAliases,
         missing,
       );
+    case "array":
+      if (!Array.isArray(value)) return;
+      for (const entry of value) recurse(entry, validator.element);
+      return;
+    case "record":
+      if (typeof value !== "object" || value === null || Array.isArray(value))
+        return;
+      for (const entry of Object.values(value)) recurse(entry, validator.value);
+      return;
+    case "object": {
+      if (typeof value !== "object" || value === null || Array.isArray(value))
+        return;
+      const fields = validator.fields as Record<string, unknown> | undefined;
+      if (!fields) return;
+      for (const [key, nestedField] of Object.entries(fields)) {
+        recurse((value as Record<string, unknown>)[key], nestedField);
+      }
+      return;
     }
-    return;
-  }
-  if (validator.kind === "union") {
-    const members = validator.members;
-    if (Array.isArray(members)) {
+    case "union": {
+      const members = validator.members;
+      if (!Array.isArray(members)) return;
       if (
         members.some((member) =>
           hasResolvableReferences(value, member, hasDocumentId, getAliases),
@@ -1259,26 +1250,12 @@ function gatherMissingReferences(
       ) {
         return;
       }
-      for (const member of members) {
-        gatherMissingReferences(
-          value,
-          member,
-          hasDocumentId,
-          getAliases,
-          missing,
-        );
-      }
+      for (const member of members) recurse(value, member);
+      return;
     }
-    return;
-  }
-  if (validator.kind === "optional") {
-    gatherMissingReferences(
-      value,
-      validator.field,
-      hasDocumentId,
-      getAliases,
-      missing,
-    );
+    case "optional":
+      recurse(value, validator.field);
+      return;
   }
 }
 

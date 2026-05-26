@@ -1872,12 +1872,82 @@ export class EmbeddedRuntime {
     return observer;
   }
 
+  private async _evaluateOnePaginatedPage(
+    observer: RuntimeQueryObserver<LocalPaginatedWatchRecord>,
+    cursor: string | null,
+    endCursor: string | null,
+    numItems: number,
+    tablesRead: Set<string>,
+    dependencies: QueryDependency[],
+  ): Promise<{ result: LocalPaginatedPageResult; cacheKey: string }> {
+    const cacheKey = `${cursor ?? " "}|${endCursor ?? " "}|${numItems}`;
+    let evaluated;
+    try {
+      evaluated = await this._evaluatePaginatedPageCached(
+        observer,
+        cacheKey,
+        cursor,
+        endCursor,
+        numItems,
+      );
+    } catch (error) {
+      if (error instanceof LocalQueryEvaluationError) {
+        for (const table of error.partialTablesRead) tablesRead.add(table);
+        dependencies.push(...error.partialDependencies);
+        throw new LocalQueryEvaluationError(error.cause, new Set(tablesRead), [
+          ...dependencies,
+        ]);
+      }
+      throw error;
+    }
+    for (const table of evaluated.tablesRead) tablesRead.add(table);
+    dependencies.push(...evaluated.dependencies);
+    return { result: evaluated.result, cacheKey };
+  }
+
+  private _pruneStalePaginatedPageCache(
+    observer: RuntimeQueryObserver<LocalPaginatedWatchRecord>,
+    liveKeys: Set<string>,
+  ): void {
+    for (const key of Array.from(observer.meta.pageCache.keys())) {
+      if (!liveKeys.has(key)) observer.meta.pageCache.delete(key);
+    }
+  }
+
+  private _finalizePaginatedWatch(
+    observer: RuntimeQueryObserver<LocalPaginatedWatchRecord>,
+    pageResults: LocalPaginatedPageResult[],
+    tablesRead: Set<string>,
+    dependencies: QueryDependency[],
+  ): LocalQueryEvaluation {
+    const results = pageResults.flatMap((page) => page.page) as unknown[];
+    const lastPage = pageResults.at(-1) ?? null;
+    observer.meta.loadingMore = false;
+    observer.meta.lastContinueCursor = lastPage?.continueCursor ?? null;
+    observer.meta.lastIsDone = lastPage?.isDone ?? false;
+    const status =
+      lastPage === null
+        ? "LoadingFirstPage"
+        : lastPage.isDone
+          ? "Exhausted"
+          : "CanLoadMore";
+    return {
+      result: {
+        results,
+        status,
+        loadMore: (numItems: number) =>
+          this._loadMoreLocalPaginatedQuery(observer, numItems),
+      },
+      tablesRead,
+      dependencies,
+    };
+  }
+
   private async _evaluateLocalPaginatedWatch(
     observer: RuntimeQueryObserver<LocalPaginatedWatchRecord>,
   ): Promise<LocalQueryEvaluation> {
     const tablesRead = new Set<string>();
     const dependencies: QueryDependency[] = [];
-
     const MAX_SPLIT_PASSES = 8;
     let pageResults: LocalPaginatedPageResult[] = [];
 
@@ -1892,76 +1962,28 @@ export class EmbeddedRuntime {
         const pageRecord = pages[index]!;
         const isLast = index === pages.length - 1;
         const endCursor = isLast ? null : pages[index + 1]!.cursor;
-        const cacheKey = `${pageRecord.cursor ?? " "}|${endCursor ?? " "}|${pageRecord.numItems}`;
+        const { result, cacheKey } = await this._evaluateOnePaginatedPage(
+          observer,
+          pageRecord.cursor,
+          endCursor,
+          pageRecord.numItems,
+          tablesRead,
+          dependencies,
+        );
         liveKeys.add(cacheKey);
-        let evaluated;
-        try {
-          evaluated = await this._evaluatePaginatedPageCached(
-            observer,
-            cacheKey,
-            pageRecord.cursor,
-            endCursor,
-            pageRecord.numItems,
-          );
-        } catch (error) {
-          if (error instanceof LocalQueryEvaluationError) {
-            for (const table of error.partialTablesRead) {
-              tablesRead.add(table);
-            }
-            dependencies.push(...error.partialDependencies);
-            throw new LocalQueryEvaluationError(
-              error.cause,
-              new Set(tablesRead),
-              [...dependencies],
-            );
-          }
-          throw error;
-        }
-        pageResults.push(evaluated.result);
-        for (const table of evaluated.tablesRead) {
-          tablesRead.add(table);
-        }
-        dependencies.push(...evaluated.dependencies);
-
-        if (isLast && evaluated.result.isDone) {
-          break;
-        }
+        pageResults.push(result);
+        if (isLast && result.isDone) break;
       }
-
-      for (const key of Array.from(observer.meta.pageCache.keys())) {
-        if (!liveKeys.has(key)) {
-          observer.meta.pageCache.delete(key);
-        }
-      }
-
-      const splitApplied = this._applyPaginatedSplits(observer, pageResults);
-      if (!splitApplied) {
-        break;
-      }
+      this._pruneStalePaginatedPageCache(observer, liveKeys);
+      if (!this._applyPaginatedSplits(observer, pageResults)) break;
     }
 
-    const results = pageResults.flatMap((page) => page.page) as unknown[];
-    const lastPage = pageResults.at(-1) ?? null;
-    observer.meta.loadingMore = false;
-    observer.meta.lastContinueCursor = lastPage?.continueCursor ?? null;
-    observer.meta.lastIsDone = lastPage?.isDone ?? false;
-    const status =
-      lastPage === null
-        ? "LoadingFirstPage"
-        : lastPage.isDone
-          ? "Exhausted"
-          : "CanLoadMore";
-
-    return {
-      result: {
-        results,
-        status,
-        loadMore: (numItems: number) =>
-          this._loadMoreLocalPaginatedQuery(observer, numItems),
-      },
+    return this._finalizePaginatedWatch(
+      observer,
+      pageResults,
       tablesRead,
       dependencies,
-    };
+    );
   }
 
   private _applyPaginatedSplits(

@@ -176,7 +176,7 @@ export class SubscriptionManager {
     withSpanSync("convex-embedded.sync.invalidate", () => {
       recordCounter("invalidation");
       const { candidateTokens, changes, tablesWritten } =
-        this._collectRelevantSubscriptions(changesOrTables);
+        this._gatherRelevantSubscriptions(changesOrTables);
 
       for (const token of candidateTokens) {
         const sub = this._subscriptions.get(token);
@@ -201,7 +201,7 @@ export class SubscriptionManager {
     changesOrTables: Set<string> | ProtocolChangeLike[],
   ): Set<string> {
     const { candidateTokens, changes, tablesWritten } =
-      this._collectRelevantSubscriptions(changesOrTables);
+      this._gatherRelevantSubscriptions(changesOrTables);
     const relevantTokens = new Set<string>();
 
     for (const token of candidateTokens) {
@@ -224,7 +224,52 @@ export class SubscriptionManager {
     return relevantTokens;
   }
 
-  private _collectRelevantSubscriptions(
+  private _addTableLevelTokens(
+    table: string,
+    changes: ProtocolChangeLike[] | null,
+    out: Set<string>,
+  ): void {
+    const tableHasNonPreciseChange =
+      changes !== null &&
+      changes.some(
+        (change) => change.tableName === table && !hasPreciseChange(change),
+      );
+    if (changes === null || tableHasNonPreciseChange) {
+      for (const token of this._subscriptionsByTable.get(table) ?? []) {
+        out.add(token);
+      }
+    }
+    if (changes === null) return;
+    for (const token of this._tableFallbackSubscriptionsByTable.get(table) ??
+      []) {
+      out.add(token);
+    }
+    for (const token of this._indexRangeBroadSubscriptionsByTable.get(table) ??
+      []) {
+      out.add(token);
+    }
+  }
+
+  private _addIndexRangeEqTokens(
+    changes: ProtocolChangeLike[],
+    out: Set<string>,
+  ): void {
+    for (const change of changes) {
+      const fieldMap = this._subscriptionsByIndexRangeEq.get(change.tableName);
+      if (!fieldMap) continue;
+      for (const [fieldPath, valueMap] of fieldMap) {
+        for (const doc of [change.before, change.after]) {
+          if (doc === null) continue;
+          const valueKey = stableValueKey(evaluateFieldPath(fieldPath, doc));
+          for (const token of valueMap.get(valueKey) ?? []) {
+            out.add(token);
+          }
+        }
+      }
+    }
+  }
+
+  private _gatherRelevantSubscriptions(
     changesOrTables: Set<string> | ProtocolChangeLike[],
   ): {
     candidateTokens: Set<string>;
@@ -237,54 +282,12 @@ export class SubscriptionManager {
       : changesOrTables;
 
     const candidateTokens = new Set<string>();
-    if (changes !== null) {
-      for (const table of tablesWritten) {
-        if (
-          changes.some(
-            (change) => change.tableName === table && !hasPreciseChange(change),
-          )
-        ) {
-          for (const token of this._subscriptionsByTable.get(table) ?? []) {
-            candidateTokens.add(token);
-          }
-        }
-        for (const token of this._tableFallbackSubscriptionsByTable.get(
-          table,
-        ) ?? []) {
-          candidateTokens.add(token);
-        }
-        for (const token of this._indexRangeBroadSubscriptionsByTable.get(
-          table,
-        ) ?? []) {
-          candidateTokens.add(token);
-        }
-      }
-      for (const change of changes) {
-        const fieldMap = this._subscriptionsByIndexRangeEq.get(
-          change.tableName,
-        );
-        if (!fieldMap) {
-          continue;
-        }
-        for (const [fieldPath, valueMap] of fieldMap) {
-          const values = [change.before, change.after]
-            .filter((doc): doc is StoredDocument => doc !== null)
-            .map((doc) => stableValueKey(evaluateFieldPath(fieldPath, doc)));
-          for (const valueKey of values) {
-            for (const token of valueMap.get(valueKey) ?? []) {
-              candidateTokens.add(token);
-            }
-          }
-        }
-      }
-    } else {
-      for (const table of tablesWritten) {
-        for (const token of this._subscriptionsByTable.get(table) ?? []) {
-          candidateTokens.add(token);
-        }
-      }
+    for (const table of tablesWritten) {
+      this._addTableLevelTokens(table, changes, candidateTokens);
     }
-
+    if (changes !== null) {
+      this._addIndexRangeEqTokens(changes, candidateTokens);
+    }
     return { candidateTokens, changes, tablesWritten };
   }
 

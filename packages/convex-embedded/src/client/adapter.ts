@@ -2,8 +2,7 @@ import type { ConvexClient } from "convex/browser";
 import { ConvexError } from "convex/values";
 
 import type { CachedEntry, EmbeddedQueryCache } from "@/client/cache";
-import { effectToTransitions } from "@/client/optimistic/apply";
-import { deriveOptimisticEffect } from "@/client/optimistic/derive";
+import { EmbeddedClient } from "@/client/embedded";
 import {
   assertRemotePlanOnline,
   type MutationPlan,
@@ -231,7 +230,7 @@ const REMOTE_PUSH_COALESCE_MS = 16;
 
 const OPTIMISTIC_PROTECTION_MS = 500;
 
-class CachePipeline {
+export class CachePipeline {
   private readonly active = new Map<string, ActiveSubscription>();
   private readonly removeOnlineListener: (() => void) | null;
   private readonly changeListeners = new Set<() => void>();
@@ -1524,7 +1523,7 @@ export function subscribeActiveSubscriptions(
 
 type WaitUntilReady = <T>(run: () => Promise<T>) => Promise<T>;
 
-export function patchRoutedConvexClient(input: {
+export interface RoutedClientInput {
   client: ConvexClient;
   runtime: EmbeddedRuntime;
   remoteClient?: ConvexClient | null;
@@ -1556,7 +1555,16 @@ export function patchRoutedConvexClient(input: {
   cache?: EmbeddedQueryCache | null;
   getCacheStorage?: () => QueryCacheStorage | null;
   knownTables?: ReadonlySet<string>;
-}): { dispose: () => void } {
+}
+
+export type ExplicitOptimisticCallback = (
+  store: { getQuery: (refName: string, args: unknown) => unknown },
+  args: Record<string, unknown>,
+) => Array<{ refName: string; args: unknown; value: unknown }>;
+
+export function patchRoutedConvexClient(input: RoutedClientInput): {
+  dispose: () => void;
+} {
   patchBaseClientLocalQueryAccess({
     client: input.client,
     runtime: input.runtime,
@@ -1571,25 +1579,7 @@ export function patchRoutedConvexClient(input: {
   const getCacheStorage = input.getCacheStorage ?? (() => null);
   const remoteClient = input.remoteClient ?? null;
 
-  const explicitOptimistic = new WeakMap<
-    object,
-    (
-      store: { getQuery: (refName: string, args: unknown) => unknown },
-      args: Record<string, unknown>,
-    ) => Array<{ refName: string; args: unknown; value: unknown }>
-  >();
-
-  const getExplicitOptimistic = (
-    ref: unknown,
-  ):
-    | ((
-        store: { getQuery: (refName: string, args: unknown) => unknown },
-        args: Record<string, unknown>,
-      ) => Array<{ refName: string; args: unknown; value: unknown }>)
-    | undefined => {
-    if (typeof ref !== "object" || ref === null) return undefined;
-    return explicitOptimistic.get(ref);
-  };
+  const explicitOptimistic = new WeakMap<object, ExplicitOptimisticCallback>();
 
   const pipeline = cache
     ? new CachePipeline({
@@ -1797,66 +1787,13 @@ export function patchRoutedConvexClient(input: {
 
   const patchable = input.client as unknown as PatchableConvexClient;
 
-  patchable.mutation = function patchedMutation(
-    ...args: unknown[]
-  ): Promise<unknown> {
-    const argsObj = (args[1] ?? {}) as Record<string, unknown>;
-    if (pipeline) {
-      try {
-        const refName = input.getRefName(args[0]);
-        const explicit = getExplicitOptimistic(args[0]);
-        const updates = explicit
-          ? explicit(
-              { getQuery: pipeline.getCurrentValue.bind(pipeline) },
-              argsObj,
-            )
-          : (() => {
-              const effect = deriveOptimisticEffect({
-                refName,
-                args: argsObj,
-                knownTables: input.knownTables,
-              });
-              if (!effect) return [];
-              return effectToTransitions(effect, cache!);
-            })();
-        if (updates.length > 0) {
-          pipeline.applyOptimisticTransition(updates);
-        }
-      } catch (error) {
-        log.warn("optimistic apply failed:", error);
-      }
-    }
-    return waitUntilReady(async () => {
-      const route = input.planMutation(args[0]);
-      if (route.kind === "error") throw route.error;
-      if (route.kind === "local") {
-        try {
-          return await input.executeLocalMutation(
-            args[0],
-            argsObj,
-            route.enqueueForReplay,
-          );
-        } catch (error) {
-          throw input.asError(error);
-        }
-      }
-      try {
-        assertRemotePlanOnline(route, input.connectivity);
-        if (!remoteClient) {
-          throw new ConvexError({
-            code: "REMOTE_CLIENT_UNAVAILABLE",
-            message:
-              "[convex-embedded] Remote mutation execution was requested, but no remote client is configured. " +
-              "Add ClientOptions.remote or remove remoteOnly().",
-            kind: "mutation",
-          });
-        }
-        return await createRemoteCaller("mutation")(...args);
-      } catch (error) {
-        throw input.asError(error);
-      }
-    });
-  };
+  // `mutation` is implemented as a real method on EmbeddedClient
+  // (see client/embedded.ts). Install the routing state on the class
+  // instance so the method can read its deps from `this._routing`.
+  if (input.client instanceof EmbeddedClient) {
+    const { client: _client, ...routing } = input;
+    input.client._installRouting(routing, pipeline, explicitOptimistic);
+  }
 
   patchable.query = function patchedQuery(
     ...args: unknown[]

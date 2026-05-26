@@ -11,7 +11,6 @@ import type { BaseConvexClientOptions } from "convex/browser";
 
 import type { AuthOptions, AuthState } from "@/client/auth";
 import { createEmbeddedClient } from "@/client/factory";
-import type { Prefetch } from "@/client/prefetch";
 import type { RemoteOptions, RemoteState } from "@/client/remote";
 import type { ConvexInput } from "@/kernel/modules";
 import { createNodePlatformAdapter } from "@/node/platform";
@@ -37,7 +36,6 @@ export interface ClientOptions {
   name?: string;
   remote?: RemoteOptions;
   auth?: AuthOptions;
-  prefetch?: Prefetch;
   databasePath?: string;
   connectivity?: ConnectivityAdapter;
   processorIdentity?: ProcessorIdentity;

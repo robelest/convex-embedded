@@ -9,7 +9,6 @@
 import type { BaseConvexClientOptions } from "convex/browser";
 
 import type { AuthOptions, AuthState } from "@/client/auth";
-import type { Prefetch } from "@/client/prefetch";
 import type { RemoteOptions, RemoteState } from "@/client/remote";
 import type { ConvexInput } from "@/kernel/modules";
 
@@ -51,15 +50,6 @@ export interface ClientOptions {
 
   /** Optional auth configuration for embedded identity + remote tokens. */
   auth?: AuthOptions;
-
-  /**
-   * Optional remote-backed prefetch data used to seed the embedded database.
-   *
-   * This is primarily useful when an Expo app participates in the same
-   * SSR/prefetch flow as a browser client and should start from the same
-   * authoritative embedded data.
-   */
-  prefetch?: Prefetch;
 
   /** Optional custom directory for the Expo SQLite database files. */
   databaseDirectory?: string;
@@ -113,7 +103,6 @@ export function createConvexClient(options: ClientOptions) {
         name: options.name,
         remote: options.remote,
         auth: options.auth,
-        prefetch: options.prefetch,
       },
       platform,
     }),

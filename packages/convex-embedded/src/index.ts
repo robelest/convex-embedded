@@ -2,8 +2,8 @@
  * @robelest/convex-embedded
  *
  * Lightweight embedded Convex runtime for local-first applications.
- * Runs locally in-memory and can be seeded from remote-backed prefetch data for
- * SSR/prefetch flows. The root package exposes framework-agnostic runtime and
+ * Runs locally in-memory and syncs on-demand against a remote Convex
+ * deployment. The root package exposes framework-agnostic runtime and
  * client primitives rather than a React-specific wrapper.
  *
  * The root package also exports the platform-agnostic client factory and
@@ -120,15 +120,12 @@ import {
  * Create an embedded Convex runtime.
  *
  * This is the primary entry point. Pass a lazy ESM registry keyed by your
- * Convex module ids, optionally your schema definition, and optionally a
- * remote-backed prefetch data for SSR/prefetch.
+ * Convex module ids and optionally your schema definition.
  *
  * @param options.modules  Lazy ESM registry keyed by canonical module id.
  * @param options.schema   Default export from your `convex/schema.ts`.
- * @param options.prefetch Optional prefetch data created by `createEmbeddedPrefetch(...)`.
  * @returns An {@link EmbeddedRuntime} instance.
  *
- * @see createEmbeddedPrefetch
  * @category Factory
  */
 export function createEmbeddedRuntime(

@@ -428,7 +428,7 @@ export function bindTableRuntime(
     }
   };
 
-  hooks.resolveHandler = async (ctx, args) => {
+  hooks.pullHandler = async (ctx, args) => {
     const isRemote = await detectRuntime(ctx);
     if (!isRemote) {
       return {
@@ -486,12 +486,12 @@ export function bindTableRuntime(
         );
     };
 
-    if (args.docIds && args.docIds.length > 0) {
+    const pullByDocIds = async (docIds: string[]) => {
       const rawLiveStates = (await ctx.runQuery(
         component!.public.getLiveStates,
         {
           collection: tableName,
-          docIds: args.docIds,
+          docIds,
         },
       )) as Array<LiveStateRecord | null>;
       const liveStatesById = new Map(
@@ -511,13 +511,177 @@ export function bindTableRuntime(
       return {
         mode: "full" as const,
         collectionSeq: -1,
-        documents: args.docIds.map((docId: string) => {
+        documents: docIds.map((docId: string) => {
           const entry = hydratedById.get(docId);
           return entry ?? { docId, deleted: true as const, seq: null };
         }),
         isDone: true,
         continueCursor: null,
       };
+    };
+
+    const pullIncrementalMode = async () => {
+      const remoteOnlyChanges =
+        typeof ctx.db?.get !== "function"
+          ? []
+          : collectionChanges.changes.filter(
+              (change) =>
+                change.kind === "upsert" && !requestedIds.has(change.docId),
+            );
+
+      const needsStateDocIds: string[] = [];
+      for (const doc of args.documents) {
+        const changeKind = changedById.get(doc.docId);
+        if (changeKind !== "delete") {
+          needsStateDocIds.push(doc.docId);
+        }
+      }
+      for (const change of remoteOnlyChanges) {
+        needsStateDocIds.push(change.docId);
+      }
+
+      const rawBatchStates =
+        needsStateDocIds.length === 0
+          ? []
+          : ((await ctx.runQuery(component!.public.getLiveStates, {
+              collection: tableName,
+              docIds: needsStateDocIds,
+            })) as Array<{
+              docId: string;
+              update: ArrayBuffer;
+              seq: number;
+            } | null>);
+
+      const liveStateMap = new Map<
+        string,
+        { update: ArrayBuffer; seq: number }
+      >();
+      for (const state of rawBatchStates) {
+        if (state && typeof state.docId === "string") {
+          liveStateMap.set(state.docId, state);
+        }
+      }
+
+      const scopeDocCache = new Map<string, Record<string, unknown> | null>();
+      if (args.scopeArgs && typeof ctx.db?.get === "function") {
+        const upsertDocIds = args.documents
+          .filter((doc) => changedById.get(doc.docId) === "upsert")
+          .map((doc) => doc.docId);
+        const scopeDocs = await Promise.all(
+          upsertDocIds.map((id) => ctx.db.get(id as GenericId<string>)),
+        );
+        upsertDocIds.forEach((id, i) =>
+          scopeDocCache.set(id, scopeDocs[i] ?? null),
+        );
+      }
+
+      const requestedResults = args.documents.map((doc) => {
+        const changeKind = changedById.get(doc.docId);
+        if (changeKind === undefined) {
+          const latest = liveStateMap.get(doc.docId) ?? null;
+          if (!latest || latest.seq <= (doc.lastSeq ?? -1)) {
+            return { docId: doc.docId, seq: doc.lastSeq };
+          }
+          try {
+            const diff = computeDiff(
+              new Uint8Array(latest.update),
+              new Uint8Array(doc.vector),
+            );
+            if (isDiffEmpty(diff)) {
+              return { docId: doc.docId, seq: latest.seq };
+            }
+            return {
+              docId: doc.docId,
+              diff: toArrayBuffer(diff),
+              seq: latest.seq,
+            };
+          } catch {
+            return { docId: doc.docId, seq: latest.seq };
+          }
+        }
+
+        if (changeKind === "delete") {
+          return { docId: doc.docId, deleted: true as const, seq: null };
+        }
+
+        if (args.scopeArgs && scopeDocCache.has(doc.docId)) {
+          const currentDocument = scopeDocCache.get(doc.docId);
+          if (
+            !currentDocument ||
+            !matchesScopeArgs(
+              currentDocument as Record<string, unknown>,
+              args.scopeArgs as Record<string, unknown>,
+            )
+          ) {
+            return { docId: doc.docId, deleted: true as const, seq: null };
+          }
+        }
+
+        const latest = liveStateMap.get(doc.docId) ?? null;
+        if (!latest) {
+          return { docId: doc.docId, deleted: true as const, seq: null };
+        }
+
+        try {
+          const diff = computeDiff(
+            new Uint8Array(latest.update),
+            new Uint8Array(doc.vector),
+          );
+          if (isDiffEmpty(diff)) {
+            return { docId: doc.docId, seq: latest.seq };
+          }
+          return {
+            docId: doc.docId,
+            diff: toArrayBuffer(diff),
+            seq: latest.seq,
+          };
+        } catch (error) {
+          log.error(
+            `resolve: failed to compute diff for ${tableName}/${doc.docId}`,
+            error,
+          );
+          return { docId: doc.docId, seq: latest.seq };
+        }
+      });
+
+      const remoteOnlyDocuments =
+        remoteOnlyChanges.length === 0
+          ? []
+          : await Promise.all(
+              remoteOnlyChanges.map((change) =>
+                ctx.db.get(change.docId as GenericId<string>),
+              ),
+            );
+      const remoteOnlyResults = remoteOnlyChanges
+        .map((change, i) => {
+          const document = remoteOnlyDocuments[i];
+          if (
+            document &&
+            !matchesScopeArgs(
+              document as Record<string, unknown>,
+              args.scopeArgs as Record<string, unknown> | undefined,
+            )
+          ) {
+            return null;
+          }
+          const latest = liveStateMap.get(change.docId) ?? null;
+          return document
+            ? { docId: change.docId, document, seq: latest?.seq ?? null }
+            : { docId: change.docId, deleted: true as const, seq: null };
+        })
+        .filter(
+          (result): result is NonNullable<typeof result> => result !== null,
+        );
+
+      return {
+        mode: collectionChanges.mode,
+        collectionSeq: collectionChanges.collectionSeq,
+        documents: [...requestedResults, ...remoteOnlyResults],
+      };
+    };
+
+    if (args.docIds && args.docIds.length > 0) {
+      return await pullByDocIds(args.docIds);
     }
 
     const collectionChanges = (await ctx.runQuery(
@@ -539,7 +703,7 @@ export function bindTableRuntime(
       ),
     );
 
-    const resolveFullMode = async () => {
+    const pullFullMode = async () => {
       const scoped = args.scopeArgs && Object.keys(args.scopeArgs).length > 0;
       const knownDocIds = args.documents.map((doc) => doc.docId);
       const scopeArgs = scoped
@@ -654,166 +818,10 @@ export function bindTableRuntime(
     };
 
     if (collectionChanges.mode === "full") {
-      return await resolveFullMode();
+      return await pullFullMode();
     }
 
-    const remoteOnlyChanges =
-      typeof ctx.db?.get !== "function"
-        ? []
-        : collectionChanges.changes.filter(
-            (change) =>
-              change.kind === "upsert" && !requestedIds.has(change.docId),
-          );
-
-    const needsStateDocIds: string[] = [];
-    for (const doc of args.documents) {
-      const changeKind = changedById.get(doc.docId);
-      if (changeKind !== "delete") {
-        needsStateDocIds.push(doc.docId);
-      }
-    }
-    for (const change of remoteOnlyChanges) {
-      needsStateDocIds.push(change.docId);
-    }
-
-    const rawBatchStates =
-      needsStateDocIds.length === 0
-        ? []
-        : ((await ctx.runQuery(component!.public.getLiveStates, {
-            collection: tableName,
-            docIds: needsStateDocIds,
-          })) as Array<{
-            docId: string;
-            update: ArrayBuffer;
-            seq: number;
-          } | null>);
-
-    const liveStateMap = new Map<
-      string,
-      { update: ArrayBuffer; seq: number }
-    >();
-    for (const state of rawBatchStates) {
-      if (state && typeof state.docId === "string") {
-        liveStateMap.set(state.docId, state);
-      }
-    }
-
-    const scopeDocCache = new Map<string, Record<string, unknown> | null>();
-    if (args.scopeArgs && typeof ctx.db?.get === "function") {
-      const upsertDocIds = args.documents
-        .filter((doc) => changedById.get(doc.docId) === "upsert")
-        .map((doc) => doc.docId);
-      const scopeDocs = await Promise.all(
-        upsertDocIds.map((id) => ctx.db.get(id as GenericId<string>)),
-      );
-      upsertDocIds.forEach((id, i) =>
-        scopeDocCache.set(id, scopeDocs[i] ?? null),
-      );
-    }
-
-    const requestedResults = args.documents.map((doc) => {
-      const changeKind = changedById.get(doc.docId);
-      if (changeKind === undefined) {
-        const latest = liveStateMap.get(doc.docId) ?? null;
-        if (!latest || latest.seq <= (doc.lastSeq ?? -1)) {
-          return { docId: doc.docId, seq: doc.lastSeq };
-        }
-        try {
-          const diff = computeDiff(
-            new Uint8Array(latest.update),
-            new Uint8Array(doc.vector),
-          );
-          if (isDiffEmpty(diff)) {
-            return { docId: doc.docId, seq: latest.seq };
-          }
-          return {
-            docId: doc.docId,
-            diff: toArrayBuffer(diff),
-            seq: latest.seq,
-          };
-        } catch {
-          return { docId: doc.docId, seq: latest.seq };
-        }
-      }
-
-      if (changeKind === "delete") {
-        return { docId: doc.docId, deleted: true as const, seq: null };
-      }
-
-      if (args.scopeArgs && scopeDocCache.has(doc.docId)) {
-        const currentDocument = scopeDocCache.get(doc.docId);
-        if (
-          !currentDocument ||
-          !matchesScopeArgs(
-            currentDocument as Record<string, unknown>,
-            args.scopeArgs as Record<string, unknown>,
-          )
-        ) {
-          return { docId: doc.docId, deleted: true as const, seq: null };
-        }
-      }
-
-      const latest = liveStateMap.get(doc.docId) ?? null;
-      if (!latest) {
-        return { docId: doc.docId, deleted: true as const, seq: null };
-      }
-
-      try {
-        const diff = computeDiff(
-          new Uint8Array(latest.update),
-          new Uint8Array(doc.vector),
-        );
-        if (isDiffEmpty(diff)) {
-          return { docId: doc.docId, seq: latest.seq };
-        }
-        return {
-          docId: doc.docId,
-          diff: toArrayBuffer(diff),
-          seq: latest.seq,
-        };
-      } catch (error) {
-        log.error(
-          `resolve: failed to compute diff for ${tableName}/${doc.docId}`,
-          error,
-        );
-        return { docId: doc.docId, seq: latest.seq };
-      }
-    });
-
-    const remoteOnlyDocuments =
-      remoteOnlyChanges.length === 0
-        ? []
-        : await Promise.all(
-            remoteOnlyChanges.map((change) =>
-              ctx.db.get(change.docId as GenericId<string>),
-            ),
-          );
-    const remoteOnlyResults = remoteOnlyChanges
-      .map((change, i) => {
-        const document = remoteOnlyDocuments[i];
-        if (
-          document &&
-          !matchesScopeArgs(
-            document as Record<string, unknown>,
-            args.scopeArgs as Record<string, unknown> | undefined,
-          )
-        ) {
-          return null;
-        }
-        const latest = liveStateMap.get(change.docId) ?? null;
-        return document
-          ? { docId: change.docId, document, seq: latest?.seq ?? null }
-          : { docId: change.docId, deleted: true as const, seq: null };
-      })
-      .filter(
-        (result): result is NonNullable<typeof result> => result !== null,
-      );
-
-    return {
-      mode: collectionChanges.mode,
-      collectionSeq: collectionChanges.collectionSeq,
-      documents: [...requestedResults, ...remoteOnlyResults],
-    };
+    return await pullIncrementalMode();
   };
 
   log.debug(`bindTableRuntime("${tableName}") — version=${schemaDef.version}`);

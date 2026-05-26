@@ -58,9 +58,9 @@ interface RegisteredFn {
   _handler: (ctx: object, args: Record<string, unknown>) => Promise<unknown>;
 }
 
-type PullArgs = Parameters<NonNullable<RuntimeHooks["resolveHandler"]>>[1];
+type PullArgs = Parameters<NonNullable<RuntimeHooks["pullHandler"]>>[1];
 type ResolveResult = Awaited<
-  ReturnType<NonNullable<RuntimeHooks["resolveHandler"]>>
+  ReturnType<NonNullable<RuntimeHooks["pullHandler"]>>
 >;
 
 interface ResolveFn {

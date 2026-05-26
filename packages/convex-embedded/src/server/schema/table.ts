@@ -230,7 +230,7 @@ export interface RuntimeHooks {
     args: DefaultFunctionArgs,
     result: unknown,
   ) => Promise<void>;
-  resolveHandler?: (
+  pullHandler?: (
     ctx: GenericQueryCtx<GenericDataModel>,
     args: {
       collectionSeq: number | null;
@@ -478,8 +478,8 @@ export function embeddedTable<
         queryPageRange?: QueryPageRange;
       },
     ) => {
-      if (hooks.resolveHandler) {
-        return hooks.resolveHandler(ctx, args);
+      if (hooks.pullHandler) {
+        return hooks.pullHandler(ctx, args);
       }
       return {
         mode: "incremental" as const,

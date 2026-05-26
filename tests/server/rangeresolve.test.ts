@@ -152,18 +152,18 @@ function createCtx(
 
 function resolveHandlerOf(
   table: ReturnType<typeof createTable>,
-): NonNullable<RuntimeHooks["resolveHandler"]> {
+): NonNullable<RuntimeHooks["pullHandler"]> {
   const hooks = (table as unknown as { _hooks: RuntimeHooks })._hooks;
-  const handler = hooks.resolveHandler;
+  const handler = hooks.pullHandler;
   if (!handler) {
-    throw new Error("resolveHandler not bound");
+    throw new Error("pullHandler not bound");
   }
   return handler;
 }
 
 function rangeArgs(
   range: QueryPageRange,
-): Parameters<NonNullable<RuntimeHooks["resolveHandler"]>>[1] {
+): Parameters<NonNullable<RuntimeHooks["pullHandler"]>>[1] {
   return {
     collectionSeq: null,
     documents: [],

@@ -54,6 +54,16 @@ export {
 } from "./schema/fields.js";
 export type { RegisterOptions } from "./schema/fields.js";
 /**
+ * Pure prose-content helpers, also re-exported so Convex backend code can
+ * normalize/render rich-text values without duplicating the implementation.
+ */
+export {
+  createEmptyProseContent,
+  normalizeProseContent,
+  proseContentToPlainText,
+  type ProseContent,
+} from "../crdt/prose/content.js";
+/**
  * Remote-routing metadata constants used by bound tables and generated queries.
  */
 export {

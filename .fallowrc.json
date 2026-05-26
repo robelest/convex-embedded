@@ -1,0 +1,11 @@
+{
+  "$schema": "https://docs.fallow.tools/schema/fallow.json",
+  "ignoreDependencies": [
+    "@op-engineering/op-sqlite",
+    "expo-file-system",
+    "expo-network",
+    "expo-splash-screen",
+    "react-native-get-random-values",
+    "better-sqlite3"
+  ]
+}

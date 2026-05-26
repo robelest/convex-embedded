@@ -2,7 +2,7 @@ import { convexToJson } from "convex/values";
 import type { JSONValue, Value } from "convex/values";
 
 import { compareValues } from "@/runtime/db/compare";
-import { evaluateFieldPath } from "@/runtime/db/query";
+import { evaluateFieldPath } from "@/runtime/db/fieldpath";
 import type { SearchIndexDefinition } from "@/runtime/db/schema";
 import type {
   SerializedSearchFilter,

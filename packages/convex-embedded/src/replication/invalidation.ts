@@ -1,7 +1,7 @@
 import type { Value } from "convex/values";
 
 import { compareValues } from "@/runtime/db/compare";
-import { evaluateFieldPath, evaluateValue } from "@/runtime/db/query";
+import { evaluateFieldPath, evaluateValue } from "@/runtime/db/fieldpath";
 import type { QueryDependency, StoredDocument } from "@/runtime/db/types";
 
 type ProtocolChangeLike = {

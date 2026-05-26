@@ -1,5 +1,5 @@
 import { dependencyOverlapsChanges } from "@/replication/invalidation";
-import { evaluateFieldPath, evaluateValue } from "@/runtime/db/query";
+import { evaluateFieldPath, evaluateValue } from "@/runtime/db/fieldpath";
 import type { QueryDependency, StoredDocument } from "@/runtime/db/types";
 import { stableValueKey } from "@/shared/valuekey";
 import { recordCounter } from "@/tracing/metrics";

@@ -7,9 +7,9 @@ import {
 } from "@/runtime/crypto";
 import type { AsyncReadBackend } from "@/runtime/db/backend";
 import { compareValues } from "@/runtime/db/compare";
+import { evaluateFieldPath } from "@/runtime/db/fieldpath";
 import { QueryEngine } from "@/runtime/db/query";
 import {
-  evaluateFieldPath,
   evaluateNormalizedFilter,
   normalizeFilter,
   type AsyncQueryReader,

@@ -1,5 +1,6 @@
 import { Database } from "@embedded/runtime/db/database";
-import { evaluateFieldPath, evaluateFilter } from "@embedded/runtime/db/query";
+import { evaluateFieldPath } from "@embedded/runtime/db/fieldpath";
+import { evaluateFilter } from "@embedded/runtime/db/query";
 import type { ParsedSchema } from "@embedded/runtime/db/schema";
 import type {
   GenericDocument,

@@ -128,7 +128,7 @@ function getFieldValueByPath(
 interface ActiveScope {
   tableName: string;
   scopeArgs: Record<string, unknown>;
-  unsub?: () => void;
+  unsubscribe?: () => void;
   pendingActivation?: Promise<void>;
   readers?: Set<string>;
 }
@@ -3773,7 +3773,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     );
 
     for (const [key, entry] of orderedScopes) {
-      if (entry.unsub) {
+      if (entry.unsubscribe) {
         continue;
       }
       const tableConfig = tables[entry.tableName];
@@ -3786,7 +3786,7 @@ function createEngine(config: EngineConfig): EngineInstance {
         bufferRemoteSnapshot,
         translateRemoteSnapshotToLocal: (docs) => docs,
         onUnsubscribe: (unsub) => {
-          entry.unsub = unsub;
+          entry.unsubscribe = unsub;
         },
         resolveServices,
         tableConfig,
@@ -3841,11 +3841,11 @@ function createEngine(config: EngineConfig): EngineInstance {
 
     for (const [key, entry] of activeScopes) {
       try {
-        entry.unsub?.();
+        entry.unsubscribe?.();
       } catch (err) {
         log.warn("sync: error during remote unsubscribe", err);
       }
-      entry.unsub = undefined;
+      entry.unsubscribe = undefined;
       entry.pendingActivation = undefined;
       const isScoped = Object.keys(entry.scopeArgs).length > 0;
       const hasReaders = (entry.readers?.size ?? 0) > 0;
@@ -3895,11 +3895,11 @@ function createEngine(config: EngineConfig): EngineInstance {
       return;
     }
     try {
-      entry.unsub?.();
+      entry.unsubscribe?.();
     } catch (err) {
       log.warn("sync: error during scope teardown unsubscribe", err);
     }
-    entry.unsub = undefined;
+    entry.unsubscribe = undefined;
     entry.pendingActivation = undefined;
     activeScopes.delete(key);
     resolvedScopes.delete(key);
@@ -3945,7 +3945,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     const normalizedScope = canonicalizeScopeArgs(scopeArgs);
     const key = buildScopeKey(tableName, normalizedScope);
     const existing = activeScopes.get(key);
-    if (existing?.unsub) {
+    if (existing?.unsubscribe) {
       return;
     }
     if (existing?.pendingActivation) {
@@ -3990,7 +3990,7 @@ function createEngine(config: EngineConfig): EngineInstance {
         bufferRemoteSnapshot,
         translateRemoteSnapshotToLocal: (docs) => docs,
         onUnsubscribe: (unsub) => {
-          entry.unsub = unsub;
+          entry.unsubscribe = unsub;
         },
         resolveServices,
         tableConfig,

@@ -14,7 +14,7 @@ export function setLoggerDebug(enabled: boolean): void {
   debugEnabled = enabled;
 }
 
-function fmt(category: string, msg: string): string {
+function formatLogLine(category: string, msg: string): string {
   return `[${PREFIX}:${category}] ${msg}`;
 }
 
@@ -64,22 +64,22 @@ export function createLogger(category: string) {
     debug: (msg: string, ...args: unknown[]) => {
       emitLog(category, SeverityNumber.DEBUG, "debug", msg, args);
       if (debugEnabled) {
-        console.debug(fmt(category, msg), ...args);
+        console.debug(formatLogLine(category, msg), ...args);
       }
     },
     info: (msg: string, ...args: unknown[]) => {
       emitLog(category, SeverityNumber.INFO, "info", msg, args);
       if (debugEnabled) {
-        console.info(fmt(category, msg), ...args);
+        console.info(formatLogLine(category, msg), ...args);
       }
     },
     warn: (msg: string, ...args: unknown[]) => {
       emitLog(category, SeverityNumber.WARN, "warn", msg, args);
-      console.warn(fmt(category, msg), ...args);
+      console.warn(formatLogLine(category, msg), ...args);
     },
     error: (msg: string, ...args: unknown[]) => {
       emitLog(category, SeverityNumber.ERROR, "error", msg, args);
-      console.error(fmt(category, msg), ...args);
+      console.error(formatLogLine(category, msg), ...args);
     },
   };
 }

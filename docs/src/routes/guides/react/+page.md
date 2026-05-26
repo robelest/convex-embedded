@@ -206,9 +206,11 @@ const client =
 
 Imports are now SSR-safe, so the React entry can be imported on the server. Only
 `createConvexReactClient(...)` remains browser-only. For server-rendered
-startup, use `createEmbeddedPrefetch(...)` from
-`@robelest/convex-embedded/client` plus `createEmbeddedRuntime(...)` from the
-root package.
+startup, run the query in your loader with `preloadQuery(...)` from
+`@robelest/convex-embedded/client`, pass the `Preloaded` payload to a client
+component, and render it through a small `usePreloadedQuery` hook you build from
+`preloadedQueryResult` + `preloadedQueryRef`, `whenPreloaded` (from
+`@robelest/convex-embedded/browser`), and React's `useQuery`.
 
 ## What happens after setup
 

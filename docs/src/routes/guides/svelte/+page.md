@@ -14,10 +14,11 @@ convex-embedded integrates with SvelteKit through `convex-svelte`. The practical
 client-only flow is: disable SSR, create the client in your layout, provide it
 once, and use the normal query/mutation helpers.
 
-If you want SSR for the initial route, the supported path is different: build
-prefetch data on the server with `createEmbeddedPrefetch(...)`, render against
-`createEmbeddedRuntime(...)`, and only create the browser client after
-hydration.
+If you want SSR for the initial route, the supported path is different: run the
+query on the server in a `+layout.server.ts` / `+page.server.ts` loader with
+`preloadQuery(...)`, pass the `Preloaded` payload to your page, and render it
+through a small `usePreloadedQuery` helper that swaps to the live local query
+once it resolves.
 
 ## Quick start
 
@@ -215,11 +216,100 @@ Queries and mutations work the same way; data is persisted to IndexedDB and
 available offline. You can add `remote` later without changing any component
 code.
 
+## SSR with preloadQuery
+
+To server-render the first route, run the query in a server loader with
+`preloadQuery(...)` and fall back to `emptyPreloaded(...)` when there is no
+remote URL:
+
+```ts
+// src/routes/+layout.server.ts
+import { preloadQuery, emptyPreloaded } from "@robelest/convex-embedded/client";
+import { api } from "../convex/_generated/api";
+
+export const load = async ({ locals }) => {
+  const convexUrl = import.meta.env.CONVEX_URL;
+  let preloadedTasks = emptyPreloaded(api.tasks.list, {});
+  if (convexUrl) {
+    preloadedTasks = await preloadQuery(
+      api.tasks.list,
+      {},
+      { url: convexUrl, token: locals.authToken },
+    );
+  }
+  return { preloadedTasks };
+};
+```
+
+`usePreloadedQuery` is small app-side glue rather than an SDK export. Build it
+from `preloadedQueryResult` + `preloadedQueryRef` (client entry),
+`whenPreloaded` (browser entry), and `convex-svelte`'s `useQuery`. Render the
+preloaded value for SSR and first paint, then defer to the live local query once
+`whenPreloaded` resolves:
+
+```ts
+// src/lib/usePreloadedQuery.svelte.ts
+import { browser } from "$app/environment";
+import { whenPreloaded } from "@robelest/convex-embedded/browser";
+import {
+  preloadedQueryResult,
+  preloadedQueryRef,
+  type Preloaded,
+} from "@robelest/convex-embedded/client";
+import { useConvexClient, useQuery } from "convex-svelte";
+import { makeFunctionReference, type FunctionReference } from "convex/server";
+
+export function usePreloadedQuery<Query extends FunctionReference<"query">>(
+  preloaded: Preloaded<Query>,
+) {
+  const initial = preloadedQueryResult(preloaded);
+  if (!browser) {
+    return {
+      get current() {
+        return initial;
+      },
+    };
+  }
+
+  const client = useConvexClient();
+  const { name, args } = preloadedQueryRef(preloaded);
+  const live = useQuery(makeFunctionReference<Query>(name), () => args);
+
+  let ready = $state(false);
+  $effect(() => {
+    void whenPreloaded(client, preloaded).then(() => (ready = true));
+  });
+
+  return {
+    get current() {
+      return ready ? (live.data ?? initial) : initial;
+    },
+  };
+}
+```
+
+Use it from a page with the `data` returned by the loader:
+
+```svelte
+<script lang="ts">
+  import { usePreloadedQuery } from "$lib/usePreloadedQuery.svelte";
+
+  let { data } = $props();
+  const tasks = usePreloadedQuery(data.preloadedTasks);
+</script>
+
+<ul>
+  {#each tasks.current as task (task._id)}
+    <li>{task.title}</li>
+  {/each}
+</ul>
+```
+
 ## Key points
 
 - **Client creation is browser-only** -- wa-sqlite still requires `IndexedDB`,
-  `Worker`, and `WebAssembly`. If you want SSR, use the prefetch bootstrap flow
-  instead of creating the client on the server.
+  `Worker`, and `WebAssembly`. If you want SSR, use `preloadQuery(...)` in a
+  server loader instead of creating the client on the server.
 - **Modules must stay lazy** -- Use canonical module ids like
   `"./convex/tasks.ts": () => import("./convex/tasks")`.
 - **Always clean up** -- Call `client.close()` in both `onDestroy` and

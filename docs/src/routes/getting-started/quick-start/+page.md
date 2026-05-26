@@ -250,18 +250,22 @@ function App() {
 - replay ownership uses processor-scoped leases, so multiple tabs can recover
   safely after crashes or abandoned sessions
 
-### SSR bootstrap
+### SSR with preloadQuery
 
 If your app server-renders its first route, do not create the browser client on
 the server. Instead:
 
-1. build prefetched data with `createEmbeddedPrefetch(...)` from
-   `@robelest/convex-embedded/client`
-2. render with `createEmbeddedRuntime({ prefetch })`
-3. pass the same prefetched data into `createConvexClient(...)` in the browser
+1. run the query in a server loader with `preloadQuery(...)` from
+   `@robelest/convex-embedded/client` (fall back to `emptyPreloaded(...)`)
+2. pass the `Preloaded` payload to a client component
+3. render `preloadedQueryResult(...)` for first paint, then defer to the live
+   local query once `whenPreloaded(...)` resolves via a small
+   `usePreloadedQuery` helper
 
-That keeps the first browser render aligned with the SSR HTML and lets runtime
-pagination work before remote sync resumes.
+That keeps the first browser render aligned with the SSR HTML.
+`usePreloadedQuery` is app-side glue, not an SDK export; the convex-svelte demo
+provides one. `preloadQuery(...)` covers non-paginated queries; paginated
+queries load client-side, matching Convex.
 
 ## 6. Control local vs remote execution explicitly
 

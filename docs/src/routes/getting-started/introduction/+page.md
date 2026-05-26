@@ -57,7 +57,7 @@ primitives.
     Documents persist to IndexedDB via wa-sqlite running in a Dedicated Worker. Data survives page refreshes and browser restarts.
   </Card>
   <Card title="Framework Agnostic">
-    The browser entry stays framework agnostic. The core SSR/bootstrap flow is driven by `createEmbeddedPrefetch`, `createEmbeddedRuntime`, and `createConvexClient` rather than a framework-specific wrapper.
+    The browser entry stays framework agnostic. The SSR flow is driven by `preloadQuery` on the server, `createConvexClient` in the browser, and `whenPreloaded` to swap to the live local query rather than a framework-specific wrapper.
   </Card>
 </CardGrid>
 

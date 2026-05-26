@@ -1,6 +1,6 @@
 ---
 title: Client API
- description: Client bootstrap helpers for building SSR/bootstrap payloads.
+ description: Server-side helpers for preloading queries during SSR.
 ---
 
 <svelte:head>
@@ -10,19 +10,20 @@ title: Client API
 
 # Client API
 
-The client entry point (`@robelest/convex-embedded/client`) is the advanced
-bootstrap surface for convex-embedded. Most applications should still start with
-[Browser API](/api/browser), but this module exposes the public
-`createEmbeddedPrefetch(...)` helper used for SSR/bootstrap flows.
+The client entry point (`@robelest/convex-embedded/client`) is the SSR surface
+for convex-embedded. Most applications should still start with
+[Browser API](/api/browser), but this module exposes the `preloadQuery(...)`
+helpers used to run a query on the server and hand the result to a client
+component for first paint.
 
 ```ts
 import {
-  createEmbeddedPrefetch,
-  emptyEmbeddedPrefetch,
-  type Prefetch,
-  type CreateEmbeddedPrefetchOptions,
-  type CreateEmbeddedPrefetchResult,
-  type EmbeddedPrefetchQuerySpec,
+  preloadQuery,
+  emptyPreloaded,
+  preloadedQueryResult,
+  preloadedQueryRef,
+  type Preloaded,
+  type PreloadQueryOptions,
 } from "@robelest/convex-embedded/client";
 ```
 
@@ -30,116 +31,113 @@ import {
 
 Use this module if you are:
 
-- building an SSR/bootstrap flow with `createEmbeddedPrefetch(...)`
-- fetching serializable prefetch data on the server before first render
-- seeding the browser runtime with `emptyEmbeddedPrefetch(...)` when SSR
-  prefetch is unavailable
+- running a query on the server before first render with `preloadQuery(...)`
+- passing the result through a loader into a client component
+- falling back to `emptyPreloaded(...)` when there is no remote URL or the
+  preload fails
 
 For typical app code, start with the browser or Expo entry points.
 
 ## Main exports
 
-### `createEmbeddedPrefetch`
+### `preloadQuery`
 
-Fetches serializable prefetch data for your embedded tables from a remote Convex
-deployment.
-
-Use it when you want:
-
-- SSR-safe imports with client-only runtime startup
-- server-rendered HTML that matches the first browser render
-- paginated first paint from `EmbeddedRuntime.paginate(...)`
-
-Typical SSR flow:
+Runs a query on the server against your remote Convex deployment and returns an
+opaque `Preloaded` payload to pass into a client component.
 
 ```ts
-import { createEmbeddedRuntime } from "@robelest/convex-embedded";
-import { createEmbeddedPrefetch } from "@robelest/convex-embedded/client";
-import { createConvexClient } from "@robelest/convex-embedded/browser";
-
-const { embedded: prefetched } = await createEmbeddedPrefetch({
-  url: process.env.CONVEX_URL!,
-  queries: {
-    tasks: {
-      query: api.tasks.list,
-      args: {},
-      collection: "tasks",
-    },
-  },
-});
-
-const runtime = createEmbeddedRuntime({
-  modules,
-  schema,
-  prefetch: prefetched,
-});
-const firstPage = await runtime.paginate(
-  api.tasks.list,
-  {},
-  { initialNumItems: 20 },
-);
-
-const client = createConvexClient({
-  modules,
-  schema,
-  remote: { url: process.env.CONVEX_URL! },
-  prefetch: prefetched,
-});
+function preloadQuery<Query extends FunctionReference<"query">>(
+  query: Query,
+  args: FunctionArgs<Query>,
+  options: PreloadQueryOptions,
+): Promise<Preloaded<Query>>;
 ```
 
-`createEmbeddedPrefetch(...)` executes the explicit SSR queries you provide and,
-for entries with `collection`, captures both the remote documents and resolve
-metadata needed to hydrate the embedded runtime. The returned `Prefetch` should
-be treated as opaque app data and passed straight into
-`createEmbeddedRuntime(...)` or `createConvexClient(...)`.
+Use it when you want server-rendered HTML that matches the first browser render.
+It is for non-paginated queries only; paginated queries load client-side,
+matching Convex.
 
-### `emptyEmbeddedPrefetch`
-
-Builds an empty prefetch payload for cases where SSR/bootstrap data is optional
-or unavailable.
+Typical SSR loader (e.g. SvelteKit `+layout.server.ts`, a Next loader):
 
 ```ts
-const fallback = emptyEmbeddedPrefetch(identityKey);
+import { preloadQuery, emptyPreloaded } from "@robelest/convex-embedded/client";
+import { api } from "$convex/_generated/api";
+
+export const load = async () => {
+  let preloadedProjects = emptyPreloaded(api.projects.list, {});
+  if (convexUrl) {
+    preloadedProjects = await preloadQuery(
+      api.projects.list,
+      {},
+      { url: convexUrl, token },
+    );
+  }
+  return { preloadedProjects };
+};
 ```
 
-### `Prefetch`
+The returned `Preloaded` payload should be treated as opaque app data. Read its
+server value with `preloadedQueryResult(...)` and decode the live query to run
+locally with `preloadedQueryRef(...)`.
 
-The serializable artifact returned by `createEmbeddedPrefetch(...)`.
+### `emptyPreloaded`
 
-It contains:
+Builds a typed `Preloaded` payload with no server value. Its decoded value is
+`null` until the live query yields. Use it when there is no remote URL or the
+preload failed.
 
-- a prefetch format version
-- an optional identity scope
-- authoritative table documents grouped by embedded table name
+```ts
+const fallback = emptyPreloaded(api.projects.list, {});
+```
 
-### `CreateEmbeddedPrefetchOptions`
+### `preloadedQueryResult`
 
-Key fields:
+Reads the server-fetched value out of a `Preloaded` payload. Works on the server
+or in the browser.
+
+```ts
+function preloadedQueryResult<Query extends FunctionReference<"query">>(
+  preloaded: Preloaded<Query>,
+): FunctionReturnType<Query>;
+```
+
+### `preloadedQueryRef`
+
+Decodes the query name and args from a `Preloaded` payload so you can run the
+live local query in the browser.
+
+```ts
+function preloadedQueryRef<Query extends FunctionReference<"query">>(
+  preloaded: Preloaded<Query>,
+): { name: string; args: Record<string, unknown> };
+```
+
+### `Preloaded<Query>`
+
+The serializable artifact returned by `preloadQuery(...)` and `emptyPreloaded`.
+It carries the server-fetched value (if any) plus the encoded query reference
+and args, and is passed straight from a loader into a client component.
+
+### `PreloadQueryOptions`
+
+The options object for `preloadQuery(...)`:
 
 - `url`: remote Convex deployment URL
 - `token`: optional auth token for authenticated reads
-- `identityKey`: optional identity scope for identity-partitioned local data
-- `queries`: explicit SSR query specs keyed by result name
 
-### `EmbeddedPrefetchQuerySpec<TResult>`
+## Client handoff
 
-Each query entry can include:
-
-- `query`: the public Convex query function reference to execute remotely
-- `args`: the serializable query arguments
-- `collection`: optional embedded table name to hydrate from the query result
-- `selectDocuments`: optional projector when the query result is not itself the
-  table document array
-
-### `CreateEmbeddedPrefetchResult<TQueries>`
-
-The helper returns:
-
-- `embedded`: the opaque `Prefetch` artifact to feed into the runtime/client
-- `results`: the raw remote query results keyed by your `queries` object
+Render `preloadedQueryResult(preloaded)` for SSR and first paint, then defer to
+the live local query (your framework's `useQuery` on
+`preloadedQueryRef(preloaded)`) once the preloaded scope has resolved from
+remote. The [`whenPreloaded`](/api/browser) helper in
+`@robelest/convex-embedded/browser` signals when that swap is safe, avoiding a
+flash of stale local data. There is no SDK `usePreloadedQuery` hook; it is small
+app-side glue you write from these primitives (the convex-svelte demo ships
+one).
 
 ## Stability note
 
-`createEmbeddedPrefetch(...)` is the supported advanced API exposed from this
+The `preloadQuery(...)` helpers are the supported SSR API exposed from this
 module. For runtime startup, queries, mutations, auth, and remote sync, use the
 browser or Expo entry points.

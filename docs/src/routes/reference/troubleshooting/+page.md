@@ -56,10 +56,10 @@ const client =
     : null;
 ```
 
-If you want SSR for the first route instead, build prefetch data on the server
-with `createEmbeddedPrefetch(...)`, render with
-`createEmbeddedRuntime({ prefetch })`, and only call `createConvexClient(...)`
-in the browser.
+If you want SSR for the first route instead, run the query in a server loader
+with `preloadQuery(...)` from `@robelest/convex-embedded/client`, pass the
+`Preloaded` payload to a client component, and only call
+`createConvexClient(...)` in the browser.
 
 ## Module registry
 

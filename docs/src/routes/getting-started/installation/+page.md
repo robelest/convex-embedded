@@ -76,19 +76,19 @@ After running `npx convex dev` or `npx convex codegen`, this makes
 `@robelest/convex-embedded` ships multiple entry points so you only import what
 you need:
 
-| Export                                    | Environment     | Description                                                                                                                     |
-| ----------------------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `@robelest/convex-embedded/browser`       | Browser         | `createConvexClient` factory, `getRemoteState`, `subscribeRemoteState`, `getAuthState`, `subscribeAuthState`, preload utilities |
-| `@robelest/convex-embedded/react`         | React           | `createConvexReactClient` and React-compatible wrapping for `ConvexProvider`, `useQuery`, and `usePaginatedQuery`               |
-| `@robelest/convex-embedded/server`        | Convex backend  | `embeddedTable`, `bindTable`, `localOnly`, `remoteOnly`                                                                         |
-| `@robelest/convex-embedded/crdt`          | Convex backend  | `schema` namespace (`register`, `prose`, `counter`, `set`, `omit`)                                                              |
-| `@robelest/convex-embedded/client`        | Advanced client | Prefetch/bootstrap helpers such as `createEmbeddedPrefetch`                                                                     |
-| `@robelest/convex-embedded/convex.config` | Convex          | Component configuration                                                                                                         |
-| `@robelest/convex-embedded/test`          | Test            | Testing utilities                                                                                                               |
+| Export                                    | Environment    | Description                                                                                                                     |
+| ----------------------------------------- | -------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `@robelest/convex-embedded/browser`       | Browser        | `createConvexClient` factory, `getRemoteState`, `subscribeRemoteState`, `getAuthState`, `subscribeAuthState`, preload utilities |
+| `@robelest/convex-embedded/react`         | React          | `createConvexReactClient` and React-compatible wrapping for `ConvexProvider`, `useQuery`, and `usePaginatedQuery`               |
+| `@robelest/convex-embedded/server`        | Convex backend | `embeddedTable`, `bindTable`, `localOnly`, `remoteOnly`                                                                         |
+| `@robelest/convex-embedded/crdt`          | Convex backend | `schema` namespace (`register`, `prose`, `counter`, `set`, `omit`)                                                              |
+| `@robelest/convex-embedded/client`        | Server (SSR)   | `preloadQuery` and the `Preloaded` helpers for server-side rendering                                                            |
+| `@robelest/convex-embedded/convex.config` | Convex         | Component configuration                                                                                                         |
+| `@robelest/convex-embedded/test`          | Test           | Testing utilities                                                                                                               |
 
 Most applications only need `browser`, `server`, and `crdt`. Use `react` for
-React hook compatibility, and reach for `client` when you need SSR/bootstrap
-helpers such as `createEmbeddedPrefetch`.
+React hook compatibility, and reach for `client` when you need the SSR
+`preloadQuery` helpers.
 
 ## Next Steps
 

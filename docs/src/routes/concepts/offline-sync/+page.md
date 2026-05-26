@@ -43,14 +43,14 @@ stateDiagram-v2
 
 ### State Variants
 
-| Status       | Description                                                                                                                             |
-| ------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `idle`       | Sync was not configured (no `remote` option), or the engine has not started yet.                                                        |
-| `connecting` | The remote `ConvexClient` is establishing its WebSocket connection.                                                                     |
-| `resolving`  | The CRDT resolve pass is in progress. May include `progress: { completed, total }`.                                                     |
-| `resolved`   | All tables are resolved and reactive subscriptions are active. Normal steady state.                                                     |
-| `offline`    | Network is unavailable. Mutations still work locally and queue for later replay.                                                        |
-| `error`      | The resolve pass failed after exhausting retries. Contains the `error` property. Recovery is attempted on the next connectivity change. |
+| Status       | Description                                                                                                                                       |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `idle`       | Sync was not configured (no `remote` option), or the engine has not started yet.                                                                  |
+| `connecting` | The remote `ConvexClient` is establishing its WebSocket connection.                                                                               |
+| `resolving`  | The CRDT resolve pass is in progress. May include `progress: { completed, total }`.                                                               |
+| `resolved`   | The current resolve pass completed and active subscriptions are live. Tables resolve on demand as queries subscribe to them. Normal steady state. |
+| `offline`    | Network is unavailable. Mutations still work locally and queue for later replay.                                                                  |
+| `error`      | The resolve pass failed after exhausting retries. Contains the `error` property. Recovery is attempted on the next connectivity change.           |
 
 ### Observing State
 

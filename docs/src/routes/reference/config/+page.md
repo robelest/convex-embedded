@@ -22,55 +22,43 @@ import { createConvexClient } from "@robelest/convex-embedded/browser";
 const client = createConvexClient(options: ClientOptions);
 ```
 
-| Option          | Type                                     | Default             | Description                                                                             |
-| --------------- | ---------------------------------------- | ------------------- | --------------------------------------------------------------------------------------- |
-| `modules`       | `Record<string, () => Promise<unknown>>` | _required_          | Lazy ESM registry keyed by canonical module id.                                         |
-| `schema`        | `unknown`                                | `undefined`         | Default export from `convex/schema.ts`.                                                 |
-| `clientOptions` | `Partial<BaseConvexClientOptions>`       | `undefined`         | Forwarded to `ConvexClient`.                                                            |
-| `name`          | `string`                                 | `"convex-embedded"` | Persistent browser database name. Shared across tabs.                                   |
-| `remote`        | `RemoteOptions`                          | `undefined`         | Enable remote. Omit for local-only.                                                     |
-| `auth`          | `AuthOptions`                            | `undefined`         | Auth and identity configuration.                                                        |
-| `prefetch`      | `Prefetch`                               | `undefined`         | Initial embedded table data created by `createEmbeddedPrefetch(...)` for SSR/bootstrap. |
-| `encryption`    | `EncryptionOptions`                      | `undefined`         | Encrypt persisted local state at rest.                                                  |
+| Option          | Type                                     | Default             | Description                                           |
+| --------------- | ---------------------------------------- | ------------------- | ----------------------------------------------------- |
+| `modules`       | `Record<string, () => Promise<unknown>>` | _required_          | Lazy ESM registry keyed by canonical module id.       |
+| `schema`        | `unknown`                                | `undefined`         | Default export from `convex/schema.ts`.               |
+| `clientOptions` | `Partial<BaseConvexClientOptions>`       | `undefined`         | Forwarded to `ConvexClient`.                          |
+| `name`          | `string`                                 | `"convex-embedded"` | Persistent browser database name. Shared across tabs. |
+| `remote`        | `RemoteOptions`                          | `undefined`         | Enable remote. Omit for local-only.                   |
+| `auth`          | `AuthOptions`                            | `undefined`         | Auth and identity configuration.                      |
+| `encryption`    | `EncryptionOptions`                      | `undefined`         | Encrypt persisted local state at rest.                |
 
-## Prefetch bootstrap
+## preload (SSR)
 
-To render on the server and start the browser client warm, build prefetch data
-from `@robelest/convex-embedded/client` and pass it into both the runtime and
-the browser client:
+To render on the server and start the browser client warm, run the query in a
+server loader with `preloadQuery(...)` from `@robelest/convex-embedded/client`,
+then hand the `Preloaded` payload to a client component:
 
 ```ts
-import { createEmbeddedRuntime } from "@robelest/convex-embedded";
-import { createEmbeddedPrefetch } from "@robelest/convex-embedded/client";
-import { createConvexClient } from "@robelest/convex-embedded/browser";
+import { preloadQuery, emptyPreloaded } from "@robelest/convex-embedded/client";
+import { api } from "$convex/_generated/api";
 
-const { embedded: prefetched } = await createEmbeddedPrefetch({
-  url: process.env.CONVEX_URL!,
-  token,
-  queries: {
-    tasks: {
-      query: api.tasks.list,
-      args: {},
-      collection: "tasks",
-    },
-  },
-});
-
-const runtime = createEmbeddedRuntime({
-  modules,
-  schema,
-  prefetch: prefetched,
-});
-const client = createConvexClient({
-  modules,
-  schema,
-  remote: { url },
-  prefetch: prefetched,
-});
+export const load = async () => {
+  let preloadedTasks = emptyPreloaded(api.tasks.list, {});
+  if (convexUrl) {
+    preloadedTasks = await preloadQuery(
+      api.tasks.list,
+      {},
+      { url: convexUrl, token },
+    );
+  }
+  return { preloadedTasks };
+};
 ```
 
-The browser import is SSR-safe, but `createConvexClient(...)` is still a
-browser-only step.
+In the client component, render `preloadedQueryResult(preloaded)` for first
+paint and defer to the live local query once `whenPreloaded(client, preloaded)`
+(from `@robelest/convex-embedded/browser`) resolves. The browser import is
+SSR-safe, but `createConvexClient(...)` is still a browser-only step.
 
 ## RemoteOptions
 

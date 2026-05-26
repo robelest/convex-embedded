@@ -153,49 +153,49 @@ const firstPage = await client.query(api.tasks.paginated, {
 Imports from `@robelest/convex-embedded/browser` are SSR-safe, but client
 creation is still a browser-only step.
 
-For SSR startup, build remote prefetch data on the server, run your first
-queries against an embedded runtime, and then pass the same prefetched data into
-the browser client:
+For SSR startup, run your first query on the server with `preloadQuery(...)`,
+hand the result to your client component for first paint, then create the
+browser client and defer to the live local query once `whenPreloaded(...)`
+resolves.
+
+Server loader:
 
 ```ts
-import { createEmbeddedRuntime } from "@robelest/convex-embedded";
-import { createEmbeddedPrefetch } from "@robelest/convex-embedded/client";
-import { createConvexClient } from "@robelest/convex-embedded/browser";
+import { preloadQuery, emptyPreloaded } from "@robelest/convex-embedded/client";
+import { api } from "$convex/_generated/api";
 
-const { embedded: prefetched } = await createEmbeddedPrefetch({
-  url: process.env.CONVEX_URL!,
-  queries: {
-    tasks: {
-      query: api.tasks.list,
-      args: {},
-      collection: "tasks",
-    },
-  },
-});
+export const load = async () => {
+  let preloadedTasks = emptyPreloaded(api.tasks.list, {});
+  if (convexUrl) {
+    preloadedTasks = await preloadQuery(
+      api.tasks.list,
+      {},
+      { url: convexUrl, token },
+    );
+  }
+  return { preloadedTasks };
+};
+```
 
-const runtime = createEmbeddedRuntime({
-  modules,
-  schema,
-  prefetch: prefetched,
-});
-const tasks = await runtime.query(api.tasks.list, {});
-const firstPage = await runtime.paginate(
-  api.tasks.paginated,
-  {},
-  { initialNumItems: 20 },
-);
+Client component handoff:
 
-const client = createConvexClient({
-  modules,
-  schema,
-  remote: { url: process.env.CONVEX_URL! },
-  prefetch: prefetched,
-});
+```ts
+import {
+  preloadedQueryResult,
+  preloadedQueryRef,
+  type Preloaded,
+} from "@robelest/convex-embedded/client";
+import { whenPreloaded } from "@robelest/convex-embedded/browser";
+
+// render preloadedQueryResult(preloaded) for SSR + first paint, then defer to the
+// live local query (framework useQuery on preloadedQueryRef(preloaded)) once
+// whenPreloaded(client, preloaded) resolves.
 ```
 
 Pagination support currently means:
 
-- `runtime.paginate(...)` is the supported SSR/runtime API
+- `preloadQuery(...)` covers non-paginated SSR; paginated queries load
+  client-side, matching Convex
 - raw browser clients can use paginated Convex queries directly
 - `convex/react` pagination hooks are only documented through the Expo entry
 

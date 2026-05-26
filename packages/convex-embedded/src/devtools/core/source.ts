@@ -316,7 +316,7 @@ class EmbeddedDevtoolsSourceImpl implements EmbeddedDevtoolsSource {
       log.warn("clearLocalData: no browser debug api registered");
       return;
     }
-    await api.clearLocalData();
+    await api.clearLocalData({ reload: true });
   }
 
   clearActivity(): void {

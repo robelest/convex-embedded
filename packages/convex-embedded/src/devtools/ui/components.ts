@@ -283,6 +283,27 @@ export interface FeedToolbar {
   setInfo(label: string): void;
 }
 
+export function toolbarButton(
+  label: string,
+  title: string,
+  onClick: () => void,
+): HTMLButtonElement {
+  return el("button", {
+    text: label,
+    title,
+    onClick,
+    style: {
+      font: `12px ${palette.mono}`,
+      padding: "3px 8px",
+      borderRadius: "5px",
+      border: `1px solid ${palette.border}`,
+      background: "transparent",
+      color: palette.fgMuted,
+      cursor: "pointer",
+    },
+  });
+}
+
 export function feedToolbar(opts: {
   onPauseToggle: () => void;
   onClear: () => void;
@@ -295,25 +316,7 @@ export function feedToolbar(opts: {
     style: { color: palette.fgMuted, font: `11px ${palette.mono}` },
   });
 
-  const iconButton = (
-    label: string,
-    title: string,
-    onClick: () => void,
-  ): HTMLButtonElement =>
-    el("button", {
-      text: label,
-      title,
-      onClick,
-      style: {
-        font: `12px ${palette.mono}`,
-        padding: "3px 8px",
-        borderRadius: "5px",
-        border: `1px solid ${palette.border}`,
-        background: "transparent",
-        color: palette.fgMuted,
-        cursor: "pointer",
-      },
-    });
+  const iconButton = toolbarButton;
 
   const pauseButton = iconButton("❚❚", "Pause", opts.onPauseToggle);
   const element = el(

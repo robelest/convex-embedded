@@ -1,5 +1,10 @@
 import type { DevtoolsLogLine } from "@/devtools/core/types";
-import { commandFilter, filterPills } from "@/devtools/ui/components";
+import {
+  commandFilter,
+  downloadJson,
+  filterPills,
+  toolbarButton,
+} from "@/devtools/ui/components";
 import {
   el,
   empty,
@@ -67,6 +72,48 @@ export const logsTab: DevtoolsTab = {
       render();
     });
 
+    const visibleLines = (): DevtoolsLogLine[] =>
+      lines.filter((line) => matches(line, state));
+
+    const copyButton = toolbarButton("Copy", "Copy filtered logs", () => {
+      const payload = visibleLines()
+        .map(
+          (line) =>
+            `${formatTime(line.timeMs)} ${line.severity}${
+              line.category ? ` ${line.category}` : ""
+            } ${line.body}`,
+        )
+        .join("\n");
+      void navigator.clipboard?.writeText(payload).then(
+        () => {
+          copyButton.textContent = "Copied";
+          setTimeout(() => {
+            copyButton.textContent = "Copy";
+          }, 1200);
+        },
+        () => undefined,
+      );
+    });
+
+    const exportButton = toolbarButton(
+      "Export",
+      "Export filtered logs as JSON",
+      () => downloadJson("convex-embedded-logs.json", visibleLines()),
+    );
+
+    const actions = el(
+      "div",
+      {
+        style: {
+          display: "flex",
+          gap: "6px",
+          alignItems: "center",
+          marginLeft: "auto",
+        },
+      },
+      [copyButton, exportButton],
+    );
+
     const header = el(
       "div",
       {
@@ -80,7 +127,7 @@ export const logsTab: DevtoolsTab = {
           background: palette.bgAlt,
         },
       },
-      [pills.element, search.element],
+      [pills.element, search.element, actions],
     );
 
     const feed = el("div", {

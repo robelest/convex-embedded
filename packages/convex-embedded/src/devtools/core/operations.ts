@@ -12,10 +12,16 @@ const SPAN_KIND_BY_NAME: Record<string, OperationKind> = {
   "convex-embedded.executeLocal.query": "query",
   "convex-embedded.executeLocal.mutation": "mutation",
   "convex-embedded.executeLocal.action": "action",
+  "convex-embedded.evaluateLocalQuery": "query",
   "convex-embedded.runUdf.query": "query",
   "convex-embedded.runUdf.mutation": "mutation",
   "convex-embedded.runUdf.action": "action",
 };
+
+const TOP_LEVEL_SPAN_PREFIXES = [
+  "convex-embedded.executeLocal.",
+  "convex-embedded.evaluateLocalQuery",
+];
 
 const DEFAULT_SLOWEST_COUNT = 10;
 
@@ -87,7 +93,9 @@ export function spansToOperations(
   const logsBySpan = indexLogsBySpan(logs);
   const tracesWithTopLevel = new Set<string>();
   for (const span of spans) {
-    if (span.name.startsWith("convex-embedded.executeLocal.")) {
+    if (
+      TOP_LEVEL_SPAN_PREFIXES.some((prefix) => span.name.startsWith(prefix))
+    ) {
       tracesWithTopLevel.add(span.traceId);
     }
   }

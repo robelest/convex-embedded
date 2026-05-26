@@ -202,7 +202,9 @@ export const activityTab: DevtoolsTab = {
     let paused = false;
     let frozen: OperationEntry[] = source.getSnapshot("operations");
     let selectedId: string | null = null;
+    let renderedDetailId: string | null | undefined;
     let newWhilePaused = 0;
+    const rowById = new Map<string, HTMLElement>();
 
     const root = el("div", {
       style: {
@@ -334,8 +336,13 @@ export const activityTab: DevtoolsTab = {
     host.appendChild(root);
 
     function renderDetail(): void {
-      detail.textContent = "";
       const op = frozen.find((entry) => entry.id === selectedId);
+      const nextId = op ? op.id : null;
+      if (nextId === renderedDetailId) {
+        return;
+      }
+      renderedDetailId = nextId;
+      detail.textContent = "";
       if (!op) {
         detail.appendChild(empty("Select an operation to inspect."));
         return;
@@ -445,16 +452,35 @@ export const activityTab: DevtoolsTab = {
       toolbar.setInfo(paused ? `paused · ${newWhilePaused} new` : "");
 
       const scrollTop = feed.scrollTop;
-      feed.textContent = "";
       const visible = frozen
         .filter((op) => matches(op, state))
         .slice(-MAX_ROWS)
         .reverse();
       if (visible.length === 0) {
-        feed.appendChild(empty("No operations captured yet."));
+        rowById.clear();
+        feed.replaceChildren(empty("No operations captured yet."));
         return;
       }
-      for (const op of visible) feed.appendChild(makeRow(op));
+      const seen = new Set<string>();
+      const rows: HTMLElement[] = [];
+      for (const op of visible) {
+        seen.add(op.id);
+        let row = rowById.get(op.id);
+        if (row === undefined) {
+          row = makeRow(op);
+          rowById.set(op.id, row);
+        }
+        row.style.background =
+          op.id === selectedId ? palette.bgRaised : "transparent";
+        rows.push(row);
+      }
+      for (const [id, row] of rowById) {
+        if (!seen.has(id)) {
+          rowById.delete(id);
+          row.remove();
+        }
+      }
+      feed.replaceChildren(...rows);
       feed.scrollTop = scrollTop;
     }
 

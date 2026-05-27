@@ -850,11 +850,6 @@ export class EmbeddedRuntime {
     return this.auth.peekUserIdentity();
   }
 
-  /**
-   * Read the active storage identity key.
-   *
-   * @returns The current identity partition key used by persisted local data.
-   */
   getIdentityKey(): string | null {
     return this.db.getActiveIdentityKey();
   }

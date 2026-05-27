@@ -49,10 +49,6 @@ export interface OpaqueTestAdapterOptions {
   storeBlob?: (id: string, blob: Blob) => Promise<void>;
   deleteBlob?: (id: string) => Promise<void>;
   close?: () => Promise<void>;
-
-  // Test-only helper: there is no canonical blob-listing method, so tests use
-  // this to inspect stored blobs.
-  listBlobs?: () => Promise<Array<{ id: string; blob: Blob }>>;
 }
 
 export interface QueryableTestAdapterOptions extends OpaqueTestAdapterOptions {
@@ -72,9 +68,9 @@ export type TestAdapterOptions = QueryableTestAdapterOptions & {
 };
 
 export class OpaqueTestAdapter implements StorageAdapter {
-  private _docs: Map<string, { doc: StoredDocument; tableName: string }> =
+  protected _docs: Map<string, { doc: StoredDocument; tableName: string }> =
     new Map();
-  private _blobs: Map<string, Blob> = new Map();
+  readonly blobs: Map<string, Blob> = new Map();
   private _meta: StorageMetadata | null = null;
   protected readonly opts: OpaqueTestAdapterOptions;
 
@@ -149,47 +145,32 @@ export class OpaqueTestAdapter implements StorageAdapter {
     }
   }
 
-  async hasDocuments(table: string): Promise<boolean | null> {
-    if (this.opts.hasDocuments) return this.opts.hasDocuments(table);
-    for (const entry of this._docs.values()) {
-      if (entry.tableName === table) return true;
-    }
-    return false;
-  }
-
   async clearAll(): Promise<void> {
     if (this.opts.clearAll) return this.opts.clearAll();
     this._docs.clear();
-    this._blobs.clear();
+    this.blobs.clear();
     this._meta = null;
   }
 
   async getBlob(id: string): Promise<Blob | null> {
     if (this.opts.getBlob) return this.opts.getBlob(id);
-    return this._blobs.get(id) ?? null;
+    return this.blobs.get(id) ?? null;
   }
 
   async storeBlob(id: string, blob: Blob): Promise<void> {
     if (this.opts.storeBlob) return this.opts.storeBlob(id, blob);
-    this._blobs.set(id, blob);
+    this.blobs.set(id, blob);
   }
 
   async deleteBlob(id: string): Promise<void> {
     if (this.opts.deleteBlob) return this.opts.deleteBlob(id);
-    this._blobs.delete(id);
+    this.blobs.delete(id);
   }
 
   async close(): Promise<void> {
     await this.opts.close?.();
   }
 
-  async listBlobs(): Promise<Array<{ id: string; blob: Blob }>> {
-    if (this.opts.listBlobs) return this.opts.listBlobs();
-    return Array.from(this._blobs.entries()).map(([id, blob]) => ({
-      id,
-      blob,
-    }));
-  }
 }
 
 class QueryableTestAdapter
@@ -216,6 +197,14 @@ class QueryableTestAdapter
 
   async vectorSearch(args: VectorSearchArgs): Promise<StoredDocument[] | null> {
     return (await this.qOpts.vectorSearch?.(args)) ?? null;
+  }
+
+  async hasDocuments(table: string): Promise<boolean | null> {
+    if (this.opts.hasDocuments) return this.opts.hasDocuments(table);
+    for (const entry of this._docs.values()) {
+      if (entry.tableName === table) return true;
+    }
+    return false;
   }
 }
 

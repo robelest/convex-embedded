@@ -153,7 +153,6 @@ describe("Database storage", () => {
         kind: "opaque",
         getDocuments: (table, opts) => backing.getDocuments(table, opts),
         getMetadata: () => backing.getMetadata(),
-        listBlobs: () => backing.listBlobs(),
         write: vi.fn().mockRejectedValue(new Error("disk full")),
         storeBlob: (id, blob) => backing.storeBlob(id, blob),
         deleteBlob: (id) => backing.deleteBlob(id),

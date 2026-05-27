@@ -38,10 +38,6 @@ export class DisposableScope {
     }
   }
 
-  get isClosed(): boolean {
-    return this.closed;
-  }
-
   async [Symbol.asyncDispose](): Promise<void> {
     await this.close();
   }

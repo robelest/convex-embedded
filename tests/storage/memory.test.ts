@@ -47,7 +47,7 @@ describe("ephemeralStorage", () => {
     });
 
     it("getBlobs returns an empty array", async ({ storage }) => {
-      expect(await storage.listBlobs()).toEqual([]);
+      expect(storage.blobs.size).toBe(0);
     });
   });
 
@@ -146,25 +146,23 @@ describe("ephemeralStorage", () => {
       const blob = new Blob(["test content"], { type: "text/plain" });
       await storage.storeBlob("blob-1", blob);
 
-      const blobs = await storage.listBlobs();
-      expect(blobs).toHaveLength(1);
-      expect(blobs[0]?.id).toBe("blob-1");
-      expect(await blobs[0]?.blob.text()).toBe("test content");
+      expect(storage.blobs.size).toBe(1);
+      const stored = storage.blobs.get("blob-1");
+      expect(await stored?.text()).toBe("test content");
     });
 
     it("deletes a blob", async ({ storage }) => {
       await storage.storeBlob("blob-1", new Blob(["data"]));
       await storage.deleteBlob("blob-1");
 
-      expect(await storage.listBlobs()).toEqual([]);
+      expect(storage.blobs.size).toBe(0);
     });
 
     it("stores multiple blobs independently", async ({ storage }) => {
       await storage.storeBlob("a", new Blob(["aaa"]));
       await storage.storeBlob("b", new Blob(["bbb"]));
 
-      const blobs = await storage.listBlobs();
-      expect(blobs.map((entry) => entry.id)).toEqual(
+      expect([...storage.blobs.keys()]).toEqual(
         expect.arrayContaining(["a", "b"]),
       );
     });
@@ -179,7 +177,7 @@ describe("ephemeralStorage", () => {
 
       expect(await storage.getDocuments()).toEqual([]);
       expect(await storage.getMetadata()).toBeNull();
-      expect(await storage.listBlobs()).toEqual([]);
+      expect(storage.blobs.size).toBe(0);
     });
   });
 });

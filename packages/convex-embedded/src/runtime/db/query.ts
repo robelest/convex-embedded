@@ -590,11 +590,6 @@ export class QueryEngine {
     private _tableVersion: TableVersionReader = () => null,
   ) {}
 
-  /** Update the document iterator (e.g. after a schema or docs change). */
-  setDocumentIterator(iter: DocumentIterator): void {
-    this._iterateDocs = iter;
-  }
-
   startQuery(query: SerializedQuery): QueryId {
     const id = this._nextQueryId;
     const results = this._evaluateQuery(query);

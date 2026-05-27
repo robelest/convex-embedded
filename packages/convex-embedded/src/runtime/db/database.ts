@@ -1377,13 +1377,6 @@ export class Database {
     }
   }
 
-  getFile(storageId: DocumentId): Blob | null {
-    if (this.get("_storage", storageId) === null) {
-      return null;
-    }
-    return this._blobStorage.get(storageId) ?? null;
-  }
-
   async loadFile(storageId: DocumentId): Promise<Blob | null> {
     if (this.get("_storage", storageId) === null) {
       return null;

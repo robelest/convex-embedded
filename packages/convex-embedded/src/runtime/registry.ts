@@ -184,10 +184,6 @@ export class RuntimeQueryObserverRegistry<TMeta> {
     return this._entries.get(token)?.observer;
   }
 
-  has(token: string): boolean {
-    return this._entries.has(token);
-  }
-
   values(): RuntimeQueryObserver<TMeta>[] {
     return [...this._entries.values()].map((entry) => entry.observer);
   }

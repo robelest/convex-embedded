@@ -1,5 +1,11 @@
 {
   "$schema": "https://docs.fallow.tools/schema/fallow.json",
+  "publicPackages": ["@robelest/convex-embedded"],
+  "dynamicallyLoaded": [
+    "docs/src/routes/**",
+    "demos/svelte/src/routes/**",
+    "demos/expo/app/**"
+  ],
   "ignoreDependencies": [
     "@op-engineering/op-sqlite",
     "expo-file-system",

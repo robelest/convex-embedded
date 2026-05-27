@@ -198,7 +198,6 @@ function createSqlStorage(rowsByTable: RowsByTable): {
     countDocuments,
     source: readSource,
     query: async () => null,
-    listBlobs: async () => [],
     getBlob: async () => null,
     write: async (batch: WriteBatch, opts?: WriteOptions) => {
       for (const put of batch.puts) {
@@ -313,7 +312,6 @@ describe("Construction", () => {
           return [];
         },
         getMetadata: async () => null,
-        listBlobs: async () => [],
         write: async () => undefined,
         storeBlob: async () => undefined,
         deleteBlob: async () => undefined,
@@ -402,7 +400,6 @@ describe("Blob storage", () => {
         kind: "opaque",
         getDocuments: async () => [],
         getMetadata: async () => ({ timestamp: 0, lastCreationTime: 0 }),
-        listBlobs: async () => [],
         write: async () => undefined,
         storeBlob: async () => {
           throw new Error("disk full");
@@ -742,7 +739,6 @@ describe("sql storage hydration", () => {
         countDocuments: async () => 0,
         source: async () => [],
         query: async () => [],
-        listBlobs: async () => [],
         getBlob: async () => null,
         write: async () => undefined,
         storeBlob: async () => undefined,
@@ -782,7 +778,6 @@ describe("sql storage hydration", () => {
         countDocuments: async () => 0,
         source: async () => [],
         query: async () => [],
-        listBlobs: async () => [],
         getBlob: async () => null,
         write: async () => undefined,
         storeBlob: async () => undefined,
@@ -1351,7 +1346,6 @@ describe("watchLocalQuery", () => {
         getDocuments: async (table?: string) =>
           table === undefined ? gate.promise : [],
         getMetadata: async () => null,
-        listBlobs: async () => [],
         write: async () => undefined,
         storeBlob: async () => undefined,
         deleteBlob: async () => undefined,
@@ -1444,7 +1438,6 @@ describe("watchLocalQuery", () => {
         getDocuments: async (table?: string) =>
           table === undefined ? gate.promise : [],
         getMetadata: async () => null,
-        listBlobs: async () => [],
         write: async () => undefined,
         storeBlob: async () => undefined,
         deleteBlob: async () => undefined,

@@ -67,7 +67,6 @@ function sqlAdapter(
   return mockAdapter({
     kind: "sql",
     getMetadata: async () => null,
-    listBlobs: async () => [],
     getDocument: async () => null,
     countDocuments: async () => 0,
     getDocuments: async () => [],

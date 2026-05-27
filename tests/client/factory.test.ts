@@ -87,7 +87,6 @@ describe("createEmbeddedClient bootstrap", () => {
               getDocuments: vi.fn(async () => []),
               getDocument: vi.fn(async () => null),
               getMetadata: async () => ({ timestamp: 0, lastCreationTime: 0 }),
-              listBlobs: vi.fn(async () => []),
               countDocuments: vi.fn(async () => 0),
               source: vi.fn(async (source: Source) => {
                 if (
@@ -124,7 +123,6 @@ describe("createEmbeddedClient bootstrap", () => {
               getDocuments: vi.fn(async () => []),
               getDocument: vi.fn(async () => null),
               getMetadata: async () => ({ timestamp: 0, lastCreationTime: 0 }),
-              listBlobs: vi.fn(async () => []),
               countDocuments: vi.fn(async () => 0),
               source: vi.fn(async () => []),
               query: vi.fn(async () => null),

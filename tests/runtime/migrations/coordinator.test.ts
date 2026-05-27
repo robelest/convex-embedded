@@ -42,7 +42,6 @@ function createSqlStorage(rowsByTable: Record<string, StoredDocument[]>) {
         : [...(rowsByTable[table] ?? [])],
     getDocument: async () => null,
     getMetadata: async () => ({ timestamp: 0, lastCreationTime: 0 }),
-    listBlobs: async () => [],
     countDocuments: async () => 0,
     source: readSource,
     query: async () => null,

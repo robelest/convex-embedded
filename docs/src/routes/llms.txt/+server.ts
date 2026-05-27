@@ -2,7 +2,8 @@ import { sidebar } from "$lib/config/sidebar";
 
 import type { RequestHandler } from "./$types";
 
-const prerender = true;
+/** @public — SvelteKit-recognized route option. */
+export const prerender = true;
 
 export const GET: RequestHandler = async () => {
   const files = import.meta.glob("/src/routes/**/+page.md", {

@@ -157,43 +157,39 @@ function createLiveModules(): ConvexModuleRegistry {
   } satisfies ConvexModuleRegistry;
 }
 
-export class TestConnectivityController implements ConnectivityAdapter {
-  private online: boolean;
-  private readonly onlineListeners = new Set<OnlineCallback>();
-  private readonly offlineListeners = new Set<OnlineCallback>();
+export interface TestConnectivityController extends ConnectivityAdapter {
+  setOnline(nextOnline: boolean): void;
+  close(): void;
+}
 
-  constructor(initiallyOnline = true) {
-    this.online = initiallyOnline;
-  }
+function createTestConnectivityController(
+  initiallyOnline = true,
+): TestConnectivityController {
+  let online = initiallyOnline;
+  const onlineListeners = new Set<OnlineCallback>();
+  const offlineListeners = new Set<OnlineCallback>();
 
-  isOnline(): boolean {
-    return this.online;
-  }
-
-  onOnline(callback: OnlineCallback): () => void {
-    this.onlineListeners.add(callback);
-    return () => this.onlineListeners.delete(callback);
-  }
-
-  onOffline(callback: OnlineCallback): () => void {
-    this.offlineListeners.add(callback);
-    return () => this.offlineListeners.delete(callback);
-  }
-
-  setOnline(nextOnline: boolean): void {
-    if (this.online === nextOnline) {
-      return;
-    }
-
-    this.online = nextOnline;
-    const listeners = nextOnline ? this.onlineListeners : this.offlineListeners;
-    listeners.forEach((callback) => callback());
-  }
-
-  close(): void {
-    this.onlineListeners.clear();
-    this.offlineListeners.clear();
-  }
+  return {
+    isOnline: () => online,
+    onOnline(callback: OnlineCallback): () => void {
+      onlineListeners.add(callback);
+      return () => onlineListeners.delete(callback);
+    },
+    onOffline(callback: OnlineCallback): () => void {
+      offlineListeners.add(callback);
+      return () => offlineListeners.delete(callback);
+    },
+    setOnline(nextOnline: boolean): void {
+      if (online === nextOnline) return;
+      online = nextOnline;
+      const listeners = nextOnline ? onlineListeners : offlineListeners;
+      listeners.forEach((callback) => callback());
+    },
+    close(): void {
+      onlineListeners.clear();
+      offlineListeners.clear();
+    },
+  };
 }
 
 export function createLiveClient(input: {
@@ -201,7 +197,10 @@ export function createLiveClient(input: {
   remoteUrl: string;
   connectivity?: TestConnectivityController;
   databasePath?: string;
-}) {
+}): {
+  client: ReturnType<typeof createConvexClient>;
+  connectivity: TestConnectivityController;
+} {
   Object.defineProperty(globalThis, "__convexAllowFunctionsInBrowser", {
     value: true,
     writable: true,
@@ -209,7 +208,7 @@ export function createLiveClient(input: {
   });
 
   const connectivity =
-    input.connectivity ?? new TestConnectivityController(true);
+    input.connectivity ?? createTestConnectivityController(true);
   const client = createConvexClient({
     convex: { modules: createLiveModules() },
     schema,

@@ -18,10 +18,7 @@ export interface ScopeRecord {
   teardownTimer?: ReturnType<typeof setTimeout>;
 
   bufferedSnapshot?: Array<Record<string, unknown>>;
-  flushScheduled?: boolean;
   retryCount?: number;
-  retryTimer?: ReturnType<typeof setTimeout>;
-  epoch?: number;
 }
 
 export interface SubscriptionsState {
@@ -354,13 +351,9 @@ export async function flushScope(
 ): Promise<void> {
   const record = state.scopes.get(scopeKey);
   if (!record) return;
-  if (record.bufferedSnapshot === undefined) {
-    record.flushScheduled = false;
-    return;
-  }
+  if (record.bufferedSnapshot === undefined) return;
   const snapshot = record.bufferedSnapshot;
   record.bufferedSnapshot = undefined;
-  record.flushScheduled = false;
   const { scopeArgs, tableName } = record;
 
   const projected = deps.projectRemoteSnapshot({
@@ -407,7 +400,6 @@ export async function flushScope(
         run: async () => undefined,
       });
       record.bufferedSnapshot = skipped;
-      record.flushScheduled = false;
       if (retryCount >= MAX_BUFFERED_SNAPSHOT_RETRIES) {
         log.error(
           `sync: giving up buffered snapshot ingest for "${tableName}" after ${retryCount} retries due to unresolved references`,
@@ -429,7 +421,6 @@ export async function flushScope(
     record.retryCount = 0;
   } catch (error) {
     record.bufferedSnapshot = snapshot;
-    record.flushScheduled = false;
     const retryCount = record.retryCount ?? 0;
 
     if (retryCount >= MAX_BUFFERED_SNAPSHOT_RETRIES) {
@@ -453,7 +444,7 @@ export async function flushScope(
     return;
   }
 
-  if (record.bufferedSnapshot !== undefined && !record.flushScheduled) {
+  if (record.bufferedSnapshot !== undefined && !state.flushScheduled) {
     scheduleFlush(state, deps);
   }
 }
@@ -474,12 +465,7 @@ export function clearAll(
     state.flushTimer = null;
   }
   for (const record of state.scopes.values()) {
-    if (record.retryTimer !== undefined) {
-      clearTimeout(record.retryTimer);
-      record.retryTimer = undefined;
-    }
     record.bufferedSnapshot = undefined;
-    record.flushScheduled = false;
     record.retryCount = 0;
   }
   deps.clearPullSequencing();

@@ -4,7 +4,6 @@ import * as Y from "yjs";
 import type { EmbeddedClientLike, TableConfig } from "@/client/engine";
 import type { ScopeRecord } from "@/client/engine/subscriptions";
 import type { IdMap } from "@/client/ids";
-import type { PendingQueue } from "@/client/pending/queue";
 import { materializeYjsDoc } from "@/client/schema";
 import { SystemPaths } from "@/kernel/system";
 import type { IngestDocumentsOptions } from "@/runtime/embedded";
@@ -447,7 +446,6 @@ type ReferenceValidator = Record<string, unknown> & { kind?: string };
 
 export interface PullDeps {
   tables: Record<string, TableConfig>;
-  tableSchemas: Record<string, Definition>;
   orderedTables: string[];
   getRemoteApplyOrder: () => string[];
   activeScopes: ReadonlyMap<string, ScopeRecord>;
@@ -455,9 +453,6 @@ export interface PullDeps {
     tableName: string,
     scopeArgs?: Record<string, unknown>,
   ) => string;
-  canonicalizeScopeArgs: (
-    scopeArgs?: Record<string, unknown>,
-  ) => Record<string, unknown>;
   ingestDocuments: (
     table: string,
     docs: Array<Record<string, unknown>>,
@@ -474,7 +469,6 @@ export interface PullDeps {
   idMap: IdMap;
   embedded: EmbeddedClientLike;
   remoteClient: ConvexClient;
-  pendingQueue: PendingQueue;
   maxRetries: number;
   retryDelayMs: number;
   emit: (status: EngineStatus) => void;

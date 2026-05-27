@@ -11,16 +11,15 @@
 import type { ConvexClient } from "convex/browser";
 
 import * as pull from "@/client/engine/pull";
-import type { MergeState, PullDeps, PullState } from "@/client/engine/pull";
+import type { PullDeps } from "@/client/engine/pull";
 import * as replay from "@/client/engine/replay";
-import type { ReplayDeps, ReplayState } from "@/client/engine/replay";
+import type { ReplayDeps } from "@/client/engine/replay";
 import * as scheduler from "@/client/engine/scheduler";
-import type { SchedulerDeps, SchedulerState } from "@/client/engine/scheduler";
+import type { SchedulerDeps } from "@/client/engine/scheduler";
 import * as subscriptions from "@/client/engine/subscriptions";
 import type {
   ScopeRecord,
   SubscriptionsDeps,
-  SubscriptionsState,
 } from "@/client/engine/subscriptions";
 import { IdMap, extractSchemaIdFields } from "@/client/ids";
 import { PendingQueue } from "@/client/pending/queue";
@@ -741,12 +740,6 @@ class EngineImpl implements EngineInstance {
   /** @internal */ readonly _statusEmitter!: EngineStatusEmitter;
   /** @internal */ readonly _idMap!: IdMap;
   /** @internal */ readonly _pendingQueue!: PendingQueue;
-  /** @internal */ readonly _pendingUploadQueue!: PendingUploadQueue;
-  /** @internal */ readonly _schedulerState!: SchedulerState;
-  /** @internal */ readonly _mergeState!: MergeState;
-  /** @internal */ readonly _pullState!: PullState;
-  /** @internal */ readonly _subsState!: SubscriptionsState;
-  /** @internal */ readonly _replayState!: ReplayState;
 
   start!: () => void;
   stop!: () => void;
@@ -1331,19 +1324,16 @@ class EngineImpl implements EngineInstance {
 
     const pullDeps: PullDeps = {
       tables,
-      tableSchemas,
       orderedTables,
       getRemoteApplyOrder,
       activeScopes: subsState.scopes,
       buildScopeKey,
-      canonicalizeScopeArgs,
       ingestDocuments,
       getDocumentsForTable,
       getDocumentsForScope,
       idMap,
       embedded,
       remoteClient,
-      pendingQueue,
       maxRetries,
       retryDelayMs,
       emit,
@@ -1430,12 +1420,6 @@ class EngineImpl implements EngineInstance {
 
     this._idMap = idMap;
     this._pendingQueue = pendingQueue;
-    this._pendingUploadQueue = pendingUploadQueue;
-    this._schedulerState = schedulerState;
-    this._mergeState = mergeState;
-    this._pullState = pullState;
-    this._subsState = subsState;
-    this._replayState = replayState;
 
     this.start = () => {
       if (started) return;

@@ -16,28 +16,33 @@ export interface ActiveQuery {
 /**
  * Represents a single connected client session.
  */
-export class Session {
+export interface Session {
   readonly id: string;
   /** Active query subscriptions keyed by queryToken. */
-  activeQueries: Map<string, ActiveQuery> = new Map();
+  activeQueries: Map<string, ActiveQuery>;
   /** Current auth identity, or `null` if unauthenticated. */
-  identity: unknown = null;
+  identity: unknown;
   /** Last state version sent to this client. */
   lastStateVersion: StateVersion;
-
-  constructor(id: string) {
-    this.id = id;
-    this.lastStateVersion = { querySet: 0, ts: 0, identity: 0 };
-  }
-
   /** Unsubscribe all active queries and clear the map. */
-  cleanup(): void {
-    for (const query of this.activeQueries.values()) {
-      query.unsubscribe();
-    }
-    this.activeQueries.clear();
-    this.identity = null;
-  }
+  cleanup(): void;
+}
+
+export function createSession(id: string): Session {
+  const session: Session = {
+    id,
+    activeQueries: new Map(),
+    identity: null,
+    lastStateVersion: { querySet: 0, ts: 0, identity: 0 },
+    cleanup() {
+      for (const query of session.activeQueries.values()) {
+        query.unsubscribe();
+      }
+      session.activeQueries.clear();
+      session.identity = null;
+    },
+  };
+  return session;
 }
 
 /**
@@ -59,7 +64,7 @@ export class SessionManager {
       this._counter += 1;
       id = `session_${this._counter}`;
     }
-    this._sessions.set(id, new Session(id));
+    this._sessions.set(id, createSession(id));
     return id;
   }
 

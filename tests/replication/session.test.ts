@@ -1,24 +1,28 @@
-import { Session, SessionManager } from "@embedded/replication/session";
+import {
+  createSession,
+  SessionManager,
+  type Session,
+} from "@embedded/replication/session";
 import { describe, expect, it, vi } from "@tests/testkit";
 
 describe.concurrent("Session", () => {
   describe("constructor", () => {
     it("stores the provided id", () => {
-      expect(new Session("abc-123").id).toBe("abc-123");
+      expect(createSession("abc-123").id).toBe("abc-123");
     });
 
     it("initializes activeQueries as an empty map", () => {
-      const session = new Session("s1");
+      const session = createSession("s1");
       expect(session.activeQueries).toBeInstanceOf(Map);
       expect(session.activeQueries.size).toBe(0);
     });
 
     it("initializes identity as null", () => {
-      expect(new Session("s1").identity).toBeNull();
+      expect(createSession("s1").identity).toBeNull();
     });
 
     it("initializes lastStateVersion with zeroed-out values", () => {
-      expect(new Session("s1").lastStateVersion).toEqual({
+      expect(createSession("s1").lastStateVersion).toEqual({
         querySet: 0,
         ts: 0,
         identity: 0,
@@ -28,7 +32,7 @@ describe.concurrent("Session", () => {
 
   describe("cleanup", () => {
     it("calls unsubscribe on all active queries", () => {
-      const session = new Session("s1");
+      const session = createSession("s1");
       const unsub1 = vi.fn();
       const unsub2 = vi.fn();
       session.activeQueries.set("q1", {
@@ -47,7 +51,7 @@ describe.concurrent("Session", () => {
     });
 
     it("clears the activeQueries map", () => {
-      const session = new Session("s1");
+      const session = createSession("s1");
       session.activeQueries.set("q1", {
         tableName: "users",
         unsubscribe: vi.fn(),
@@ -59,7 +63,7 @@ describe.concurrent("Session", () => {
     });
 
     it("resets identity to null", () => {
-      const session = new Session("s1");
+      const session = createSession("s1");
       session.identity = { subject: "user1" };
 
       session.cleanup();
@@ -68,7 +72,7 @@ describe.concurrent("Session", () => {
     });
 
     it("is safe to call when no active queries exist", () => {
-      expect(() => new Session("s1").cleanup()).not.toThrow();
+      expect(() => createSession("s1").cleanup()).not.toThrow();
     });
   });
 });
@@ -96,8 +100,8 @@ describe.concurrent("SessionManager", () => {
 
       const session = manager.getSession(id);
 
-      expect(session).toBeInstanceOf(Session);
       expect(session.id).toBe(id);
+      expect(session.activeQueries).toBeInstanceOf(Map);
     });
 
     it("returns the same Session instance on repeated calls", () => {

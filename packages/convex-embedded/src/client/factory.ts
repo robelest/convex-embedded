@@ -39,7 +39,7 @@ import { STORAGE_METADATA_STORE_MIGRATIONS } from "@/kernel/syscalls";
 import { createAmbientCryptoProvider } from "@/runtime/crypto";
 import { EmbeddedRuntime } from "@/runtime/embedded";
 import type { EmbeddedRuntimeOptions } from "@/runtime/embedded";
-import { LoadCoordinator } from "@/runtime/load";
+import { createLoadCoordinator } from "@/runtime/load";
 import {
   PENDING_STORE_MIGRATIONS,
   PENDING_UPLOADS_STORE_MIGRATIONS,
@@ -277,7 +277,7 @@ export function createEmbeddedClient(input: {
     getIdentityKey: options.auth?.getIdentityKey,
   };
 
-  const load = new LoadCoordinator({
+  const load = createLoadCoordinator({
     runtime,
     platform,
     name: dbName,

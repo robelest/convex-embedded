@@ -84,55 +84,48 @@ export async function attachPlatformStorage(input: {
   );
 }
 
-export class LoadCoordinator {
+export interface LoadCoordinator {
   readonly identityReady: Promise<string | null>;
   readonly ready: Promise<void>;
   readonly storageReady: Promise<void>;
+}
 
-  constructor(private readonly input: LoadCoordinatorInput) {
-    this.storageReady = attachPlatformStorage({
-      runtime: this.input.runtime,
-      platform: this.input.platform,
-      name: this.input.name,
-    });
+export function createLoadCoordinator(
+  input: LoadCoordinatorInput,
+): LoadCoordinator {
+  const storageReady = attachPlatformStorage({
+    runtime: input.runtime,
+    platform: input.platform,
+    name: input.name,
+  });
 
-    this.identityReady = this.storageReady.then(() =>
-      this.initializeIdentity(),
-    );
-
-    const loadReady = this.runLoadPass().catch((error) => {
-      this.input.onLoadError(error);
-    });
-
-    this.ready = this.bindReadiness(loadReady);
-  }
-
-  private initializeIdentity(): Promise<string | null> {
+  function initializeIdentity(): Promise<string | null> {
     return withSpan("convex-embedded.initializeIdentity", async () => {
       try {
-        const identityKey = await this.input.readActiveIdentityKey();
-        const resolvedIdentityKey =
-          identityKey ?? this.input.fallbackIdentityKey;
-        this.input.runtime.setActiveIdentityKey(resolvedIdentityKey);
-        this.input.setActiveIdentityKey(resolvedIdentityKey);
+        const identityKey = await input.readActiveIdentityKey();
+        const resolvedIdentityKey = identityKey ?? input.fallbackIdentityKey;
+        input.runtime.setActiveIdentityKey(resolvedIdentityKey);
+        input.setActiveIdentityKey(resolvedIdentityKey);
         return resolvedIdentityKey;
       } catch (error) {
-        this.input.runtime.setActiveIdentityKey(null);
-        this.input.setActiveIdentityKey(null);
-        this.input.onIdentityError(error);
+        input.runtime.setActiveIdentityKey(null);
+        input.setActiveIdentityKey(null);
+        input.onIdentityError(error);
         return null;
       }
     });
   }
 
-  private runLoadPass(): Promise<void> {
+  const identityReady = storageReady.then(() => initializeIdentity());
+
+  async function runLoadPass(): Promise<void> {
     return withSpan("convex-embedded.runLoadPass", async (span) => {
       const started = now();
-      const identityKey = await this.identityReady;
+      const identityKey = await identityReady;
 
       let hasPendingEntries = false;
       await withSpan("convex-embedded.checkPendingReplay", async () => {
-        const qid = this.input.runtime.db.startQueryAsync({
+        const qid = input.runtime.db.startQueryAsync({
           source: {
             type: "IndexRange",
             indexName: "_resolve_pending.by_identity_key_and_creation_time",
@@ -144,28 +137,28 @@ export class LoadCoordinator {
           operators: [{ limit: 1 }],
         });
         try {
-          const next = await this.input.runtime.db.queryNextAsync(qid);
+          const next = await input.runtime.db.queryNextAsync(qid);
           hasPendingEntries = !next.done;
         } finally {
-          this.input.runtime.db.queryCleanup(qid);
+          input.runtime.db.queryCleanup(qid);
         }
       });
 
       if (hasPendingEntries) {
         await withSpan("convex-embedded.loadReplayMetadata", () =>
-          this.input.loadReplayMetadata(),
+          input.loadReplayMetadata(),
         );
       }
 
       const replayReady = now();
 
       await withSpan("convex-embedded.runLocalMigrations", () =>
-        runLocalMigrations(this.input.runtime, {
+        runLocalMigrations(input.runtime, {
           identityKey,
-          tableDefinitions: this.input.tableDefinitions,
-          replayMetadata: this.input.replayMetadata,
-          storeManifests: this.input.storeManifests,
-          withMigrationLock: this.input.withMigrationLock,
+          tableDefinitions: input.tableDefinitions,
+          replayMetadata: input.replayMetadata,
+          storeManifests: input.storeManifests,
+          withMigrationLock: input.withMigrationLock,
         }),
       );
 
@@ -176,7 +169,7 @@ export class LoadCoordinator {
         "convex.load.migrations_ms": +(ended - replayReady).toFixed(1),
         "convex.load.total_ms": +(ended - started).toFixed(1),
       });
-      this.input.onTiming({
+      input.onTiming({
         replayMetadataMs: replayReady - started,
         migrationsMs: ended - replayReady,
         totalMs: ended - started,
@@ -184,11 +177,15 @@ export class LoadCoordinator {
     });
   }
 
-  private bindReadiness(loadReady: Promise<void>): Promise<void> {
-    return loadReady.then(() =>
-      this.input.runtime.refreshLocalQueryWatches().catch((error) => {
-        this.input.onRefreshError(error);
-      }),
-    );
-  }
+  const loadReady = runLoadPass().catch((error) => {
+    input.onLoadError(error);
+  });
+
+  const ready = loadReady.then(() =>
+    input.runtime.refreshLocalQueryWatches().catch((error) => {
+      input.onRefreshError(error);
+    }),
+  );
+
+  return { identityReady, ready, storageReady };
 }

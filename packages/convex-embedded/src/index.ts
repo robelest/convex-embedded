@@ -71,7 +71,10 @@ export {
 
 export type { SqliteDriver, SqliteStatement } from "@/storage/sqlite/driver";
 
-export { SubscriptionManager } from "@/replication/subscriptions";
+export {
+  createSubscriptionManager,
+  type SubscriptionManager,
+} from "@/replication/subscriptions";
 
 export { SystemPaths } from "@/kernel/system";
 

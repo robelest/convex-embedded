@@ -1,5 +1,5 @@
 import { UdfExecutor } from "@embedded/kernel/udf";
-import { SubscriptionManager } from "@embedded/replication/subscriptions";
+import { createSubscriptionManager, type SubscriptionManager } from "@embedded/replication/subscriptions";
 import { createAmbientCryptoProvider } from "@embedded/runtime/crypto";
 import { Database } from "@embedded/runtime/db/database";
 import type { DocumentId } from "@embedded/runtime/db/types";
@@ -86,7 +86,7 @@ async function seedSystemRuntime(): Promise<EmbeddedRuntime> {
 function buildSubscriptionManager(
   subscriptionCount: number,
 ): SubscriptionManager {
-  const manager = new SubscriptionManager();
+  const manager = createSubscriptionManager();
   for (let index = 0; index < subscriptionCount; index += 1) {
     manager.subscribe(
       `query-${index}`,

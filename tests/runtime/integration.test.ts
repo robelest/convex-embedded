@@ -1,4 +1,4 @@
-import { SubscriptionManager } from "@embedded/replication/subscriptions";
+import { createSubscriptionManager } from "@embedded/replication/subscriptions";
 /**
  * Integration tests for the embedded Convex runtime.
  *
@@ -1009,7 +1009,7 @@ describe("Integration: MVCC Timestamps", () => {
 describe("Integration: Subscription Invalidation", () => {
   it("mutation commit triggers subscription callback for written tables", () => {
     const db = new Database(null);
-    const subs = new SubscriptionManager();
+    const subs = createSubscriptionManager();
 
     const messagesCallback = vi.fn();
     const usersCallback = vi.fn();
@@ -1032,7 +1032,7 @@ describe("Integration: Subscription Invalidation", () => {
 
   it("mutation writing multiple tables invalidates all matching subs", () => {
     const db = new Database(null);
-    const subs = new SubscriptionManager();
+    const subs = createSubscriptionManager();
 
     const cb1 = vi.fn();
     const cb2 = vi.fn();
@@ -1052,7 +1052,7 @@ describe("Integration: Subscription Invalidation", () => {
 
   it("rollback does not produce tablesWritten (no invalidation)", () => {
     const db = new Database(null);
-    const subs = new SubscriptionManager();
+    const subs = createSubscriptionManager();
     const cb = vi.fn();
     subs.subscribe("q1", new Set(["tasks"]), cb);
 
@@ -1064,7 +1064,7 @@ describe("Integration: Subscription Invalidation", () => {
   });
 
   it("unsubscribe prevents callback after invalidation", () => {
-    const subs = new SubscriptionManager();
+    const subs = createSubscriptionManager();
     const cb = vi.fn();
 
     const unsub = subs.subscribe("q1", new Set(["tasks"]), cb);
@@ -1075,7 +1075,7 @@ describe("Integration: Subscription Invalidation", () => {
   });
 
   it("clear removes all subscriptions", () => {
-    const subs = new SubscriptionManager();
+    const subs = createSubscriptionManager();
     const cb1 = vi.fn();
     const cb2 = vi.fn();
 

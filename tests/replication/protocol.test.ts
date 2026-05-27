@@ -6,7 +6,10 @@ import type {
   ServerMessage,
 } from "@embedded/replication/protocol";
 import { ReplicationProtocolHandler } from "@embedded/replication/protocol";
-import { SubscriptionManager } from "@embedded/replication/subscriptions";
+import {
+  createSubscriptionManager,
+  type SubscriptionManager,
+} from "@embedded/replication/subscriptions";
 import { RuntimeProtocolQueryRegistry } from "@embedded/runtime/registry";
 import { flushMicrotasks } from "@tests/helpers/time";
 import { describe, expect, it, vi, type Mock } from "@tests/testkit";
@@ -56,7 +59,7 @@ function createMocks(): Mocks {
     runMutation: vi.fn().mockResolvedValue("mutationResult"),
     runAction: vi.fn().mockResolvedValue("actionResult"),
   };
-  const subscriptions = new SubscriptionManager();
+  const subscriptions = createSubscriptionManager();
   const queryStore = new RuntimeProtocolQueryRegistry(subscriptions);
   const auth: AuthMock = {
     verifyToken: vi.fn<ProtocolAuth["verifyToken"]>().mockResolvedValue({

@@ -1,4 +1,4 @@
-import { SubscriptionManager } from "@embedded/replication/subscriptions";
+import { createSubscriptionManager } from "@embedded/replication/subscriptions";
 import type { DocumentId, StoredDocument } from "@embedded/runtime/db/types";
 import type { QueryDependency } from "@embedded/runtime/db/types";
 import { describe, expect, it, vi } from "@tests/testkit";
@@ -18,7 +18,7 @@ function row(id: string, fields: Record<string, unknown> = {}): StoredDocument {
 describe.concurrent("SubscriptionManager", () => {
   describe("subscribe + invalidate", () => {
     it("fires callback when a subscribed table is written", () => {
-      const manager = new SubscriptionManager();
+      const manager = createSubscriptionManager();
       const cb = vi.fn();
 
       manager.subscribe("q1", new Set(["users"]), cb);
@@ -30,7 +30,7 @@ describe.concurrent("SubscriptionManager", () => {
 
   describe("no false positives", () => {
     it("does NOT fire callback when an unrelated table is written", () => {
-      const manager = new SubscriptionManager();
+      const manager = createSubscriptionManager();
       const cb = vi.fn();
 
       manager.subscribe("q1", new Set(["users"]), cb);
@@ -42,7 +42,7 @@ describe.concurrent("SubscriptionManager", () => {
 
   describe("multiple subscriptions", () => {
     it("each fires independently when their tables are written", () => {
-      const manager = new SubscriptionManager();
+      const manager = createSubscriptionManager();
       const cbUsers = vi.fn();
       const cbPosts = vi.fn();
 
@@ -59,7 +59,7 @@ describe.concurrent("SubscriptionManager", () => {
     });
 
     it("fires both when both tables are written at once", () => {
-      const manager = new SubscriptionManager();
+      const manager = createSubscriptionManager();
       const cbUsers = vi.fn();
       const cbPosts = vi.fn();
 
@@ -75,7 +75,7 @@ describe.concurrent("SubscriptionManager", () => {
 
   describe("dependency-aware invalidation", () => {
     it("does not fire an index-range subscription for a non-matching change", () => {
-      const manager = new SubscriptionManager();
+      const manager = createSubscriptionManager();
       const cb = vi.fn();
       const dependencies: QueryDependency[] = [
         {
@@ -100,7 +100,7 @@ describe.concurrent("SubscriptionManager", () => {
     });
 
     it("fires an index-range subscription when a change enters the range", () => {
-      const manager = new SubscriptionManager();
+      const manager = createSubscriptionManager();
       const cb = vi.fn();
       const dependencies: QueryDependency[] = [
         {
@@ -125,7 +125,7 @@ describe.concurrent("SubscriptionManager", () => {
     });
 
     it("matches undefined range values through the Convex undefined sentinel", () => {
-      const manager = new SubscriptionManager();
+      const manager = createSubscriptionManager();
       const cb = vi.fn();
       const dependencies: QueryDependency[] = [
         {
@@ -152,7 +152,7 @@ describe.concurrent("SubscriptionManager", () => {
     });
 
     it("handles bigint equality keys without throwing during invalidation", () => {
-      const manager = new SubscriptionManager();
+      const manager = createSubscriptionManager();
       const cb = vi.fn();
       const dependencies: QueryDependency[] = [
         {
@@ -177,7 +177,7 @@ describe.concurrent("SubscriptionManager", () => {
     });
 
     it("falls back to table invalidation when a change lacks precise row data", () => {
-      const manager = new SubscriptionManager();
+      const manager = createSubscriptionManager();
       const cb = vi.fn();
       const dependencies: QueryDependency[] = [
         {
@@ -198,7 +198,7 @@ describe.concurrent("SubscriptionManager", () => {
 
   describe("multi-table subscription", () => {
     it("fires when ANY of its tables is written", () => {
-      const manager = new SubscriptionManager();
+      const manager = createSubscriptionManager();
       const cb = vi.fn();
 
       manager.subscribe("q1", new Set(["users", "posts", "comments"]), cb);
@@ -213,7 +213,7 @@ describe.concurrent("SubscriptionManager", () => {
 
   describe("fires at most once per invalidation", () => {
     it("fires only once even if multiple subscribed tables overlap with written set", () => {
-      const manager = new SubscriptionManager();
+      const manager = createSubscriptionManager();
       const cb = vi.fn();
 
       manager.subscribe("q1", new Set(["users", "posts"]), cb);
@@ -223,7 +223,7 @@ describe.concurrent("SubscriptionManager", () => {
     });
 
     it("fires once when written set is a superset of subscribed tables", () => {
-      const manager = new SubscriptionManager();
+      const manager = createSubscriptionManager();
       const cb = vi.fn();
 
       manager.subscribe("q1", new Set(["users", "posts"]), cb);
@@ -235,7 +235,7 @@ describe.concurrent("SubscriptionManager", () => {
 
   describe("unsubscribe", () => {
     it("returned function removes the subscription so callback no longer fires", () => {
-      const manager = new SubscriptionManager();
+      const manager = createSubscriptionManager();
       const cb = vi.fn();
       const unsubscribe = manager.subscribe("q1", new Set(["users"]), cb);
 
@@ -248,7 +248,7 @@ describe.concurrent("SubscriptionManager", () => {
     });
 
     it("unsubscribing one does not affect others", () => {
-      const manager = new SubscriptionManager();
+      const manager = createSubscriptionManager();
       const cb1 = vi.fn();
       const cb2 = vi.fn();
       const unsub1 = manager.subscribe("q1", new Set(["users"]), cb1);
@@ -264,7 +264,7 @@ describe.concurrent("SubscriptionManager", () => {
 
   describe("clear", () => {
     it("removes all subscriptions", () => {
-      const manager = new SubscriptionManager();
+      const manager = createSubscriptionManager();
       const cb1 = vi.fn();
       const cb2 = vi.fn();
       manager.subscribe("q1", new Set(["users"]), cb1);
@@ -280,7 +280,7 @@ describe.concurrent("SubscriptionManager", () => {
 
   describe("subscribe with same token", () => {
     it("replaces previous subscription", () => {
-      const manager = new SubscriptionManager();
+      const manager = createSubscriptionManager();
       const cb1 = vi.fn();
       const cb2 = vi.fn();
       manager.subscribe("q1", new Set(["users"]), cb1);
@@ -296,7 +296,7 @@ describe.concurrent("SubscriptionManager", () => {
     });
 
     it("old unsubscribe function still removes the token", () => {
-      const manager = new SubscriptionManager();
+      const manager = createSubscriptionManager();
       const cb1 = vi.fn();
       const cb2 = vi.fn();
       const unsub1 = manager.subscribe("q1", new Set(["users"]), cb1);

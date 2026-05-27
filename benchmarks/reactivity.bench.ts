@@ -1,6 +1,6 @@
 import type { ProtocolExecutor } from "@embedded/replication/protocol";
 import { ReplicationProtocolHandler } from "@embedded/replication/protocol";
-import { SubscriptionManager } from "@embedded/replication/subscriptions";
+import { createSubscriptionManager, type SubscriptionManager } from "@embedded/replication/subscriptions";
 import type { DocumentId } from "@embedded/runtime/db/types";
 import { RuntimeProtocolQueryRegistry } from "@embedded/runtime/registry";
 import { bench, describe } from "@tests/testkit";
@@ -45,7 +45,7 @@ function createExecutor(): ProtocolExecutor {
 async function seedProtocol(
   queryCount: number,
 ): Promise<ReplicationProtocolHandler> {
-  const subscriptions = new SubscriptionManager();
+  const subscriptions = createSubscriptionManager();
   const protocol = new ReplicationProtocolHandler({
     executor: createExecutor(),
     queryStore: new RuntimeProtocolQueryRegistry(subscriptions),
@@ -86,7 +86,7 @@ const TARGETED_CHANGE = [
 const protocol10k = await seedProtocol(10_000);
 
 function buildSubscriptionManager(count: number): SubscriptionManager {
-  const manager = new SubscriptionManager();
+  const manager = createSubscriptionManager();
   for (let index = 0; index < count; index += 1) {
     const tableName = index % 2 === 0 ? "tasks" : "messages";
     manager.subscribe(

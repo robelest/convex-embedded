@@ -36,7 +36,10 @@ import type {
   ServerMessage,
 } from "@/replication/protocol";
 import { createSessionManager, type SessionManager } from "@/replication/session";
-import { SubscriptionManager } from "@/replication/subscriptions";
+import {
+  createSubscriptionManager,
+  type SubscriptionManager,
+} from "@/replication/subscriptions";
 import {
   blobShaBase64,
   createAmbientCryptoProvider,
@@ -2762,7 +2765,7 @@ export class EmbeddedRuntime {
     const db = new Database(schema, options.storage, crypto);
     const moduleLoader = new ModuleLoader(options.convex.modules);
     const transactionManager = createTransactionManager();
-    const subscriptions = new SubscriptionManager();
+    const subscriptions = createSubscriptionManager();
     const tableVersionGetter = (tableName: string): number =>
       db.getTableVersion(tableName);
     const protocolQueryObservers =

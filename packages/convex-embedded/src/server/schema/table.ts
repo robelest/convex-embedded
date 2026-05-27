@@ -191,7 +191,7 @@ export type EmbeddedTable<
     vectorIndex: EmbeddedVectorIndexFn<TableName, Shape>;
   };
 
-interface EmbeddedMutationDef {
+export interface EmbeddedMutationDef {
   args?: PropertyValidators | GenericValidator;
   returns?: PropertyValidators | GenericValidator;
   handler: (

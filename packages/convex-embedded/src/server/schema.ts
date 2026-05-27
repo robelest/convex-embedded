@@ -85,6 +85,7 @@ export {
   getTableRegistry,
   typedTable,
   type EmbeddedMutationBuilder,
+  type EmbeddedMutationDef,
   type EmbeddedQueryBuilder,
   type EmbeddedTable,
   type EmbeddedTableHandle,

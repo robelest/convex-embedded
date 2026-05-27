@@ -3931,9 +3931,7 @@ export function createDatabase(
   );
 
   return {
-    get queryEngine() {
-      return queryEngine;
-    },
+    queryEngine,
     get timestamp() {
       return timestamp;
     },
@@ -3987,12 +3985,8 @@ export function createDatabase(
     getIndexedDocuments,
     vectorSearch,
     vectorSearchAsync,
-    get _indexDocuments() {
-      return indexDocuments;
-    },
-    get _idTableMap() {
-      return idTableMap;
-    },
+    _indexDocuments: indexDocuments,
+    _idTableMap: idTableMap,
     _addWriteRaw: addWriteRaw,
   };
 }

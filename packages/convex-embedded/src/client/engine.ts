@@ -1603,12 +1603,8 @@ export function createEngine(config: EngineConfig): EngineInstance {
     on: (_event, listener) => statusEmitter.on(listener),
     getStatus: () => statusEmitter.get(),
     pendingCount: () => pendingQueue.length,
-    get idMap() {
-      return idMap;
-    },
-    get pendingQueue() {
-      return pendingQueue;
-    },
+    idMap,
+    pendingQueue,
     async [Symbol.asyncDispose]() {
       stop();
     },

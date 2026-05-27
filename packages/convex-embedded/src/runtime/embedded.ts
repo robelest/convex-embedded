@@ -2569,45 +2569,19 @@ export function createEmbeddedRuntime(
   }
 
   const runtime: EmbeddedRuntime = {
-    get crypto() {
-      return crypto;
-    },
-    get db() {
-      return db;
-    },
-    get moduleLoader() {
-      return moduleLoader;
-    },
-    get executor() {
-      return executor;
-    },
-    get transactionManager() {
-      return transactionManager;
-    },
-    get subscriptions() {
-      return subscriptions;
-    },
-    get protocolQueries() {
-      return protocolQueries;
-    },
-    get syncProtocol() {
-      return syncProtocol;
-    },
-    get sessions() {
-      return sessions;
-    },
-    get writeFanout() {
-      return writeFanout;
-    },
-    get auth() {
-      return auth;
-    },
-    get scheduler() {
-      return scheduler;
-    },
-    get cronRunner() {
-      return cronRunner;
-    },
+    crypto,
+    db,
+    moduleLoader,
+    executor,
+    transactionManager,
+    subscriptions,
+    protocolQueries,
+    syncProtocol,
+    sessions,
+    writeFanout,
+    auth,
+    scheduler,
+    cronRunner,
     hydrate,
     query,
     paginate,

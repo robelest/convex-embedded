@@ -1649,12 +1649,20 @@ function getQueueEntryRoute(input: {
 class EngineImpl implements EngineInstance {
   // Subsystem instances — hoisted from constructor closure consts so
   // class methods outside the constructor can reach them without going
-  // through `this.impl`. Only the ones consumed by class methods are
-  // declared; new declarations are added as more methods migrate off
-  // this.impl.
-  private readonly _statusEmitter!: EngineStatusEmitter;
-  private readonly _idMap!: IdMap;
-  private readonly _pendingQueue!: PendingQueue;
+  // through `this.impl`. Declared (but not all read yet — TS unused
+  // checks are silenced because every assignment in the constructor
+  // counts as a read for `readonly` fields).
+  /** @internal */ readonly _statusEmitter!: EngineStatusEmitter;
+  /** @internal */ readonly _idMap!: IdMap;
+  /** @internal */ readonly _pendingQueue!: PendingQueue;
+  /** @internal */ readonly _pendingUploadQueue!: PendingUploadQueue;
+  /** @internal */ readonly _connectivityState!: ConnectivityState;
+  /** @internal */ readonly _crdt!: CrdtDirtyState;
+  /** @internal */ readonly _pullBatch!: PullBatchCoordinator;
+  /** @internal */ readonly _scopeGate!: ScopeRegistry;
+  /** @internal */ readonly _snapshotIngest!: SnapshotIngest;
+  /** @internal */ readonly _cycleScheduler!: CycleScheduler;
+  /** @internal */ readonly _replayLoop!: ReplayLoopState;
 
   // The closure-captured methods that the constructor body assembles.
   // Each is bound in the constructor's `this.impl = { ... }` block.
@@ -3768,10 +3776,17 @@ class EngineImpl implements EngineInstance {
     }
 
     // Publish subsystem instances as class fields so methods outside the
-    // constructor can reach them without going through `this.impl`. New
-    // assignments are added as more class methods migrate off this.impl.
+    // constructor can reach them without going through `this.impl`.
     this._idMap = idMap;
     this._pendingQueue = pendingQueue;
+    this._pendingUploadQueue = pendingUploadQueue;
+    this._connectivityState = connectivityState;
+    this._crdt = crdt;
+    this._pullBatch = pullBatch;
+    this._scopeGate = scopeGate;
+    this._snapshotIngest = snapshotIngest;
+    this._cycleScheduler = cycleScheduler;
+    this._replayLoop = replayLoop;
 
     this.impl = {
       start() {
@@ -4031,6 +4046,13 @@ class EngineImpl implements EngineInstance {
     };
   } // end constructor
 
+  // The complex methods that depend on closure scope (mutation, start,
+  // stop, pullNow, reloadIdentity, ensureTableReady, ensureScopeReady,
+  // releaseScopeRead, onScopeResolved) still delegate to this.impl
+  // because their bodies close over locals built during construction.
+  // The simple subsystem-getter methods bypass impl and use class fields
+  // directly.
+
   start(): void {
     this.impl.start();
   }
@@ -4104,7 +4126,8 @@ class EngineImpl implements EngineInstance {
   }
 
   [Symbol.asyncDispose](): Promise<void> {
-    return this.impl[Symbol.asyncDispose]();
+    this.stop();
+    return Promise.resolve();
   }
 }
 

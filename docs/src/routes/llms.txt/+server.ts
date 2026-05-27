@@ -2,7 +2,7 @@ import { sidebar } from "$lib/config/sidebar";
 
 import type { RequestHandler } from "./$types";
 
-export const prerender = true;
+const prerender = true;
 
 export const GET: RequestHandler = async () => {
   const files = import.meta.glob("/src/routes/**/+page.md", {

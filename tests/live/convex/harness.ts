@@ -137,7 +137,7 @@ export async function describeLiveClientState(
   };
 }
 
-export async function logLiveClientState(
+async function logLiveClientState(
   label: string,
   client: Awaited<ReturnType<typeof createLiveClient>>["client"],
 ): Promise<void> {
@@ -146,7 +146,7 @@ export async function logLiveClientState(
   );
 }
 
-export function createLiveModules(): ConvexModuleRegistry {
+function createLiveModules(): ConvexModuleRegistry {
   return {
     "_generated/api": () => import("../../../convex/_generated/api.js"),
     "_generated/server": () => import("../../../convex/_generated/server.js"),
@@ -231,7 +231,7 @@ export function createDirectRemoteClient(remoteUrl: string) {
   return new ConvexHttpClient(remoteUrl);
 }
 
-export async function waitForRemoteStatus(
+async function waitForRemoteStatus(
   client: Parameters<typeof getRemoteState>[0],
   predicate: (status: ReturnType<typeof getRemoteState>) => boolean,
   timeoutMs = 20_000,

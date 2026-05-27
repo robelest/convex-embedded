@@ -90,28 +90,6 @@ export function createReplayState(): ReplayState {
   };
 }
 
-export function inFlight(state: ReplayState): Promise<Set<string>> | null {
-  return state.inFlight;
-}
-
-export function setInFlight(
-  state: ReplayState,
-  promise: Promise<Set<string>> | null,
-): void {
-  state.inFlight = promise;
-}
-
-export function requestedWhileActive(state: ReplayState): boolean {
-  return state.requestedWhileActive;
-}
-
-export function setRequestedWhileActive(
-  state: ReplayState,
-  requested: boolean,
-): void {
-  state.requestedWhileActive = requested;
-}
-
 export function activeEntry(state: ReplayState): PendingEntry | null {
   return state.activeEntry;
 }
@@ -131,7 +109,7 @@ function sweepRecent(state: ReplayState, now: number): void {
   }
 }
 
-export function addRecentlyReplayed(state: ReplayState, id: string): void {
+function addRecentlyReplayed(state: ReplayState, id: string): void {
   const now = Date.now();
   sweepRecent(state, now);
   state.recentlyReplayedIds.set(id, now);

@@ -20,7 +20,7 @@ import type { SchemaOp } from "@/storage/adapter";
 
 const log = createLogger("migration");
 
-export const VERSION_TABLE = "_resolve_schema_versions";
+const VERSION_TABLE = "_resolve_schema_versions";
 
 export interface SystemIndexRange {
   fieldPath: string;

@@ -61,11 +61,7 @@ export function isOnline(state: SchedulerState): boolean {
   return state.online;
 }
 
-export function offlineTransitionsSinceBoot(state: SchedulerState): number {
-  return state.offlineTransitions;
-}
-
-export function markOnline(state: SchedulerState): boolean {
+function markOnline(state: SchedulerState): boolean {
   const wasReconnect = state.cameOnlineAfterOffline;
   if (wasReconnect) {
     state.offlineTransitions += 1;

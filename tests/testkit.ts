@@ -1,3 +1,3 @@
 export * from "vitest";
 
-export { it, test, type TestFixtures } from "./helpers/fixtures";
+export { it, type TestFixtures } from "./helpers/fixtures";

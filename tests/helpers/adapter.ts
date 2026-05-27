@@ -192,7 +192,7 @@ export class OpaqueTestAdapter implements StorageAdapter {
   }
 }
 
-export class QueryableTestAdapter
+class QueryableTestAdapter
   extends OpaqueTestAdapter
   implements QueryableAdapter
 {

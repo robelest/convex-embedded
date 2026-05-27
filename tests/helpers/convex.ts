@@ -6,7 +6,7 @@ import { convexTest } from "convex-test";
 import type { GenericSchema, SchemaDefinition } from "convex/server";
 import * as Y from "yjs";
 
-export const appModules = {
+const appModules = {
   "_generated/api": () => import("../../convex/_generated/api.js"),
   "_generated/server": () => import("../../convex/_generated/server.js"),
   schema: () => import("../../convex/schema"),
@@ -35,7 +35,7 @@ export function toArrayBuffer(data: Uint8Array): ArrayBuffer {
   return buffer;
 }
 
-export function emptyStateVector(): ArrayBuffer {
+function emptyStateVector(): ArrayBuffer {
   const doc = new Y.Doc();
   return toArrayBuffer(Y.encodeStateVector(doc));
 }
@@ -45,7 +45,7 @@ interface RegisterEntry {
   timestamp?: number;
 }
 
-export function readRegister(fields: Y.Map<unknown>, key: string): unknown {
+function readRegister(fields: Y.Map<unknown>, key: string): unknown {
   const registerMap = fields.get(key);
   if (!(registerMap instanceof Y.Map)) {
     return undefined;

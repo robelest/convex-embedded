@@ -46,7 +46,7 @@ export const statusColors = {
   cancelled: colors.warm[300],
 } as const;
 
-export const roleColors = {
+const roleColors = {
   admin: colors.accent[500],
   member: colors.warm[500],
   viewer: colors.warm[400],

@@ -77,7 +77,7 @@ export function matchesScopeArgs(
  * index descriptor + the fields that will be equality-constrained, or
  * `null` if no index matches.
  */
-export function pickIndex(
+function pickIndex(
   spec: PullSpec,
   scopeArgs: Record<string, unknown>,
 ): { indexName: string; fields: readonly string[] } | null {

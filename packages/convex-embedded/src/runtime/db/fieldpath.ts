@@ -3,7 +3,7 @@ import { jsonToConvex } from "convex/values";
 
 import type { GenericDocument } from "@/runtime/db/types";
 
-export function isSimpleObject(value: unknown): boolean {
+function isSimpleObject(value: unknown): boolean {
   const isObject = value !== null && typeof value === "object";
   if (!isObject) {
     return false;

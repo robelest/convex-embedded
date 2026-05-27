@@ -6,7 +6,7 @@ import { createLogger } from "@/shared/logger";
 
 const log = createLogger("server-runtime");
 
-export function isComponentUnavailableError(error: unknown): boolean {
+function isComponentUnavailableError(error: unknown): boolean {
   const { code, message } = parseErrorMetadata(error);
   if (code === "NESTED_COMPONENT_LOCAL_UNSUPPORTED") {
     return true;

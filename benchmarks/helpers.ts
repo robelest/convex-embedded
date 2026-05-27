@@ -28,7 +28,7 @@ export interface Size {
   readonly docs: number;
 }
 
-export const SIZES: readonly Size[] = [
+const SIZES: readonly Size[] = [
   { label: "small", docs: 1_000 },
   { label: "medium", docs: 10_000 },
   { label: "large", docs: 50_000 },
@@ -311,7 +311,7 @@ const queryFullScan = queryGeneric({
       .collect(),
 });
 
-export const COMPUTE_MODULES = {
+const COMPUTE_MODULES = {
   tasks: () =>
     Promise.resolve({
       insert: insertTask,

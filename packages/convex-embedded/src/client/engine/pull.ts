@@ -85,7 +85,7 @@ export function createMergeState(
   };
 }
 
-export function retryable<T>(
+function retryable<T>(
   fn: (attempt: number) => Promise<T>,
   opts: { maxRetries: number; retryDelayMs: number; signal?: AbortSignal },
 ): Promise<T> {
@@ -105,31 +105,6 @@ export function retryable<T>(
       signal: opts.signal,
     },
   );
-}
-
-export function singleFlight<K, T>(): {
-  run: (key: K, fn: () => Promise<T>) => Promise<T>;
-} {
-  const inFlight = new Map<K, Promise<T>>();
-  return {
-    run(key: K, fn: () => Promise<T>): Promise<T> {
-      const existing = inFlight.get(key);
-      if (existing) return existing;
-      let assigned!: Promise<T>;
-      const promise = (async () => {
-        try {
-          return await fn();
-        } finally {
-          if (inFlight.get(key) === assigned) {
-            inFlight.delete(key);
-          }
-        }
-      })();
-      assigned = promise;
-      inFlight.set(key, promise);
-      return promise;
-    },
-  };
 }
 
 export function recordExpectedSelfCausedSignal(
@@ -184,7 +159,7 @@ export function consumeExpectedSelfCausedSignal(
   return true;
 }
 
-export function hasPendingSelfCausedSignal(
+function hasPendingSelfCausedSignal(
   state: PullState,
   tableName: string,
 ): boolean {
@@ -192,14 +167,14 @@ export function hasPendingSelfCausedSignal(
   return pending !== undefined && pending.length > 0;
 }
 
-export function getLastKnownCollectionSeq(
+function getLastKnownCollectionSeq(
   state: PullState,
   tableName: string,
 ): number | undefined {
   return state.lastKnownCollectionSeqByTable.get(tableName);
 }
 
-export function recordPulledScopeSeq(
+function recordPulledScopeSeq(
   state: PullState,
   deps: { buildScopeKey: PullDeps["buildScopeKey"] },
   tableName: string,
@@ -269,7 +244,7 @@ export function scheduleTableCoalesce(
   }
 }
 
-export function fireCoalescedTableUpdate(
+function fireCoalescedTableUpdate(
   state: PullState,
   tableName: string,
 ): void {
@@ -300,14 +275,14 @@ export function fireCoalescedTableUpdate(
   }
 }
 
-export function inFlightGet(
+function inFlightGet(
   state: PullState,
   key: string,
 ): Promise<void> | undefined {
   return state.pullInFlight.get(key);
 }
 
-export function inFlightSet(
+function inFlightSet(
   state: PullState,
   key: string,
   promise: Promise<void>,
@@ -315,15 +290,15 @@ export function inFlightSet(
   state.pullInFlight.set(key, promise);
 }
 
-export function inFlightDelete(state: PullState, key: string): void {
+function inFlightDelete(state: PullState, key: string): void {
   state.pullInFlight.delete(key);
 }
 
-export function markRerun(state: PullState, key: string): void {
+function markRerun(state: PullState, key: string): void {
   state.pullRerun.add(key);
 }
 
-export function takeRerun(state: PullState, key: string): boolean {
+function takeRerun(state: PullState, key: string): boolean {
   return state.pullRerun.delete(key);
 }
 
@@ -357,7 +332,7 @@ export function markDirty(
   mergeState.dirtyRows.add(`${tableName}:${docId}`);
 }
 
-export function clearDirty(
+function clearDirty(
   mergeState: MergeState,
   tableName: string,
   docId: string,
@@ -373,11 +348,7 @@ export function hasDirty(mergeState: MergeState): boolean {
   return mergeState.dirtyRows.size > 0;
 }
 
-export function dirtySize(mergeState: MergeState): number {
-  return mergeState.dirtyRows.size;
-}
-
-export function iterateGroupedDirty(
+function iterateGroupedDirty(
   mergeState: MergeState,
   orderedTables: string[],
 ): Array<{ tableName: string; docIds: Set<string> }> {
@@ -940,7 +911,7 @@ async function runSpan<A>(input: {
   return withSpan(input.name, () => input.run(), { attributes });
 }
 
-export async function readPullMetadata(
+async function readPullMetadata(
   deps: PullDeps,
   tableName: string,
   tableConfig: TableConfig,
@@ -972,7 +943,7 @@ export async function readPullMetadata(
   };
 }
 
-export async function readPullMetadataFastPath(
+async function readPullMetadataFastPath(
   deps: PullDeps,
   tableName: string,
   tableConfig: TableConfig,
@@ -997,7 +968,7 @@ export async function readPullMetadataFastPath(
   };
 }
 
-export async function writePullMetadata(
+async function writePullMetadata(
   deps: PullDeps,
   input: {
     tableConfig: TableConfig;
@@ -1070,7 +1041,7 @@ export async function writePullMetadata(
   await Promise.all(operations);
 }
 
-export async function hydrateDocumentsById(
+async function hydrateDocumentsById(
   deps: PullDeps,
   input: {
     tableName: string;
@@ -1181,7 +1152,7 @@ export async function hydrateDocumentsById(
   }
 }
 
-export async function hydrateMissingReferences(
+async function hydrateMissingReferences(
   deps: PullDeps,
   input: {
     docs: Array<Record<string, unknown>>;
@@ -1264,7 +1235,7 @@ export async function filterAfterHydratingReferences(
   return result;
 }
 
-export async function getTablePagePlan(
+async function getTablePagePlan(
   state: PullState,
   deps: PullDeps,
   tableName: string,
@@ -1681,7 +1652,7 @@ export async function pullAll(
   });
 }
 
-export async function mergeDirtyRowsForTable(
+async function mergeDirtyRowsForTable(
   state: PullState,
   mergeState: MergeState,
   deps: PullDeps,

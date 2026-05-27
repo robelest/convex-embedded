@@ -110,160 +110,24 @@ export interface BufferingTracingHandle {
 
 type Listener = () => void;
 
-export class BufferingSpanProcessor implements SpanProcessor {
-  private readonly _spans: BufferedSpan[] = [];
-  private readonly _listeners = new Set<Listener>();
-  private _notifyHandle: ReturnType<typeof setTimeout> | null = null;
-
-  constructor(private readonly _capacity: number) {}
-
-  forceFlush(): Promise<void> {
-    return Promise.resolve();
-  }
-
-  onStart(): void {}
-
-  onEnd(span: ReadableSpan): void {
-    const ctx = span.spanContext();
-    const startMs = hrTimeToMs(span.startTime);
-    const endMs = hrTimeToMs(span.endTime);
-    const status = span.status.code;
-    const buffered: BufferedSpan = {
-      name: span.name,
-      spanId: ctx.spanId,
-      parentSpanId: span.parentSpanContext?.spanId,
-      traceId: ctx.traceId,
-      startMs,
-      durMs: Math.max(0, endMs - startMs),
-      attributes: { ...span.attributes },
-      status:
-        status === SpanStatusCode.OK
-          ? "ok"
-          : status === SpanStatusCode.ERROR
-            ? "error"
-            : "unset",
-      error: status === SpanStatusCode.ERROR ? span.status.message : undefined,
-      events: span.events.map((event) => ({
-        name: event.name,
-        timeMs: hrTimeToMs(event.time),
-        attributes: event.attributes ? { ...event.attributes } : undefined,
-      })),
-    };
-    this._spans.push(buffered);
-    if (this._spans.length > this._capacity) {
-      this._spans.splice(0, this._spans.length - this._capacity);
-    }
-    this._scheduleNotify();
-  }
-
-  shutdown(): Promise<void> {
-    if (this._notifyHandle !== null) {
-      clearTimeout(this._notifyHandle);
-      this._notifyHandle = null;
-    }
-    this._listeners.clear();
-    this._spans.length = 0;
-    return Promise.resolve();
-  }
-
-  getSpans(): BufferedSpan[] {
-    return this._spans.slice();
-  }
-
-  clearSpans(): void {
-    this._spans.length = 0;
-    this._scheduleNotify();
-  }
-
-  subscribe(listener: Listener): () => void {
-    this._listeners.add(listener);
-    return () => {
-      this._listeners.delete(listener);
-    };
-  }
-
-  private _scheduleNotify(): void {
-    if (this._notifyHandle !== null) return;
-    this._notifyHandle = setTimeout(() => {
-      this._notifyHandle = null;
-      for (const listener of this._listeners) {
-        try {
-          listener();
-        } catch {
-          // ignore listener errors
-        }
-      }
-    }, 50);
-  }
+export interface BufferingSpanProcessor extends SpanProcessor {
+  getSpans(): BufferedSpan[];
+  clearSpans(): void;
+  subscribe(listener: Listener): () => void;
 }
 
-export class BufferingLogRecordProcessor implements LogRecordProcessor {
-  private readonly _logs: BufferedLog[] = [];
-  private readonly _listeners = new Set<Listener>();
-  private _notifyHandle: ReturnType<typeof setTimeout> | null = null;
+export function createBufferingSpanProcessor(
+  capacity: number,
+): BufferingSpanProcessor {
+  const spans: BufferedSpan[] = [];
+  const listeners = new Set<Listener>();
+  let notifyHandle: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(private readonly _capacity: number) {}
-
-  onEmit(logRecord: SdkLogRecord): void {
-    const sc = logRecord.spanContext;
-    const body = logRecord.body;
-    this._logs.push({
-      severity:
-        logRecord.severityText ??
-        severityNumberToText(logRecord.severityNumber),
-      severityNumber: logRecord.severityNumber ?? 0,
-      body:
-        typeof body === "string"
-          ? body
-          : body === undefined
-            ? ""
-            : JSON.stringify(body),
-      attributes: { ...logRecord.attributes },
-      timeMs: hrTimeToMs(logRecord.hrTime),
-      traceId: sc?.traceId,
-      spanId: sc?.spanId,
-    });
-    if (this._logs.length > this._capacity) {
-      this._logs.splice(0, this._logs.length - this._capacity);
-    }
-    this._scheduleNotify();
-  }
-
-  forceFlush(): Promise<void> {
-    return Promise.resolve();
-  }
-
-  shutdown(): Promise<void> {
-    if (this._notifyHandle !== null) {
-      clearTimeout(this._notifyHandle);
-      this._notifyHandle = null;
-    }
-    this._listeners.clear();
-    this._logs.length = 0;
-    return Promise.resolve();
-  }
-
-  getLogs(): BufferedLog[] {
-    return this._logs.slice();
-  }
-
-  clearLogs(): void {
-    this._logs.length = 0;
-    this._scheduleNotify();
-  }
-
-  subscribe(listener: Listener): () => void {
-    this._listeners.add(listener);
-    return () => {
-      this._listeners.delete(listener);
-    };
-  }
-
-  private _scheduleNotify(): void {
-    if (this._notifyHandle !== null) return;
-    this._notifyHandle = setTimeout(() => {
-      this._notifyHandle = null;
-      for (const listener of this._listeners) {
+  function scheduleNotify(): void {
+    if (notifyHandle !== null) return;
+    notifyHandle = setTimeout(() => {
+      notifyHandle = null;
+      for (const listener of listeners) {
         try {
           listener();
         } catch {
@@ -272,6 +136,148 @@ export class BufferingLogRecordProcessor implements LogRecordProcessor {
       }
     }, 50);
   }
+
+  return {
+    forceFlush(): Promise<void> {
+      return Promise.resolve();
+    },
+    onStart(): void {},
+    onEnd(span: ReadableSpan): void {
+      const ctx = span.spanContext();
+      const startMs = hrTimeToMs(span.startTime);
+      const endMs = hrTimeToMs(span.endTime);
+      const status = span.status.code;
+      const buffered: BufferedSpan = {
+        name: span.name,
+        spanId: ctx.spanId,
+        parentSpanId: span.parentSpanContext?.spanId,
+        traceId: ctx.traceId,
+        startMs,
+        durMs: Math.max(0, endMs - startMs),
+        attributes: { ...span.attributes },
+        status:
+          status === SpanStatusCode.OK
+            ? "ok"
+            : status === SpanStatusCode.ERROR
+              ? "error"
+              : "unset",
+        error:
+          status === SpanStatusCode.ERROR ? span.status.message : undefined,
+        events: span.events.map((event) => ({
+          name: event.name,
+          timeMs: hrTimeToMs(event.time),
+          attributes: event.attributes ? { ...event.attributes } : undefined,
+        })),
+      };
+      spans.push(buffered);
+      if (spans.length > capacity) {
+        spans.splice(0, spans.length - capacity);
+      }
+      scheduleNotify();
+    },
+    shutdown(): Promise<void> {
+      if (notifyHandle !== null) {
+        clearTimeout(notifyHandle);
+        notifyHandle = null;
+      }
+      listeners.clear();
+      spans.length = 0;
+      return Promise.resolve();
+    },
+    getSpans(): BufferedSpan[] {
+      return spans.slice();
+    },
+    clearSpans(): void {
+      spans.length = 0;
+      scheduleNotify();
+    },
+    subscribe(listener: Listener): () => void {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+  };
+}
+
+export interface BufferingLogRecordProcessor extends LogRecordProcessor {
+  getLogs(): BufferedLog[];
+  clearLogs(): void;
+  subscribe(listener: Listener): () => void;
+}
+
+export function createBufferingLogRecordProcessor(
+  capacity: number,
+): BufferingLogRecordProcessor {
+  const logs: BufferedLog[] = [];
+  const listeners = new Set<Listener>();
+  let notifyHandle: ReturnType<typeof setTimeout> | null = null;
+
+  function scheduleNotify(): void {
+    if (notifyHandle !== null) return;
+    notifyHandle = setTimeout(() => {
+      notifyHandle = null;
+      for (const listener of listeners) {
+        try {
+          listener();
+        } catch {
+          // ignore listener errors
+        }
+      }
+    }, 50);
+  }
+
+  return {
+    onEmit(logRecord: SdkLogRecord): void {
+      const sc = logRecord.spanContext;
+      const body = logRecord.body;
+      logs.push({
+        severity:
+          logRecord.severityText ??
+          severityNumberToText(logRecord.severityNumber),
+        severityNumber: logRecord.severityNumber ?? 0,
+        body:
+          typeof body === "string"
+            ? body
+            : body === undefined
+              ? ""
+              : JSON.stringify(body),
+        attributes: { ...logRecord.attributes },
+        timeMs: hrTimeToMs(logRecord.hrTime),
+        traceId: sc?.traceId,
+        spanId: sc?.spanId,
+      });
+      if (logs.length > capacity) {
+        logs.splice(0, logs.length - capacity);
+      }
+      scheduleNotify();
+    },
+    forceFlush(): Promise<void> {
+      return Promise.resolve();
+    },
+    shutdown(): Promise<void> {
+      if (notifyHandle !== null) {
+        clearTimeout(notifyHandle);
+        notifyHandle = null;
+      }
+      listeners.clear();
+      logs.length = 0;
+      return Promise.resolve();
+    },
+    getLogs(): BufferedLog[] {
+      return logs.slice();
+    },
+    clearLogs(): void {
+      logs.length = 0;
+      scheduleNotify();
+    },
+    subscribe(listener: Listener): () => void {
+      listeners.add(listener);
+      return () => {
+        listeners.delete(listener);
+      };
+    },
+  };
 }
 
 function severityNumberToText(severityNumber: number | undefined): string {

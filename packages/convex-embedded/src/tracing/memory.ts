@@ -13,8 +13,8 @@ import { BasicTracerProvider } from "@opentelemetry/sdk-trace-base";
 import { StackContextManager } from "@opentelemetry/sdk-trace-web";
 
 import {
-  BufferingLogRecordProcessor,
-  BufferingSpanProcessor,
+  createBufferingLogRecordProcessor,
+  createBufferingSpanProcessor,
   type BufferedLog,
   type BufferedMetricPoint,
   type BufferedSpan,
@@ -57,7 +57,7 @@ export function installInMemoryTracing(
   options: InMemoryTracingOptions = {},
 ): BufferingTracingHandle {
   const capacity = Math.max(16, options.capacity ?? 2000);
-  const processor = new BufferingSpanProcessor(capacity);
+  const processor = createBufferingSpanProcessor(capacity);
   const provider = new BasicTracerProvider({
     resource: options.resource,
     spanProcessors: [processor],
@@ -81,7 +81,7 @@ export function installInMemoryTracing(
   });
   metrics.setGlobalMeterProvider(meterProvider);
 
-  const logProcessor = new BufferingLogRecordProcessor(capacity);
+  const logProcessor = createBufferingLogRecordProcessor(capacity);
   const loggerProvider = new LoggerProvider({
     resource: options.resource,
     processors: [logProcessor],

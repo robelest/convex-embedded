@@ -16,10 +16,10 @@ import * as replay from "@/client/engine/replay";
 import type { ReplayDeps } from "@/client/engine/replay";
 import * as scheduler from "@/client/engine/scheduler";
 import type { SchedulerDeps } from "@/client/engine/scheduler";
-import * as subscriptions from "@/client/engine/subscriptions";
-import type {
-  ScopeRecord,
-  SubscriptionsDeps,
+import {
+  createSubscriptions,
+  type ScopeRecord,
+  type SubscriptionsSubsystem,
 } from "@/client/engine/subscriptions";
 import { IdMap, extractSchemaIdFields } from "@/client/ids";
 import { PendingQueue } from "@/client/pending/queue";
@@ -856,7 +856,6 @@ class EngineImpl implements EngineInstance {
     this._statusEmitter = statusEmitter;
     let started = false;
     const schedulerState = scheduler.createSchedulerState();
-    const subsState = subscriptions.createSubscriptionsState();
 
     const schemaIdFields = extractSchemaIdFields(
       Object.values(tables)
@@ -904,7 +903,7 @@ class EngineImpl implements EngineInstance {
 
     const pullState = pull.createPullState();
 
-    const subsDeps: SubscriptionsDeps = {
+    const subs: SubscriptionsSubsystem = createSubscriptions({
       orderedTables,
       canonicalizeScopeArgs,
       buildScopeKey,
@@ -919,7 +918,7 @@ class EngineImpl implements EngineInstance {
       getPendingEntries: () => pendingQueue.entries(),
       getAliases: (id) => idMap.getAliases(id),
       clearPullSequencing: () => pull.clearAll(pullState),
-    };
+    });
 
     function getRemoteApplyOrder(): string[] {
       return orderedTables.filter((tableName) =>
@@ -932,16 +931,9 @@ class EngineImpl implements EngineInstance {
       docs: Array<Record<string, unknown>>,
       scopeArgs?: Record<string, unknown>,
     ): Promise<void> => {
-      subscriptions.bufferRemoteSnapshot(
-        subsState,
-        subsDeps,
-        tableName,
-        docs,
-        scopeArgs,
-      );
+      subs.bufferRemoteSnapshot(tableName, docs, scopeArgs);
     };
-    const clearBufferedSnapshots = () =>
-      subscriptions.clearAll(subsState, subsDeps);
+    const clearBufferedSnapshots = () => subs.clearAll();
 
     function emit(newStatus: EngineStatus): void {
       statusEmitter.emit(newStatus);
@@ -997,7 +989,7 @@ class EngineImpl implements EngineInstance {
       stopRemoteSubscriptions();
 
       // (Re)subscribe the scopes that are already active — e.g. after a reconnect.
-      const orderedScopes = Array.from(subsState.scopes.entries()).sort(
+      const orderedScopes = Array.from(subs.scopes().entries()).sort(
         ([leftKey, left], [rightKey, right]) => {
           const leftOrder = orderedTables.indexOf(left.tableName);
           const rightOrder = orderedTables.indexOf(right.tableName);
@@ -1075,13 +1067,13 @@ class EngineImpl implements EngineInstance {
      * Unsubscribe from all active remote reactive subscriptions.
      */
     function stopRemoteSubscriptions(): void {
-      subscriptions.clearAllTeardownTimers(subsState);
+      subs.clearAllTeardownTimers();
 
-      if (!subscriptions.hasActive(subsState)) return;
+      if (!subs.hasActive()) return;
 
-      subscriptions.bumpEpoch(subsState);
+      subs.bumpEpoch();
 
-      for (const [key, entry] of subsState.scopes) {
+      for (const [key, entry] of subs.scopes()) {
         try {
           entry.unsubscribe?.();
         } catch (err) {
@@ -1092,8 +1084,8 @@ class EngineImpl implements EngineInstance {
         const isScoped = Object.keys(entry.scopeArgs).length > 0;
         const hasReaders = (entry.readers?.size ?? 0) > 0;
         if (isScoped && !hasReaders) {
-          subscriptions.deleteScope(subsState, key);
-          subscriptions.clearPulled(subsState, key);
+          subs.deleteScope(key);
+          subs.clearPulled(key);
         }
       }
 
@@ -1114,17 +1106,17 @@ class EngineImpl implements EngineInstance {
         return;
       }
       const key = buildScopeKey(tableName, normalizedScope);
-      subscriptions.clearTeardownTimer(subsState, key);
-      subscriptions.set(subsState, key, {
+      subs.clearTeardownTimer(key);
+      subs.set(key, {
         tableName,
         scopeArgs: normalizedScope,
       });
-      subscriptions.addReader(subsState, key, readKey);
+      subs.addReader(key, readKey);
     }
 
     function teardownScope(key: string): void {
-      subscriptions.clearTeardownTimer(subsState, key);
-      const entry = subscriptions.get(subsState, key);
+      subs.clearTeardownTimer(key);
+      const entry = subs.get(key);
       if (!entry) {
         return;
       }
@@ -1138,8 +1130,8 @@ class EngineImpl implements EngineInstance {
       }
       entry.unsubscribe = undefined;
       entry.pendingActivation = undefined;
-      subscriptions.deleteScope(subsState, key);
-      subscriptions.clearPulled(subsState, key);
+      subs.deleteScope(key);
+      subs.clearPulled(key);
       log.debug(`sync: deactivated idle scope ${key}`);
     }
 
@@ -1153,12 +1145,11 @@ class EngineImpl implements EngineInstance {
         return;
       }
       const key = buildScopeKey(tableName, normalizedScope);
-      const remaining = subscriptions.removeReader(subsState, key, readKey);
+      const remaining = subs.removeReader(key, readKey);
       if (remaining === null || remaining > 0) {
         return;
       }
-      subscriptions.setTeardownTimer(
-        subsState,
+      subs.setTeardownTimer(
         key,
         setTimeout(() => teardownScope(key), SCOPE_TEARDOWN_DEBOUNCE_MS),
       );
@@ -1174,7 +1165,7 @@ class EngineImpl implements EngineInstance {
 
       const normalizedScope = canonicalizeScopeArgs(scopeArgs);
       const key = buildScopeKey(tableName, normalizedScope);
-      const existing = subscriptions.get(subsState, key);
+      const existing = subs.get(key);
       if (existing?.unsubscribe) {
         return;
       }
@@ -1182,7 +1173,7 @@ class EngineImpl implements EngineInstance {
         await existing.pendingActivation;
         return;
       }
-      const entry: ScopeRecord = subscriptions.set(subsState, key, {
+      const entry: ScopeRecord = subs.set(key, {
         tableName,
         scopeArgs: normalizedScope,
       });
@@ -1199,7 +1190,7 @@ class EngineImpl implements EngineInstance {
         return;
       }
 
-      const epochAtStart = subscriptions.getEpoch(subsState);
+      const epochAtStart = subs.getEpoch();
 
       const activation = (async () => {
         if (!pull.hasPulledScopeSeq(pullState, key)) {
@@ -1210,10 +1201,10 @@ class EngineImpl implements EngineInstance {
             normalizedScope,
           );
         }
-        subscriptions.markPulled(subsState, key);
+        subs.markPulled(key);
         await yieldToEventLoop();
 
-        if (subscriptions.getEpoch(subsState) !== epochAtStart || !started) {
+        if (subs.getEpoch() !== epochAtStart || !started) {
           return;
         }
 
@@ -1326,7 +1317,7 @@ class EngineImpl implements EngineInstance {
       tables,
       orderedTables,
       getRemoteApplyOrder,
-      activeScopes: subsState.scopes,
+      activeScopes: subs.scopes(),
       buildScopeKey,
       ingestDocuments,
       getDocumentsForTable,
@@ -1358,7 +1349,8 @@ class EngineImpl implements EngineInstance {
       uploadUrlRef,
       uploadFetch,
       pullState,
-      subscriptionsState: subsState,
+      softResetSubsBuffers: () => subs.softResetBuffers(),
+      hasActiveSubs: () => subs.hasActive(),
       emit,
       isOnline: () => scheduler.isOnline(schedulerState),
       isStarted: () => started,
@@ -1482,7 +1474,7 @@ class EngineImpl implements EngineInstance {
 
       stopRemoteSubscriptions();
       clearBufferedSnapshots();
-      subscriptions.resetPulled(subsState);
+      subs.resetPulled();
 
       cleanupOnlineListener?.();
       cleanupOfflineListener?.();
@@ -1633,19 +1625,13 @@ class EngineImpl implements EngineInstance {
       scopeArgs: Record<string, unknown> | undefined,
       cb: () => void,
     ): (() => void) => {
-      return subscriptions.onPulled(
-        subsState,
-        subsDeps,
-        tableName,
-        scopeArgs,
-        cb,
-      );
+      return subs.onPulled(tableName, scopeArgs, cb);
     };
 
     this.reloadIdentity = async (): Promise<void> => {
       await hydrateIdentityState();
       clearBufferedSnapshots();
-      subscriptions.resetPulled(subsState);
+      subs.resetPulled();
       await pendingQueue.unblockAll();
 
       if (!started) {

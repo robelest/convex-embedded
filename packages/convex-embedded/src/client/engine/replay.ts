@@ -3,8 +3,6 @@ import type { ConvexClient } from "convex/browser";
 import type { EmbeddedClientLike, TableConfig } from "@/client/engine";
 import * as pull from "@/client/engine/pull";
 import type { PullState } from "@/client/engine/pull";
-import * as subscriptions from "@/client/engine/subscriptions";
-import type { SubscriptionsState } from "@/client/engine/subscriptions";
 import type { IdMap } from "@/client/ids";
 import {
   MAX_REPLAY_RETRIES,
@@ -69,7 +67,8 @@ export interface ReplayDeps {
   uploadUrlRef?: unknown;
   uploadFetch?: typeof globalThis.fetch;
   pullState: PullState;
-  subscriptionsState: SubscriptionsState;
+  softResetSubsBuffers: () => void;
+  hasActiveSubs: () => boolean;
   emit: (status: EngineStatus) => void;
   isOnline: () => boolean;
   isStarted: () => boolean;
@@ -973,11 +972,8 @@ export function ensureProcessing(state: ReplayState, deps: ReplayDeps): void {
     await rollbackDeadLetteredTables(state, deps, deadLettered);
 
     if (deps.pendingQueue.isEmpty) {
-      subscriptions.softResetBuffers(deps.subscriptionsState);
-      if (
-        !subscriptions.hasActive(deps.subscriptionsState) &&
-        deps.isStarted()
-      ) {
+      deps.softResetSubsBuffers();
+      if (!deps.hasActiveSubs() && deps.isStarted()) {
         void deps.runScheduler();
       }
       return;

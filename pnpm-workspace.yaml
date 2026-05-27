@@ -14,7 +14,6 @@ catalog:
   "@opentelemetry/sdk-trace-base": ^2.5.0
   "@opentelemetry/sdk-trace-node": ^2.5.0
   "@opentelemetry/sdk-trace-web": ^2.5.0
-  "@opentelemetry/semantic-conventions": ^1.39.0
   convex: ^1.38.0
   tsdown: ^0.21.1
   typescript: ^5.9.0

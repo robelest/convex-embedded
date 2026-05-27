@@ -111,8 +111,8 @@ export function getFunctionPath(
  * @example
  * ```ts
  * const loader = new ModuleLoader({
- *   messages: () => import("./convex/messages"),
- *   "lib/utils": () => import("./convex/lib/utils"),
+ *   messages: () => loadModule("messages"),
+ *   "lib/utils": () => loadModule("lib/utils"),
  * });
  * const mod = await loader.load("messages");
  * const listFn = mod["list"]; // the exported query/mutation/action

@@ -10,9 +10,9 @@
     "ts-morph"
   ],
   "ignorePatterns": [
+    "**/_generated/**",
     "packages/convex-embedded/consumer-types/**",
     "packages/convex-embedded/src/browser/sqlite/worker.js",
-    "packages/convex-embedded/src/component/_generated/**",
     "packages/convex-embedded/src/component/public/cleanup.ts",
     "packages/convex-embedded/src/component/public/marks.ts",
     "packages/convex-embedded/src/expo/shims/**",

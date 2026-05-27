@@ -95,11 +95,7 @@ type BrowserResolvePhase =
   | { _tag: "Offline" }
   | { _tag: "Error"; error: unknown };
 
-/**
- * Implementation contract for the lazily loaded resolve engine.
- * @internal
- */
-export interface EngineInstance {
+interface EngineHandle {
   mutation(
     ref: unknown,
     args: Record<string, unknown>,
@@ -131,7 +127,7 @@ export interface EngineInstance {
 }
 
 function readScopeArgs(
-  engine: EngineInstance,
+  engine: EngineHandle,
   readArgs?: Record<string, unknown>,
 ): Record<string, unknown> | undefined {
   const filtered = readArgs
@@ -151,7 +147,7 @@ function readScopeArgs(
  * gating) target the exact scope the query resolves.
  */
 function deriveQueryScope(
-  engine: EngineInstance,
+  engine: EngineHandle,
   refName: string,
   readArgs?: Record<string, unknown>,
 ): { tableName: string; scopeArgs: Record<string, unknown> | undefined } {
@@ -192,7 +188,7 @@ interface RemoteAuthClient {
  * @internal
  */
 export interface PullEntry {
-  engine: EngineInstance | null;
+  engine: EngineHandle | null;
   state: RemoteState;
   stateHub: PubSub<RemoteState>;
   routeModes: Map<string, RouteMode>;
@@ -275,7 +271,7 @@ export function subscribeRemoteState(
 }
 
 function preloadedScope(
-  engine: EngineInstance,
+  engine: EngineHandle,
   preloaded: { _name: string; _argsJSON: JSONValue },
 ): { tableName: string; scopeArgs: Record<string, unknown> | undefined } {
   const args = jsonToConvex(preloaded._argsJSON) as Record<string, unknown>;
@@ -355,11 +351,11 @@ export function deletePullEntry(client: ConvexClient): void {
 }
 
 async function loadEngine(): Promise<{
-  create(config: unknown): EngineInstance;
+  create(config: unknown): EngineHandle;
 }> {
   const mod = await import("@/client/engine");
   return mod.engine as unknown as {
-    create(config: unknown): EngineInstance;
+    create(config: unknown): EngineHandle;
   };
 }
 
@@ -536,7 +532,7 @@ async function discoverAndStart(input: PullInput): Promise<void> {
       Ready: (current) => {
         entry.routeModes = current.routeModes;
         warnModuleLoadFailures(current.moduleLoadFailures);
-        const engine: EngineInstance = engineFactory.create({
+        const engine: EngineHandle = engineFactory.create({
           embedded,
           remoteClient,
           tables: current.tables,

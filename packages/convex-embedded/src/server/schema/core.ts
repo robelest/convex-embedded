@@ -1,53 +1,23 @@
 import type { OptionalProperty, Validator } from "convex/values";
 
-/**
- * Internal CRDT field kind constants used by schema descriptors.
- */
-export const CrdtType = {
-  Prose: "prose",
-  Register: "register",
-  Counter: "counter",
-  Set: "set",
-  Plain: "plain",
-  Omitted: "omitted",
-} as const;
+import {
+  CrdtType,
+  type Conflict,
+  type ConflictEntry,
+  type CrdtFieldDescriptor,
+} from "@/shared/types";
+
+export {
+  CrdtType,
+  type Conflict,
+  type ConflictEntry,
+  type CrdtFieldDescriptor,
+};
 
 /**
  * Union of schema descriptor CRDT kinds.
  */
 export type CrdtTypeValue = (typeof CrdtType)[keyof typeof CrdtType];
-
-/**
- * Metadata for one conflicting register write.
- *
- * @typeParam T - Register value type.
- */
-export interface ConflictEntry<T> {
-  value: T;
-  clientId: string;
-  timestamp: number;
-}
-
-/**
- * Conflict information passed into custom register resolvers.
- *
- * @typeParam T - Register value type.
- */
-export interface Conflict<T> {
-  values: T[];
-  entries: ConflictEntry<T>[];
-  latest(): T;
-  byClient(id: string): T | undefined;
-}
-
-/**
- * Shared descriptor shape implemented by all embedded CRDT fields.
- */
-export interface CrdtFieldDescriptor {
-  type: CrdtTypeValue;
-  validator: unknown;
-  resolve?: (conflict: Conflict<unknown>) => unknown;
-}
 
 /**
  * JSON representation for prose/rich-text fields.

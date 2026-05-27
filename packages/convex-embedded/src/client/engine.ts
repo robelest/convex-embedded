@@ -14,7 +14,7 @@ import * as Y from "yjs";
 import { ConnectivityState } from "@/client/engine/connectivity";
 import { CrdtDirtyState } from "@/client/engine/crdt";
 import { PullBatchCoordinator } from "@/client/engine/pullbatch";
-import { ReplayGracePeriod } from "@/client/engine/replay";
+import { ReplayLoopState } from "@/client/engine/replay";
 import { CycleScheduler } from "@/client/engine/scheduler";
 import { ScopeRegistry, type ActiveScope } from "@/client/engine/scope";
 import { SnapshotIngest } from "@/client/engine/snapshot";
@@ -1700,9 +1700,10 @@ function createEngine(config: EngineConfig): EngineInstance {
   const activatedRemoteTables = new Set(rootTablesByDependencies(tables));
   const processorHeartbeatMs = Math.max(1_000, Math.floor(leaseMs / 3));
 
-  const replayGrace = new ReplayGracePeriod();
-  const addRecentlyReplayed = (id: string) => replayGrace.add(id);
-  const getRecentlyReplayedIdSet = () => replayGrace.snapshot();
+  const replayLoop = new ReplayLoopState();
+  const addRecentlyReplayed = (id: string) =>
+    replayLoop.addRecentlyReplayed(id);
+  const getRecentlyReplayedIdSet = () => replayLoop.recentlyReplayedIdSet();
   const pullServices: EngineResolveInput = {
     remoteClient,
     ingestDocuments,
@@ -1780,10 +1781,6 @@ function createEngine(config: EngineConfig): EngineInstance {
 
   const connectivityState = new ConnectivityState();
   const crdt = new CrdtDirtyState(tables);
-
-  let queueProcessingPromise: Promise<Set<string>> | null = null;
-  let queueProcessingRequestedWhileActive = false;
-  let activeEntry: PendingEntry | null = null;
 
   let onOnline: (() => void) | null = null;
   let onOffline: (() => void) | null = null;
@@ -2083,9 +2080,9 @@ function createEngine(config: EngineConfig): EngineInstance {
    * On failure, the entry stays in the queue for retry on next cycle.
    */
   async function processQueue(signal?: AbortSignal): Promise<Set<string>> {
-    if (queueProcessingPromise) {
-      queueProcessingRequestedWhileActive = true;
-      return queueProcessingPromise;
+    if (replayLoop.inFlight()) {
+      replayLoop.setRequestedWhileActive(true);
+      return replayLoop.inFlight()!;
     }
     if (pendingQueue.isEmpty) {
       await pendingQueue.hydrate();
@@ -2096,10 +2093,10 @@ function createEngine(config: EngineConfig): EngineInstance {
 
     log.info(`sync: processing ${pendingQueue.length} queued mutation(s)`);
 
-    queueProcessingPromise = (async () => {
+    const cyclePromise = (async () => {
       try {
         outer: while (connectivityState.isOnline() && !signal?.aborted) {
-          queueProcessingRequestedWhileActive = false;
+          replayLoop.setRequestedWhileActive(false);
           while (
             !pendingQueue.isEmpty &&
             connectivityState.isOnline() &&
@@ -2111,7 +2108,7 @@ function createEngine(config: EngineConfig): EngineInstance {
               leaseMs,
             );
             if (!entry) break;
-            activeEntry = entry;
+            replayLoop.setActiveEntry(entry);
             if (entry.state === "blocked") {
               log.warn(
                 `sync: blocked pending entry for ${entry.ref}; halting replay`,
@@ -2168,7 +2165,7 @@ function createEngine(config: EngineConfig): EngineInstance {
               );
               if (!leaseHeld) {
                 if (entry.hydrated === true) {
-                  activeEntry = null;
+                  replayLoop.setActiveEntry(null);
                   log.warn(
                     `sync: lost replay lease before remote push (table: ${entry.table})`,
                   );
@@ -2217,7 +2214,7 @@ function createEngine(config: EngineConfig): EngineInstance {
               }
               await pendingQueue.remove(entry, processorIdForReplay);
               if (replayDocId) addRecentlyReplayed(replayDocId);
-              activeEntry = null;
+              replayLoop.setActiveEntry(null);
               log.debug(
                 `sync: pushed mutation to remote (table: ${entry.table}, remaining: ${pendingQueue.length})`,
               );
@@ -2229,7 +2226,7 @@ function createEngine(config: EngineConfig): EngineInstance {
               if (isAlreadyAppliedReplayError(entry, err as Error)) {
                 await pendingQueue.remove(entry, processorIdForReplay);
                 if (replayDocId) addRecentlyReplayed(replayDocId);
-                activeEntry = null;
+                replayLoop.setActiveEntry(null);
                 log.debug(
                   `sync: dropping already-applied mutation (table: ${entry.table}, remaining: ${pendingQueue.length})`,
                 );
@@ -2240,7 +2237,7 @@ function createEngine(config: EngineConfig): EngineInstance {
                 continue;
               }
               if (err instanceof ReplayLeaseLostError) {
-                activeEntry = null;
+                replayLoop.setActiveEntry(null);
                 log.warn(
                   `sync: replay lease lost while processing ${entry.ref}`,
                 );
@@ -2253,7 +2250,7 @@ function createEngine(config: EngineConfig): EngineInstance {
               const reason = classifyReplayError(err as Error);
               if (reason !== "unknown") {
                 await pendingQueue.block(entry, reason);
-                activeEntry = null;
+                replayLoop.setActiveEntry(null);
                 recordCounter("replay.outcome", {
                   result: "blocked",
                   reason,
@@ -2269,7 +2266,7 @@ function createEngine(config: EngineConfig): EngineInstance {
                 );
                 await pendingQueue.remove(entry, processorIdForReplay);
                 deadLetteredTables.add(entry.table);
-                activeEntry = null;
+                replayLoop.setActiveEntry(null);
                 recordCounter("replay.outcome", {
                   result: "dead_letter",
                   "convex.table": entry.table,
@@ -2280,7 +2277,7 @@ function createEngine(config: EngineConfig): EngineInstance {
                   err,
                 );
                 await pendingQueue.release(entry, processorIdForReplay);
-                activeEntry = null;
+                replayLoop.setActiveEntry(null);
                 recordCounter("replay.outcome", {
                   result: "released",
                   "convex.table": entry.table,
@@ -2290,7 +2287,7 @@ function createEngine(config: EngineConfig): EngineInstance {
             }
           }
           if (
-            !queueProcessingRequestedWhileActive ||
+            !replayLoop.requestedWhileActive() ||
             pendingQueue.isEmpty ||
             !connectivityState.isOnline() ||
             signal?.aborted
@@ -2308,10 +2305,11 @@ function createEngine(config: EngineConfig): EngineInstance {
       }
       return deadLetteredTables;
     })().finally(() => {
-      queueProcessingPromise = null;
+      replayLoop.setInFlight(null);
     });
+    replayLoop.setInFlight(cyclePromise);
 
-    const result = await queueProcessingPromise;
+    const result = await cyclePromise;
 
     if (pendingQueue.isEmpty) {
       log.info("sync: queue fully processed");
@@ -3766,11 +3764,11 @@ function createEngine(config: EngineConfig): EngineInstance {
       unregisterPendingUploadsDepth();
 
       cycleScheduler.abortCurrent();
-      if (activeEntry) {
-        const entry = activeEntry;
-        activeEntry = null;
+      const claimedEntry = replayLoop.activeEntry();
+      if (claimedEntry) {
+        replayLoop.setActiveEntry(null);
         runDetached(
-          () => pendingQueue.release(entry, processorIdForReplay),
+          () => pendingQueue.release(claimedEntry, processorIdForReplay),
           "[sync] release pending claim:",
         );
       }

@@ -2,7 +2,7 @@ import type { ConvexClient } from "convex/browser";
 import * as Y from "yjs";
 
 import type { EmbeddedClientLike, TableConfig } from "@/client/engine";
-import type { ActiveScope } from "@/client/engine/scope";
+import type { ScopeRecord } from "@/client/engine/subscriptions";
 import type { IdMap } from "@/client/ids";
 import type { PendingQueue } from "@/client/pending/queue";
 import { materializeYjsDoc } from "@/client/schema";
@@ -450,7 +450,7 @@ export interface PullDeps {
   tableSchemas: Record<string, Definition>;
   orderedTables: string[];
   getRemoteApplyOrder: () => string[];
-  activeScopes: ReadonlyMap<string, ActiveScope>;
+  activeScopes: ReadonlyMap<string, ScopeRecord>;
   buildScopeKey: (
     tableName: string,
     scopeArgs?: Record<string, unknown>,

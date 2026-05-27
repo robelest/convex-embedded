@@ -15,8 +15,12 @@ import type { MergeState, PullDeps, PullState } from "@/client/engine/pull";
 import { ReplayLoopState } from "@/client/engine/replay";
 import * as scheduler from "@/client/engine/scheduler";
 import type { SchedulerDeps, SchedulerState } from "@/client/engine/scheduler";
-import { ScopeRegistry, type ActiveScope } from "@/client/engine/scope";
-import { SnapshotIngest } from "@/client/engine/snapshot";
+import * as subscriptions from "@/client/engine/subscriptions";
+import type {
+  ScopeRecord,
+  SubscriptionsDeps,
+  SubscriptionsState,
+} from "@/client/engine/subscriptions";
 import { IdMap, extractSchemaIdFields } from "@/client/ids";
 import { MAX_REPLAY_RETRIES, PendingQueue } from "@/client/pending/queue";
 import type { PendingEntry } from "@/client/pending/queue";
@@ -1102,8 +1106,7 @@ class EngineImpl implements EngineInstance {
   /** @internal */ readonly _schedulerState!: SchedulerState;
   /** @internal */ readonly _mergeState!: MergeState;
   /** @internal */ readonly _pullState!: PullState;
-  /** @internal */ readonly _scopeGate!: ScopeRegistry;
-  /** @internal */ readonly _snapshotIngest!: SnapshotIngest;
+  /** @internal */ readonly _subsState!: SubscriptionsState;
   /** @internal */ readonly _replayLoop!: ReplayLoopState;
 
   start!: () => void;
@@ -1230,8 +1233,8 @@ class EngineImpl implements EngineInstance {
     const statusEmitter = new EngineStatusEmitter();
     this._statusEmitter = statusEmitter;
     let started = false;
-    let scopeActivationEpoch = 0;
     const schedulerState = scheduler.createSchedulerState();
+    const subsState = subscriptions.createSubscriptionsState();
 
     const schemaIdFields = extractSchemaIdFields(
       Object.values(tables)
@@ -1275,37 +1278,25 @@ class EngineImpl implements EngineInstance {
     let onOffline: (() => void) | null = null;
     let cleanupOnlineListener: (() => void) | null = null;
     let cleanupOfflineListener: (() => void) | null = null;
-    const activeScopes = new Map<string, ActiveScope>();
-    const scopeTeardownTimers = new Map<
-      string,
-      ReturnType<typeof setTimeout>
-    >();
     const SCOPE_TEARDOWN_DEBOUNCE_MS = config.scopeTeardownDebounceMs ?? 3000;
 
     const pullState = pull.createPullState();
 
-    // First-resolve gating + subscriber registry: owns resolvedScopes and
-    // scopeResolveListeners from the engine factory closure. Used to delay
-    // preloaded/SSR values from rendering against stale local rows.
-    const scopeGate = new ScopeRegistry();
-
-    function markScopeResolved(
-      tableName: string,
-      scopeArgs?: Record<string, unknown>,
-    ): void {
-      scopeGate.markResolved(buildScopeKey(tableName, scopeArgs ?? {}));
-    }
-
-    function onScopeResolved(
-      tableName: string,
-      scopeArgs: Record<string, unknown> | undefined,
-      cb: () => void,
-    ): () => void {
-      return scopeGate.onResolved(
-        buildScopeKey(tableName, scopeArgs ?? {}),
-        cb,
-      );
-    }
+    const subsDeps: SubscriptionsDeps = {
+      orderedTables,
+      canonicalizeScopeArgs,
+      buildScopeKey,
+      projectRemoteSnapshot,
+      getDocumentsForTable,
+      filterAfterHydratingReferences,
+      ingestDocuments,
+      runSpan,
+      yieldToEventLoop,
+      getRecentlyReplayedIdSet: () => getRecentlyReplayedIdSet(),
+      getPendingEntries: () => pendingQueue.entries(),
+      getAliases: (id) => idMap.getAliases(id),
+      clearPullSequencing: () => pull.clearAll(pullState),
+    };
 
     function getRemoteApplyOrder(): string[] {
       return orderedTables.filter((tableName) =>
@@ -1313,39 +1304,21 @@ class EngineImpl implements EngineInstance {
       );
     }
 
-    function hasActiveSubscriptions(): boolean {
-      return activeScopes.size > 0;
-    }
-
-    const snapshotIngest = new SnapshotIngest(
-      {
-        orderedTables,
-        canonicalizeScopeArgs,
-        buildScopeKey,
-        projectRemoteSnapshot,
-        getDocumentsForTable,
-        filterAfterHydratingReferences,
-        ingestDocuments: (table, docs, scopeArgs) =>
-          ingestDocuments(table, docs, scopeArgs),
-        runSpan,
-        yieldToEventLoop,
-      },
-      {
-        getRecentlyReplayedIdSet: () => getRecentlyReplayedIdSet(),
-        getPendingEntries: () => pendingQueue.entries(),
-        getAliases: (id) => idMap.getAliases(id),
-        clearPullBatch: () => pull.clearAll(pullState),
-      },
-    );
-
-    // Legacy aliases for callers (Scope subsystem + several engine top-level
-    // methods) that haven't been migrated to the class API yet.
-    const bufferRemoteSnapshot = (
+    const bufferRemoteSnapshot = async (
       tableName: string,
       docs: Array<Record<string, unknown>>,
       scopeArgs?: Record<string, unknown>,
-    ) => snapshotIngest.bufferRemoteSnapshot(tableName, docs, scopeArgs);
-    const clearBufferedSnapshots = () => snapshotIngest.clearAll();
+    ): Promise<void> => {
+      subscriptions.bufferRemoteSnapshot(
+        subsState,
+        subsDeps,
+        tableName,
+        docs,
+        scopeArgs,
+      );
+    };
+    const clearBufferedSnapshots = () =>
+      subscriptions.clearAll(subsState, subsDeps);
 
     function ensureReplayProcessing(): void {
       if (!scheduler.isOnline(schedulerState)) return;
@@ -1359,8 +1332,8 @@ class EngineImpl implements EngineInstance {
         await rollbackDeadLetteredTables(deadLettered);
 
         if (pendingQueue.isEmpty) {
-          snapshotIngest.softResetBuffers();
-          if (!hasActiveSubscriptions() && started) {
+          subscriptions.softResetBuffers(subsState);
+          if (!subscriptions.hasActive(subsState) && started) {
             void scheduler.run(schedulerState, schedulerDeps);
           }
           return;
@@ -1896,7 +1869,7 @@ class EngineImpl implements EngineInstance {
       stopRemoteSubscriptions();
 
       // (Re)subscribe the scopes that are already active — e.g. after a reconnect.
-      const orderedScopes = Array.from(activeScopes.entries()).sort(
+      const orderedScopes = Array.from(subsState.scopes.entries()).sort(
         ([leftKey, left], [rightKey, right]) => {
           const leftOrder = orderedTables.indexOf(left.tableName);
           const rightOrder = orderedTables.indexOf(right.tableName);
@@ -1974,16 +1947,13 @@ class EngineImpl implements EngineInstance {
      * Unsubscribe from all active remote reactive subscriptions.
      */
     function stopRemoteSubscriptions(): void {
-      for (const timer of scopeTeardownTimers.values()) {
-        clearTimeout(timer);
-      }
-      scopeTeardownTimers.clear();
+      subscriptions.clearAllTeardownTimers(subsState);
 
-      if (activeScopes.size === 0) return;
+      if (!subscriptions.hasActive(subsState)) return;
 
-      scopeActivationEpoch++;
+      subscriptions.bumpEpoch(subsState);
 
-      for (const [key, entry] of activeScopes) {
+      for (const [key, entry] of subsState.scopes) {
         try {
           entry.unsubscribe?.();
         } catch (err) {
@@ -1994,8 +1964,8 @@ class EngineImpl implements EngineInstance {
         const isScoped = Object.keys(entry.scopeArgs).length > 0;
         const hasReaders = (entry.readers?.size ?? 0) > 0;
         if (isScoped && !hasReaders) {
-          activeScopes.delete(key);
-          scopeGate.clearResolved(key);
+          subscriptions.deleteScope(subsState, key);
+          subscriptions.clearPulled(subsState, key);
         }
       }
 
@@ -2016,22 +1986,17 @@ class EngineImpl implements EngineInstance {
         return;
       }
       const key = buildScopeKey(tableName, normalizedScope);
-      const pendingTeardown = scopeTeardownTimers.get(key);
-      if (pendingTeardown !== undefined) {
-        clearTimeout(pendingTeardown);
-        scopeTeardownTimers.delete(key);
-      }
-      let entry = activeScopes.get(key);
-      if (!entry) {
-        entry = { tableName, scopeArgs: normalizedScope };
-        activeScopes.set(key, entry);
-      }
-      (entry.readers ??= new Set<string>()).add(readKey);
+      subscriptions.clearTeardownTimer(subsState, key);
+      subscriptions.set(subsState, key, {
+        tableName,
+        scopeArgs: normalizedScope,
+      });
+      subscriptions.addReader(subsState, key, readKey);
     }
 
     function teardownScope(key: string): void {
-      scopeTeardownTimers.delete(key);
-      const entry = activeScopes.get(key);
+      subscriptions.clearTeardownTimer(subsState, key);
+      const entry = subscriptions.get(subsState, key);
       if (!entry) {
         return;
       }
@@ -2045,8 +2010,8 @@ class EngineImpl implements EngineInstance {
       }
       entry.unsubscribe = undefined;
       entry.pendingActivation = undefined;
-      activeScopes.delete(key);
-      scopeGate.clearResolved(key);
+      subscriptions.deleteScope(subsState, key);
+      subscriptions.clearPulled(subsState, key);
       log.debug(`sync: deactivated idle scope ${key}`);
     }
 
@@ -2060,19 +2025,12 @@ class EngineImpl implements EngineInstance {
         return;
       }
       const key = buildScopeKey(tableName, normalizedScope);
-      const entry = activeScopes.get(key);
-      if (!entry) {
+      const remaining = subscriptions.removeReader(subsState, key, readKey);
+      if (remaining === null || remaining > 0) {
         return;
       }
-      entry.readers?.delete(readKey);
-      if ((entry.readers?.size ?? 0) > 0) {
-        return;
-      }
-      const existing = scopeTeardownTimers.get(key);
-      if (existing !== undefined) {
-        clearTimeout(existing);
-      }
-      scopeTeardownTimers.set(
+      subscriptions.setTeardownTimer(
+        subsState,
         key,
         setTimeout(() => teardownScope(key), SCOPE_TEARDOWN_DEBOUNCE_MS),
       );
@@ -2088,7 +2046,7 @@ class EngineImpl implements EngineInstance {
 
       const normalizedScope = canonicalizeScopeArgs(scopeArgs);
       const key = buildScopeKey(tableName, normalizedScope);
-      const existing = activeScopes.get(key);
+      const existing = subscriptions.get(subsState, key);
       if (existing?.unsubscribe) {
         return;
       }
@@ -2096,11 +2054,10 @@ class EngineImpl implements EngineInstance {
         await existing.pendingActivation;
         return;
       }
-      const entry: ActiveScope = existing ?? {
+      const entry: ScopeRecord = subscriptions.set(subsState, key, {
         tableName,
         scopeArgs: normalizedScope,
-      };
-      if (!existing) activeScopes.set(key, entry);
+      });
       if (
         !scheduler.isOnline(schedulerState) ||
         !started ||
@@ -2114,7 +2071,7 @@ class EngineImpl implements EngineInstance {
         return;
       }
 
-      const epochAtStart = scopeActivationEpoch;
+      const epochAtStart = subscriptions.getEpoch(subsState);
 
       const activation = (async () => {
         if (!pull.hasPulledScopeSeq(pullState, key)) {
@@ -2125,10 +2082,10 @@ class EngineImpl implements EngineInstance {
             normalizedScope,
           );
         }
-        markScopeResolved(tableName, normalizedScope);
+        subscriptions.markPulled(subsState, key);
         await yieldToEventLoop();
 
-        if (scopeActivationEpoch !== epochAtStart || !started) {
+        if (subscriptions.getEpoch(subsState) !== epochAtStart || !started) {
           return;
         }
 
@@ -2252,7 +2209,7 @@ class EngineImpl implements EngineInstance {
       tableSchemas,
       orderedTables,
       getRemoteApplyOrder,
-      activeScopes,
+      activeScopes: subsState.scopes,
       buildScopeKey,
       canonicalizeScopeArgs,
       ingestDocuments,
@@ -2318,8 +2275,7 @@ class EngineImpl implements EngineInstance {
     this._schedulerState = schedulerState;
     this._mergeState = mergeState;
     this._pullState = pullState;
-    this._scopeGate = scopeGate;
-    this._snapshotIngest = snapshotIngest;
+    this._subsState = subsState;
     this._replayLoop = replayLoop;
 
     this.start = () => {
@@ -2383,7 +2339,7 @@ class EngineImpl implements EngineInstance {
 
       stopRemoteSubscriptions();
       clearBufferedSnapshots();
-      scopeGate.resetResolved();
+      subscriptions.resetPulled(subsState);
 
       cleanupOnlineListener?.();
       cleanupOfflineListener?.();
@@ -2534,13 +2490,19 @@ class EngineImpl implements EngineInstance {
       scopeArgs: Record<string, unknown> | undefined,
       cb: () => void,
     ): (() => void) => {
-      return onScopeResolved(tableName, scopeArgs, cb);
+      return subscriptions.onPulled(
+        subsState,
+        subsDeps,
+        tableName,
+        scopeArgs,
+        cb,
+      );
     };
 
     this.reloadIdentity = async (): Promise<void> => {
       await hydrateIdentityState();
       clearBufferedSnapshots();
-      scopeGate.resetResolved();
+      subscriptions.resetPulled(subsState);
       await pendingQueue.unblockAll();
 
       if (!started) {

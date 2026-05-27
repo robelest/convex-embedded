@@ -14,6 +14,7 @@ import * as Y from "yjs";
 import { ConnectivityState } from "@/client/engine/connectivity";
 import { CrdtDirtyState } from "@/client/engine/crdt";
 import { PullBatchCoordinator } from "@/client/engine/pullbatch";
+import { CycleScheduler } from "@/client/engine/scheduler";
 import { ScopeRegistry, type ActiveScope } from "@/client/engine/scope";
 import { SnapshotIngest } from "@/client/engine/snapshot";
 import {
@@ -1763,7 +1764,7 @@ function createEngine(config: EngineConfig): EngineInstance {
   const statusEmitter = new EngineStatusEmitter();
   let started = false;
   let scopeActivationEpoch = 0;
-  let abortController: AbortController | null = null;
+  const cycleScheduler = new CycleScheduler();
 
   const schemaIdFields = extractSchemaIdFields(
     Object.values(tables)
@@ -1806,14 +1807,12 @@ function createEngine(config: EngineConfig): EngineInstance {
 
   let queueProcessingPromise: Promise<Set<string>> | null = null;
   let queueProcessingRequestedWhileActive = false;
-  let replicationCyclePromise: Promise<void> | null = null;
   let activeEntry: PendingEntry | null = null;
 
   let onOnline: (() => void) | null = null;
   let onOffline: (() => void) | null = null;
   let cleanupOnlineListener: (() => void) | null = null;
   let cleanupOfflineListener: (() => void) | null = null;
-  let processorHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
   const activeScopes = new Map<string, ActiveScope>();
   const scopeTeardownTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const SCOPE_TEARDOWN_DEBOUNCE_MS = config.scopeTeardownDebounceMs ?? 3000;
@@ -2371,18 +2370,19 @@ function createEngine(config: EngineConfig): EngineInstance {
   function runReplicationCycle(options?: {
     forceResolve?: boolean;
   }): Promise<void> {
-    if (replicationCyclePromise) {
+    const inFlight = cycleScheduler.inFlight();
+    if (inFlight) {
       if (options?.forceResolve) {
-        return replicationCyclePromise.then(() => runReplicationCycle(options));
+        return inFlight.then(() => runReplicationCycle(options));
       }
-      return replicationCyclePromise;
+      return inFlight;
     }
 
-    abortController?.abort();
-    abortController = new AbortController();
-    const signal = abortController.signal;
+    cycleScheduler.abortCurrent();
+    const controller = cycleScheduler.newAbortController();
+    const signal = controller.signal;
 
-    replicationCyclePromise = (async () => {
+    const cyclePromise = (async () => {
       try {
         await processUploadQueue(signal);
         const deadLettered = await processQueue(signal);
@@ -2440,13 +2440,14 @@ function createEngine(config: EngineConfig): EngineInstance {
         }
       }
     })().finally(() => {
-      replicationCyclePromise = null;
-      if (abortController?.signal === signal) {
-        abortController = null;
+      cycleScheduler.setInFlight(null);
+      if (cycleScheduler.currentSignal() === signal) {
+        cycleScheduler.abortCurrent();
       }
     });
 
-    return replicationCyclePromise;
+    cycleScheduler.setInFlight(cyclePromise);
+    return cyclePromise;
   }
 
   async function mergeDirtyCrdtRows(signal?: AbortSignal): Promise<void> {
@@ -3455,7 +3456,7 @@ function createEngine(config: EngineConfig): EngineInstance {
         await getTableSpec(
           tableName,
           tableConfig,
-          abortController?.signal ?? undefined,
+          cycleScheduler.currentSignal(),
           normalizedScope,
         );
       }
@@ -3516,8 +3517,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     log.info("sync: offline event");
     connectivityState.markOffline();
     recordCounter("connectivity.transition", { state: "offline" });
-    abortController?.abort();
-    abortController = null;
+    cycleScheduler.abortCurrent();
     stopRemoteSubscriptions();
     clearBufferedSnapshots();
     emit({ status: "offline" });
@@ -3724,20 +3724,11 @@ function createEngine(config: EngineConfig): EngineInstance {
   }
 
   function startProcessorHeartbeat(): void {
-    runDetached(heartbeatProcessorSafe, "[sync] processor heartbeat:");
-    if (processorHeartbeatTimer !== null) {
-      clearInterval(processorHeartbeatTimer);
-    }
-    processorHeartbeatTimer = setInterval(() => {
-      runDetached(heartbeatProcessorSafe, "[sync] processor heartbeat:");
-    }, processorHeartbeatMs);
+    cycleScheduler.startHeartbeat(processorHeartbeatMs, heartbeatProcessorSafe);
   }
 
   function stopProcessorHeartbeat(): void {
-    if (processorHeartbeatTimer !== null) {
-      clearInterval(processorHeartbeatTimer);
-      processorHeartbeatTimer = null;
-    }
+    cycleScheduler.stopHeartbeat();
     runDetached(
       () =>
         runLocalSystemMutation(SystemPaths.processorRemove, {
@@ -3798,8 +3789,7 @@ function createEngine(config: EngineConfig): EngineInstance {
       unregisterPendingDepth();
       unregisterPendingUploadsDepth();
 
-      abortController?.abort();
-      abortController = null;
+      cycleScheduler.abortCurrent();
       if (activeEntry) {
         const entry = activeEntry;
         activeEntry = null;

@@ -76,6 +76,81 @@ export class EmbeddedClient extends ConvexClient {
     this._pipeline = pipeline;
     this._explicitOptimistic = explicitOptimistic;
     this._subscriptions = subscriptions;
+    this._installLocalQueryAccess();
+  }
+
+  /**
+   * Override the internal `client.localQueryResult` / `client.localQueryLogs`
+   * accessors to consult the embedded runtime (and cache, if present) before
+   * falling back to the original ConvexClient behavior.
+   */
+  private _installLocalQueryAccess(): void {
+    const routing = this._routing;
+    if (!routing) return;
+    const baseClient = (
+      this as unknown as {
+        client?: {
+          localQueryResult?: (
+            refName: string,
+            args: Record<string, unknown>,
+          ) => unknown;
+          localQueryLogs?: (
+            refName: string,
+            args: Record<string, unknown>,
+          ) => string[] | undefined;
+        };
+      }
+    ).client;
+    if (!baseClient) return;
+
+    const originalLocalQueryResult =
+      baseClient.localQueryResult?.bind(baseClient);
+    const originalLocalQueryLogs = baseClient.localQueryLogs?.bind(baseClient);
+
+    if (typeof originalLocalQueryResult === "function") {
+      baseClient.localQueryResult = (
+        refName: string,
+        args: Record<string, unknown>,
+      ) => {
+        if (routing.planReadByName(refName).kind !== "local") {
+          return originalLocalQueryResult(refName, args);
+        }
+        if (
+          routing.cache &&
+          !refName.startsWith("_system:") &&
+          this._pipeline
+        ) {
+          const cached = routing.cache.get(refName, args ?? {});
+          if (cached !== undefined) {
+            return toClientResult(
+              cached.value,
+              routing.translateLocalResultToClient,
+            );
+          }
+        }
+        const translatedArgs =
+          routing.translateLocalArgsToRuntime?.(args ?? {}) ?? args ?? {};
+        void routing.ensureReadReady?.(refName, args ?? {});
+        const result = routing.runtime
+          .watchLocalQuery(refName, translatedArgs)
+          .localQueryResult();
+        return toClientResult(result, routing.translateLocalResultToClient);
+      };
+    }
+
+    if (typeof originalLocalQueryLogs === "function") {
+      baseClient.localQueryLogs = (
+        refName: string,
+        args: Record<string, unknown>,
+      ) => {
+        if (routing.planReadByName(refName).kind !== "local") {
+          return originalLocalQueryLogs(refName, args);
+        }
+        return routing.runtime
+          .watchLocalQuery(refName, args ?? {})
+          .localQueryLogs();
+      };
+    }
   }
 
   private async _routedMutation<M extends FunctionReference<"mutation">>(

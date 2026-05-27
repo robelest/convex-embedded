@@ -1351,74 +1351,6 @@ function createRuntimeLocalPaginatedOnUpdate(input: {
   };
 }
 
-function patchBaseClientLocalQueryAccess(input: {
-  client: ConvexClient;
-  runtime: EmbeddedRuntime;
-  planReadByName: (refName: string) => ReadPlan;
-  ensureReadReady?: (
-    refName: string,
-    readArgs?: Record<string, unknown>,
-  ) => Promise<void>;
-  translateLocalArgsToRuntime?: (
-    args: Record<string, unknown>,
-  ) => Record<string, unknown>;
-  translateLocalResultToClient?: <T>(value: T) => T;
-  cache?: EmbeddedQueryCache | null;
-}) {
-  const baseClient = (input.client as unknown as PatchableConvexClient).client;
-  if (!baseClient) {
-    return;
-  }
-
-  const originalLocalQueryResult =
-    baseClient.localQueryResult?.bind(baseClient);
-  const originalLocalQueryLogs = baseClient.localQueryLogs?.bind(baseClient);
-
-  if (typeof originalLocalQueryResult === "function") {
-    baseClient.localQueryResult = (
-      refName: string,
-      args: Record<string, unknown>,
-    ) => {
-      if (input.planReadByName(refName).kind !== "local") {
-        return originalLocalQueryResult(refName, args);
-      }
-
-      if (input.cache && !isSystemRefName(refName)) {
-        const cached = input.cache.get(refName, args ?? {});
-        if (cached !== undefined) {
-          return toClientResult(
-            cached.value,
-            input.translateLocalResultToClient,
-          );
-        }
-      }
-
-      const translatedArgs =
-        input.translateLocalArgsToRuntime?.(args ?? {}) ?? args ?? {};
-      void input.ensureReadReady?.(refName, args ?? {});
-      const result = input.runtime
-        .watchLocalQuery(refName, translatedArgs)
-        .localQueryResult();
-      return toClientResult(result, input.translateLocalResultToClient);
-    };
-  }
-
-  if (typeof originalLocalQueryLogs === "function") {
-    baseClient.localQueryLogs = (
-      refName: string,
-      args: Record<string, unknown>,
-    ) => {
-      if (input.planReadByName(refName).kind !== "local") {
-        return originalLocalQueryLogs(refName, args);
-      }
-
-      return input.runtime
-        .watchLocalQuery(refName, args ?? {})
-        .localQueryLogs();
-    };
-  }
-}
-
 export function deferSubscription(input: {
   factory: () => Promise<unknown>;
   asError: (error: unknown) => Error;
@@ -1562,15 +1494,8 @@ export type ExplicitOptimisticCallback = (
 export function patchRoutedConvexClient(input: RoutedClientInput): {
   dispose: () => void;
 } {
-  patchBaseClientLocalQueryAccess({
-    client: input.client,
-    runtime: input.runtime,
-    planReadByName: input.planReadByName,
-    ensureReadReady: input.ensureReadReady,
-    translateLocalArgsToRuntime: input.translateLocalArgsToRuntime,
-    translateLocalResultToClient: input.translateLocalResultToClient,
-    cache: input.cache ?? null,
-  });
+  // The cache-aware localQueryResult/localQueryLogs overrides are installed
+  // by EmbeddedClient._installLocalQueryAccess (see client/embedded.ts).
 
   const cache = input.cache ?? null;
   const getCacheStorage = input.getCacheStorage ?? (() => null);

@@ -36,7 +36,7 @@ import { createLogger } from "@/shared/logger";
 import type { RouteMode } from "@/shared/route";
 import type { EngineStatus } from "@/shared/types";
 import { stableValueKey } from "@/shared/valuekey";
-import { PubSub } from "@/utils/pubsub";
+import { createPubSub, type PubSub } from "@/utils/pubsub";
 import { createDisposableScope, type DisposableScope } from "@/utils/scope";
 
 const log = createLogger("remote");
@@ -631,7 +631,7 @@ export function attachResolve(input: {
   const entry: PullEntry = {
     engine: null,
     state: { status: "idle" },
-    stateHub: new PubSub<RemoteState>(),
+    stateHub: createPubSub<RemoteState>(),
     routeModes: new Map(),
     discovery: null,
     discoveryReady: false,

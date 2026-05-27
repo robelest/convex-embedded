@@ -53,7 +53,7 @@ import { extractEmbeddedTableDefinitions } from "@/shared/schema";
 import type { PendingReplayMeta } from "@/shared/symbols";
 import type { StorageAdapter } from "@/storage/adapter";
 import type { SqliteDriver } from "@/storage/sqlite/driver";
-import { PubSub } from "@/utils/pubsub";
+import { createPubSub, type PubSub } from "@/utils/pubsub";
 import { createDisposableScope } from "@/utils/scope";
 
 const log = createLogger("setup");
@@ -143,7 +143,7 @@ function createAuthEntry(
     activeIdentityKey: null,
     sessionBroadcast: sessionBroadcast ?? undefined,
     state: { status: "idle" } as AuthState,
-    stateHub: new PubSub<AuthState>(),
+    stateHub: createPubSub<AuthState>(),
   };
 }
 

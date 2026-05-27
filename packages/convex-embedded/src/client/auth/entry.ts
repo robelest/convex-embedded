@@ -3,7 +3,7 @@ import type { ConvexClient } from "convex/browser";
 import type { UserIdentity } from "@/auth";
 import type { EmbeddedRuntime } from "@/runtime/embedded";
 import type { SessionBroadcast } from "@/runtime/platform";
-import { PubSub } from "@/utils/pubsub";
+import type { PubSub } from "@/utils/pubsub";
 
 export type AuthTokenFetcher = Parameters<ConvexClient["setAuth"]>[0];
 export type UserIdentitySource = () => Promise<UserIdentity | null>;

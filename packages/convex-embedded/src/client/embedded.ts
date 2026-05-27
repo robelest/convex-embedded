@@ -8,7 +8,7 @@ import type {
 import { ConvexError } from "convex/values";
 
 import {
-  CachePipeline,
+  createCachePipeline,
   createCacheOnUpdate,
   createCachePaginatedOnUpdate,
   createNoopUnsubscribe,
@@ -23,6 +23,7 @@ import {
   toClientResult,
 } from "@/client/adapter";
 import type {
+  CachePipeline,
   ExplicitOptimisticCallback,
   RoutedClientInput,
 } from "@/client/adapter";
@@ -90,7 +91,7 @@ export class EmbeddedClient extends ConvexClient {
     >();
 
     const pipeline = cache
-      ? new CachePipeline({
+      ? createCachePipeline({
           cache,
           getCacheStorage,
           remoteClient,

@@ -226,46 +226,47 @@ const REMOTE_PUSH_COALESCE_MS = 16;
 
 const OPTIMISTIC_PROTECTION_MS = 500;
 
-export class CachePipeline {
-  private readonly active = new Map<string, ActiveSubscription>();
-  private readonly removeOnlineListener: (() => void) | null;
-  private readonly changeListeners = new Set<() => void>();
+export interface CachePipeline {
+  listActiveSubscriptions(): ActiveSubscriptionSnapshot[];
+  onSubscriptionsChange(listener: () => void): () => void;
+  dispose(): void;
+  getCurrentValue(refName: string, args: unknown): unknown;
+  setWorkScheduler(scheduler: WorkScheduler | null): void;
+  getWorkScheduler(): WorkScheduler;
+  applyOptimisticTransition(
+    updates: Array<{
+      refName: string;
+      args: unknown;
+      value: unknown;
+      priority?: "discrete" | "transition";
+    }>,
+  ): void;
+  subscribe(input: {
+    refName: string;
+    args: unknown;
+    onValue: (value: unknown) => void;
+    onError?: (error: Error) => void;
+  }): () => void;
+}
 
-  constructor(private readonly config: CachePipelineConfig) {
-    const connectivity = config.connectivity;
-    this.removeOnlineListener =
-      connectivity?.onOnline?.(() => {
-        this.openDeferredSubscriptions();
-      }) ?? null;
-    // Pin live subscriptions so the cache eviction loop can't drop the
-    // value backing an active `useQuery`.
-    config.cache.setIsPinned((argsKey) => this.active.has(argsKey));
-  }
+export function createCachePipeline(
+  config: CachePipelineConfig,
+): CachePipeline {
+  const active = new Map<string, ActiveSubscription>();
+  const changeListeners = new Set<() => void>();
+  let workScheduler: WorkScheduler = createDefaultWorkScheduler();
 
-  listActiveSubscriptions(): ActiveSubscriptionSnapshot[] {
-    const snapshot: ActiveSubscriptionSnapshot[] = [];
-    for (const entry of this.active.values()) {
-      snapshot.push({
-        id: entry.argsKey,
-        path: entry.refName,
-        args: entry.args,
-        value: entry.hasValue ? entry.currentValue : undefined,
-        updateCount: entry.updateCount,
-        lastUpdateMs: entry.lastUpdateMs,
-      });
-    }
-    return snapshot;
-  }
+  const connectivity = config.connectivity;
+  const removeOnlineListener =
+    connectivity?.onOnline?.(() => {
+      openDeferredSubscriptions();
+    }) ?? null;
+  // Pin live subscriptions so the cache eviction loop can't drop the
+  // value backing an active `useQuery`.
+  config.cache.setIsPinned((argsKey) => active.has(argsKey));
 
-  onSubscriptionsChange(listener: () => void): () => void {
-    this.changeListeners.add(listener);
-    return () => {
-      this.changeListeners.delete(listener);
-    };
-  }
-
-  private notifySubscriptionsChange(): void {
-    for (const listener of this.changeListeners) {
+  function notifySubscriptionsChange(): void {
+    for (const listener of changeListeners) {
       try {
         listener();
       } catch {
@@ -274,17 +275,7 @@ export class CachePipeline {
     }
   }
 
-  dispose(): void {
-    this.removeOnlineListener?.();
-    for (const entry of this.active.values()) {
-      entry.remoteUnsubscribe?.();
-      entry.localUnsubscribe?.();
-    }
-    this.active.clear();
-    this.changeListeners.clear();
-  }
-
-  private opensRemoteSubscription(entry: ActiveSubscription): boolean {
+  function opensRemoteSubscription(entry: ActiveSubscription): boolean {
     const args = entry.args as Record<string, unknown> | undefined;
     const isPaginated =
       args !== undefined &&
@@ -293,72 +284,26 @@ export class CachePipeline {
     return !isPaginated;
   }
 
-  private openDeferredSubscriptions(): void {
-    if (!this.config.remoteClient) return;
-    if (isConnectivityOffline(this.config.connectivity)) return;
-    for (const entry of this.active.values()) {
+  function openDeferredSubscriptions(): void {
+    if (!config.remoteClient) return;
+    if (isConnectivityOffline(config.connectivity)) return;
+    for (const entry of active.values()) {
       if (
         entry.remoteUnsubscribe === null &&
-        this.opensRemoteSubscription(entry)
+        opensRemoteSubscription(entry)
       ) {
-        this.openRemoteSubscription(entry);
+        openRemoteSubscription(entry);
       }
     }
   }
 
-  getCurrentValue(refName: string, args: unknown): unknown {
-    const argsKey = `${refName} ${stableValueKey(args)}`;
-    const existing = this.active.get(argsKey);
-    if (existing && existing.hasValue) {
-      return existing.currentValue;
-    }
-    const cached = this.config.cache.get(refName, args);
-    return cached?.value;
-  }
-
-  private workScheduler: WorkScheduler = createDefaultWorkScheduler();
-
-  setWorkScheduler(scheduler: WorkScheduler | null): void {
-    this.workScheduler = scheduler ?? createDefaultWorkScheduler();
-  }
-
-  getWorkScheduler(): WorkScheduler {
-    return this.workScheduler;
-  }
-
-  applyOptimisticTransition(
-    updates: Array<{
-      refName: string;
-      args: unknown;
-      value: unknown;
-      priority?: "discrete" | "transition";
-    }>,
-  ): void {
-    if (updates.length === 0) return;
-    const transition: typeof updates = [];
-    for (const update of updates) {
-      if (update.priority === "transition") {
-        transition.push(update);
-        continue;
-      }
-      this.applyOptimisticOne(update);
-    }
-    if (transition.length > 0) {
-      this.workScheduler.post("user-visible", () => {
-        for (const update of transition) {
-          this.applyOptimisticOne(update);
-        }
-      });
-    }
-  }
-
-  private applyOptimisticOne(update: {
+  function applyOptimisticOne(update: {
     refName: string;
     args: unknown;
     value: unknown;
   }): void {
     const argsKey = `${update.refName} ${stableValueKey(update.args)}`;
-    const previous = this.config.cache.get(update.refName, update.args);
+    const previous = config.cache.get(update.refName, update.args);
     const nextEntry: CachedEntry = {
       value: update.value,
       receivedAtMs: Date.now(),
@@ -366,14 +311,10 @@ export class CachePipeline {
       paginationCursor: previous?.paginationCursor,
       paginationIsDone: previous?.paginationIsDone,
     };
-    const changed = this.config.cache.set(
-      update.refName,
-      update.args,
-      nextEntry,
-    );
+    const changed = config.cache.set(update.refName, update.args, nextEntry);
     if (!changed) return;
 
-    const entry = this.active.get(argsKey);
+    const entry = active.get(argsKey);
     if (entry) {
       const valueChanged =
         !entry.hasValue || !structuralEqual(entry.currentValue, update.value);
@@ -381,144 +322,53 @@ export class CachePipeline {
       entry.hasValue = true;
       entry.optimisticAppliedAtMs = nowMs();
       if (valueChanged) {
-        this.notifyListeners(entry);
+        notifyListeners(entry);
       }
-      void this.persistEntry(entry, nextEntry);
+      void persistEntry(entry, nextEntry);
     }
   }
 
-  subscribe(input: {
-    refName: string;
-    args: unknown;
-    onValue: (value: unknown) => void;
-    onError?: (error: Error) => void;
-  }): () => void {
-    const { refName, args } = input;
-    const argsKey = `${refName} ${stableValueKey(args)}`;
-    let entry = this.active.get(argsKey);
-    if (!entry) {
-      entry = {
-        refName,
-        args,
-        argsKey,
-        listeners: new Set(),
-        errorListeners: new Set(),
-        currentValue: undefined,
-        hasValue: false,
-        lastRemoteValue: undefined,
-        optimisticAppliedAtMs: 0,
-        remoteUnsubscribe: null,
-        storageLoadPromise: null,
-        localUnsubscribe: null,
-        localHandle: null,
-        pendingPushValue: undefined,
-        pendingPushHasValue: false,
-        pendingPushTimer: null,
-        lastPushAtMs: 0,
-        updateCount: 0,
-        lastUpdateMs: 0,
-      };
-      this.active.set(argsKey, entry);
-      this.bootstrapEntry(entry);
-      this.notifySubscriptionsChange();
-    }
-
-    entry.listeners.add(input.onValue);
-    if (input.onError) {
-      entry.errorListeners.add(input.onError);
-    }
-
-    if (entry.hasValue) {
-      try {
-        input.onValue(entry.currentValue);
-      } catch {
-        /* listener error */
-      }
-    }
-
-    return () => {
-      const current = this.active.get(argsKey);
-      if (!current) return;
-      current.listeners.delete(input.onValue);
-      if (input.onError) {
-        current.errorListeners.delete(input.onError);
-      }
-      if (current.listeners.size === 0 && current.errorListeners.size === 0) {
-        if (current.pendingPushTimer !== null) {
-          clearTimeout(current.pendingPushTimer);
-          current.pendingPushTimer = null;
-          current.pendingPushHasValue = false;
-          current.pendingPushValue = undefined;
-        }
-        if (current.remoteUnsubscribe) {
-          try {
-            current.remoteUnsubscribe();
-          } catch {
-            /* ignore */
-          }
-          current.remoteUnsubscribe = null;
-        }
-        if (current.localUnsubscribe) {
-          try {
-            current.localUnsubscribe();
-          } catch {
-            /* ignore */
-          }
-          current.localUnsubscribe = null;
-        }
-        this.active.delete(argsKey);
-        if (!isSystemRefName(current.refName)) {
-          this.config.releaseRead?.(
-            current.refName,
-            current.args as Record<string, unknown>,
-          );
-        }
-        this.notifySubscriptionsChange();
-      }
-    };
-  }
-
-  private bootstrapEntry(entry: ActiveSubscription): void {
+  function bootstrapEntry(entry: ActiveSubscription): void {
     const startedAt = nowMs();
     if (!isSystemRefName(entry.refName)) {
-      void this.config.ensureReadReady?.(
+      void config.ensureReadReady?.(
         entry.refName,
         entry.args as Record<string, unknown>,
       );
     }
-    const cached = this.config.cache.get(entry.refName, entry.args);
+    const cached = config.cache.get(entry.refName, entry.args);
     let cacheState: "hit" | "miss-disk" | "miss-cold" = "miss-cold";
     if (cached) {
       entry.currentValue = cached.value;
       entry.hasValue = true;
       entry.lastRemoteValue = cached.value;
       cacheState = "hit";
-    } else if (this.config.getCacheStorage()) {
-      entry.storageLoadPromise = this.loadFromStorage(entry).catch(() => {
+    } else if (config.getCacheStorage()) {
+      entry.storageLoadPromise = loadFromStorage(entry).catch(() => {
         /* swallow */
       });
       cacheState = "miss-disk";
     }
 
     if (
-      this.config.remoteClient &&
-      !isConnectivityOffline(this.config.connectivity) &&
-      this.opensRemoteSubscription(entry)
+      config.remoteClient &&
+      !isConnectivityOffline(config.connectivity) &&
+      opensRemoteSubscription(entry)
     ) {
-      this.openRemoteSubscription(entry);
+      openRemoteSubscription(entry);
     }
 
-    this.openLocalWatch(entry);
+    openLocalWatch(entry);
     log.debug(
       `bootstrapEntry ${entry.refName} ${cacheState} ms=${(nowMs() - startedAt).toFixed(1)}`,
     );
   }
 
-  private openLocalWatch(entry: ActiveSubscription): void {
-    const runtime = this.config.runtime;
+  function openLocalWatch(entry: ActiveSubscription): void {
+    const runtime = config.runtime;
     if (!runtime || typeof runtime.watchLocalQuery !== "function") return;
     const translatedArgs =
-      this.config.translateLocalArgsToRuntime?.(
+      config.translateLocalArgsToRuntime?.(
         entry.args as Record<string, unknown>,
       ) ?? (entry.args as Record<string, unknown>);
 
@@ -530,7 +380,7 @@ export class CachePipeline {
     }
 
     const handleLocal = () => {
-      if (!this.active.has(entry.argsKey)) return;
+      if (!active.has(entry.argsKey)) return;
       withSpanSync("convex-embedded.cache.localUpdate", (span) => {
         const startedAt = nowMs();
         let result: unknown;
@@ -587,7 +437,7 @@ export class CachePipeline {
         log.debug(
           `local-watch ${entry.refName} result.length=${Array.isArray(result) ? result.length : "non-array"} fallback=${usedRemoteFallback} read_ms=${(equalStart - startedAt).toFixed(1)} equal_ms=${equalMs.toFixed(1)}`,
         );
-        const previous = this.config.cache.get(entry.refName, entry.args);
+        const previous = config.cache.get(entry.refName, entry.args);
         const nextEntry: CachedEntry = {
           value: result,
           receivedAtMs: Date.now(),
@@ -595,15 +445,11 @@ export class CachePipeline {
           paginationCursor: previous?.paginationCursor,
           paginationIsDone: previous?.paginationIsDone,
         };
-        const changed = this.config.cache.set(
-          entry.refName,
-          entry.args,
-          nextEntry,
-        );
+        const changed = config.cache.set(entry.refName, entry.args, nextEntry);
         entry.currentValue = result;
         entry.hasValue = true;
         if (changed) {
-          void this.persistEntry(entry, nextEntry);
+          void persistEntry(entry, nextEntry);
         }
         span.setAttributes({
           "convex.cache.ref": entry.refName,
@@ -611,7 +457,7 @@ export class CachePipeline {
           "convex.cache.eval_ms": +(nowMs() - startedAt).toFixed(2),
           "convex.cache.fallback": usedRemoteFallback,
         });
-        this.notifyListeners(entry);
+        notifyListeners(entry);
       });
     };
 
@@ -635,8 +481,8 @@ export class CachePipeline {
     handleLocal();
   }
 
-  private async loadFromStorage(entry: ActiveSubscription): Promise<void> {
-    const storage = this.config.getCacheStorage();
+  async function loadFromStorage(entry: ActiveSubscription): Promise<void> {
+    const storage = config.getCacheStorage();
     if (!storage) return;
     const argsHash = stableValueKey(entry.args);
     let row;
@@ -647,7 +493,7 @@ export class CachePipeline {
     }
     if (!row) return;
     if (entry.hasValue) return;
-    if (!this.active.has(entry.argsKey)) return;
+    if (!active.has(entry.argsKey)) return;
     const value = safeJsonParse(row.valueJson);
     const cacheEntry: CachedEntry = {
       value,
@@ -657,31 +503,31 @@ export class CachePipeline {
       paginationIsDone:
         row.paginationIsDone === null ? undefined : row.paginationIsDone === 1,
     };
-    this.config.cache.set(entry.refName, entry.args, cacheEntry);
+    config.cache.set(entry.refName, entry.args, cacheEntry);
     entry.currentValue = value;
     entry.hasValue = true;
     entry.lastRemoteValue = value;
-    this.notifyListeners(entry);
+    notifyListeners(entry);
   }
 
-  private openRemoteSubscription(entry: ActiveSubscription): void {
-    const remoteClient = this.config.remoteClient;
+  function openRemoteSubscription(entry: ActiveSubscription): void {
+    const remoteClient = config.remoteClient;
     if (!remoteClient) return;
     const patchable = remoteClient as unknown as PatchableConvexClient;
     if (typeof patchable.onUpdate !== "function") return;
 
     const applyPush = (value: unknown) => {
-      if (!this.active.has(entry.argsKey)) return;
+      if (!active.has(entry.argsKey)) return;
       const remoteChanged =
         entry.lastRemoteValue === undefined ||
         !structuralEqual(entry.lastRemoteValue, value);
       if (!remoteChanged) return;
       const previousRemote = entry.lastRemoteValue;
       entry.lastRemoteValue = value;
-      this.workScheduler.post("background", () => {
-        this.extractDocsToStore(entry.refName, value, previousRemote);
+      workScheduler.post("background", () => {
+        extractDocsToStore(entry.refName, value, previousRemote);
       });
-      const previous = this.config.cache.get(entry.refName, entry.args);
+      const previous = config.cache.get(entry.refName, entry.args);
       const persistedEntry: CachedEntry = {
         value,
         receivedAtMs: Date.now(),
@@ -689,7 +535,7 @@ export class CachePipeline {
         paginationCursor: previous?.paginationCursor,
         paginationIsDone: previous?.paginationIsDone,
       };
-      void this.persistEntry(entry, persistedEntry);
+      void persistEntry(entry, persistedEntry);
       if (entry.localHandle) {
         entry.localHandle();
       }
@@ -708,7 +554,7 @@ export class CachePipeline {
     };
 
     const handlePush = (value: unknown) => {
-      if (!this.active.has(entry.argsKey)) return;
+      if (!active.has(entry.argsKey)) return;
       log.debug(
         `remote-push ${entry.refName} value.length=${Array.isArray(value) ? value.length : "non-array"} type=${Array.isArray(value) ? "array" : typeof value}`,
       );
@@ -733,7 +579,7 @@ export class CachePipeline {
     };
 
     const handleError = (error: Error) => {
-      const normalized = this.config.asError(error);
+      const normalized = config.asError(error);
       for (const listener of entry.errorListeners) {
         try {
           listener(normalized);
@@ -761,13 +607,13 @@ export class CachePipeline {
           (result as { unsubscribe: () => void }).unsubscribe();
       }
     } catch (error) {
-      handleError(this.config.asError(error));
+      handleError(config.asError(error));
       return;
     }
     entry.remoteUnsubscribe = unsubscribe;
   }
 
-  private extractDocsToStore(
+  function extractDocsToStore(
     refName: string,
     value: unknown,
     previousValue: unknown,
@@ -806,7 +652,7 @@ export class CachePipeline {
       );
       return;
     }
-    const runtime = this.config.runtime;
+    const runtime = config.runtime;
     if (!runtime || typeof runtime.writeDocsFromCache !== "function") return;
     log.debug(
       `extractDocsToStore ${refName} table=${tableName} docs=${docs.length} changed=${changed.length} collect_ms=${collectMs.toFixed(1)}`,
@@ -816,11 +662,11 @@ export class CachePipeline {
     });
   }
 
-  private async persistEntry(
+  async function persistEntry(
     entry: ActiveSubscription,
     cacheEntry: CachedEntry,
   ): Promise<void> {
-    const storage = this.config.getCacheStorage();
+    const storage = config.getCacheStorage();
     if (!storage) return;
     const argsHash = stableValueKey(entry.args);
     try {
@@ -844,10 +690,10 @@ export class CachePipeline {
     }
   }
 
-  private notifyListeners(entry: ActiveSubscription): void {
+  function notifyListeners(entry: ActiveSubscription): void {
     entry.updateCount += 1;
     entry.lastUpdateMs = Date.now();
-    this.notifySubscriptionsChange();
+    notifySubscriptionsChange();
     if (entry.listeners.size === 0) return;
     log.debug(
       `notify ${entry.refName} listeners=${entry.listeners.size} ts=${nowMs().toFixed(1)}`,
@@ -870,6 +716,184 @@ export class CachePipeline {
       });
     });
   }
+
+  function listActiveSubscriptions(): ActiveSubscriptionSnapshot[] {
+    const snapshot: ActiveSubscriptionSnapshot[] = [];
+    for (const entry of active.values()) {
+      snapshot.push({
+        id: entry.argsKey,
+        path: entry.refName,
+        args: entry.args,
+        value: entry.hasValue ? entry.currentValue : undefined,
+        updateCount: entry.updateCount,
+        lastUpdateMs: entry.lastUpdateMs,
+      });
+    }
+    return snapshot;
+  }
+
+  function onSubscriptionsChange(listener: () => void): () => void {
+    changeListeners.add(listener);
+    return () => {
+      changeListeners.delete(listener);
+    };
+  }
+
+  function dispose(): void {
+    removeOnlineListener?.();
+    for (const entry of active.values()) {
+      entry.remoteUnsubscribe?.();
+      entry.localUnsubscribe?.();
+    }
+    active.clear();
+    changeListeners.clear();
+  }
+
+  function getCurrentValue(refName: string, args: unknown): unknown {
+    const argsKey = `${refName} ${stableValueKey(args)}`;
+    const existing = active.get(argsKey);
+    if (existing && existing.hasValue) {
+      return existing.currentValue;
+    }
+    const cached = config.cache.get(refName, args);
+    return cached?.value;
+  }
+
+  function setWorkScheduler(scheduler: WorkScheduler | null): void {
+    workScheduler = scheduler ?? createDefaultWorkScheduler();
+  }
+
+  function getWorkScheduler(): WorkScheduler {
+    return workScheduler;
+  }
+
+  function applyOptimisticTransition(
+    updates: Array<{
+      refName: string;
+      args: unknown;
+      value: unknown;
+      priority?: "discrete" | "transition";
+    }>,
+  ): void {
+    if (updates.length === 0) return;
+    const transition: typeof updates = [];
+    for (const update of updates) {
+      if (update.priority === "transition") {
+        transition.push(update);
+        continue;
+      }
+      applyOptimisticOne(update);
+    }
+    if (transition.length > 0) {
+      workScheduler.post("user-visible", () => {
+        for (const update of transition) {
+          applyOptimisticOne(update);
+        }
+      });
+    }
+  }
+
+  function subscribe(input: {
+    refName: string;
+    args: unknown;
+    onValue: (value: unknown) => void;
+    onError?: (error: Error) => void;
+  }): () => void {
+    const { refName, args } = input;
+    const argsKey = `${refName} ${stableValueKey(args)}`;
+    let entry = active.get(argsKey);
+    if (!entry) {
+      entry = {
+        refName,
+        args,
+        argsKey,
+        listeners: new Set(),
+        errorListeners: new Set(),
+        currentValue: undefined,
+        hasValue: false,
+        lastRemoteValue: undefined,
+        optimisticAppliedAtMs: 0,
+        remoteUnsubscribe: null,
+        storageLoadPromise: null,
+        localUnsubscribe: null,
+        localHandle: null,
+        pendingPushValue: undefined,
+        pendingPushHasValue: false,
+        pendingPushTimer: null,
+        lastPushAtMs: 0,
+        updateCount: 0,
+        lastUpdateMs: 0,
+      };
+      active.set(argsKey, entry);
+      bootstrapEntry(entry);
+      notifySubscriptionsChange();
+    }
+
+    entry.listeners.add(input.onValue);
+    if (input.onError) {
+      entry.errorListeners.add(input.onError);
+    }
+
+    if (entry.hasValue) {
+      try {
+        input.onValue(entry.currentValue);
+      } catch {
+        /* listener error */
+      }
+    }
+
+    return () => {
+      const current = active.get(argsKey);
+      if (!current) return;
+      current.listeners.delete(input.onValue);
+      if (input.onError) {
+        current.errorListeners.delete(input.onError);
+      }
+      if (current.listeners.size === 0 && current.errorListeners.size === 0) {
+        if (current.pendingPushTimer !== null) {
+          clearTimeout(current.pendingPushTimer);
+          current.pendingPushTimer = null;
+          current.pendingPushHasValue = false;
+          current.pendingPushValue = undefined;
+        }
+        if (current.remoteUnsubscribe) {
+          try {
+            current.remoteUnsubscribe();
+          } catch {
+            /* ignore */
+          }
+          current.remoteUnsubscribe = null;
+        }
+        if (current.localUnsubscribe) {
+          try {
+            current.localUnsubscribe();
+          } catch {
+            /* ignore */
+          }
+          current.localUnsubscribe = null;
+        }
+        active.delete(argsKey);
+        if (!isSystemRefName(current.refName)) {
+          config.releaseRead?.(
+            current.refName,
+            current.args as Record<string, unknown>,
+          );
+        }
+        notifySubscriptionsChange();
+      }
+    };
+  }
+
+  return {
+    listActiveSubscriptions,
+    onSubscriptionsChange,
+    dispose,
+    getCurrentValue,
+    setWorkScheduler,
+    getWorkScheduler,
+    applyOptimisticTransition,
+    subscribe,
+  };
 }
 
 export function createCacheOnUpdate(input: {

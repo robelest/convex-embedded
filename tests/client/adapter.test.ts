@@ -1,7 +1,7 @@
 import { patchRoutedConvexClient } from "@resolve/client/adapter";
+import { EmbeddedClient } from "@resolve/client/embedded";
 import type { EmbeddedRuntime } from "@resolve/index";
 import { describe, expect, it, vi } from "@tests/testkit";
-import type { ConvexClient } from "convex/browser";
 
 interface RoutedQueryClient {
   query(refName: string, args: Record<string, unknown>): Promise<unknown>;
@@ -63,17 +63,7 @@ function createPatchedClient(result: IssuesResult) {
     watchLocalPaginatedQuery: vi.fn(() => watch),
   } as unknown as EmbeddedRuntime;
 
-  const client = {
-    query: vi.fn(),
-    mutation: vi.fn(),
-    action: vi.fn(),
-    onUpdate: vi.fn(),
-    onPaginatedUpdate_experimental: vi.fn(),
-    client: {
-      localQueryResult: vi.fn(),
-      localQueryLogs: vi.fn(() => []),
-    },
-  } as unknown as ConvexClient;
+  const client = new EmbeddedClient("http://embedded.local");
 
   patchRoutedConvexClient({
     client,

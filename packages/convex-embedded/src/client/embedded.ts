@@ -7,6 +7,7 @@ import type {
 } from "convex/server";
 import { ConvexError } from "convex/values";
 
+import { toClientResult } from "@/client/adapter";
 import type {
   CachePipeline,
   ExplicitOptimisticCallback,
@@ -36,6 +37,8 @@ export class EmbeddedClient extends ConvexClient {
     // any own-properties set by the parent constructor (test mocks
     // initialize `mutation` etc. as instance fields).
     this.mutation = this._routedMutation.bind(this) as ConvexClient["mutation"];
+    this.query = this._routedQuery.bind(this) as ConvexClient["query"];
+    this.action = this._routedAction.bind(this) as ConvexClient["action"];
   }
 
   /** @internal */
@@ -130,6 +133,95 @@ export class EmbeddedClient extends ConvexClient {
                 options,
               );
         return result as Awaited<FunctionReturnType<M>>;
+      } catch (error) {
+        throw routing.asError(error);
+      }
+    });
+  }
+
+  private async _executeLocalRead(
+    ref: unknown,
+    args: Record<string, unknown>,
+    kind: "query" | "action",
+  ): Promise<unknown> {
+    const routing = this._routing!;
+    const translatedArgs = routing.translateLocalArgsToRuntime?.(args) ?? args;
+    try {
+      const result = await routing.runtime.executeLocal({
+        kind,
+        path: routing.getRefName(ref),
+        args: translatedArgs,
+      });
+      return toClientResult(result, routing.translateLocalResultToClient);
+    } catch (error) {
+      throw routing.asError(error);
+    }
+  }
+
+  private _routedQuery<Q extends FunctionReference<"query">>(
+    queryRef: Q,
+    args: Q["_args"],
+  ): Promise<Awaited<Q["_returnType"]>> {
+    return this._routedRead(queryRef, args, "query");
+  }
+
+  private _routedAction<A extends FunctionReference<"action">>(
+    actionRef: A,
+    args: FunctionArgs<A>,
+  ): Promise<Awaited<FunctionReturnType<A>>> {
+    return this._routedRead(actionRef, args, "action");
+  }
+
+  private async _routedRead<R extends FunctionReference<"query" | "action">>(
+    ref: R,
+    args: FunctionArgs<R>,
+    kind: "query" | "action",
+  ): Promise<Awaited<FunctionReturnType<R>>> {
+    const routing = this._routing;
+    if (!routing) {
+      throw new Error(
+        `[convex-embedded] EmbeddedClient.${kind} called before routing was installed.`,
+      );
+    }
+    const argsObj = (args ?? {}) as Record<string, unknown>;
+    const waitUntilReady = routing.waitUntilReady ?? ((run) => run());
+    return waitUntilReady(async () => {
+      const route = routing.planRead(ref);
+      if (route.kind === "error") throw route.error;
+      if (route.kind === "local") {
+        try {
+          await routing.ensureReadReady?.(routing.getRefName(ref), argsObj);
+          return (await this._executeLocalRead(ref, argsObj, kind)) as Awaited<
+            FunctionReturnType<R>
+          >;
+        } catch (error) {
+          throw routing.asError(error);
+        }
+      }
+      try {
+        assertRemotePlanOnline(route, routing.connectivity);
+        const remote = routing.remoteClient;
+        if (!remote) {
+          throw new ConvexError({
+            code: "REMOTE_CLIENT_UNAVAILABLE",
+            message:
+              `[convex-embedded] Remote ${kind} execution was requested, but no remote client is configured. ` +
+              "Add ClientOptions.remote or remove remoteOnly().",
+            kind,
+          });
+        }
+        const remoteArgs =
+          routing.translateClientArgsToRemote?.(argsObj) ?? argsObj;
+        if (kind === "query") {
+          return (await remote.query(
+            ref as FunctionReference<"query">,
+            remoteArgs as FunctionArgs<FunctionReference<"query">>,
+          )) as Awaited<FunctionReturnType<R>>;
+        }
+        return (await remote.action(
+          ref as FunctionReference<"action">,
+          remoteArgs as FunctionArgs<FunctionReference<"action">>,
+        )) as Awaited<FunctionReturnType<R>>;
       } catch (error) {
         throw routing.asError(error);
       }

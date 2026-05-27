@@ -1,5 +1,4 @@
 import type { ConvexClient } from "convex/browser";
-import { ConvexError } from "convex/values";
 
 import type { CachedEntry, EmbeddedQueryCache } from "@/client/cache";
 import { EmbeddedClient } from "@/client/embedded";
@@ -153,7 +152,7 @@ function normalizeClientResult(
   );
 }
 
-function toClientResult<T>(value: T, translate?: <U>(value: U) => U): T {
+export function toClientResult<T>(value: T, translate?: <U>(value: U) => U): T {
   const translated = translate?.(value) ?? value;
   return normalizeClientResult(value, translated) as T;
 }
@@ -1673,24 +1672,6 @@ export function patchRoutedConvexClient(input: RoutedClientInput): {
   const waitUntilReady = input.waitUntilReady ?? ((run) => run());
   const isReady = input.isReady ?? (() => true);
 
-  const executeLocalRead = async (
-    ref: unknown,
-    args: Record<string, unknown>,
-    kind: "query" | "action",
-  ) => {
-    const translatedArgs = input.translateLocalArgsToRuntime?.(args) ?? args;
-    try {
-      const result = await input.runtime.executeLocal({
-        kind,
-        path: input.getRefName(ref),
-        args: translatedArgs,
-      });
-      return toClientResult(result, input.translateLocalResultToClient);
-    } catch (error) {
-      throw input.asError(error);
-    }
-  };
-
   const translateRemoteArgs = (args: unknown): unknown => {
     if (!isPlainObject(args)) return args;
     return input.translateClientArgsToRemote?.(args) ?? args;
@@ -1699,25 +1680,6 @@ export function patchRoutedConvexClient(input: RoutedClientInput): {
   const remotePatchable = remoteClient
     ? (remoteClient as unknown as PatchableConvexClient)
     : null;
-
-  const createRemoteCaller =
-    (method: "mutation" | "query" | "action") =>
-    (...args: unknown[]): Promise<unknown> => {
-      if (!remotePatchable) {
-        return Promise.reject(
-          new ConvexError({
-            code: "REMOTE_CLIENT_UNAVAILABLE",
-            message:
-              `[convex-embedded] Remote ${method} execution was requested, but no remote client is configured. ` +
-              "Add ClientOptions.remote or remove remoteOnly().",
-            kind: method,
-          }),
-        );
-      }
-      const remoteArgs = [...args];
-      remoteArgs[1] = translateRemoteArgs(remoteArgs[1] ?? {});
-      return remotePatchable[method](...remoteArgs);
-    };
 
   const remoteOnUpdate = remotePatchable
     ? (...args: unknown[]): unknown => {
@@ -1795,89 +1757,8 @@ export function patchRoutedConvexClient(input: RoutedClientInput): {
     input.client._installRouting(routing, pipeline, explicitOptimistic);
   }
 
-  patchable.query = function patchedQuery(
-    ...args: unknown[]
-  ): Promise<unknown> {
-    return waitUntilReady(async () => {
-      const route = input.planRead(args[0]);
-      if (route.kind === "error") {
-        throw route.error;
-      }
-      if (route.kind === "local") {
-        try {
-          await input.ensureReadReady?.(
-            input.getRefName(args[0]),
-            (args[1] ?? {}) as Record<string, unknown>,
-          );
-          return await executeLocalRead(
-            args[0],
-            (args[1] ?? {}) as Record<string, unknown>,
-            "query",
-          );
-        } catch (error) {
-          throw input.asError(error);
-        }
-      }
-
-      try {
-        assertRemotePlanOnline(route, input.connectivity);
-        if (!remoteClient) {
-          throw new ConvexError({
-            code: "REMOTE_CLIENT_UNAVAILABLE",
-            message:
-              "[convex-embedded] Remote query execution was requested, but no remote client is configured. " +
-              "Add ClientOptions.remote or remove remoteOnly().",
-            kind: "query",
-          });
-        }
-        return await createRemoteCaller("query")(...args);
-      } catch (error) {
-        throw input.asError(error);
-      }
-    });
-  };
-
-  patchable.action = function patchedAction(
-    ...args: unknown[]
-  ): Promise<unknown> {
-    return waitUntilReady(async () => {
-      const route = input.planRead(args[0]);
-      if (route.kind === "error") {
-        throw route.error;
-      }
-      if (route.kind === "local") {
-        try {
-          await input.ensureReadReady?.(
-            input.getRefName(args[0]),
-            (args[1] ?? {}) as Record<string, unknown>,
-          );
-          return await executeLocalRead(
-            args[0],
-            (args[1] ?? {}) as Record<string, unknown>,
-            "action",
-          );
-        } catch (error) {
-          throw input.asError(error);
-        }
-      }
-
-      try {
-        assertRemotePlanOnline(route, input.connectivity);
-        if (!remoteClient) {
-          throw new ConvexError({
-            code: "REMOTE_CLIENT_UNAVAILABLE",
-            message:
-              "[convex-embedded] Remote action execution was requested, but no remote client is configured. " +
-              "Add ClientOptions.remote or remove remoteOnly().",
-            kind: "action",
-          });
-        }
-        return await createRemoteCaller("action")(...args);
-      } catch (error) {
-        throw input.asError(error);
-      }
-    });
-  };
+  // `query` and `action` are implemented as real methods on EmbeddedClient
+  // (see client/embedded.ts).
 
   patchable.onUpdate = createSubscriptionFactory(
     localOnUpdate,

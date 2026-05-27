@@ -11,6 +11,7 @@
 import type { ConvexClient } from "convex/browser";
 import * as Y from "yjs";
 
+import { ConnectivityState } from "@/client/engine/connectivity";
 import { CrdtDirtyState } from "@/client/engine/crdt";
 import { PullBatchCoordinator } from "@/client/engine/pullbatch";
 import {
@@ -1820,9 +1821,7 @@ function createEngine(config: EngineConfig): EngineInstance {
   const processorIdForReplay =
     processorId ?? `processor_${Math.random().toString(36).slice(2)}`;
 
-  let isOnline = false;
-  let offlineTransitionsSinceBoot = 0;
-  let cameOnlineAfterOfflinePeriod = false;
+  const connectivityState = new ConnectivityState();
   const crdt = new CrdtDirtyState(tables);
 
   let queueProcessingPromise: Promise<Set<string>> | null = null;
@@ -2121,7 +2120,7 @@ function createEngine(config: EngineConfig): EngineInstance {
   }
 
   function ensureReplayProcessing(): void {
-    if (!isOnline) return;
+    if (!connectivityState.isOnline()) return;
     const hasPendingMutation = !pendingQueue.isEmpty;
     const hasPendingUpload = pendingUploadQueue.length > 0;
     if (!hasPendingMutation && !hasPendingUpload) return;
@@ -2365,9 +2364,13 @@ function createEngine(config: EngineConfig): EngineInstance {
 
     queueProcessingPromise = (async () => {
       try {
-        outer: while (isOnline && !signal?.aborted) {
+        outer: while (connectivityState.isOnline() && !signal?.aborted) {
           queueProcessingRequestedWhileActive = false;
-          while (!pendingQueue.isEmpty && isOnline && !signal?.aborted) {
+          while (
+            !pendingQueue.isEmpty &&
+            connectivityState.isOnline() &&
+            !signal?.aborted
+          ) {
             const entry = await pendingQueue.claimNext(
               processorIdForReplay,
               leaseMs,
@@ -2389,7 +2392,7 @@ function createEngine(config: EngineConfig): EngineInstance {
               hasActiveLocalDocument: (localId: string) =>
                 embedded.hasLocalDocumentId?.(localId) ?? false,
               getRemoteId: (localId: string) => idMap.getRemoteId(localId),
-              isOnline,
+              isOnline: connectivityState.isOnline(),
               signal,
             });
             await runSpan({
@@ -2555,7 +2558,7 @@ function createEngine(config: EngineConfig): EngineInstance {
           if (
             !queueProcessingRequestedWhileActive ||
             pendingQueue.isEmpty ||
-            !isOnline ||
+            !connectivityState.isOnline() ||
             signal?.aborted
           ) {
             break;
@@ -2630,14 +2633,15 @@ function createEngine(config: EngineConfig): EngineInstance {
           aborted: signal.aborted,
           forceResolve: options?.forceResolve ?? false,
           hasPending: !pendingQueue.isEmpty,
-          isOnline,
+          isOnline: connectivityState.isOnline(),
           started,
-          offlineTransitionsSinceBoot,
+          offlineTransitionsSinceBoot:
+            connectivityState.offlineTransitionsSinceBoot(),
           hasDirtyCrdtRows: crdt.hasDirty(),
         });
 
         if (route._tag === "Skip") {
-          if (isOnline && started && !signal.aborted) {
+          if (connectivityState.isOnline() && started && !signal.aborted) {
             emit({ status: "resolved" });
           }
         } else if (route._tag === "DeferUntilQueueDrains") {
@@ -2649,7 +2653,7 @@ function createEngine(config: EngineConfig): EngineInstance {
           if (
             !options?.forceResolve &&
             crdt.hasDirty() &&
-            offlineTransitionsSinceBoot > 0
+            connectivityState.offlineTransitionsSinceBoot() > 0
           ) {
             await mergeDirtyCrdtRows(signal);
           } else {
@@ -2665,7 +2669,7 @@ function createEngine(config: EngineConfig): EngineInstance {
             aborted: signal.aborted,
             forceResolve: options?.forceResolve ?? false,
             hasPending: !pendingQueue.isEmpty,
-            isOnline,
+            isOnline: connectivityState.isOnline(),
             started,
           })
         ) {
@@ -3676,7 +3680,7 @@ function createEngine(config: EngineConfig): EngineInstance {
       scopeArgs: normalizedScope,
     };
     if (!existing) activeScopes.set(key, entry);
-    if (!isOnline || !started || !pendingQueue.isEmpty) {
+    if (!connectivityState.isOnline() || !started || !pendingQueue.isEmpty) {
       return;
     }
 
@@ -3743,11 +3747,7 @@ function createEngine(config: EngineConfig): EngineInstance {
 
   function handleOnline() {
     log.info("sync: online event — flushing queue, resolving, subscribing");
-    if (cameOnlineAfterOfflinePeriod) {
-      offlineTransitionsSinceBoot += 1;
-      cameOnlineAfterOfflinePeriod = false;
-    }
-    isOnline = true;
+    connectivityState.markOnline();
     recordCounter("connectivity.transition", { state: "online" });
 
     runDetached(() => runReplicationCycle(), "[sync] handleOnline:");
@@ -3755,10 +3755,7 @@ function createEngine(config: EngineConfig): EngineInstance {
 
   function handleOffline() {
     log.info("sync: offline event");
-    if (isOnline) {
-      cameOnlineAfterOfflinePeriod = true;
-    }
-    isOnline = false;
+    connectivityState.markOffline();
     recordCounter("connectivity.transition", { state: "offline" });
     abortController?.abort();
     abortController = null;
@@ -4017,7 +4014,7 @@ function createEngine(config: EngineConfig): EngineInstance {
 
       matchTag(startRoute, "_tag", {
         Offline: () => {
-          isOnline = false;
+          connectivityState.markOffline();
           emit({ status: "offline" });
         },
         WaitForHydrationThenOnline: () => {
@@ -4102,7 +4099,7 @@ function createEngine(config: EngineConfig): EngineInstance {
       try {
         localResult = await executeMutationLocally(ref, localArgs);
       } catch (err) {
-        if (!isOnline) {
+        if (!connectivityState.isOnline()) {
           throw err;
         }
         localFailed = true;
@@ -4153,7 +4150,7 @@ function createEngine(config: EngineConfig): EngineInstance {
         log.debug(
           `engine.mutation queue.push push=${(__pushDone - __pushStart).toFixed(1)}ms ref=${refName}`,
         );
-        if (!isOnline && crdt.shouldTrack(table)) {
+        if (!connectivityState.isOnline() && crdt.shouldTrack(table)) {
           const docId =
             typeof localResult === "string"
               ? localResult
@@ -4163,7 +4160,7 @@ function createEngine(config: EngineConfig): EngineInstance {
             crdt.mark(table, docId);
           }
         }
-        if (isOnline) {
+        if (connectivityState.isOnline()) {
           ensureReplayProcessing();
         } else {
           log.debug("sync: offline — mutation queued for later push");
@@ -4178,7 +4175,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     },
 
     pullNow(): Promise<void> {
-      if (isOnline) {
+      if (connectivityState.isOnline()) {
         stopRemoteSubscriptions();
       }
       return runReplicationCycle({ forceResolve: true });
@@ -4225,7 +4222,7 @@ function createEngine(config: EngineConfig): EngineInstance {
         return;
       }
 
-      if (isOnline) {
+      if (connectivityState.isOnline()) {
         stopRemoteSubscriptions();
         await runReplicationCycle({ forceResolve: true });
         return;

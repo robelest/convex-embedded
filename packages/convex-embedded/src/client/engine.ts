@@ -11,6 +11,7 @@
 import type { ConvexClient } from "convex/browser";
 import * as Y from "yjs";
 
+import { PullBatchCoordinator } from "@/client/engine/pullbatch";
 import {
   EngineStatusEmitter,
   type ChangeListener,
@@ -1864,89 +1865,12 @@ function createEngine(config: EngineConfig): EngineInstance {
   const scopeTeardownTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const SCOPE_TEARDOWN_DEBOUNCE_MS = config.scopeTeardownDebounceMs ?? 3000;
 
-  const RESOLVE_TABLE_COALESCE_MS = 32;
-  const expectedSelfCausedSignals = new Map<string, number[]>();
-  const lastKnownCollectionSeqByTable = new Map<string, number>();
-  const lastResolvedScopeSeq = new Map<string, number>();
-  const pullInFlight = new Map<string, Promise<void>>();
-  const resolveRerun = new Set<string>();
+  const pullBatch = new PullBatchCoordinator({ buildScopeKey });
   // Scopes that have completed a resolve from remote at least once since
   // activation. Used to gate preloaded/SSR values until the local rows for a
   // scope are no longer stale-only (see onScopeResolved).
   const resolvedScopes = new Set<string>();
   const scopeResolveListeners = new Map<string, Set<() => void>>();
-  type TableCoalesceEntry = {
-    signalSeqs: Set<number>;
-    pendingThunks: Map<string, () => void>;
-    timer: ReturnType<typeof setTimeout> | null;
-  };
-  const tableCoalesceMap = new Map<string, TableCoalesceEntry>();
-
-  function recordExpectedSelfCausedSignal(
-    tableName: string,
-    postCommitSeq: number,
-  ): void {
-    const existing = expectedSelfCausedSignals.get(tableName) ?? [];
-    existing.push(postCommitSeq);
-    existing.sort((a, b) => a - b);
-    expectedSelfCausedSignals.set(tableName, existing);
-  }
-
-  function nextExpectedSelfCausedSeq(tableName: string): number {
-    const lastKnown = lastKnownCollectionSeqByTable.get(tableName) ?? -1;
-    const pending = expectedSelfCausedSignals.get(tableName);
-    const highestPending =
-      pending && pending.length > 0 ? pending[pending.length - 1]! : -1;
-    return Math.max(lastKnown, highestPending) + 1;
-  }
-
-  function consumeExpectedSelfCausedSignal(
-    tableName: string,
-    signalSeq: number,
-  ): boolean {
-    const seqs = expectedSelfCausedSignals.get(tableName);
-    if (!seqs || seqs.length === 0) {
-      return false;
-    }
-    let bestIndex = -1;
-    for (let i = seqs.length - 1; i >= 0; i--) {
-      if (seqs[i]! <= signalSeq) {
-        bestIndex = i;
-        break;
-      }
-    }
-    if (bestIndex < 0) {
-      return false;
-    }
-    seqs.splice(bestIndex, 1);
-    if (seqs.length === 0) {
-      expectedSelfCausedSignals.delete(tableName);
-    } else {
-      expectedSelfCausedSignals.set(tableName, seqs);
-    }
-    if (signalSeq >= 0) {
-      lastKnownCollectionSeqByTable.set(tableName, signalSeq);
-    }
-    log.debug(
-      `sync: skipping self-caused bind for "${tableName}" (signalSeq=${signalSeq})`,
-    );
-    return true;
-  }
-
-  function recordPulledScopeSeq(
-    tableName: string,
-    scopeArgs: Record<string, unknown> | undefined,
-    collectionSeq: number | null,
-  ): void {
-    if (collectionSeq === null) {
-      return;
-    }
-    const scopeKey = buildScopeKey(tableName, scopeArgs ?? {});
-    const prev = lastResolvedScopeSeq.get(scopeKey) ?? -Infinity;
-    if (collectionSeq > prev) {
-      lastResolvedScopeSeq.set(scopeKey, collectionSeq);
-    }
-  }
 
   function markScopeResolved(
     tableName: string,
@@ -1997,98 +1921,6 @@ function createEngine(config: EngineConfig): EngineInstance {
         scopeResolveListeners.delete(scopeKey);
       }
     };
-  }
-
-  function shouldSkipRedundantPartialPull(
-    tableName: string,
-    scopeArgs: Record<string, unknown> | undefined,
-    signalSeq: number,
-  ): boolean {
-    if (signalSeq < 0) {
-      return false;
-    }
-    const scopeKey = buildScopeKey(tableName, scopeArgs ?? {});
-    const resolvedSeq = lastResolvedScopeSeq.get(scopeKey);
-    if (resolvedSeq === undefined) {
-      return false;
-    }
-    if (signalSeq <= resolvedSeq) {
-      log.debug(
-        `sync: skipping redundant partial resolve for "${tableName}" ` +
-          `(signalSeq=${signalSeq} <= resolvedSeq=${resolvedSeq})`,
-      );
-      return true;
-    }
-    return false;
-  }
-
-  function fireCoalescedTableUpdate(tableName: string): void {
-    const entry = tableCoalesceMap.get(tableName);
-    if (!entry) return;
-    if (entry.timer !== null) {
-      clearTimeout(entry.timer);
-      entry.timer = null;
-    }
-    if (entry.pendingThunks.size === 0) {
-      tableCoalesceMap.delete(tableName);
-      return;
-    }
-    if (entry.signalSeqs.size > 0) {
-      const highestSeq = Math.max(...Array.from(entry.signalSeqs));
-      if (highestSeq >= 0) {
-        lastKnownCollectionSeqByTable.set(tableName, highestSeq);
-      }
-    }
-    const thunks = Array.from(entry.pendingThunks.values());
-    tableCoalesceMap.delete(tableName);
-    for (const thunk of thunks) {
-      try {
-        thunk();
-      } catch (err) {
-        log.warn(`sync: coalesced bind thunk for "${tableName}" failed`, err);
-      }
-    }
-  }
-
-  function scheduleTableCoalesce(input: {
-    tableName: string;
-    scopeKey: string;
-    signalSeq: number;
-    runHandler: () => void;
-  }): void {
-    const { tableName, scopeKey, signalSeq, runHandler } = input;
-    let entry = tableCoalesceMap.get(tableName);
-    if (!entry) {
-      entry = {
-        signalSeqs: new Set(),
-        pendingThunks: new Map(),
-        timer: null,
-      };
-      tableCoalesceMap.set(tableName, entry);
-    }
-    if (signalSeq >= 0) {
-      entry.signalSeqs.add(signalSeq);
-    }
-    entry.pendingThunks.set(scopeKey, runHandler);
-    if (entry.timer === null) {
-      entry.timer = setTimeout(() => {
-        fireCoalescedTableUpdate(tableName);
-      }, RESOLVE_TABLE_COALESCE_MS);
-    }
-  }
-
-  function clearTableCoalesceState(): void {
-    for (const entry of tableCoalesceMap.values()) {
-      if (entry.timer !== null) {
-        clearTimeout(entry.timer);
-      }
-    }
-    tableCoalesceMap.clear();
-    expectedSelfCausedSignals.clear();
-    lastKnownCollectionSeqByTable.clear();
-    lastResolvedScopeSeq.clear();
-    pullInFlight.clear();
-    resolveRerun.clear();
   }
 
   function getRemoteApplyOrder(): string[] {
@@ -2309,7 +2141,7 @@ function createEngine(config: EngineConfig): EngineInstance {
       state.retryCount = 0;
     }
     tableRemoteSyncStateMap.clear();
-    clearTableCoalesceState();
+    pullBatch.clearAll();
   }
 
   function ensureReplayProcessing(): void {
@@ -2652,9 +2484,9 @@ function createEngine(config: EngineConfig): EngineInstance {
                 heartbeat.stop();
               }
 
-              recordExpectedSelfCausedSignal(
+              pullBatch.recordExpectedSelfCausedSignal(
                 entry.table,
-                nextExpectedSelfCausedSeq(entry.table),
+                pullBatch.nextExpectedSelfCausedSeq(entry.table),
               );
 
               if (
@@ -3152,9 +2984,9 @@ function createEngine(config: EngineConfig): EngineInstance {
     scopeArgs?: Record<string, unknown>,
   ): Promise<void> {
     const key = buildScopeKey(tableName, scopeArgs ?? {});
-    const inFlight = pullInFlight.get(key);
+    const inFlight = pullBatch.pullInFlightGet(key);
     if (inFlight) {
-      resolveRerun.add(key);
+      pullBatch.markRerun(key);
       return inFlight;
     }
     const run = (async () => {
@@ -3173,13 +3005,13 @@ function createEngine(config: EngineConfig): EngineInstance {
           },
         );
       } finally {
-        pullInFlight.delete(key);
+        pullBatch.pullInFlightDelete(key);
       }
-      if (resolveRerun.delete(key)) {
+      if (pullBatch.takeRerun(key)) {
         await getTableSpec(tableName, tableConfig, signal, scopeArgs);
       }
     })();
-    pullInFlight.set(key, run);
+    pullBatch.pullInFlightSet(key, run);
     return run;
   }
 
@@ -3413,8 +3245,9 @@ function createEngine(config: EngineConfig): EngineInstance {
 
     {
       const hasPendingSelfCausedSignal =
-        (expectedSelfCausedSignals.get(tableName)?.length ?? 0) > 0;
-      const cachedCollectionSeq = lastKnownCollectionSeqByTable.get(tableName);
+        pullBatch.hasPendingSelfCausedSignal(tableName);
+      const cachedCollectionSeq =
+        pullBatch.getLastKnownCollectionSeq(tableName);
       const metadata =
         hasPendingSelfCausedSignal && typeof cachedCollectionSeq === "number"
           ? await readPullMetadataFastPath(
@@ -3649,7 +3482,7 @@ function createEngine(config: EngineConfig): EngineInstance {
         advanceCollectionSeq: fullyDrained,
       });
 
-      recordPulledScopeSeq(
+      pullBatch.recordPulledScopeSeq(
         tableName,
         scopeArgs,
         finalResolveResult.collectionSeq,
@@ -3710,9 +3543,12 @@ function createEngine(config: EngineConfig): EngineInstance {
         tableConfig,
         tableName: entry.tableName,
         scopeArgs: entry.scopeArgs,
-        consumeExpectedSelfCausedSignal,
-        scheduleTableCoalesce,
-        shouldSkipRedundantPartialPull,
+        consumeExpectedSelfCausedSignal: (table, signalSeq) =>
+          pullBatch.consumeExpectedSelfCausedSignal(table, signalSeq),
+        scheduleTableCoalesce: (input) =>
+          pullBatch.scheduleTableCoalesce(input),
+        shouldSkipRedundantPartialPull: (table, scopeArgs, signalSeq) =>
+          pullBatch.shouldSkipRedundantPartialPull(table, scopeArgs, signalSeq),
         onPartialResponse: () => {
           runDetached(
             () =>
@@ -3726,7 +3562,7 @@ function createEngine(config: EngineConfig): EngineInstance {
           );
         },
       });
-      if (!lastResolvedScopeSeq.has(key)) {
+      if (!pullBatch.hasResolvedScopeSeq(key)) {
         runDetached(
           () =>
             getTableSpec(
@@ -3887,7 +3723,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     const epochAtStart = scopeActivationEpoch;
 
     const activation = (async () => {
-      if (!lastResolvedScopeSeq.has(key)) {
+      if (!pullBatch.hasResolvedScopeSeq(key)) {
         await getTableSpec(
           tableName,
           tableConfig,
@@ -3914,9 +3750,12 @@ function createEngine(config: EngineConfig): EngineInstance {
         tableConfig,
         tableName,
         scopeArgs: normalizedScope,
-        consumeExpectedSelfCausedSignal,
-        scheduleTableCoalesce,
-        shouldSkipRedundantPartialPull,
+        consumeExpectedSelfCausedSignal: (table, signalSeq) =>
+          pullBatch.consumeExpectedSelfCausedSignal(table, signalSeq),
+        scheduleTableCoalesce: (input) =>
+          pullBatch.scheduleTableCoalesce(input),
+        shouldSkipRedundantPartialPull: (table, scopeArgs, signalSeq) =>
+          pullBatch.shouldSkipRedundantPartialPull(table, scopeArgs, signalSeq),
         onPartialResponse: () => {
           runDetached(
             () =>

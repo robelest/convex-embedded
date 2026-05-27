@@ -14,6 +14,7 @@ import * as Y from "yjs";
 import { ConnectivityState } from "@/client/engine/connectivity";
 import { CrdtDirtyState } from "@/client/engine/crdt";
 import { PullBatchCoordinator } from "@/client/engine/pullbatch";
+import { ScopeRegistry, type ActiveScope } from "@/client/engine/scope";
 import { SnapshotIngest } from "@/client/engine/snapshot";
 import {
   EngineStatusEmitter,
@@ -132,14 +133,6 @@ function getFieldValueByPath(
     }
     return (current as Record<string, unknown>)[segment];
   }, doc);
-}
-
-interface ActiveScope {
-  tableName: string;
-  scopeArgs: Record<string, unknown>;
-  unsubscribe?: () => void;
-  pendingActivation?: Promise<void>;
-  readers?: Set<string>;
 }
 
 function toErrorMessage(error: unknown): string {
@@ -1826,33 +1819,17 @@ function createEngine(config: EngineConfig): EngineInstance {
   const SCOPE_TEARDOWN_DEBOUNCE_MS = config.scopeTeardownDebounceMs ?? 3000;
 
   const pullBatch = new PullBatchCoordinator({ buildScopeKey });
-  // Scopes that have completed a resolve from remote at least once since
-  // activation. Used to gate preloaded/SSR values until the local rows for a
-  // scope are no longer stale-only (see onScopeResolved).
-  const resolvedScopes = new Set<string>();
-  const scopeResolveListeners = new Map<string, Set<() => void>>();
+
+  // First-resolve gating + subscriber registry: owns resolvedScopes and
+  // scopeResolveListeners from the engine factory closure. Used to delay
+  // preloaded/SSR values from rendering against stale local rows.
+  const scopeGate = new ScopeRegistry();
 
   function markScopeResolved(
     tableName: string,
     scopeArgs?: Record<string, unknown>,
   ): void {
-    const scopeKey = buildScopeKey(tableName, scopeArgs ?? {});
-    if (resolvedScopes.has(scopeKey)) {
-      return;
-    }
-    resolvedScopes.add(scopeKey);
-    const ls = scopeResolveListeners.get(scopeKey);
-    if (ls) {
-      // A listener may unsubscribe itself here; deleting the current entry
-      // during a Set for-of is safe.
-      for (const cb of ls) {
-        try {
-          cb();
-        } catch (err) {
-          log.warn("sync: scope-resolved listener failed", err);
-        }
-      }
-    }
+    scopeGate.markResolved(buildScopeKey(tableName, scopeArgs ?? {}));
   }
 
   function onScopeResolved(
@@ -1860,27 +1837,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     scopeArgs: Record<string, unknown> | undefined,
     cb: () => void,
   ): () => void {
-    const scopeKey = buildScopeKey(tableName, scopeArgs ?? {});
-    let set = scopeResolveListeners.get(scopeKey);
-    if (!set) {
-      set = new Set();
-      scopeResolveListeners.set(scopeKey, set);
-    }
-    set.add(cb);
-    if (resolvedScopes.has(scopeKey)) {
-      try {
-        cb();
-      } catch (err) {
-        log.warn("sync: scope-resolved listener failed", err);
-      }
-    }
-    return () => {
-      const current = scopeResolveListeners.get(scopeKey);
-      current?.delete(cb);
-      if (current && current.size === 0) {
-        scopeResolveListeners.delete(scopeKey);
-      }
-    };
+    return scopeGate.onResolved(buildScopeKey(tableName, scopeArgs ?? {}), cb);
   }
 
   function getRemoteApplyOrder(): string[] {
@@ -3376,7 +3333,7 @@ function createEngine(config: EngineConfig): EngineInstance {
       const hasReaders = (entry.readers?.size ?? 0) > 0;
       if (isScoped && !hasReaders) {
         activeScopes.delete(key);
-        resolvedScopes.delete(key);
+        scopeGate.clearResolved(key);
       }
     }
 
@@ -3427,7 +3384,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     entry.unsubscribe = undefined;
     entry.pendingActivation = undefined;
     activeScopes.delete(key);
-    resolvedScopes.delete(key);
+    scopeGate.clearResolved(key);
     log.debug(`sync: deactivated idle scope ${key}`);
   }
 
@@ -3854,8 +3811,7 @@ function createEngine(config: EngineConfig): EngineInstance {
 
       stopRemoteSubscriptions();
       clearBufferedSnapshots();
-      resolvedScopes.clear();
-      scopeResolveListeners.clear();
+      scopeGate.resetResolved();
 
       cleanupOnlineListener?.();
       cleanupOfflineListener?.();
@@ -4017,7 +3973,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     async reloadIdentity(): Promise<void> {
       await hydrateIdentityState();
       clearBufferedSnapshots();
-      resolvedScopes.clear();
+      scopeGate.resetResolved();
       await pendingQueue.unblockAll();
 
       if (!started) {

@@ -19,7 +19,7 @@ export const SCHEDULED_FUNCTIONS_STORE_MIGRATIONS: StoreMigrationManifest = {
   version: 1,
 };
 
-interface SchedulerExecutorOptions {
+export interface SchedulerExecutorOptions {
   db: Database;
   runFunction: (path: string, args: Record<string, unknown>) => Promise<void>;
 }
@@ -34,70 +34,62 @@ interface PendingJob {
  * Manages deferred function execution using `setTimeout`.
  *
  * Each scheduled job gets a unique string ID that can be used to cancel
- * it before it fires. On {@link shutdown}, all pending timeouts are
- * cleared.
+ * it before it fires. On {@link SchedulerExecutor.shutdown}, all pending
+ * timeouts are cleared.
  */
-export class SchedulerExecutor {
-  private _runFunction: (
-    path: string,
-    args: Record<string, unknown>,
-  ) => Promise<void>;
-  private _pending: Map<string, PendingJob> = new Map();
-  private _nextId = 1;
-
-  constructor(options: SchedulerExecutorOptions) {
-    this._runFunction = options.runFunction;
-  }
-
-  /**
-   * Schedule a function for execution after `delayMs` milliseconds.
-   *
-   * @param functionPath  Convex function path (e.g. `"messages:send"`).
-   * @param args          Arguments to pass to the function.
-   * @param delayMs       Delay in milliseconds (0 = next tick).
-   * @returns A unique job ID that can be passed to {@link cancelJob}.
-   */
+export interface SchedulerExecutor {
   schedule(
     functionPath: string,
     args: Record<string, unknown>,
     delayMs: number,
-  ): string {
-    return withSpanSync("convex-embedded.scheduler.schedule", (span) => {
-      span.setAttribute("convex.function_path", functionPath);
-      const jobId = `job_${this._nextId++}`;
+  ): string;
+  cancelJob(jobId: string): void;
+  shutdown(): void;
+}
 
-      const timerId = setTimeout(() => {
-        this._pending.delete(jobId);
-        void withSpan("convex-embedded.scheduler.run", (runSpan) => {
-          runSpan.setAttribute("convex.function_path", functionPath);
-          return this._runFunction(functionPath, args).catch((error) => {
-            log.error(`Scheduled function "${functionPath}" failed:`, error);
+export function createSchedulerExecutor(
+  options: SchedulerExecutorOptions,
+): SchedulerExecutor {
+  const runFunction = options.runFunction;
+  const pending: Map<string, PendingJob> = new Map();
+  let nextId = 1;
+
+  return {
+    schedule(
+      functionPath: string,
+      args: Record<string, unknown>,
+      delayMs: number,
+    ): string {
+      return withSpanSync("convex-embedded.scheduler.schedule", (span) => {
+        span.setAttribute("convex.function_path", functionPath);
+        const jobId = `job_${nextId++}`;
+
+        const timerId = setTimeout(() => {
+          pending.delete(jobId);
+          void withSpan("convex-embedded.scheduler.run", (runSpan) => {
+            runSpan.setAttribute("convex.function_path", functionPath);
+            return runFunction(functionPath, args).catch((error) => {
+              log.error(`Scheduled function "${functionPath}" failed:`, error);
+            });
           });
-        });
-      }, delayMs);
+        }, delayMs);
 
-      this._pending.set(jobId, { timerId, functionPath, args });
-      return jobId;
-    });
-  }
-
-  /**
-   * Cancel a previously scheduled job. No-op if the job has already
-   * executed or does not exist.
-   */
-  cancelJob(jobId: string): void {
-    const job = this._pending.get(jobId);
-    if (job) {
-      clearTimeout(job.timerId);
-      this._pending.delete(jobId);
-    }
-  }
-
-  /** Clear all pending timeouts. */
-  shutdown(): void {
-    for (const job of this._pending.values()) {
-      clearTimeout(job.timerId);
-    }
-    this._pending.clear();
-  }
+        pending.set(jobId, { timerId, functionPath, args });
+        return jobId;
+      });
+    },
+    cancelJob(jobId: string): void {
+      const job = pending.get(jobId);
+      if (job) {
+        clearTimeout(job.timerId);
+        pending.delete(jobId);
+      }
+    },
+    shutdown(): void {
+      for (const job of pending.values()) {
+        clearTimeout(job.timerId);
+      }
+      pending.clear();
+    },
+  };
 }

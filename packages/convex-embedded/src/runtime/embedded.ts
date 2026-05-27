@@ -62,7 +62,10 @@ import { createTransport } from "@/runtime/transport";
 import type { EmbeddedTransport } from "@/runtime/transport";
 import { discoverCronJobs } from "@/scheduler/cron/discover";
 import { CronRunner } from "@/scheduler/cron/runner";
-import { SchedulerExecutor } from "@/scheduler/executor";
+import {
+  createSchedulerExecutor,
+  type SchedulerExecutor,
+} from "@/scheduler/executor";
 import { canonicalizeMappedCreateTable } from "@/shared/canonicalize";
 import { structuralEqual } from "@/shared/equals";
 import { createLogger, setLoggerDebug } from "@/shared/logger";
@@ -2799,7 +2802,7 @@ export class EmbeddedRuntime {
     });
     const sessions = new SessionManager();
     const writeFanout = options.writeBroadcast ?? createNoopWriteBroadcast();
-    const scheduler = new SchedulerExecutor({
+    const scheduler = createSchedulerExecutor({
       db,
       runFunction: async (path: string, args: Record<string, unknown>) => {
         await runtime._runUdf(

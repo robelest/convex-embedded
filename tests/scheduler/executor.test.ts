@@ -1,15 +1,16 @@
-import { SchedulerExecutor } from "@embedded/scheduler/executor";
+import {
+  createSchedulerExecutor,
+  type SchedulerExecutorOptions,
+} from "@embedded/scheduler/executor";
 import { withFakeTimers } from "@tests/helpers/time";
 import { describe, expect, it, vi } from "@tests/testkit";
 
-type RunFunction = ConstructorParameters<
-  typeof SchedulerExecutor
->[0]["runFunction"];
+type RunFunction = SchedulerExecutorOptions["runFunction"];
 
 describe("SchedulerExecutor", () => {
   it("returns a deterministic first job ID", ({ db }) => {
     const runFunction = vi.fn<RunFunction>().mockResolvedValue(undefined);
-    const scheduler = new SchedulerExecutor({ db, runFunction });
+    const scheduler = createSchedulerExecutor({ db, runFunction });
 
     const id = scheduler.schedule("tasks:run", {}, 1000);
 
@@ -18,7 +19,7 @@ describe("SchedulerExecutor", () => {
 
   it("hands out unique sequential IDs across schedules", ({ db }) => {
     const runFunction = vi.fn<RunFunction>().mockResolvedValue(undefined);
-    const scheduler = new SchedulerExecutor({ db, runFunction });
+    const scheduler = createSchedulerExecutor({ db, runFunction });
 
     const id1 = scheduler.schedule("a:run", {}, 100);
     const id2 = scheduler.schedule("b:run", {}, 200);
@@ -32,7 +33,7 @@ describe("SchedulerExecutor", () => {
   it("runs the scheduled function once its delay elapses", async ({ db }) => {
     await withFakeTimers(async () => {
       const runFunction = vi.fn<RunFunction>().mockResolvedValue(undefined);
-      const scheduler = new SchedulerExecutor({ db, runFunction });
+      const scheduler = createSchedulerExecutor({ db, runFunction });
 
       scheduler.schedule("messages:send", { body: "hi" }, 1000);
       expect(runFunction).not.toHaveBeenCalled();
@@ -46,7 +47,7 @@ describe("SchedulerExecutor", () => {
   it("runs a zero-delay function on the next tick", async ({ db }) => {
     await withFakeTimers(async () => {
       const runFunction = vi.fn<RunFunction>().mockResolvedValue(undefined);
-      const scheduler = new SchedulerExecutor({ db, runFunction });
+      const scheduler = createSchedulerExecutor({ db, runFunction });
 
       scheduler.schedule("instant:run", { fast: true }, 0);
       await vi.advanceTimersByTimeAsync(0);
@@ -60,7 +61,7 @@ describe("SchedulerExecutor", () => {
   }) => {
     await withFakeTimers(async () => {
       const runFunction = vi.fn<RunFunction>().mockResolvedValue(undefined);
-      const scheduler = new SchedulerExecutor({ db, runFunction });
+      const scheduler = createSchedulerExecutor({ db, runFunction });
 
       const jobId = scheduler.schedule("tasks:cancel", {}, 5000);
       scheduler.cancelJob(jobId);
@@ -73,7 +74,7 @@ describe("SchedulerExecutor", () => {
 
   it("ignores cancellation of an unknown job ID", ({ db }) => {
     const runFunction = vi.fn<RunFunction>().mockResolvedValue(undefined);
-    const scheduler = new SchedulerExecutor({ db, runFunction });
+    const scheduler = createSchedulerExecutor({ db, runFunction });
 
     expect(() => scheduler.cancelJob("job_999")).not.toThrow();
   });
@@ -81,7 +82,7 @@ describe("SchedulerExecutor", () => {
   it("clears all pending jobs on shutdown", async ({ db }) => {
     await withFakeTimers(async () => {
       const runFunction = vi.fn<RunFunction>().mockResolvedValue(undefined);
-      const scheduler = new SchedulerExecutor({ db, runFunction });
+      const scheduler = createSchedulerExecutor({ db, runFunction });
 
       scheduler.schedule("a:run", {}, 1000);
       scheduler.schedule("b:run", {}, 2000);
@@ -103,7 +104,7 @@ describe("SchedulerExecutor", () => {
       const consoleSpy = vi
         .spyOn(console, "error")
         .mockImplementation(() => {});
-      const scheduler = new SchedulerExecutor({ db, runFunction });
+      const scheduler = createSchedulerExecutor({ db, runFunction });
 
       scheduler.schedule("failing:task", { x: 1 }, 500);
       await vi.advanceTimersByTimeAsync(500);

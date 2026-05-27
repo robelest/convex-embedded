@@ -736,311 +736,262 @@ function isLocalUploadUrl(value: unknown): value is string {
   }
 }
 
-class EngineImpl implements EngineInstance {
-  // Subsystem instances — hoisted from constructor closure consts so
-  // class methods outside the constructor can reach them without going
-  // through `this.impl`. Declared (but not all read yet — TS unused
-  // checks are silenced because every assignment in the constructor
-  // counts as a read for `readonly` fields).
-  /** @internal */ readonly _statusEmitter!: EngineStatusEmitter;
-  /** @internal */ readonly _idMap!: IdMap;
-  /** @internal */ readonly _pendingQueue!: PendingQueue;
+export function createEngine(config: EngineConfig): EngineInstance {
+  const {
+    embedded,
+    remoteClient,
+    tables,
+    uploadUrlRef,
+    maxRetries = 3,
+    retryDelayMs = 1000,
+    getIdentityKey,
+    processorId,
+    leaseMs = 30_000,
+    getReplayPayloadVersion,
+    uploadFetch,
+  } = config;
 
-  start!: () => void;
-  stop!: () => void;
-  mutation!: (
-    ref: unknown,
-    args: Record<string, unknown>,
-    options?: { enqueueForReplay?: boolean },
-  ) => Promise<unknown>;
-  pullNow!: () => Promise<void>;
-  ensureTableReady!: (tableName: string) => Promise<void>;
-  ensureScopeReady!: (
-    tableName: string,
+  const localClient = embedded.client;
+  const rawIngestDocuments = embedded.ingestDocuments.bind(embedded);
+
+  const ingestLockMap = new Map<string, Promise<void>>();
+  function ingestDocuments(
+    table: string,
+    docs: Array<Record<string, unknown>>,
     scopeArgs?: Record<string, unknown>,
-    readKey?: string,
-  ) => Promise<void>;
-  releaseScopeRead!: (
-    tableName: string,
-    scopeArgs: Record<string, unknown> | undefined,
-    readKey: string,
-  ) => void;
-  onScopeResolved!: (
-    tableName: string,
-    scopeArgs: Record<string, unknown> | undefined,
-    cb: () => void,
-  ) => () => void;
-  reloadIdentity!: () => Promise<void>;
-  constructor(config: EngineConfig) {
-    const {
-      embedded,
-      remoteClient,
-      tables,
-      uploadUrlRef,
-      maxRetries = 3,
-      retryDelayMs = 1000,
-      getIdentityKey,
-      processorId,
-      leaseMs = 30_000,
-      getReplayPayloadVersion,
-      uploadFetch,
-    } = config;
+    options?: IngestDocumentsOptions,
+  ): Promise<void> {
+    const prev = ingestLockMap.get(table) ?? Promise.resolve();
+    const next = prev.then(
+      () => rawIngestDocuments(table, docs, scopeArgs, options),
+      () => rawIngestDocuments(table, docs, scopeArgs, options),
+    );
+    ingestLockMap.set(table, next);
+    next
+      .finally(() => {
+        if (ingestLockMap.get(table) === next) {
+          ingestLockMap.delete(table);
+        }
+      })
+      .catch(() => undefined);
+    return next;
+  }
+  const getDocumentsForTable = embedded.getDocumentsForTable.bind(embedded);
+  const getDocumentsForScope = embedded.getDocumentsForScope?.bind(embedded);
+  const tableSchemas = Object.fromEntries(
+    Object.entries(tables)
+      .filter(([, tableConfig]) => tableConfig.schema !== undefined)
+      .map(([tableName, tableConfig]) => [tableName, tableConfig.schema]),
+  ) as Record<string, Definition>;
+  const orderedTables = orderTablesByDependencies(tables);
+  const activatedRemoteTables = new Set(rootTablesByDependencies(tables));
+  const processorHeartbeatMs = Math.max(1_000, Math.floor(leaseMs / 3));
 
-    const localClient = embedded.client;
-    const rawIngestDocuments = embedded.ingestDocuments.bind(embedded);
+  let replayInst!: Replay;
+  const getRecentlyReplayedIdSet = () => replayInst.recentlyReplayedIdSet();
+  const pullServices: EngineResolveInput = {
+    remoteClient,
+    ingestDocuments,
+    getDocumentsForTable,
+  };
+  const executeLocal = embedded.executeLocal?.bind(embedded);
+  const registerUploadUrlSource =
+    embedded.registerUploadUrlSource?.bind(embedded);
 
-    const ingestLockMap = new Map<string, Promise<void>>();
-    function ingestDocuments(
-      table: string,
-      docs: Array<Record<string, unknown>>,
-      scopeArgs?: Record<string, unknown>,
-      options?: IngestDocumentsOptions,
-    ): Promise<void> {
-      const prev = ingestLockMap.get(table) ?? Promise.resolve();
-      const next = prev.then(
-        () => rawIngestDocuments(table, docs, scopeArgs, options),
-        () => rawIngestDocuments(table, docs, scopeArgs, options),
-      );
-      ingestLockMap.set(table, next);
-      next
-        .finally(() => {
-          if (ingestLockMap.get(table) === next) {
-            ingestLockMap.delete(table);
-          }
+  const executeLocalQuery = executeLocal
+    ? (path: string, args: Record<string, unknown>) =>
+        executeLocal({ kind: "query", path, args })
+    : undefined;
+  const executeLocalMutationWithoutEffects = executeLocal
+    ? (path: string, args: Record<string, unknown>) =>
+        executeLocal({
+          kind: "mutation",
+          path,
+          args,
+          applyLocalEffects: false,
         })
-        .catch(() => undefined);
-      return next;
-    }
-    const getDocumentsForTable = embedded.getDocumentsForTable.bind(embedded);
-    const getDocumentsForScope = embedded.getDocumentsForScope?.bind(embedded);
-    const tableSchemas = Object.fromEntries(
-      Object.entries(tables)
-        .filter(([, tableConfig]) => tableConfig.schema !== undefined)
-        .map(([tableName, tableConfig]) => [tableName, tableConfig.schema]),
-    ) as Record<string, Definition>;
-    const orderedTables = orderTablesByDependencies(tables);
-    const activatedRemoteTables = new Set(rootTablesByDependencies(tables));
-    const processorHeartbeatMs = Math.max(1_000, Math.floor(leaseMs / 3));
+    : undefined;
+  const executeLocalMutationWithEffects = executeLocal
+    ? (ref: unknown, args: Record<string, unknown>) =>
+        executeLocal({
+          kind: "mutation",
+          path: getFunctionName(ref as Parameters<typeof getFunctionName>[0]),
+          args,
+          applyLocalEffects: true,
+        })
+    : undefined;
 
-    let replayInst!: Replay;
-    const getRecentlyReplayedIdSet = () => replayInst.recentlyReplayedIdSet();
-    const pullServices: EngineResolveInput = {
-      remoteClient,
-      ingestDocuments,
-      getDocumentsForTable,
-    };
-    const executeLocal = embedded.executeLocal?.bind(embedded);
-    const registerUploadUrlSource =
-      embedded.registerUploadUrlSource?.bind(embedded);
+  const statusEmitter = createEngineStatusEmitter();
+  let started = false;
+  // schedulerInst is assigned later in the constructor body (after its
+  // refs are defined). Earlier closures capture the binding and read it
+  // at call time, after assignment.
+  let schedulerInst!: Scheduler;
+  let pullInst!: Pull;
 
-    const executeLocalQuery = executeLocal
-      ? (path: string, args: Record<string, unknown>) =>
-          executeLocal({ kind: "query", path, args })
-      : undefined;
-    const executeLocalMutationWithoutEffects = executeLocal
-      ? (path: string, args: Record<string, unknown>) =>
-          executeLocal({
-            kind: "mutation",
-            path,
-            args,
-            applyLocalEffects: false,
-          })
-      : undefined;
-    const executeLocalMutationWithEffects = executeLocal
-      ? (ref: unknown, args: Record<string, unknown>) =>
-          executeLocal({
-            kind: "mutation",
-            path: getFunctionName(ref as Parameters<typeof getFunctionName>[0]),
-            args,
-            applyLocalEffects: true,
-          })
-      : undefined;
+  const schemaIdFields = extractSchemaIdFields(
+    Object.values(tables)
+      .filter((t) => t.schema !== undefined)
+      .map((t) => t.schema.shape),
+  );
+  const idMap = new IdMap(
+    localClient,
+    executeLocalQuery,
+    executeLocalMutationWithoutEffects,
+    getIdentityKey,
+    (id) => embedded.hasLocalDocumentId?.(id) ?? false,
+    schemaIdFields,
+  );
+  const pendingQueue = new PendingQueue(
+    localClient,
+    executeLocalQuery,
+    executeLocalMutationWithoutEffects,
+    getIdentityKey,
+  );
+  const unregisterPendingDepth = registerGauge(
+    "pending_queue.depth",
+    () => pendingQueue.length,
+  );
+  const pendingUploadQueue = new PendingUploadQueue(
+    localClient,
+    executeLocalQuery,
+    executeLocalMutationWithoutEffects,
+    getIdentityKey,
+  );
+  const unregisterPendingUploadsDepth = registerGauge(
+    "pending_uploads.depth",
+    () => pendingUploadQueue.length,
+  );
+  const processorIdForReplay =
+    processorId ?? `processor_${Math.random().toString(36).slice(2)}`;
 
-    const statusEmitter = createEngineStatusEmitter();
-    this._statusEmitter = statusEmitter;
-    let started = false;
-    // schedulerInst is assigned later in the constructor body (after its
-    // refs are defined). Earlier closures capture the binding and read it
-    // at call time, after assignment.
-    let schedulerInst!: Scheduler;
-    let pullInst!: Pull;
+  let onOnline: (() => void) | null = null;
+  let onOffline: (() => void) | null = null;
+  let cleanupOnlineListener: (() => void) | null = null;
+  let cleanupOfflineListener: (() => void) | null = null;
+  const SCOPE_TEARDOWN_DEBOUNCE_MS = config.scopeTeardownDebounceMs ?? 3000;
 
-    const schemaIdFields = extractSchemaIdFields(
-      Object.values(tables)
-        .filter((t) => t.schema !== undefined)
-        .map((t) => t.schema.shape),
+  const subs: SubscriptionsSubsystem = createSubscriptions({
+    orderedTables,
+    canonicalizeScopeArgs,
+    buildScopeKey,
+    projectRemoteSnapshot: replay.projectRemoteSnapshot,
+    getDocumentsForTable,
+    filterAfterHydratingReferences: (input) =>
+      pullInst.filterAfterHydratingReferences(input),
+    ingestDocuments,
+    runSpan,
+    yieldToEventLoop,
+    getRecentlyReplayedIdSet: () => getRecentlyReplayedIdSet(),
+    getPendingEntries: () => pendingQueue.entries(),
+    getAliases: (id) => idMap.getAliases(id),
+    clearPullSequencing: () => pullInst.clearAll(),
+  });
+
+  function getRemoteApplyOrder(): string[] {
+    return orderedTables.filter((tableName) =>
+      activatedRemoteTables.has(tableName),
     );
-    const idMap = new IdMap(
-      localClient,
-      executeLocalQuery,
-      executeLocalMutationWithoutEffects,
-      getIdentityKey,
-      (id) => embedded.hasLocalDocumentId?.(id) ?? false,
-      schemaIdFields,
+  }
+
+  const bufferRemoteSnapshot = async (
+    tableName: string,
+    docs: Array<Record<string, unknown>>,
+    scopeArgs?: Record<string, unknown>,
+  ): Promise<void> => {
+    subs.bufferRemoteSnapshot(tableName, docs, scopeArgs);
+  };
+  const clearBufferedSnapshots = () => subs.clearAll();
+
+  function emit(newStatus: EngineStatus): void {
+    statusEmitter.emit(newStatus);
+  }
+
+  /**
+   * Drain the pending uploads queue. Runs before mutation replay so that
+   * any local storage IDs queued mutations reference are already mapped to
+   * remote IDs by the time those mutations process.
+   */
+
+  /**
+   * Process the pending queue serially.
+   *
+   * Each mutation is awaited before the next starts. This ensures:
+   * 1. `create` completes and populates the ID map before a subsequent
+   *    `update`/`remove` that references the same document.
+   * 2. Ordering is preserved — mutations replay in the exact order they
+   *    were issued locally.
+   *
+   * On failure, the entry stays in the queue for retry on next cycle.
+   */
+
+  async function getTableSpec(
+    tableName: string,
+    tableConfig: TableConfig,
+    signal?: AbortSignal,
+    scopeArgs?: Record<string, unknown>,
+  ): Promise<void> {
+    return pullInst.getTableSpec(tableName, tableConfig, signal, scopeArgs);
+  }
+
+  /**
+   * Subscribe to each table's remote query via `remoteClient.onUpdate()`.
+   *
+   * When the remote Convex backend pushes new query results (because
+   * any client mutated the data), the callback diffs the remote
+   * documents against local state and ingests the changes into the
+   * embedded runtime.
+   *
+   * This is the primary mechanism for cross-client real-time sync
+   * while online. Resolve (Yjs CRDT diff) handles the offline
+   * catch-up case.
+   */
+  function startRemoteSubscriptions(): void {
+    stopRemoteSubscriptions();
+
+    // (Re)subscribe the scopes that are already active — e.g. after a reconnect.
+    const orderedScopes = Array.from(subs.scopes().entries()).sort(
+      ([leftKey, left], [rightKey, right]) => {
+        const leftOrder = orderedTables.indexOf(left.tableName);
+        const rightOrder = orderedTables.indexOf(right.tableName);
+        if (leftOrder !== rightOrder) {
+          return leftOrder - rightOrder;
+        }
+        return leftKey.localeCompare(rightKey);
+      },
     );
-    const pendingQueue = new PendingQueue(
-      localClient,
-      executeLocalQuery,
-      executeLocalMutationWithoutEffects,
-      getIdentityKey,
-    );
-    const unregisterPendingDepth = registerGauge(
-      "pending_queue.depth",
-      () => pendingQueue.length,
-    );
-    const pendingUploadQueue = new PendingUploadQueue(
-      localClient,
-      executeLocalQuery,
-      executeLocalMutationWithoutEffects,
-      getIdentityKey,
-    );
-    const unregisterPendingUploadsDepth = registerGauge(
-      "pending_uploads.depth",
-      () => pendingUploadQueue.length,
-    );
-    const processorIdForReplay =
-      processorId ?? `processor_${Math.random().toString(36).slice(2)}`;
 
-    let onOnline: (() => void) | null = null;
-    let onOffline: (() => void) | null = null;
-    let cleanupOnlineListener: (() => void) | null = null;
-    let cleanupOfflineListener: (() => void) | null = null;
-    const SCOPE_TEARDOWN_DEBOUNCE_MS = config.scopeTeardownDebounceMs ?? 3000;
-
-    const subs: SubscriptionsSubsystem = createSubscriptions({
-      orderedTables,
-      canonicalizeScopeArgs,
-      buildScopeKey,
-      projectRemoteSnapshot: replay.projectRemoteSnapshot,
-      getDocumentsForTable,
-      filterAfterHydratingReferences: (input) =>
-        pullInst.filterAfterHydratingReferences(input),
-      ingestDocuments,
-      runSpan,
-      yieldToEventLoop,
-      getRecentlyReplayedIdSet: () => getRecentlyReplayedIdSet(),
-      getPendingEntries: () => pendingQueue.entries(),
-      getAliases: (id) => idMap.getAliases(id),
-      clearPullSequencing: () => pullInst.clearAll(),
-    });
-
-    function getRemoteApplyOrder(): string[] {
-      return orderedTables.filter((tableName) =>
-        activatedRemoteTables.has(tableName),
-      );
-    }
-
-    const bufferRemoteSnapshot = async (
-      tableName: string,
-      docs: Array<Record<string, unknown>>,
-      scopeArgs?: Record<string, unknown>,
-    ): Promise<void> => {
-      subs.bufferRemoteSnapshot(tableName, docs, scopeArgs);
-    };
-    const clearBufferedSnapshots = () => subs.clearAll();
-
-    function emit(newStatus: EngineStatus): void {
-      statusEmitter.emit(newStatus);
-    }
-
-    /**
-     * Drain the pending uploads queue. Runs before mutation replay so that
-     * any local storage IDs queued mutations reference are already mapped to
-     * remote IDs by the time those mutations process.
-     */
-
-    /**
-     * Process the pending queue serially.
-     *
-     * Each mutation is awaited before the next starts. This ensures:
-     * 1. `create` completes and populates the ID map before a subsequent
-     *    `update`/`remove` that references the same document.
-     * 2. Ordering is preserved — mutations replay in the exact order they
-     *    were issued locally.
-     *
-     * On failure, the entry stays in the queue for retry on next cycle.
-     */
-
-    async function getTableSpec(
-      tableName: string,
-      tableConfig: TableConfig,
-      signal?: AbortSignal,
-      scopeArgs?: Record<string, unknown>,
-    ): Promise<void> {
-      return pullInst.getTableSpec(tableName, tableConfig, signal, scopeArgs);
-    }
-
-    /**
-     * Subscribe to each table's remote query via `remoteClient.onUpdate()`.
-     *
-     * When the remote Convex backend pushes new query results (because
-     * any client mutated the data), the callback diffs the remote
-     * documents against local state and ingests the changes into the
-     * embedded runtime.
-     *
-     * This is the primary mechanism for cross-client real-time sync
-     * while online. Resolve (Yjs CRDT diff) handles the offline
-     * catch-up case.
-     */
-    function startRemoteSubscriptions(): void {
-      stopRemoteSubscriptions();
-
-      // (Re)subscribe the scopes that are already active — e.g. after a reconnect.
-      const orderedScopes = Array.from(subs.scopes().entries()).sort(
-        ([leftKey, left], [rightKey, right]) => {
-          const leftOrder = orderedTables.indexOf(left.tableName);
-          const rightOrder = orderedTables.indexOf(right.tableName);
-          if (leftOrder !== rightOrder) {
-            return leftOrder - rightOrder;
-          }
-          return leftKey.localeCompare(rightKey);
+    for (const [key, entry] of orderedScopes) {
+      if (entry.unsubscribe) {
+        continue;
+      }
+      const tableConfig = tables[entry.tableName];
+      if (!tableConfig) {
+        continue;
+      }
+      registerRemoteSubscription({
+        getPendingEntries: () => pendingQueue.entries(),
+        getAliases: (id) => idMap.getAliases(id),
+        bufferRemoteSnapshot,
+        translateRemoteSnapshotToLocal: (docs) => docs,
+        onUnsubscribe: (unsub) => {
+          entry.unsubscribe = unsub;
         },
-      );
-
-      for (const [key, entry] of orderedScopes) {
-        if (entry.unsubscribe) {
-          continue;
-        }
-        const tableConfig = tables[entry.tableName];
-        if (!tableConfig) {
-          continue;
-        }
-        registerRemoteSubscription({
-          getPendingEntries: () => pendingQueue.entries(),
-          getAliases: (id) => idMap.getAliases(id),
-          bufferRemoteSnapshot,
-          translateRemoteSnapshotToLocal: (docs) => docs,
-          onUnsubscribe: (unsub) => {
-            entry.unsubscribe = unsub;
-          },
-          pullServices,
-          tableConfig,
-          tableName: entry.tableName,
-          scopeArgs: entry.scopeArgs,
-          consumeExpectedSelfCausedSignal: (table, signalSeq) =>
-            pullInst.consumeExpectedSelfCausedSignal(table, signalSeq),
-          scheduleTableCoalesce: (input) =>
-            pullInst.scheduleTableCoalesce(input),
-          shouldSkipRedundantPartialPull: (table, scopeArgs, signalSeq) =>
-            pullInst.shouldSkipRedundantPartialPull(
-              table,
-              scopeArgs,
-              signalSeq,
-            ),
-          onPartialResponse: () => {
-            runDetached(
-              () =>
-                getTableSpec(
-                  entry.tableName,
-                  tableConfig,
-                  undefined,
-                  entry.scopeArgs,
-                ),
-              `[sync] paginated resolve for "${entry.tableName}":`,
-            );
-          },
-        });
-        if (!pullInst.hasPulledScopeSeq(key)) {
+        pullServices,
+        tableConfig,
+        tableName: entry.tableName,
+        scopeArgs: entry.scopeArgs,
+        consumeExpectedSelfCausedSignal: (table, signalSeq) =>
+          pullInst.consumeExpectedSelfCausedSignal(table, signalSeq),
+        scheduleTableCoalesce: (input) =>
+          pullInst.scheduleTableCoalesce(input),
+        shouldSkipRedundantPartialPull: (table, scopeArgs, signalSeq) =>
+          pullInst.shouldSkipRedundantPartialPull(
+            table,
+            scopeArgs,
+            signalSeq,
+          ),
+        onPartialResponse: () => {
           runDetached(
             () =>
               getTableSpec(
@@ -1049,629 +1000,622 @@ class EngineImpl implements EngineInstance {
                 undefined,
                 entry.scopeArgs,
               ),
-            `[sync] cold resolve for "${entry.tableName}":`,
+            `[sync] paginated resolve for "${entry.tableName}":`,
           );
-        }
-        void yieldToEventLoop();
-      }
-
-      log.info(`sync: subscribed to ${orderedScopes.length} remote table(s)`);
-    }
-
-    /**
-     * Unsubscribe from all active remote reactive subscriptions.
-     */
-    function stopRemoteSubscriptions(): void {
-      subs.clearAllTeardownTimers();
-
-      if (!subs.hasActive()) return;
-
-      subs.bumpEpoch();
-
-      for (const [key, entry] of subs.scopes()) {
-        try {
-          entry.unsubscribe?.();
-        } catch (err) {
-          log.warn("sync: error during remote unsubscribe", err);
-        }
-        entry.unsubscribe = undefined;
-        entry.pendingActivation = undefined;
-        const isScoped = Object.keys(entry.scopeArgs).length > 0;
-        const hasReaders = (entry.readers?.size ?? 0) > 0;
-        if (isScoped && !hasReaders) {
-          subs.deleteScope(key);
-          subs.clearPulled(key);
-        }
-      }
-
-      log.info("sync: unsubscribed from remote tables");
-    }
-
-    function yieldToEventLoop(): Promise<void> {
-      return new Promise((resolve) => setTimeout(resolve, 0));
-    }
-
-    function registerScopeReader(
-      tableName: string,
-      scopeArgs: Record<string, unknown> | undefined,
-      readKey: string,
-    ): void {
-      const normalizedScope = canonicalizeScopeArgs(scopeArgs);
-      if (Object.keys(normalizedScope).length === 0) {
-        return;
-      }
-      const key = buildScopeKey(tableName, normalizedScope);
-      subs.clearTeardownTimer(key);
-      subs.set(key, {
-        tableName,
-        scopeArgs: normalizedScope,
+        },
       });
-      subs.addReader(key, readKey);
+      if (!pullInst.hasPulledScopeSeq(key)) {
+        runDetached(
+          () =>
+            getTableSpec(
+              entry.tableName,
+              tableConfig,
+              undefined,
+              entry.scopeArgs,
+            ),
+          `[sync] cold resolve for "${entry.tableName}":`,
+        );
+      }
+      void yieldToEventLoop();
     }
 
-    function teardownScope(key: string): void {
-      subs.clearTeardownTimer(key);
-      const entry = subs.get(key);
-      if (!entry) {
-        return;
-      }
-      if ((entry.readers?.size ?? 0) > 0) {
-        return;
-      }
+    log.info(`sync: subscribed to ${orderedScopes.length} remote table(s)`);
+  }
+
+  /**
+   * Unsubscribe from all active remote reactive subscriptions.
+   */
+  function stopRemoteSubscriptions(): void {
+    subs.clearAllTeardownTimers();
+
+    if (!subs.hasActive()) return;
+
+    subs.bumpEpoch();
+
+    for (const [key, entry] of subs.scopes()) {
       try {
         entry.unsubscribe?.();
       } catch (err) {
-        log.warn("sync: error during scope teardown unsubscribe", err);
+        log.warn("sync: error during remote unsubscribe", err);
       }
       entry.unsubscribe = undefined;
       entry.pendingActivation = undefined;
-      subs.deleteScope(key);
-      subs.clearPulled(key);
-      log.debug(`sync: deactivated idle scope ${key}`);
+      const isScoped = Object.keys(entry.scopeArgs).length > 0;
+      const hasReaders = (entry.readers?.size ?? 0) > 0;
+      if (isScoped && !hasReaders) {
+        subs.deleteScope(key);
+        subs.clearPulled(key);
+      }
     }
 
-    function releaseScopeRead(
-      tableName: string,
-      scopeArgs: Record<string, unknown> | undefined,
-      readKey: string,
-    ): void {
-      const normalizedScope = canonicalizeScopeArgs(scopeArgs);
-      if (Object.keys(normalizedScope).length === 0) {
-        return;
-      }
-      const key = buildScopeKey(tableName, normalizedScope);
-      const remaining = subs.removeReader(key, readKey);
-      if (remaining === null || remaining > 0) {
-        return;
-      }
-      subs.setTeardownTimer(
-        key,
-        setTimeout(() => teardownScope(key), SCOPE_TEARDOWN_DEBOUNCE_MS),
-      );
+    log.info("sync: unsubscribed from remote tables");
+  }
+
+  function yieldToEventLoop(): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  function registerScopeReader(
+    tableName: string,
+    scopeArgs: Record<string, unknown> | undefined,
+    readKey: string,
+  ): void {
+    const normalizedScope = canonicalizeScopeArgs(scopeArgs);
+    if (Object.keys(normalizedScope).length === 0) {
+      return;
+    }
+    const key = buildScopeKey(tableName, normalizedScope);
+    subs.clearTeardownTimer(key);
+    subs.set(key, {
+      tableName,
+      scopeArgs: normalizedScope,
+    });
+    subs.addReader(key, readKey);
+  }
+
+  function teardownScope(key: string): void {
+    subs.clearTeardownTimer(key);
+    const entry = subs.get(key);
+    if (!entry) {
+      return;
+    }
+    if ((entry.readers?.size ?? 0) > 0) {
+      return;
+    }
+    try {
+      entry.unsubscribe?.();
+    } catch (err) {
+      log.warn("sync: error during scope teardown unsubscribe", err);
+    }
+    entry.unsubscribe = undefined;
+    entry.pendingActivation = undefined;
+    subs.deleteScope(key);
+    subs.clearPulled(key);
+    log.debug(`sync: deactivated idle scope ${key}`);
+  }
+
+  function releaseScopeRead(
+    tableName: string,
+    scopeArgs: Record<string, unknown> | undefined,
+    readKey: string,
+  ): void {
+    const normalizedScope = canonicalizeScopeArgs(scopeArgs);
+    if (Object.keys(normalizedScope).length === 0) {
+      return;
+    }
+    const key = buildScopeKey(tableName, normalizedScope);
+    const remaining = subs.removeReader(key, readKey);
+    if (remaining === null || remaining > 0) {
+      return;
+    }
+    subs.setTeardownTimer(
+      key,
+      setTimeout(() => teardownScope(key), SCOPE_TEARDOWN_DEBOUNCE_MS),
+    );
+  }
+
+  async function activateScope(
+    tableName: string,
+    scopeArgs?: Record<string, unknown>,
+  ): Promise<void> {
+    if (!(tableName in tables)) {
+      return;
     }
 
-    async function activateScope(
-      tableName: string,
-      scopeArgs?: Record<string, unknown>,
-    ): Promise<void> {
-      if (!(tableName in tables)) {
+    const normalizedScope = canonicalizeScopeArgs(scopeArgs);
+    const key = buildScopeKey(tableName, normalizedScope);
+    const existing = subs.get(key);
+    if (existing?.unsubscribe) {
+      return;
+    }
+    if (existing?.pendingActivation) {
+      await existing.pendingActivation;
+      return;
+    }
+    const entry: ScopeRecord = subs.set(key, {
+      tableName,
+      scopeArgs: normalizedScope,
+    });
+    if (
+      !schedulerInst.isOnline() ||
+      !started ||
+      !pendingQueue.isEmpty
+    ) {
+      return;
+    }
+
+    const tableConfig = tables[tableName];
+    if (!tableConfig) {
+      return;
+    }
+
+    const epochAtStart = subs.getEpoch();
+
+    const activation = (async () => {
+      if (!pullInst.hasPulledScopeSeq(key)) {
+        await getTableSpec(
+          tableName,
+          tableConfig,
+          schedulerInst.currentSignal(),
+          normalizedScope,
+        );
+      }
+      subs.markPulled(key);
+      await yieldToEventLoop();
+
+      if (subs.getEpoch() !== epochAtStart || !started) {
         return;
       }
 
-      const normalizedScope = canonicalizeScopeArgs(scopeArgs);
-      const key = buildScopeKey(tableName, normalizedScope);
-      const existing = subs.get(key);
-      if (existing?.unsubscribe) {
-        return;
-      }
-      if (existing?.pendingActivation) {
-        await existing.pendingActivation;
-        return;
-      }
-      const entry: ScopeRecord = subs.set(key, {
+      registerRemoteSubscription({
+        getPendingEntries: () => pendingQueue.entries(),
+        getAliases: (id) => idMap.getAliases(id),
+        bufferRemoteSnapshot,
+        translateRemoteSnapshotToLocal: (docs) => docs,
+        onUnsubscribe: (unsub) => {
+          entry.unsubscribe = unsub;
+        },
+        pullServices,
+        tableConfig,
         tableName,
         scopeArgs: normalizedScope,
-      });
-      if (
-        !schedulerInst.isOnline() ||
-        !started ||
-        !pendingQueue.isEmpty
-      ) {
-        return;
-      }
-
-      const tableConfig = tables[tableName];
-      if (!tableConfig) {
-        return;
-      }
-
-      const epochAtStart = subs.getEpoch();
-
-      const activation = (async () => {
-        if (!pullInst.hasPulledScopeSeq(key)) {
-          await getTableSpec(
-            tableName,
-            tableConfig,
-            schedulerInst.currentSignal(),
-            normalizedScope,
+        consumeExpectedSelfCausedSignal: (table, signalSeq) =>
+          pullInst.consumeExpectedSelfCausedSignal(table, signalSeq),
+        scheduleTableCoalesce: (input) =>
+          pullInst.scheduleTableCoalesce(input),
+        shouldSkipRedundantPartialPull: (table, scopeArgs, signalSeq) =>
+          pullInst.shouldSkipRedundantPartialPull(
+            table,
+            scopeArgs,
+            signalSeq,
+          ),
+        onPartialResponse: () => {
+          runDetached(
+            () =>
+              getTableSpec(
+                tableName,
+                tableConfig,
+                undefined,
+                normalizedScope,
+              ),
+            `[sync] paginated resolve for scoped "${tableName}":`,
           );
-        }
-        subs.markPulled(key);
-        await yieldToEventLoop();
+        },
+      });
+    })();
 
-        if (subs.getEpoch() !== epochAtStart || !started) {
-          return;
-        }
-
-        registerRemoteSubscription({
-          getPendingEntries: () => pendingQueue.entries(),
-          getAliases: (id) => idMap.getAliases(id),
-          bufferRemoteSnapshot,
-          translateRemoteSnapshotToLocal: (docs) => docs,
-          onUnsubscribe: (unsub) => {
-            entry.unsubscribe = unsub;
-          },
-          pullServices,
-          tableConfig,
-          tableName,
-          scopeArgs: normalizedScope,
-          consumeExpectedSelfCausedSignal: (table, signalSeq) =>
-            pullInst.consumeExpectedSelfCausedSignal(table, signalSeq),
-          scheduleTableCoalesce: (input) =>
-            pullInst.scheduleTableCoalesce(input),
-          shouldSkipRedundantPartialPull: (table, scopeArgs, signalSeq) =>
-            pullInst.shouldSkipRedundantPartialPull(
-              table,
-              scopeArgs,
-              signalSeq,
-            ),
-          onPartialResponse: () => {
-            runDetached(
-              () =>
-                getTableSpec(
-                  tableName,
-                  tableConfig,
-                  undefined,
-                  normalizedScope,
-                ),
-              `[sync] paginated resolve for scoped "${tableName}":`,
-            );
-          },
-        });
-      })();
-
-      entry.pendingActivation = activation;
-      try {
-        await activation;
-      } finally {
-        if (entry.pendingActivation === activation) {
-          entry.pendingActivation = undefined;
-        }
+    entry.pendingActivation = activation;
+    try {
+      await activation;
+    } finally {
+      if (entry.pendingActivation === activation) {
+        entry.pendingActivation = undefined;
       }
     }
+  }
 
-    async function hydrateIdentityState(): Promise<void> {
-      try {
-        await Promise.all([
-          idMap.hydrate(),
-          pendingQueue.hydrate(),
-          pendingUploadQueue.hydrate(),
-        ]);
-      } catch (err) {
-        log.warn("sync: hydration failed", err);
-      }
+  async function hydrateIdentityState(): Promise<void> {
+    try {
+      await Promise.all([
+        idMap.hydrate(),
+        pendingQueue.hydrate(),
+        pendingUploadQueue.hydrate(),
+      ]);
+    } catch (err) {
+      log.warn("sync: hydration failed", err);
     }
+  }
 
-    function getCurrentIdentityKey(): string | null {
-      return getIdentityKey?.() ?? null;
-    }
+  function getCurrentIdentityKey(): string | null {
+    return getIdentityKey?.() ?? null;
+  }
 
-    async function runLocalSystemMutation(
-      path: string,
-      args: Record<string, unknown>,
-    ): Promise<void> {
-      if (executeLocal) {
-        await executeLocal({
-          kind: "mutation",
-          path,
-          args,
-          applyLocalEffects: true,
-        });
-        return;
-      }
-      await (localClient as unknown as LocalPathCallable).mutation(path, args);
-    }
-
-    async function runLocalSystemQuery<T>(
-      path: string,
-      args: Record<string, unknown>,
-    ): Promise<T> {
-      if (executeLocal) {
-        return (await executeLocal({
-          kind: "query",
-          path,
-          args,
-        })) as T;
-      }
-      return (await (localClient as unknown as LocalPathCallable).query(
+  async function runLocalSystemMutation(
+    path: string,
+    args: Record<string, unknown>,
+  ): Promise<void> {
+    if (executeLocal) {
+      await executeLocal({
+        kind: "mutation",
         path,
         args,
-      )) as T;
-    }
-
-    async function heartbeatProcessor(): Promise<void> {
-      await runLocalSystemMutation(SystemPaths.processorHeartbeat, {
-        processorId: processorIdForReplay,
-        identityKey: getCurrentIdentityKey(),
+        applyLocalEffects: true,
       });
+      return;
     }
+    await (localClient as unknown as LocalPathCallable).mutation(path, args);
+  }
 
-    const pullRefs: PullRefs = {
-      tables,
-      orderedTables,
-      getRemoteApplyOrder,
-      activeScopes: () => subs.scopes(),
-      buildScopeKey,
-      ingestDocuments,
-      getDocumentsForTable,
-      getDocumentsForScope,
-      idMap,
-      embedded,
-      remoteClient,
-      maxRetries,
-      retryDelayMs,
-      emit,
-      yieldToEventLoop,
-      runLocalSystemQuery,
-      runLocalSystemMutation,
-      getCurrentIdentityKey,
-    };
-    pullInst = createPull(pullRefs);
+  async function runLocalSystemQuery<T>(
+    path: string,
+    args: Record<string, unknown>,
+  ): Promise<T> {
+    if (executeLocal) {
+      return (await executeLocal({
+        kind: "query",
+        path,
+        args,
+      })) as T;
+    }
+    return (await (localClient as unknown as LocalPathCallable).query(
+      path,
+      args,
+    )) as T;
+  }
 
-    const replayRefs: ReplayRefs = {
-      pendingQueue,
-      pendingUploadQueue,
-      embedded,
-      idMap,
-      remoteClient,
-      tables,
-      tableSchemas,
+  async function heartbeatProcessor(): Promise<void> {
+    await runLocalSystemMutation(SystemPaths.processorHeartbeat, {
       processorId: processorIdForReplay,
-      leaseMs,
-      uploadUrlRef,
-      uploadFetch,
-      recordExpectedSelfCausedSignal: (table, postCommitSeq) =>
-        pullInst.recordExpectedSelfCausedSignal(table, postCommitSeq),
-      nextExpectedSelfCausedSeq: (table) =>
-        pullInst.nextExpectedSelfCausedSeq(table),
-      softResetSubsBuffers: () => subs.softResetBuffers(),
-      hasActiveSubs: () => subs.hasActive(),
-      isOnline: () => schedulerInst.isOnline(),
+      identityKey: getCurrentIdentityKey(),
+    });
+  }
+
+  const pullRefs: PullRefs = {
+    tables,
+    orderedTables,
+    getRemoteApplyOrder,
+    activeScopes: () => subs.scopes(),
+    buildScopeKey,
+    ingestDocuments,
+    getDocumentsForTable,
+    getDocumentsForScope,
+    idMap,
+    embedded,
+    remoteClient,
+    maxRetries,
+    retryDelayMs,
+    emit,
+    yieldToEventLoop,
+    runLocalSystemQuery,
+    runLocalSystemMutation,
+    getCurrentIdentityKey,
+  };
+  pullInst = createPull(pullRefs);
+
+  const replayRefs: ReplayRefs = {
+    pendingQueue,
+    pendingUploadQueue,
+    embedded,
+    idMap,
+    remoteClient,
+    tables,
+    tableSchemas,
+    processorId: processorIdForReplay,
+    leaseMs,
+    uploadUrlRef,
+    uploadFetch,
+    recordExpectedSelfCausedSignal: (table, postCommitSeq) =>
+      pullInst.recordExpectedSelfCausedSignal(table, postCommitSeq),
+    nextExpectedSelfCausedSeq: (table) =>
+      pullInst.nextExpectedSelfCausedSeq(table),
+    softResetSubsBuffers: () => subs.softResetBuffers(),
+    hasActiveSubs: () => subs.hasActive(),
+    isOnline: () => schedulerInst.isOnline(),
+    isStarted: () => started,
+    runScheduler: () => schedulerInst.run(),
+    stopRemoteSubscriptions,
+    pullTable: (tableName, tableConfig, signal) =>
+      getTableSpec(tableName, tableConfig, signal),
+  };
+  replayInst = createReplay(replayRefs);
+
+  const schedulerRefs: SchedulerRefs = {
+    processUploadQueue: (signal) => replayInst.processUploadQueue(signal),
+    processQueue: (signal) => replayInst.processQueue(signal),
+    rollbackDeadLetteredTables: (deadLettered, signal) =>
+      replayInst.rollbackDeadLetteredTables(deadLettered, signal),
+    mergeDirtyCrdtRows: (signal) => pullInst.runMerge(signal),
+    pullAll: (signal) => pullInst.pullAll(signal),
+    stopRemoteSubscriptions,
+    startRemoteSubscriptions,
+    clearBufferedSnapshots,
+    emit,
+    pendingQueue,
+    hasDirtyCrdtRows: () => pullInst.hasDirty(),
+    clearDirtyCrdtRows: () => pullInst.clearAllDirty(),
+    isStarted: () => started,
+    heartbeatMs: processorHeartbeatMs,
+    heartbeat: heartbeatProcessor,
+  };
+
+  schedulerInst = createScheduler(schedulerRefs);
+
+  const handleOnline = (): void => schedulerInst.handleOnline();
+  const handleOffline = (): void => schedulerInst.handleOffline();
+  const startProcessorHeartbeat = (): void => schedulerInst.startHeartbeat();
+
+  function stopProcessorHeartbeat(): void {
+    schedulerInst.stopHeartbeat();
+    runDetached(
+      () =>
+        runLocalSystemMutation(SystemPaths.processorRemove, {
+          processorId: processorIdForReplay,
+          identityKey: getCurrentIdentityKey(),
+        }),
+      "[sync] processor cleanup:",
+    );
+  }
+
+  const start = (): void => {
+    if (started) return;
+    started = true;
+
+    log.info("sync: started");
+    startProcessorHeartbeat();
+
+    const hydrationPromise = hydrateIdentityState();
+
+    const runOnlineAfterHydration = createHydrationAwareOnlineHandler({
+      handleOnline,
+      hydrationPromise,
       isStarted: () => started,
-      runScheduler: () => schedulerInst.run(),
-      stopRemoteSubscriptions,
-      pullTable: (tableName, tableConfig, signal) =>
-        getTableSpec(tableName, tableConfig, signal),
-    };
-    replayInst = createReplay(replayRefs);
+    });
 
-    const schedulerRefs: SchedulerRefs = {
-      processUploadQueue: (signal) => replayInst.processUploadQueue(signal),
-      processQueue: (signal) => replayInst.processQueue(signal),
-      rollbackDeadLetteredTables: (deadLettered, signal) =>
-        replayInst.rollbackDeadLetteredTables(deadLettered, signal),
-      mergeDirtyCrdtRows: (signal) => pullInst.runMerge(signal),
-      pullAll: (signal) => pullInst.pullAll(signal),
-      stopRemoteSubscriptions,
-      startRemoteSubscriptions,
-      clearBufferedSnapshots,
-      emit,
-      pendingQueue,
-      hasDirtyCrdtRows: () => pullInst.hasDirty(),
-      clearDirtyCrdtRows: () => pullInst.clearAllDirty(),
-      isStarted: () => started,
-      heartbeatMs: processorHeartbeatMs,
-      heartbeat: heartbeatProcessor,
-    };
+    const connectivity = getConnectivityAdapter(config.connectivity);
 
-    schedulerInst = createScheduler(schedulerRefs);
+    const startRoute = getStartLifecycleRoute({
+      hasNavigator: true,
+      navigatorOnline: connectivity?.isOnline(),
+    });
 
-    const handleOnline = (): void => schedulerInst.handleOnline();
-    const handleOffline = (): void => schedulerInst.handleOffline();
-    const startProcessorHeartbeat = (): void => schedulerInst.startHeartbeat();
+    matchTag(startRoute, "_tag", {
+      Offline: () => {
+        schedulerInst.markOffline();
+        emit({ status: "offline" });
+      },
+      WaitForHydrationThenOnline: () => {
+        runOnlineAfterHydration();
+      },
+    });
 
-    function stopProcessorHeartbeat(): void {
-      schedulerInst.stopHeartbeat();
+    if (connectivity.onOnline && connectivity.onOffline) {
+      onOnline = runOnlineAfterHydration;
+      onOffline = handleOffline;
+      cleanupOnlineListener = connectivity.onOnline(onOnline);
+      cleanupOfflineListener = connectivity.onOffline(onOffline);
+    }
+  };
+
+  const stop = (): void => {
+    if (!started) return;
+    started = false;
+
+    log.info("sync: stopped");
+    stopProcessorHeartbeat();
+    unregisterPendingDepth();
+    unregisterPendingUploadsDepth();
+
+    schedulerInst.abortCurrent();
+    const claimedEntry = replayInst.activeEntry();
+    if (claimedEntry) {
+      replayInst.setActiveEntry(null);
       runDetached(
-        () =>
-          runLocalSystemMutation(SystemPaths.processorRemove, {
-            processorId: processorIdForReplay,
-            identityKey: getCurrentIdentityKey(),
-          }),
-        "[sync] processor cleanup:",
+        () => pendingQueue.release(claimedEntry, processorIdForReplay),
+        "[sync] release pending claim:",
       );
     }
 
-    this._idMap = idMap;
-    this._pendingQueue = pendingQueue;
+    stopRemoteSubscriptions();
+    clearBufferedSnapshots();
+    subs.resetPulled();
 
-    this.start = () => {
-      if (started) return;
-      started = true;
+    cleanupOnlineListener?.();
+    cleanupOfflineListener?.();
+    cleanupOnlineListener = null;
+    cleanupOfflineListener = null;
+    onOnline = null;
+    onOffline = null;
 
-      log.info("sync: started");
-      startProcessorHeartbeat();
+    emit({ status: "idle" });
+    statusEmitter.clearListeners();
+  };
 
-      const hydrationPromise = hydrateIdentityState();
+  const mutation = async (
+    ref: unknown,
+    args: Record<string, unknown>,
+    options?: { enqueueForReplay?: boolean },
+  ): Promise<unknown> => {
+    const enqueueForReplay = options?.enqueueForReplay ?? true;
+    const executeMutationLocally = executeLocalMutationWithEffects
+      ? executeLocalMutationWithEffects
+      : (r: unknown, a: Record<string, unknown>) =>
+          (localClient as unknown as LocalPathCallable).mutation(
+            r,
+            a,
+          ) as Promise<unknown>;
 
-      const runOnlineAfterHydration = createHydrationAwareOnlineHandler({
-        handleOnline,
-        hydrationPromise,
-        isStarted: () => started,
-      });
+    const refName = getFunctionName(
+      ref as Parameters<typeof getFunctionName>[0],
+    );
+    const localArgs = idMap.translateRemoteIdsToLocal(args);
 
-      const connectivity = getConnectivityAdapter(config.connectivity);
-
-      const startRoute = getStartLifecycleRoute({
-        hasNavigator: true,
-        navigatorOnline: connectivity?.isOnline(),
-      });
-
-      matchTag(startRoute, "_tag", {
-        Offline: () => {
-          schedulerInst.markOffline();
-          emit({ status: "offline" });
-        },
-        WaitForHydrationThenOnline: () => {
-          runOnlineAfterHydration();
-        },
-      });
-
-      if (connectivity.onOnline && connectivity.onOffline) {
-        onOnline = runOnlineAfterHydration;
-        onOffline = handleOffline;
-        cleanupOnlineListener = connectivity.onOnline(onOnline);
-        cleanupOfflineListener = connectivity.onOffline(onOffline);
+    const __mutStart = globalThis.performance?.now?.() ?? Date.now();
+    let localResult: unknown = undefined;
+    let localFailed = false;
+    try {
+      localResult = await executeMutationLocally(ref, localArgs);
+    } catch (err) {
+      if (!schedulerInst.isOnline()) {
+        throw err;
       }
-    };
-
-    this.stop = () => {
-      if (!started) return;
-      started = false;
-
-      log.info("sync: stopped");
-      stopProcessorHeartbeat();
-      unregisterPendingDepth();
-      unregisterPendingUploadsDepth();
-
-      schedulerInst.abortCurrent();
-      const claimedEntry = replayInst.activeEntry();
-      if (claimedEntry) {
-        replayInst.setActiveEntry(null);
-        runDetached(
-          () => pendingQueue.release(claimedEntry, processorIdForReplay),
-          "[sync] release pending claim:",
-        );
-      }
-
-      stopRemoteSubscriptions();
-      clearBufferedSnapshots();
-      subs.resetPulled();
-
-      cleanupOnlineListener?.();
-      cleanupOfflineListener?.();
-      cleanupOnlineListener = null;
-      cleanupOfflineListener = null;
-      onOnline = null;
-      onOffline = null;
-
-      emit({ status: "idle" });
-      statusEmitter.clearListeners();
-    };
-
-    this.mutation = async (
-      ref: unknown,
-      args: Record<string, unknown>,
-      options?: { enqueueForReplay?: boolean },
-    ): Promise<unknown> => {
-      const enqueueForReplay = options?.enqueueForReplay ?? true;
-      const executeMutationLocally = executeLocalMutationWithEffects
-        ? executeLocalMutationWithEffects
-        : (r: unknown, a: Record<string, unknown>) =>
-            (localClient as unknown as LocalPathCallable).mutation(
-              r,
-              a,
-            ) as Promise<unknown>;
-
-      const refName = getFunctionName(
-        ref as Parameters<typeof getFunctionName>[0],
-      );
-      const localArgs = idMap.translateRemoteIdsToLocal(args);
-
-      const __mutStart = globalThis.performance?.now?.() ?? Date.now();
-      let localResult: unknown = undefined;
-      let localFailed = false;
-      try {
-        localResult = await executeMutationLocally(ref, localArgs);
-      } catch (err) {
-        if (!schedulerInst.isOnline()) {
-          throw err;
-        }
-        localFailed = true;
-        log.debug(
-          `sync: local mutation "${refName}" failed; falling back to remote`,
-          err,
-        );
-      }
-
-      const __localDone = globalThis.performance?.now?.() ?? Date.now();
+      localFailed = true;
       log.debug(
-        `engine.mutation local-done t+${(__localDone - __mutStart).toFixed(1)}ms ref=${refName}`,
+        `sync: local mutation "${refName}" failed; falling back to remote`,
+        err,
       );
+    }
 
-      if (localFailed) {
-        const remoteResult = await (
-          remoteClient as unknown as RemoteCallable
-        ).mutation(ref, args);
-        return remoteResult;
-      }
+    const __localDone = globalThis.performance?.now?.() ?? Date.now();
+    log.debug(
+      `engine.mutation local-done t+${(__localDone - __mutStart).toFixed(1)}ms ref=${refName}`,
+    );
 
-      if (isLocalUploadUrl(localResult)) {
-        registerUploadUrlSource?.(localResult, refName);
-        return localResult;
-      }
+    if (localFailed) {
+      const remoteResult = await (
+        remoteClient as unknown as RemoteCallable
+      ).mutation(ref, args);
+      return remoteResult;
+    }
 
-      if (enqueueForReplay) {
-        const table = inferTableFromRef(ref, tables);
-        if (!table) {
-          throw new Error(
-            `[convex-embedded] could not infer table for mutation ref "${refName}".`,
-          );
-        }
-        // Detach pending-queue persistence so the user mutation returns
-        // immediately after local memory commit. Subsequent mutations may
-        // race their pending-pushes through the runtime's transaction lock
-        // (which already serialises commits), preserving ordering.
-        const replayPayloadVersion = getReplayPayloadVersion?.(refName) ?? 1;
-        const __pushStart = globalThis.performance?.now?.() ?? Date.now();
-        await pendingQueue.push(
-          ref,
-          args,
-          localResult,
-          table,
-          replayPayloadVersion,
-        );
-        const __pushDone = globalThis.performance?.now?.() ?? Date.now();
-        log.debug(
-          `engine.mutation queue.push push=${(__pushDone - __pushStart).toFixed(1)}ms ref=${refName}`,
-        );
-        if (
-          !schedulerInst.isOnline() &&
-          pullInst.shouldTrackCrdt(table)
-        ) {
-          const docId =
-            typeof localResult === "string"
-              ? localResult
-              : ((localArgs?.id as string | undefined) ??
-                (localArgs?._id as string | undefined));
-          if (docId) {
-            pullInst.markDirty(table, docId);
-          }
-        }
-        if (schedulerInst.isOnline()) {
-          replayInst.ensureProcessing();
-        } else {
-          log.debug("sync: offline — mutation queued for later push");
-        }
-      }
-
-      const __chainDone = globalThis.performance?.now?.() ?? Date.now();
-      log.debug(
-        `engine.mutation chain-done t+${(__chainDone - __mutStart).toFixed(1)}ms ref=${refName}`,
-      );
+    if (isLocalUploadUrl(localResult)) {
+      registerUploadUrlSource?.(localResult, refName);
       return localResult;
-    };
+    }
 
-    this.pullNow = (): Promise<void> => {
+    if (enqueueForReplay) {
+      const table = inferTableFromRef(ref, tables);
+      if (!table) {
+        throw new Error(
+          `[convex-embedded] could not infer table for mutation ref "${refName}".`,
+        );
+      }
+      // Detach pending-queue persistence so the user mutation returns
+      // immediately after local memory commit. Subsequent mutations may
+      // race their pending-pushes through the runtime's transaction lock
+      // (which already serialises commits), preserving ordering.
+      const replayPayloadVersion = getReplayPayloadVersion?.(refName) ?? 1;
+      const __pushStart = globalThis.performance?.now?.() ?? Date.now();
+      await pendingQueue.push(
+        ref,
+        args,
+        localResult,
+        table,
+        replayPayloadVersion,
+      );
+      const __pushDone = globalThis.performance?.now?.() ?? Date.now();
+      log.debug(
+        `engine.mutation queue.push push=${(__pushDone - __pushStart).toFixed(1)}ms ref=${refName}`,
+      );
+      if (
+        !schedulerInst.isOnline() &&
+        pullInst.shouldTrackCrdt(table)
+      ) {
+        const docId =
+          typeof localResult === "string"
+            ? localResult
+            : ((localArgs?.id as string | undefined) ??
+              (localArgs?._id as string | undefined));
+        if (docId) {
+          pullInst.markDirty(table, docId);
+        }
+      }
       if (schedulerInst.isOnline()) {
-        stopRemoteSubscriptions();
+        replayInst.ensureProcessing();
+      } else {
+        log.debug("sync: offline — mutation queued for later push");
       }
-      return schedulerInst.run({ forcePull: true });
-    };
+    }
 
-    this.ensureTableReady = (tableName: string): Promise<void> => {
-      return activateScope(tableName);
-    };
+    const __chainDone = globalThis.performance?.now?.() ?? Date.now();
+    log.debug(
+      `engine.mutation chain-done t+${(__chainDone - __mutStart).toFixed(1)}ms ref=${refName}`,
+    );
+    return localResult;
+  };
 
-    this.ensureScopeReady = (
-      tableName: string,
-      scopeArgs?: Record<string, unknown>,
-      readKey?: string,
-    ): Promise<void> => {
-      if (readKey !== undefined) {
-        registerScopeReader(tableName, scopeArgs, readKey);
-      }
-      return activateScope(tableName, scopeArgs);
-    };
+  const pullNow = (): Promise<void> => {
+    if (schedulerInst.isOnline()) {
+      stopRemoteSubscriptions();
+    }
+    return schedulerInst.run({ forcePull: true });
+  };
 
-    this.releaseScopeRead = (
-      tableName: string,
-      scopeArgs: Record<string, unknown> | undefined,
-      readKey: string,
-    ): void => {
-      releaseScopeRead(tableName, scopeArgs, readKey);
-    };
+  const ensureTableReady = (tableName: string): Promise<void> => {
+    return activateScope(tableName);
+  };
 
-    this.onScopeResolved = (
-      tableName: string,
-      scopeArgs: Record<string, unknown> | undefined,
-      cb: () => void,
-    ): (() => void) => {
-      return subs.onPulled(tableName, scopeArgs, cb);
-    };
+  const ensureScopeReady = (
+    tableName: string,
+    scopeArgs?: Record<string, unknown>,
+    readKey?: string,
+  ): Promise<void> => {
+    if (readKey !== undefined) {
+      registerScopeReader(tableName, scopeArgs, readKey);
+    }
+    return activateScope(tableName, scopeArgs);
+  };
 
-    this.reloadIdentity = async (): Promise<void> => {
-      await hydrateIdentityState();
-      clearBufferedSnapshots();
-      subs.resetPulled();
-      await pendingQueue.unblockAll();
+  const releaseScopeReadFn = (
+    tableName: string,
+    scopeArgs: Record<string, unknown> | undefined,
+    readKey: string,
+  ): void => {
+    releaseScopeRead(tableName, scopeArgs, readKey);
+  };
 
-      if (!started) {
-        return;
-      }
+  const onScopeResolved = (
+    tableName: string,
+    scopeArgs: Record<string, unknown> | undefined,
+    cb: () => void,
+  ): (() => void) => {
+    return subs.onPulled(tableName, scopeArgs, cb);
+  };
 
-      if (schedulerInst.isOnline()) {
-        stopRemoteSubscriptions();
-        await schedulerInst.run({ forcePull: true });
-        return;
-      }
+  const reloadIdentity = async (): Promise<void> => {
+    await hydrateIdentityState();
+    clearBufferedSnapshots();
+    subs.resetPulled();
+    await pendingQueue.unblockAll();
 
-      emit({ status: "offline" });
-    };
-  } // end constructor
+    if (!started) {
+      return;
+    }
 
-  on(_event: "change", listener: ChangeListener): () => void {
-    return this._statusEmitter.on(listener);
-  }
+    if (schedulerInst.isOnline()) {
+      stopRemoteSubscriptions();
+      await schedulerInst.run({ forcePull: true });
+      return;
+    }
 
-  getStatus(): EngineStatus {
-    return this._statusEmitter.get();
-  }
+    emit({ status: "offline" });
+  };
 
-  pendingCount(): number {
-    return this._pendingQueue.length;
-  }
-
-  get idMap(): IdMap {
-    return this._idMap;
-  }
-
-  get pendingQueue(): PendingQueue {
-    return this._pendingQueue;
-  }
-
-  [Symbol.asyncDispose](): Promise<void> {
-    this.stop();
-    return Promise.resolve();
-  }
+  return {
+    start,
+    stop,
+    mutation,
+    pullNow,
+    ensureTableReady,
+    ensureScopeReady,
+    releaseScopeRead: releaseScopeReadFn,
+    onScopeResolved,
+    reloadIdentity,
+    on: (_event, listener) => statusEmitter.on(listener),
+    getStatus: () => statusEmitter.get(),
+    pendingCount: () => pendingQueue.length,
+    get idMap() {
+      return idMap;
+    },
+    get pendingQueue() {
+      return pendingQueue;
+    },
+    async [Symbol.asyncDispose]() {
+      stop();
+    },
+  };
 }
-
-/**
- * Engine — owned-state class assembling the engine's subsystems
- * (statusEmitter, pullBatch, crdt, connectivity, snapshot, scope,
- * cycleScheduler, replayLoop) and exposing the public {@link EngineInstance}
- * interface.
- *
- * Currently still uses a closure-style constructor body (the former
- * `createEngine` factory body, inlined). Inner methods will incrementally
- * migrate onto the class as real methods so the constructor becomes a
- * thin wirer that hands work to subsystem methods.
- *
- * @internal
- */
-export { EngineImpl as Engine };
 
 /** @internal */
 export const engine = {
-  create: (config: EngineConfig): EngineInstance => new EngineImpl(config),
+  create: createEngine,
 };

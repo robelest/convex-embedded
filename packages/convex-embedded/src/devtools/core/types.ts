@@ -131,6 +131,3 @@ export interface EmbeddedDevtoolsSource {
   dispose(): void;
 }
 
-export interface DevtoolsPanelProps {
-  source: EmbeddedDevtoolsSource;
-}

@@ -125,17 +125,6 @@ export type QueryDependency =
       filter: VectorSearchExpression | null;
     };
 
-export type IndexInfo = {
-  indexDescriptor: string;
-  fields: string[];
-};
-
-export type VectorIndexInfo = {
-  indexDescriptor: string;
-  vectorField: string;
-  dimensions: number;
-  filterFields: string[];
-};
 
 /**
  * Monotonic timestamp for MVCC versioning.

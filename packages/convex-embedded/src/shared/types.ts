@@ -164,37 +164,6 @@ export interface QueryPageRange {
 }
 
 /**
- * Client-to-server resolve request.
- *
- * Sent during reconnect / resolve reconciliation to reconcile local Yjs documents with the
- * authoritative remote embedded state.
- */
-export interface PullRequest {
-  /** Last acknowledged collection sequence for the table, or `null` for a full resolve sync. */
-  collectionSeq: number | null;
-  /** Requested document vectors and per-document sequence cursors. */
-  documents: PullDocumentRequest[];
-  /** Optional bound query arguments for scoped resolve queries. */
-  scopeArgs?: Record<string, unknown>;
-  /** Cursor for paged full fallback responses. */
-  fullCursor?: string | null;
-  /** Index range for windowed (demand-range) resolve; absent ⇒ whole-scope. */
-  queryPageRange?: QueryPageRange;
-}
-
-/**
- * Per-document resolve request payload.
- */
-export interface PullDocumentRequest {
-  /** Embedded document id. */
-  docId: string;
-  /** Y.encodeStateVector(localDoc) */
-  vector: ArrayBuffer;
-  /** Last acknowledged atomic sequence for the document, or `null` when unknown. */
-  lastSeq: number | null;
-}
-
-/**
  * Server-to-client resolve response.
  *
  * Incremental responses contain diffs and per-document sequence updates.
@@ -230,20 +199,3 @@ export interface PullDocumentResponse {
   deleted?: true;
 }
 
-/**
- * Client-to-server push request containing local Yjs updates.
- */
-export interface PushRequest {
-  /** Documents whose local Yjs state should be pushed to the server. */
-  documents: PushDocumentRequest[];
-}
-
-/**
- * Per-document push payload.
- */
-export interface PushDocumentRequest {
-  /** Embedded document id. */
-  docId: string;
-  /** Y.encodeStateAsUpdateV2(localDoc) */
-  update: ArrayBuffer;
-}

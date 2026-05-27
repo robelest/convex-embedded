@@ -29,9 +29,6 @@ export interface RunCodegenInput {
 /** Preferred programmatic name for embedded registry generation. */
 export type GenerateEmbeddedRegistryInput = RunCodegenInput;
 
-/** Result returned by {@link generateEmbeddedRegistry}. */
-export type GenerateEmbeddedRegistryResult = RunCodegenResult;
-
 /**
  * Result of one {@link runCodegen} pass.
  *

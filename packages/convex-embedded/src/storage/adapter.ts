@@ -155,7 +155,6 @@ export function isQueryable(
 
 export type { StorageMetadata as DatabaseMeta };
 export type { DocumentWithTable as StoredDocumentWithTable };
-export type { DocumentDelete as StoredDocumentDelete };
 export type { WriteBatch as CommitBatch };
 
 export interface SqlCommittedTableSnapshot {

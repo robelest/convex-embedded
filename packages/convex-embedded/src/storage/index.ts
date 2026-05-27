@@ -25,13 +25,22 @@ export {
   type WriteOptions,
   type WriteResult,
   type WriteBatch,
-  type TableSnapshot,
   type StorageMetadata,
   type QueryArgs,
-  type ReadOptions,
-  type DocumentDelete,
-  type DocumentWithTable,
   type VectorSearchArgs,
+} from "./adapter";
+
+// Public adapter surface; types not consumed inside the repo are still part
+// of the @robelest/convex-embedded/storage contract for external apps.
+export {
+  // fallow-ignore-next-line unused-type
+  type TableSnapshot,
+  // fallow-ignore-next-line unused-type
+  type ReadOptions,
+  // fallow-ignore-next-line unused-type
+  type DocumentDelete,
+  // fallow-ignore-next-line unused-type
+  type DocumentWithTable,
 } from "./adapter";
 
 export { SqliteAdapter } from "./sqlite/adapter";

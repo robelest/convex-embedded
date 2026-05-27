@@ -23,13 +23,7 @@ const log = createLogger("auth");
  * Embedded auth entry and configuration types re-exported for advanced
  * integrations.
  */
-export type {
-  AuthEntry,
-  AuthOptions,
-  AuthState,
-  AuthTokenFetcher,
-  UserIdentitySource,
-} from "@/client/auth/entry";
+export type { AuthEntry, AuthOptions, AuthState } from "@/client/auth/entry";
 /**
  * Advanced auth controller helpers re-exported for integration code.
  * @internal

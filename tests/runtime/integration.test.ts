@@ -5,7 +5,7 @@ import { createSubscriptionManager } from "@embedded/replication/subscriptions";
  * Exercises the Database, QueryEngine, UdfExecutor, Syscalls, and
  * SubscriptionManager layers working together end-to-end.
  */
-import { Database } from "@embedded/runtime/db/database";
+import { createDatabase, type Database } from "@embedded/runtime/db/database";
 import type { ParsedSchema } from "@embedded/runtime/db/schema";
 import type {
   DocumentId,
@@ -23,7 +23,7 @@ const MISSING_ID = "00000000-0000-4000-8000-000000000000" as DocumentId;
 
 /** Schema-less database inside a fresh transaction. */
 function freshDb(): Database {
-  const db = new Database(null);
+  const db = createDatabase(null);
   db.startTransaction();
   return db;
 }
@@ -214,7 +214,7 @@ describe("Integration: Database CRUD", () => {
   });
 
   it("normalizeId returns null for arbitrary strings", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     expect(db.normalizeId("tasks", "not-an-id")).toBeNull();
     expect(db.normalizeId("tasks", "")).toBeNull();
   });
@@ -344,7 +344,7 @@ describe("Integration: Query Pipeline", () => {
 
 describe("Integration: Schema Validation", () => {
   it("accepts documents matching the schema", () => {
-    const db = new Database(messagesSchema());
+    const db = createDatabase(messagesSchema());
     db.startTransaction();
     expect(() =>
       db.insert("messages", { body: "hi", author: "alice" }),
@@ -353,7 +353,7 @@ describe("Integration: Schema Validation", () => {
   });
 
   it("rejects documents with wrong field type", () => {
-    const db = new Database(messagesSchema());
+    const db = createDatabase(messagesSchema());
     db.startTransaction();
     expect(() => db.insert("messages", { body: 123, author: "alice" })).toThrow(
       /Validator error/,
@@ -361,7 +361,7 @@ describe("Integration: Schema Validation", () => {
   });
 
   it("rejects documents with missing required field", () => {
-    const db = new Database(messagesSchema());
+    const db = createDatabase(messagesSchema());
     db.startTransaction();
     expect(() => db.insert("messages", { body: "hi" })).toThrow(
       /Missing required field/,
@@ -369,7 +369,7 @@ describe("Integration: Schema Validation", () => {
   });
 
   it("rejects documents with extra fields", () => {
-    const db = new Database(messagesSchema());
+    const db = createDatabase(messagesSchema());
     db.startTransaction();
     expect(() =>
       db.insert("messages", { body: "hi", author: "alice", extra: true }),
@@ -377,7 +377,7 @@ describe("Integration: Schema Validation", () => {
   });
 
   it("patch also validates against schema", () => {
-    const db = new Database(messagesSchema());
+    const db = createDatabase(messagesSchema());
     db.startTransaction();
     const id = db.insert("messages", { body: "hi", author: "alice" });
     expect(() => db.patch("messages", id, { body: 42 })).toThrow(
@@ -386,7 +386,7 @@ describe("Integration: Schema Validation", () => {
   });
 
   it("replace also validates against schema", () => {
-    const db = new Database(messagesSchema());
+    const db = createDatabase(messagesSchema());
     db.startTransaction();
     const id = db.insert("messages", { body: "hi", author: "alice" });
     expect(() => db.replace("messages", id, { body: "new" })).toThrow(
@@ -395,14 +395,14 @@ describe("Integration: Schema Validation", () => {
   });
 
   it("inserting into table not in schema is allowed (no validation)", () => {
-    const db = new Database(messagesSchema());
+    const db = createDatabase(messagesSchema());
     db.startTransaction();
     expect(() => db.insert("other", { anything: 42 })).not.toThrow();
     db.commit();
   });
 
   it("schema-less mode allows any document", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     db.startTransaction();
     expect(() =>
       db.insert("whatever", { a: 1, b: "two", c: [3], d: { nested: true } }),
@@ -417,7 +417,7 @@ describe("Integration: Schema Validation", () => {
 
 describe("Integration: Index Range Queries", () => {
   function indexedDb(): Database {
-    const db = new Database(messagesSchema());
+    const db = createDatabase(messagesSchema());
     db.startTransaction();
     db.insert("messages", { body: "hello from alice", author: "alice" });
     db.insert("messages", { body: "hello from bob", author: "bob" });
@@ -616,7 +616,7 @@ describe("Integration: Pagination", () => {
 
 describe("Integration: Search Queries", () => {
   function searchDb(): Database {
-    const db = new Database(messagesSchema());
+    const db = createDatabase(messagesSchema());
     db.startTransaction();
     db.insert("messages", { body: "the quick brown fox", author: "alice" });
     db.insert("messages", { body: "the lazy dog", author: "bob" });
@@ -670,7 +670,7 @@ describe("Integration: Search Queries", () => {
   });
 
   it("applies post-search operator filters before enforcing limit", () => {
-    const db = new Database(messagesSchema());
+    const db = createDatabase(messagesSchema());
     db.startTransaction();
     db.insert("messages", { body: "quick quick fox", author: "alice" });
     db.insert("messages", { body: "quick fox", author: "bob" });
@@ -798,7 +798,7 @@ describe("Integration: Search Queries", () => {
 
 describe("Integration: Vector Search", () => {
   function vectorDb(): Database {
-    const db = new Database(vectorSchema());
+    const db = createDatabase(vectorSchema());
     db.startTransaction();
     db.writeDocument("embeddings", {
       _id: "alpha",
@@ -950,7 +950,7 @@ describe("Integration: Transaction Rollback", () => {
 
 describe("Integration: MVCC Timestamps", () => {
   it("starts at 0", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     expect(db.timestamp).toBe(0);
   });
 
@@ -1008,7 +1008,7 @@ describe("Integration: MVCC Timestamps", () => {
 
 describe("Integration: Subscription Invalidation", () => {
   it("mutation commit triggers subscription callback for written tables", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     const subs = createSubscriptionManager();
 
     const messagesCallback = vi.fn();
@@ -1031,7 +1031,7 @@ describe("Integration: Subscription Invalidation", () => {
   });
 
   it("mutation writing multiple tables invalidates all matching subs", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     const subs = createSubscriptionManager();
 
     const cb1 = vi.fn();
@@ -1051,7 +1051,7 @@ describe("Integration: Subscription Invalidation", () => {
   });
 
   it("rollback does not produce tablesWritten (no invalidation)", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     const subs = createSubscriptionManager();
     const cb = vi.fn();
     subs.subscribe("q1", new Set(["tasks"]), cb);
@@ -1277,19 +1277,19 @@ describe("Integration: Snapshot Isolation", () => {
 
 describe("Integration: Error Cases", () => {
   it("write outside transaction throws", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     expect(() => db.insert("tasks", { title: "fail" })).toThrow(
       /outside of transaction/,
     );
   });
 
   it("commit without transaction throws", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     expect(() => db.commit()).toThrow(/already committed or rolled back/);
   });
 
   it("rollback without transaction throws", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     expect(() => db.rollbackWrites()).toThrow(
       /already committed or rolled back/,
     );

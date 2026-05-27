@@ -40,7 +40,7 @@ import {
 } from "@embedded/kernel/modules";
 import { UdfExecutor } from "@embedded/kernel/udf";
 import { createAmbientCryptoProvider } from "@embedded/runtime/crypto";
-import { Database } from "@embedded/runtime/db/database";
+import { createDatabase, type Database } from "@embedded/runtime/db/database";
 import type { ParsedSchema } from "@embedded/runtime/db/schema";
 import type {
   DefaultFunctionArgs,
@@ -227,7 +227,7 @@ export interface EmbeddedTestContext<M extends Record<string, ModuleValue>> {
 export function embeddedTest<M extends Record<string, ModuleValue>>(
   options: EmbeddedTestOptions<M>,
 ): EmbeddedTestContext<M> {
-  const db = new Database(options.schema ?? null);
+  const db = createDatabase(options.schema ?? null);
 
   const modulesByPath = new Map<string, ConvexModule>();
   for (const [key, fn] of Object.entries(options.modules)) {

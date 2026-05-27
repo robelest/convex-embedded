@@ -1,5 +1,5 @@
 import { openNodeStorage } from "@embedded/node/sqlite/adapter";
-import { Database } from "@embedded/runtime/db/database";
+import { createDatabase } from "@embedded/runtime/db/database";
 import { temporaryDatabasePath, uniqueSuffix } from "@tests/helpers/storage";
 import { describe, expect, it } from "@tests/testkit";
 
@@ -12,7 +12,7 @@ describe("SQLite adapter materialization at large table sizes", () => {
   }) => {
     const dbPath = temporaryDatabasePath(uniqueSuffix("large-table"));
     const storage = track(await openNodeStorage({ filename: dbPath }));
-    const db = new Database(null);
+    const db = createDatabase(null);
     db.setStorage(storage);
     await db.hydrate();
 

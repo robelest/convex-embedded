@@ -7,7 +7,8 @@ import type { RunUdfFn } from "@embedded/kernel/syscalls";
 import { UdfExecutor } from "@embedded/kernel/udf";
 import type { EmbeddedCryptoProvider } from "@embedded/runtime/crypto";
 import {
-  Database,
+  createDatabase,
+  type Database,
   type CommitInvalidationBatch,
   type DatabaseCommitResult,
 } from "@embedded/runtime/db/database";
@@ -57,7 +58,7 @@ function makeCommitResult(
 }
 
 function createMockDb(): MockDb {
-  const db = new Database(null);
+  const db = createDatabase(null);
   const commitResult = makeCommitResult();
   return {
     db,

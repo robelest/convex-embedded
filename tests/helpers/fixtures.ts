@@ -7,7 +7,7 @@
  * still works — fixtures are opt-in per test via the destructured first arg.
  */
 
-import { Database } from "@embedded/runtime/db/database";
+import { createDatabase, type Database } from "@embedded/runtime/db/database";
 import * as vitest from "vitest";
 
 import { OpaqueTestAdapter } from "./adapter";
@@ -40,7 +40,7 @@ export interface TestFixtures {
 
 export const it = vitest.it.extend<TestFixtures>({
   db: async ({}, use) => {
-    await use(new Database(null));
+    await use(createDatabase(null));
   },
   storage: async ({ onTestFinished }, use) => {
     const storage = new OpaqueTestAdapter();

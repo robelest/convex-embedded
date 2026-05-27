@@ -1,7 +1,7 @@
 import { rmSync } from "node:fs";
 
 import { openNodeStorage } from "@embedded/node/sqlite/adapter";
-import { Database } from "@embedded/runtime/db/database";
+import { createDatabase, type Database } from "@embedded/runtime/db/database";
 import { parseSchema, type SchemaExport } from "@embedded/runtime/db/schema";
 import type {
   SerializedQuery,
@@ -150,7 +150,7 @@ export async function emptyIndexedDb(
     track(storage);
   }
 
-  const db = new Database(PARSED_SCHEMA);
+  const db = createDatabase(PARSED_SCHEMA);
   db.setStorage(storage);
   await db.hydrate();
 
@@ -171,7 +171,7 @@ export async function seededSqliteDb(
     }),
   );
 
-  const db = new Database(options.withIndex ? PARSED_SCHEMA : null);
+  const db = createDatabase(options.withIndex ? PARSED_SCHEMA : null);
   db.setStorage(storage);
   await db.hydrate();
 
@@ -188,7 +188,7 @@ export async function unhydratedSqliteDb(file: string): Promise<Database> {
     }),
   );
 
-  const db = new Database(PARSED_SCHEMA);
+  const db = createDatabase(PARSED_SCHEMA);
   db.setStorage(storage);
 
   return db;

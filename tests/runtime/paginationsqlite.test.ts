@@ -1,5 +1,5 @@
 import { openNodeStorage } from "@embedded/node/sqlite/adapter";
-import { Database } from "@embedded/runtime/db/database";
+import { createDatabase, type Database } from "@embedded/runtime/db/database";
 import { parseSchema, type SchemaExport } from "@embedded/runtime/db/schema";
 import type { SerializedQuery } from "@embedded/runtime/db/types";
 import { buildUserTableSpecs } from "@embedded/storage/sqlite/factory";
@@ -114,7 +114,7 @@ describe("SQLite pagination seek parity", () => {
     const storage = track(
       await openNodeStorage({ filename: file, userTableSpecs: specs }),
     );
-    const db = new Database(parsed);
+    const db = createDatabase(parsed);
     db.setStorage(storage);
     await db.hydrate();
 

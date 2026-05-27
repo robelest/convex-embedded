@@ -1,5 +1,5 @@
 import { openNodeStorage } from "@embedded/node/sqlite/adapter";
-import { Database } from "@embedded/runtime/db/database";
+import { createDatabase, type Database } from "@embedded/runtime/db/database";
 import type {
   DocumentId,
   SerializedQuery,
@@ -110,7 +110,7 @@ async function openTrackedDatabase(
   dbPath: string,
 ): Promise<{ db: Database; storage: SqliteAdapter }> {
   const storage = track(await openNodeStorage({ filename: dbPath }));
-  const db = new Database(null);
+  const db = createDatabase(null);
   db.setStorage(storage);
   await db.hydrate();
   return { db, storage };

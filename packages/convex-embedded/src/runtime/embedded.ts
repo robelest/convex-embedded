@@ -45,7 +45,7 @@ import {
   createAmbientCryptoProvider,
   type EmbeddedCryptoProvider,
 } from "@/runtime/crypto";
-import { Database } from "@/runtime/db/database";
+import { createDatabase, type Database } from "@/runtime/db/database";
 import type { DatabaseCommitResult } from "@/runtime/db/database";
 import { parseSchema } from "@/runtime/db/schema";
 import type { SchemaExport } from "@/runtime/db/schema";
@@ -499,7 +499,7 @@ export function createEmbeddedRuntime(
   let storageAdapter: StorageAdapter | null = options.storage ?? null;
   const verifyTokenHook = options.verifyToken ?? null;
   const crypto = options.crypto ?? createAmbientCryptoProvider();
-  const db = new Database(parsedSchema, options.storage, crypto);
+  const db = createDatabase(parsedSchema, options.storage, crypto);
   const moduleLoader = new ModuleLoader(options.convex.modules);
   const transactionManager = createTransactionManager();
   const subscriptions = createSubscriptionManager();

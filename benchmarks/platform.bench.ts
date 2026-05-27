@@ -1,7 +1,7 @@
 import { UdfExecutor } from "@embedded/kernel/udf";
 import { createSubscriptionManager, type SubscriptionManager } from "@embedded/replication/subscriptions";
 import { createAmbientCryptoProvider } from "@embedded/runtime/crypto";
-import { Database } from "@embedded/runtime/db/database";
+import { createDatabase } from "@embedded/runtime/db/database";
 import type { DocumentId } from "@embedded/runtime/db/types";
 import {
   createEmbeddedRuntime,
@@ -24,7 +24,7 @@ function createMockModuleLoader(
 
 function createExecutor() {
   return new UdfExecutor({
-    db: new Database(null),
+    db: createDatabase(null),
     crypto: createAmbientCryptoProvider(),
     moduleLoader: createMockModuleLoader({
       messages: {
@@ -112,7 +112,7 @@ function buildSubscriptionManager(
 const runtime = await seedSystemRuntime();
 const executor = createExecutor();
 const scheduler = createSchedulerExecutor({
-  db: new Database(null),
+  db: createDatabase(null),
   runFunction: async () => {},
 });
 const subscriptions = buildSubscriptionManager(5_000);

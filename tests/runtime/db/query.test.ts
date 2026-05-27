@@ -1,4 +1,4 @@
-import { Database } from "@embedded/runtime/db/database";
+import { createDatabase, type Database } from "@embedded/runtime/db/database";
 import { evaluateFieldPath } from "@embedded/runtime/db/fieldpath";
 import { evaluateFilter } from "@embedded/runtime/db/query";
 import type { ParsedSchema } from "@embedded/runtime/db/schema";
@@ -16,7 +16,7 @@ function seedDb(
   docs: ReadonlyArray<Record<string, unknown>>,
   schema: ParsedSchema | null = null,
 ): Database {
-  const db = new Database(schema);
+  const db = createDatabase(schema);
   db.startTransaction();
   for (const doc of docs) {
     db.insert(table, doc);
@@ -123,7 +123,7 @@ describe.concurrent("QueryEngine — full table scan", () => {
   });
 
   it("returns an empty array for an empty table", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
 
     db.startTransaction();
     const results = drainQuery(db, db.startQuery(fullScan("tasks", "asc")));
@@ -284,7 +284,7 @@ describe.concurrent("QueryEngine — vector search", () => {
   });
 
   it("breaks score ties by _id ascending", () => {
-    const db = new Database(schemaWithVectorIndex);
+    const db = createDatabase(schemaWithVectorIndex);
     db.startTransaction();
     db.writeDocument("tasks", {
       _id: "bbb",
@@ -310,7 +310,7 @@ describe.concurrent("QueryEngine — vector search", () => {
   });
 
   it("returns zero scores for a zero query vector", () => {
-    const db = new Database(schemaWithVectorIndex);
+    const db = createDatabase(schemaWithVectorIndex);
     db.startTransaction();
     db.writeDocument("tasks", {
       _id: "bbb",
@@ -726,7 +726,7 @@ describe.concurrent("QueryEngine — count", () => {
   });
 
   it("returns 0 for an empty table", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
 
     db.startTransaction();
     const count = db.count("tasks");

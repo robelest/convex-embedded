@@ -1,5 +1,5 @@
 import { createAmbientCryptoProvider } from "@embedded/runtime/crypto";
-import { Database } from "@embedded/runtime/db/database";
+import { createDatabase, type Database } from "@embedded/runtime/db/database";
 import type { ParsedSchema } from "@embedded/runtime/db/schema";
 import type { DocumentId, StoredDocument } from "@embedded/runtime/db/types";
 import type { WriteBatch, WriteResult } from "@embedded/storage/adapter";
@@ -7,17 +7,6 @@ import { mockAdapter } from "@tests/helpers/adapter";
 import { describe, expect, it, vi } from "@tests/testkit";
 
 const MISSING_ID = "00000000-0000-4000-8000-000000000000" as DocumentId;
-
-/** Private members reached into by a few low-level state tests. */
-interface DatabaseInternals {
-  _indexDocuments: Map<string, string[]>;
-  _idTableMap: Map<string, string>;
-  _addWriteRaw(id: DocumentId, newValue: StoredDocument | null): void;
-}
-
-function internals(db: Database): DatabaseInternals {
-  return db as unknown as DatabaseInternals;
-}
 
 function schemaDb(): Database {
   const schema: ParsedSchema = {
@@ -39,7 +28,7 @@ function schemaDb(): Database {
       ],
     ]),
   };
-  return new Database(schema);
+  return createDatabase(schema);
 }
 
 function indexedDb(): Database {
@@ -57,7 +46,7 @@ function indexedDb(): Database {
       ],
     ]),
   };
-  return new Database(schema);
+  return createDatabase(schema);
 }
 
 /** A sql-backed mock adapter whose document reads/queries are stubbed empty. */
@@ -92,7 +81,7 @@ function sqlAdapter(
 
 describe("Database — ID generation", () => {
   it("generates UUID-format IDs on insert", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     db.startTransaction();
     const id = db.insert("tasks", { title: "test" });
     db.commit();
@@ -103,7 +92,7 @@ describe("Database — ID generation", () => {
   });
 
   it("generates unique IDs across inserts", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     db.startTransaction();
     const ids = new Set([
       db.insert("tasks", { title: "a" }),
@@ -122,7 +111,7 @@ describe("Database — ID generation", () => {
       "00000000-0000-4000-8000-000000000002",
     ];
     let index = 0;
-    const db = new Database(null, undefined, {
+    const db = createDatabase(null, undefined, {
       ...createAmbientCryptoProvider(),
       randomUUID: () => uuids[index++] ?? crypto.randomUUID(),
     });
@@ -139,7 +128,7 @@ describe("Database — ID generation", () => {
 
 describe("Database — CRUD", () => {
   it("returns the inserted document with _id and _creationTime from get", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     db.startTransaction();
     const id = db.insert("tasks", { title: "hello" });
     const doc = db.get("tasks", id);
@@ -151,7 +140,7 @@ describe("Database — CRUD", () => {
   });
 
   it("patches only the specified fields", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     db.startTransaction();
     const id = db.insert("tasks", { title: "original", priority: 1 });
     db.patch("tasks", id, { title: "updated" });
@@ -163,7 +152,7 @@ describe("Database — CRUD", () => {
   });
 
   it("replaces all user fields", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     db.startTransaction();
     const id = db.insert("tasks", { title: "old", priority: 1 });
     db.replace("tasks", id, { title: "new" });
@@ -177,7 +166,7 @@ describe("Database — CRUD", () => {
   });
 
   it("returns null for a document after deletion", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     db.startTransaction();
     const id = db.insert("tasks", { title: "bye" });
     expect(db.get("tasks", id)).not.toBeNull();
@@ -189,7 +178,7 @@ describe("Database — CRUD", () => {
   });
 
   it("returns null when getting a non-existent ID", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     db.startTransaction();
     const result = db.get(undefined, MISSING_ID);
     db.commit();
@@ -218,7 +207,7 @@ describe("Database — CRUD", () => {
       __identityKey: "user-1",
       title: "private",
     };
-    const db = new Database(
+    const db = createDatabase(
       schema,
       mockAdapter({
         kind: "sql",
@@ -245,7 +234,7 @@ describe("Database — CRUD", () => {
 
 describe("Database — transactions", () => {
   it("makes writes visible within the same transaction", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     db.startTransaction();
     const id = db.insert("tasks", { title: "visible" });
 
@@ -254,7 +243,7 @@ describe("Database — transactions", () => {
   });
 
   it("persists writes after commit", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     db.startTransaction();
     const id = db.insert("tasks", { title: "persisted" });
     db.commit();
@@ -267,7 +256,7 @@ describe("Database — transactions", () => {
   });
 
   it("discards writes on rollback", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     db.startTransaction();
     const id = db.insert("tasks", { title: "rolled-back" });
     db.rollbackWrites();
@@ -280,7 +269,7 @@ describe("Database — transactions", () => {
   });
 
   it("merges a child commit into the parent transaction", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     db.startTransaction();
     const parentId = db.insert("tasks", { title: "parent-write" });
 
@@ -299,7 +288,7 @@ describe("Database — transactions", () => {
   });
 
   it("discards only child writes on child rollback", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     db.startTransaction();
     const parentId = db.insert("tasks", { title: "parent-write" });
 
@@ -315,11 +304,11 @@ describe("Database — transactions", () => {
 
 describe("Database — MVCC timestamps", () => {
   it("starts at 0", () => {
-    expect(new Database(null).timestamp).toBe(0);
+    expect(createDatabase(null).timestamp).toBe(0);
   });
 
   it("increments on commit with writes", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     db.startTransaction();
     db.insert("tasks", { title: "a" });
     db.commit();
@@ -328,7 +317,7 @@ describe("Database — MVCC timestamps", () => {
   });
 
   it("does not increment on commit without writes", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     db.startTransaction();
     db.commit();
 
@@ -336,7 +325,7 @@ describe("Database — MVCC timestamps", () => {
   });
 
   it("does not increment on rollback", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     db.startTransaction();
     db.insert("tasks", { title: "a" });
     db.rollbackWrites();
@@ -345,7 +334,7 @@ describe("Database — MVCC timestamps", () => {
   });
 
   it("increments once per committed mutation", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
 
     db.startTransaction();
     db.insert("tasks", { title: "a" });
@@ -478,7 +467,7 @@ describe("Database — async read backend", () => {
       },
     ];
     const readVectorCandidates = vi.fn(async () => candidates);
-    const vectorDb = new Database(vectorSchema);
+    const vectorDb = createDatabase(vectorSchema);
     vectorDb.setReadBackendForTests({ vectorSearch: readVectorCandidates });
     vectorDb.setStorage(sqlAdapter({ vectorSearch: readVectorCandidates }));
 
@@ -606,7 +595,7 @@ describe("Database — async read backend", () => {
 
 describe("Database — tablesWritten", () => {
   it("returns the single written table", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     db.startTransaction();
     db.insert("tasks", { title: "a" });
     const { tablesWritten } = db.commit();
@@ -615,7 +604,7 @@ describe("Database — tablesWritten", () => {
   });
 
   it("returns every written table", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     db.startTransaction();
     db.insert("tasks", { title: "a" });
     db.insert("users", { name: "alice" });
@@ -625,7 +614,7 @@ describe("Database — tablesWritten", () => {
   });
 
   it("returns an empty set for a read-only transaction", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     db.startTransaction();
     const { tablesWritten } = db.commit();
 
@@ -635,12 +624,12 @@ describe("Database — tablesWritten", () => {
 
 describe("Database — committed indexes", () => {
   it("dedupes duplicate ids in committed index reads", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     db.startTransaction();
     const id = db.insert("tasks", { title: "a" });
     db.commit();
 
-    internals(db)._indexDocuments.set("tasks.by_creation_time", [id, id]);
+    db._indexDocuments.set("tasks.by_creation_time", [id, id]);
 
     const docs = db.getIndexedDocuments("tasks", "by_creation_time");
     expect(docs).toHaveLength(1);
@@ -656,7 +645,7 @@ describe("Database — sql committed state authority", () => {
         tables: [],
       }),
     );
-    const db = new Database(null);
+    const db = createDatabase(null);
     db.setStorage(sqlAdapter({ write }));
 
     db.startTransaction();
@@ -682,13 +671,13 @@ describe("Database — sql committed state authority", () => {
         tables: [],
       }),
     );
-    const db = new Database(null);
+    const db = createDatabase(null);
     db.setStorage(sqlAdapter({ write }));
 
-    internals(db)._idTableMap.set("task-1", "tasks");
+    db._idTableMap.set("task-1", "tasks");
 
     db.startTransaction();
-    internals(db)._addWriteRaw("task-1" as DocumentId, null);
+    db._addWriteRaw("task-1" as DocumentId, null);
     const commit = await db.commitAsync();
 
     expect(commit.tablesWritten.has("tasks")).toBe(true);
@@ -702,7 +691,7 @@ describe("Database — sql committed state authority", () => {
   });
 
   it("commits to memory immediately and surfaces sql write failures via persisted", async () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     db.setStorage(
       sqlAdapter({
         write: vi.fn(async () => {
@@ -723,7 +712,7 @@ describe("Database — sql committed state authority", () => {
 describe("Database — hydrate", () => {
   it("replaces existing in-memory state on full hydration", async () => {
     const storage = mockAdapter();
-    const db = new Database(null);
+    const db = createDatabase(null);
 
     db.startTransaction();
     const ghostId = db.insert("tasks", { title: "ghost" });
@@ -743,7 +732,7 @@ describe("Database — hydrate", () => {
 
   it("replaces only the requested tables on scoped hydration", async () => {
     const storage = mockAdapter();
-    const db = new Database(null);
+    const db = createDatabase(null);
 
     db.startTransaction();
     const staleTaskId = db.insert("tasks", { title: "stale task" });
@@ -787,7 +776,7 @@ describe("Database — hydrate", () => {
     });
     await storage2.storeBlob(storageId, new Blob(["two"]));
 
-    const db = new Database(null);
+    const db = createDatabase(null);
     db.setStorage(storage1);
     await db.hydrate();
     expect(await (await db.loadFile(storageId))?.text()).toBe("one");
@@ -842,7 +831,7 @@ describe("Database — schema validation", () => {
 
 describe("Database — normalizeId", () => {
   it("returns the id for the correct table", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     db.startTransaction();
     const id = db.insert("tasks", { title: "a" });
     expect(db.normalizeId("tasks", id)).toBe(id);
@@ -850,7 +839,7 @@ describe("Database — normalizeId", () => {
   });
 
   it("returns null for an id from a different table", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     db.startTransaction();
     const id = db.insert("tasks", { title: "a" });
     expect(db.normalizeId("users", id)).toBeNull();
@@ -858,12 +847,12 @@ describe("Database — normalizeId", () => {
   });
 
   it("returns null for a non-id string", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     expect(db.normalizeId("tasks", "random-string")).toBeNull();
   });
 
   it("stops normalizing a deleted id after commit", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     db.startTransaction();
     const id = db.insert("tasks", { title: "a" });
     db.commit();
@@ -879,7 +868,7 @@ describe("Database — normalizeId", () => {
 
 describe("Database — error cases", () => {
   it("throws when patching a non-existent document", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     db.startTransaction();
     expect(() => db.patch("tasks", MISSING_ID, { x: 1 })).toThrow(
       /non-existent/,
@@ -888,14 +877,14 @@ describe("Database — error cases", () => {
   });
 
   it("throws when deleting a non-existent document", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     db.startTransaction();
     expect(() => db.delete("tasks", MISSING_ID)).toThrow(/non-existent/);
     db.commit();
   });
 
   it("throws when replacing a non-existent document", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     db.startTransaction();
     expect(() => db.replace("tasks", MISSING_ID, { title: "new" })).toThrow(
       /non-existent/,
@@ -904,7 +893,7 @@ describe("Database — error cases", () => {
   });
 
   it("throws when writing outside a transaction", () => {
-    const db = new Database(null);
+    const db = createDatabase(null);
     expect(() => db.insert("tasks", { title: "fail" })).toThrow(
       /outside of transaction/,
     );
@@ -915,7 +904,7 @@ async function seedPersistedTask(
   storage: ReturnType<typeof mockAdapter>,
   title: string,
 ): Promise<DocumentId> {
-  const persisted = new Database(null, storage);
+  const persisted = createDatabase(null, storage);
   persisted.startTransaction();
   const id = persisted.insert("tasks", { title });
   await persisted.commit().persisted;

@@ -1,5 +1,5 @@
 import { openNodeStorage } from "@embedded/node/sqlite/adapter";
-import { Database } from "@embedded/runtime/db/database";
+import { createDatabase } from "@embedded/runtime/db/database";
 import type { ParsedSchema } from "@embedded/runtime/db/schema";
 import type { StorageAdapter } from "@embedded/storage/adapter";
 import { buildUserTableSpecs } from "@embedded/storage/sqlite/factory";
@@ -57,14 +57,14 @@ describe("anonymous→identity migration reaches SQLite user tables", () => {
       await storage.close?.();
     });
 
-    const writer = new Database(schema);
+    const writer = createDatabase(schema);
     writer.setStorage(storage);
     writer.setActiveIdentityKey(null);
     writer.startTransaction();
     const id = writer.insert("tasks", { status: "active" });
     await writer.commitAsync();
 
-    const reader = new Database(schema);
+    const reader = createDatabase(schema);
     reader.setStorage(storage);
     reader.setActiveIdentityKey("user-1");
 
@@ -86,14 +86,14 @@ describe("anonymous→identity migration reaches SQLite user tables", () => {
       await storage.close?.();
     });
 
-    const writer = new Database(schema);
+    const writer = createDatabase(schema);
     writer.setStorage(storage);
     writer.setActiveIdentityKey("user-2");
     writer.startTransaction();
     const id = writer.insert("tasks", { status: "active" });
     await writer.commitAsync();
 
-    const reader = new Database(schema);
+    const reader = createDatabase(schema);
     reader.setStorage(storage);
     reader.setActiveIdentityKey("user-1");
     await reader.reStampAnonymousUserTablesInStorage("user-1");

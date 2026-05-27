@@ -1,5 +1,6 @@
 import {
-  Database,
+  createDatabase,
+  type Database,
   type DatabaseCommitResult,
 } from "@embedded/runtime/db/database";
 import type { DocumentId } from "@embedded/runtime/db/types";
@@ -9,7 +10,7 @@ import { describe, expect, it, vi } from "@tests/testkit";
 import type { GenericDocument } from "convex/server";
 
 async function persistedDb(storage: StorageAdapter): Promise<Database> {
-  const db = new Database(null, storage);
+  const db = createDatabase(null, storage);
   await db.hydrate();
   return db;
 }
@@ -159,7 +160,7 @@ describe("Database storage", () => {
         clearAll: () => backing.clearAll(),
       });
 
-      const db = new Database(null, failingStorage);
+      const db = createDatabase(null, failingStorage);
       vi.spyOn(console, "error").mockImplementation(() => {});
 
       db.startTransaction();

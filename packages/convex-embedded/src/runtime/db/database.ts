@@ -61,7 +61,6 @@ import {
   type VectorIndexState,
 } from "@/runtime/db/vector";
 import { createStore } from "@/runtime/store";
-import type { Store } from "@/runtime/store";
 /**
  * Core in-memory database engine with MVCC timestamps.
  *
@@ -269,214 +268,192 @@ function formatValueForError(value: unknown): string {
   }
 }
 
-export class Database {
-  /** Committed documents keyed by `DocumentId`. */
-  private _documents = new Map<DocumentId, StoredDocument>();
+export interface Database {
+  readonly queryEngine: QueryEngine;
+  readonly timestamp: Timestamp;
+  getTableVersion(tableName: string): number;
+  bumpTableVersions(tableNames: Iterable<string>): void;
+  setStorage(storage: StorageAdapter | null): void;
+  setReadBackendForTests(readBackend: AsyncReadBackend | null): void;
+  setActiveIdentityKey(identityKey: string | null): void;
+  getActiveIdentityKey(): string | null;
+  hydrate(options?: { tables?: string[] }): Promise<void>;
+  hydrateSystemTables(): Promise<void>;
+  isTableHydrationAttempted(tableName: string): boolean;
+  tableHydrated(tableName: string): Promise<void>;
+  replicateTable(tableName: string): Promise<void>;
+  startTransaction(): void;
+  commit(): DatabaseCommitResult;
+  commitAsync(): Promise<DatabaseCommitResult>;
+  waitForPersistence(): Promise<void>;
+  rollbackWrites(): void;
+  get(
+    tableName: TableName | undefined,
+    id: DocumentId,
+    options?: { countRead?: boolean },
+  ): StoredDocument | null;
+  insert(table: TableName, value: Record<string, unknown>): DocumentId;
+  patch(
+    tableName: TableName | undefined,
+    id: DocumentId,
+    value: Record<string, unknown>,
+  ): void;
+  replace(
+    tableName: TableName | undefined,
+    id: DocumentId,
+    value: Record<string, unknown>,
+  ): void;
+  delete(tableName: TableName | undefined, id: DocumentId): void;
+  writeDocument(
+    table: TableName,
+    doc: Record<string, unknown> & { _id: string; _creationTime: number },
+    options?: { validate?: boolean },
+  ): void;
+  deleteDocument(table: TableName, id: DocumentId): boolean;
+  getDocumentsForTable(tableName: string): StoredDocument[];
+  hasDocumentsForTable(tableName: string): boolean;
+  getTableNames(): string[];
+  getIndexDefinitions(
+    tableName: string,
+  ): Array<{ indexName: string; fields: string[] }>;
+  migrateAnonymousDataToIdentity(identityKey: string): Set<string>;
+  reStampAnonymousUserTablesInStorage(identityKey: string): Promise<string[]>;
+  normalizeId(table: TableName, idString: string): DocumentId | null;
+  getTableForId(id: string): string | undefined;
+  storeFile(storageId: DocumentId, blob: Blob): Promise<void>;
+  deleteBlob(storageId: string): void;
+  loadFile(storageId: DocumentId): Promise<Blob | null>;
+  startQuery(query: SerializedQuery): QueryId;
+  startQueryAsync(query: SerializedQuery): QueryId;
+  queryNext(queryId: QueryId): {
+    value: GenericDocument | null;
+    done: boolean;
+  };
+  queryNextAsync(queryId: QueryId): Promise<{
+    value: GenericDocument | null;
+    done: boolean;
+  }>;
+  queryCleanup(queryId: QueryId): void;
+  paginateAsync(args: {
+    query: SerializedQuery;
+    cursor: string | null;
+    endCursor?: string | null;
+    pageSize: number;
+    maximumRowsRead?: number | null;
+    maximumBytesRead?: number | null;
+  }): Promise<PaginateResult>;
+  count(tableName: string): number;
+  countAsync(tableName: string): Promise<number>;
+  getAsync(
+    tableName: TableName | undefined,
+    id: DocumentId,
+    options?: { countRead?: boolean },
+  ): Promise<StoredDocument | null>;
+  ensureCommittedDocumentForWrite(
+    tableName: TableName,
+    id: DocumentId,
+  ): Promise<boolean>;
+  listDocumentsAsync(tableName: TableName): Promise<StoredDocument[]>;
+  listDocumentsForScopeAsync(
+    tableName: TableName,
+    scopeArgs: Record<string, unknown>,
+  ): Promise<StoredDocument[] | null>;
+  getCommittedTableCount(tableName: string): number;
+  getIndexedDocuments(tableName: string, indexName: string): StoredDocument[];
+  vectorSearch(
+    tableAndIndexName: string,
+    vector: number[],
+    filter: VectorSearchExpression | null,
+    limit?: number,
+  ): Array<{ _id: string; _score: number }>;
+  vectorSearchAsync(
+    tableAndIndexName: string,
+    vector: number[],
+    filter: VectorSearchExpression | null,
+    limit?: number,
+  ): Promise<Array<{ _id: string; _score: number }>>;
+  _indexDocuments: Map<string, string[]>;
+  _idTableMap: Map<string, string>;
+  _addWriteRaw(id: DocumentId, newValue: StoredDocument | null): void;
+}
 
-  /** Blob storage keyed by `_storage` document ID. */
-  private _blobStorage = new Map<DocumentId, Blob>();
-
-  /** Committed document IDs grouped by table for faster per-table iteration. */
-  private _tableDocuments: Map<string, Set<string>> = new Map();
-
-  /** Committed index orderings keyed by `table.index`. */
-  private _indexDocuments: Map<string, string[]> = new Map();
-  private _indexDefsCache: Map<
+export function createDatabase(
+  schema: ParsedSchema | null,
+  storage?: StorageAdapter,
+  crypto?: EmbeddedCryptoProvider,
+): Database {
+  const documents = new Map<DocumentId, StoredDocument>();
+  const blobStorage = new Map<DocumentId, Blob>();
+  const tableDocuments: Map<string, Set<string>> = new Map();
+  const indexDocuments: Map<string, string[]> = new Map();
+  const indexDefsCache: Map<
     string,
     Array<{ indexName: string; fields: string[] }>
   > = new Map();
+  const searchIndexes: Map<string, SearchIndexState> = new Map();
+  const vectorIndexes: Map<string, VectorIndexState> = new Map();
+  const idTableMap: Map<string, string> = new Map();
+  let lastCreationTime: number = 0;
+  let activeIdentityKey: string | null = null;
+  let timestamp: Timestamp = 0;
+  const tableVersion: Map<string, number> = new Map();
+  const tablesWritten: Set<string> = new Set();
+  let storageAdapter: StorageAdapter | null = storage ?? null;
+  let fullyHydrated = false;
+  const hydrationAttemptedTables = new Set<string>();
+  const tableHydrationPromises = new Map<string, Promise<void>>();
+  const tableHydrationResolvers = new Map<string, () => void>();
+  const cryptoProvider: EmbeddedCryptoProvider =
+    crypto ?? createAmbientCryptoProvider();
+  const writes: Array<Record<DocumentId, StoredDocument | null>> = [];
+  let pendingWriteCount = 0;
+  const writeCounts: number[] = [];
+  const writeTables: Array<Map<string, Set<string>>> = [];
+  const hydrationInFlight = new Map<string, Promise<void>>();
+  let pendingPersistChain: Promise<void> = Promise.resolve();
+  const pendingTableState: Map<string, PendingTableState> = new Map();
+  const store = createStore();
 
-  /** Committed search index state keyed by `table.index`. */
-  private _searchIndexes: Map<string, SearchIndexState> = new Map();
+  store.setStorage(storageAdapter);
 
-  /** Committed vector index state keyed by `table.index`. */
-  private _vectorIndexes: Map<string, VectorIndexState> = new Map();
-
-  /**
-   * Maps each document UUID to its table name.
-   * Populated on insert (when UUID is generated) and on hydrate/replicateTable
-   * (derived from stored documents).
-   */
-  private _idTableMap: Map<string, string> = new Map();
-
-  /** Last creation-time value emitted, used to guarantee monotonic times. */
-  private _lastCreationTime: number = 0;
-
-  /** Parsed schema definition (may be null if running schema-less). */
-  private _schema: ParsedSchema | null;
-
-  /** Active identity namespace for non-system tables. */
-  private _activeIdentityKey: string | null = null;
-
-  /**
-   * Monotonically increasing timestamp. Incremented on every committed
-   * transaction that contains at least one write. Consumers (e.g. the
-   * subscription manager) use this to detect staleness.
-   */
-  private _timestamp: Timestamp = 0;
-
-  private _tableVersion: Map<string, number> = new Map();
-
-  getTableVersion(tableName: string): number {
-    return this._tableVersion.get(tableName) ?? 0;
+  if (schema !== null) {
+    validateSchemaDefinition(schema);
   }
 
-  bumpTableVersions(tableNames: Iterable<string>): void {
+  function getTableVersion(tableName: string): number {
+    return tableVersion.get(tableName) ?? 0;
+  }
+
+  function bumpTableVersions(tableNames: Iterable<string>): void {
     for (const tableName of tableNames) {
-      this._tableVersion.set(
-        tableName,
-        (this._tableVersion.get(tableName) ?? 0) + 1,
-      );
+      tableVersion.set(tableName, (tableVersion.get(tableName) ?? 0) + 1);
     }
   }
 
-  /**
-   * Tables that have been written (insert / patch / replace / delete)
-   * in the *current* outermost transaction.  Accumulated across nested
-   * child transactions when they commit up.
-   */
-  private _tablesWritten: Set<string> = new Set();
-
-  /** Optional durable storage backend. */
-  private _storage: StorageAdapter | null = null;
-  private _fullyHydrated = false;
-  private readonly _hydrationAttemptedTables = new Set<string>();
-  private readonly _tableHydrationPromises = new Map<string, Promise<void>>();
-  private readonly _tableHydrationResolvers = new Map<string, () => void>();
-
-  private readonly _crypto: EmbeddedCryptoProvider;
-
-  /**
-   * Pending writes for each level of transaction nesting.
-   *
-   * - When a mutation performs updates they are staged in the last (deepest)
-   *   level.
-   * - When a child mutation commits, its writes are merged up one level.
-   * - When the top-level mutation commits, the writes are applied to
-   *   `_documents` and the MVCC timestamp bumps.
-   * - When a mutation rolls back, the deepest level is discarded.
-   */
-  private _writes: Array<Record<DocumentId, StoredDocument | null>> = [];
-
-  /** Number of staged writes across all active transaction levels. */
-  private _pendingWriteCount = 0;
-
-  /** Per-transaction write counts keyed by nesting depth. */
-  private _writeCounts: number[] = [];
-
-  /** Pending write ids grouped by table for each transaction level. */
-  private _writeTables: Array<Map<string, Set<string>>> = [];
-
-  /** Dedups concurrent `hydrate()` calls with the same scope. */
-  private _hydrationInFlight = new Map<string, Promise<void>>();
-
-  /** Serializes async-persisted commits so SQLite writes apply in order. */
-  private _pendingPersistChain: Promise<void> = Promise.resolve();
-
-  /** Lazily built visible pending state grouped by table. */
-  private _pendingTableState: Map<string, PendingTableState> = new Map();
-
-  readonly queryEngine: QueryEngine;
-  private readonly _store: Store = createStore();
-
-  constructor(
-    schema: ParsedSchema | null,
-    storage?: StorageAdapter,
-    crypto?: EmbeddedCryptoProvider,
-  ) {
-    this._schema = schema;
-    this._storage = storage ?? null;
-    this._crypto = crypto ?? createAmbientCryptoProvider();
-    this._store.setStorage(this._storage);
-
-    if (schema !== null) {
-      validateSchemaDefinition(schema);
-    }
-
-    const iterateDocs: DocumentIterator = (tableName, callback) => {
-      this._iterateDocs(tableName, callback);
-    };
-    const countTable: TableCountReader = (tableName) =>
-      this._hasPendingWritesForTable(tableName) ||
-      this._isIdentityScopedTable(tableName)
-        ? this.getDocumentsForTable(tableName).length
-        : (this._tableDocuments.get(tableName)?.size ?? 0);
-    const countTableAsync: AsyncTableCountReader = async (tableName) => {
-      if (
-        this._hasPendingWritesForTable(tableName) ||
-        this._isIdentityScopedTable(tableName)
-      ) {
-        return this.getDocumentsForTable(tableName).length;
-      }
-      if (this.isTableHydrationAttempted(tableName)) {
-        return this._tableDocuments.get(tableName)?.size ?? 0;
-      }
-      const storeCount = await this._store.countDocuments(
-        tableName,
-        this._storageReadOptions(tableName),
-      );
-      if (storeCount !== null) return storeCount;
-      return this._tableDocuments.get(tableName)?.size ?? 0;
-    };
-    const query: QueryReader = (query) => this._readOptimizedQuery(query);
-    const readQueryAsync: AsyncQueryReader = (query) =>
-      this._readOptimizedQueryAsync(query);
-    const source: SourceReader = (source, limit, seek) =>
-      this._readOptimizedSource(source, limit, seek);
-    const readSourceAsync: AsyncSourceReader = (source, limit, seek) =>
-      this._readOptimizedSourceAsync(source, limit, seek);
-
-    this.queryEngine = createQueryEngine(
-      schema,
-      iterateDocs,
-      countTable,
-      query,
-      source,
-      countTableAsync,
-      readQueryAsync,
-      readSourceAsync,
-      (tableName: string) => this.getTableVersion(tableName),
-    );
+  function setStorage(next: StorageAdapter | null): void {
+    storageAdapter = next;
+    store.setStorage(next);
+    resetBlobState();
   }
 
-  /**
-   * Attach (or replace) the durable storage adapter.
-   *
-   * This is used when the storage backend is initialised asynchronously
-   * (e.g. a wa-sqlite worker) after the `Database` is constructed.
-   * After calling this, invoke {@link hydrate} to load persisted data.
-   */
-  setStorage(storage: StorageAdapter | null): void {
-    this._storage = storage;
-    this._store.setStorage(storage);
-    this._resetBlobState();
+  function setReadBackendForTests(readBackend: AsyncReadBackend | null): void {
+    store.setReadBackendForTests(readBackend);
   }
 
-  setReadBackendForTests(readBackend: AsyncReadBackend | null): void {
-    this._store.setReadBackendForTests(readBackend);
+  function setActiveIdentityKey(identityKey: string | null): void {
+    activeIdentityKey = identityKey;
   }
 
-  setActiveIdentityKey(identityKey: string | null): void {
-    this._activeIdentityKey = identityKey;
+  function getActiveIdentityKey(): string | null {
+    return activeIdentityKey;
   }
 
-  getActiveIdentityKey(): string | null {
-    return this._activeIdentityKey;
-  }
-
-  /**
-   * Hydrate the database from durable storage.
-   *
-   * Must be called (and awaited) before the first transaction when a
-   * {@link StorageAdapter} is attached. No-op when running without
-   * storage.
-   */
-  async hydrate(options?: { tables?: string[] }): Promise<void> {
-    if (this._storage === null) return;
+  async function hydrate(options?: { tables?: string[] }): Promise<void> {
+    if (storageAdapter === null) return;
     const scopeKey = options?.tables
       ? [...options.tables].sort().join(",")
       : "__all__";
-    const inFlight = this._hydrationInFlight.get(scopeKey);
+    const inFlight = hydrationInFlight.get(scopeKey);
     if (inFlight !== undefined) {
       return inFlight;
     }
@@ -492,41 +469,39 @@ export class Database {
           : "all",
       });
       if (!scopedHydration || tableNames.includes("_storage")) {
-        this._resetBlobState();
+        resetBlobState();
       }
-      const { documents, meta } = await withSpan(
+      const { documents: loaded, meta } = await withSpan(
         "convex-embedded.db.hydrate.fetch",
         () =>
-          this._store.load(
-            scopedHydration ? { tables: tableNames } : undefined,
-          ),
+          store.load(scopedHydration ? { tables: tableNames } : undefined),
       );
       const fetched = globalThis.performance?.now?.() ?? Date.now();
       span.setAttributes({
-        "convex.db.hydrate.docs": documents.length,
+        "convex.db.hydrate.docs": loaded.length,
         "convex.db.hydrate.fetch_ms": +(fetched - started).toFixed(1),
       });
 
       withSpanSync("convex-embedded.db.hydrate.populate", () => {
         if (scopedHydration) {
           for (const tableName of tableNames) {
-            this._clearCommittedTable(tableName);
-            this._hydrationAttemptedTables.add(tableName);
+            clearCommittedTable(tableName);
+            hydrationAttemptedTables.add(tableName);
           }
         } else {
-          this._documents.clear();
-          this._idTableMap.clear();
-          this._tableDocuments.clear();
-          this._fullyHydrated = true;
+          documents.clear();
+          idTableMap.clear();
+          tableDocuments.clear();
+          fullyHydrated = true;
         }
 
-        for (const { doc, tableName } of documents) {
+        for (const { doc, tableName } of loaded) {
           if (tableName) {
-            this._idTableMap.set(doc._id as string, tableName);
+            idTableMap.set(doc._id as string, tableName);
           }
-          this._documents.set(doc._id, doc);
+          documents.set(doc._id, doc);
           if (tableName) {
-            this._addCommittedIdToTable(tableName, doc._id as string);
+            addCommittedIdToTable(tableName, doc._id as string);
           }
         }
       });
@@ -536,38 +511,38 @@ export class Database {
           for (const tableName of tableNames) {
             withSpanSync(
               "convex-embedded.db.rebuildTableIndexes",
-              () => this._rebuildTableIndexes(tableName),
+              () => rebuildTableIndexes(tableName),
               { attributes: { "convex.table": tableName } },
             );
             withSpanSync(
               "convex-embedded.db.rebuildTableSearchIndexes",
-              () => this._rebuildTableSearchIndexes(tableName),
+              () => rebuildTableSearchIndexes(tableName),
               { attributes: { "convex.table": tableName } },
             );
             withSpanSync(
               "convex-embedded.db.rebuildTableVectorIndexes",
-              () => this._rebuildTableVectorIndexes(tableName),
+              () => rebuildTableVectorIndexes(tableName),
               { attributes: { "convex.table": tableName } },
             );
-            this._resolveTableHydration(tableName);
+            resolveTableHydration(tableName);
           }
         } else {
           withSpanSync("convex-embedded.db.rebuildAllIndexes", () =>
-            this._rebuildAllIndexes(),
+            rebuildAllIndexes(),
           );
           withSpanSync("convex-embedded.db.rebuildAllSearchIndexes", () =>
-            this._rebuildAllSearchIndexes(),
+            rebuildAllSearchIndexes(),
           );
           withSpanSync("convex-embedded.db.rebuildAllVectorIndexes", () =>
-            this._rebuildAllVectorIndexes(),
+            rebuildAllVectorIndexes(),
           );
-          this._resolveAllTableHydrations();
+          resolveAllTableHydrations();
         }
       });
 
       if (meta !== null) {
-        this._timestamp = meta.timestamp;
-        this._lastCreationTime = meta.lastCreationTime;
+        timestamp = meta.timestamp;
+        lastCreationTime = meta.lastCreationTime;
       }
 
       const ended = globalThis.performance?.now?.() ?? Date.now();
@@ -576,54 +551,44 @@ export class Database {
         "convex.db.hydrate.rebuild_ms": +(ended - fetched).toFixed(1),
       });
       log.info(
-        `hydrate: docs=${documents.length}, scope=${tableNames?.length ? tableNames.join(",") : "all"}, blobs=lazy, fetch=${(fetched - started).toFixed(1)}ms total=${(ended - started).toFixed(1)}ms`,
+        `hydrate: docs=${loaded.length}, scope=${tableNames?.length ? tableNames.join(",") : "all"}, blobs=lazy, fetch=${(fetched - started).toFixed(1)}ms total=${(ended - started).toFixed(1)}ms`,
       );
     });
-    this._hydrationInFlight.set(scopeKey, promise);
+    hydrationInFlight.set(scopeKey, promise);
     try {
       await promise;
     } finally {
-      if (this._hydrationInFlight.get(scopeKey) === promise) {
-        this._hydrationInFlight.delete(scopeKey);
+      if (hydrationInFlight.get(scopeKey) === promise) {
+        hydrationInFlight.delete(scopeKey);
       }
     }
   }
 
-  /**
-   * Hydrate only the runtime's system tables (the open path). User tables are
-   * left for lazy on-demand hydration and are read directly from the store
-   * (push-down). This only applies to queryable (SQL) storage where reads can be
-   * served without an in-memory copy; on non-queryable storage there is no
-   * push-down, so fall back to full hydration.
-   */
-  async hydrateSystemTables(): Promise<void> {
-    if (this._storage === null) return;
-    if (!this._store.isQueryable()) {
-      return this.hydrate();
+  async function hydrateSystemTables(): Promise<void> {
+    if (storageAdapter === null) return;
+    if (!store.isQueryable()) {
+      return hydrate();
     }
-    return this.hydrate({ tables: [...RUNTIME_SYSTEM_TABLES] });
+    return hydrate({ tables: [...RUNTIME_SYSTEM_TABLES] });
   }
 
-  isTableHydrationAttempted(tableName: string): boolean {
-    return this._fullyHydrated || this._hydrationAttemptedTables.has(tableName);
+  function isTableHydrationAttempted(tableName: string): boolean {
+    return fullyHydrated || hydrationAttemptedTables.has(tableName);
   }
 
-  tableHydrated(tableName: string): Promise<void> {
+  function tableHydrated(tableName: string): Promise<void> {
     if (
-      this._storage === null ||
-      this._fullyHydrated ||
-      // Queryable (SQL) user tables are served by push-down reads, so a reader
-      // never needs to wait for an in-memory hydrate that will not happen under
-      // lazy hydration. Without this the per-table query gate would hang.
-      this._isQueryableTable(tableName)
+      storageAdapter === null ||
+      fullyHydrated ||
+      isQueryableTable(tableName)
     ) {
       return Promise.resolve();
     }
-    return this._ensureTableHydrationEntry(tableName);
+    return ensureTableHydrationEntry(tableName);
   }
 
-  private _ensureTableHydrationEntry(tableName: string): Promise<void> {
-    const existing = this._tableHydrationPromises.get(tableName);
+  function ensureTableHydrationEntry(tableName: string): Promise<void> {
+    const existing = tableHydrationPromises.get(tableName);
     if (existing !== undefined) {
       return existing;
     }
@@ -631,45 +596,35 @@ export class Database {
     const promise = new Promise<void>((resolve) => {
       resolver = resolve;
     });
-    this._tableHydrationPromises.set(tableName, promise);
-    this._tableHydrationResolvers.set(tableName, resolver);
+    tableHydrationPromises.set(tableName, promise);
+    tableHydrationResolvers.set(tableName, resolver);
     return promise;
   }
 
-  private _resolveTableHydration(tableName: string): void {
-    const resolver = this._tableHydrationResolvers.get(tableName);
+  function resolveTableHydration(tableName: string): void {
+    const resolver = tableHydrationResolvers.get(tableName);
     if (resolver !== undefined) {
       resolver();
-      this._tableHydrationResolvers.delete(tableName);
+      tableHydrationResolvers.delete(tableName);
       return;
     }
-    this._tableHydrationPromises.set(tableName, Promise.resolve());
+    tableHydrationPromises.set(tableName, Promise.resolve());
   }
 
-  private _resolveAllTableHydrations(): void {
-    for (const resolver of this._tableHydrationResolvers.values()) {
+  function resolveAllTableHydrations(): void {
+    for (const resolver of tableHydrationResolvers.values()) {
       resolver();
     }
-    this._tableHydrationResolvers.clear();
+    tableHydrationResolvers.clear();
   }
 
-  /**
-   * Re-read a single table from durable storage into the in-memory store.
-   *
-   * Used by cross-tab sync: when another tab writes to a table, this
-   * method replaces the in-memory documents for that table with the
-   * current state from IndexedDB (via the wa-sqlite worker). Also
-   * syncs metadata counters so IDs and timestamps remain monotonic.
-   *
-   * No-op when running without a storage adapter.
-   */
-  async replicateTable(tableName: string): Promise<void> {
-    if (this._storage === null) return;
+  async function replicateTable(tableName: string): Promise<void> {
+    if (storageAdapter === null) return;
 
-    const { docs, meta } = await this._store.refreshTable({ tableName });
+    const { docs, meta } = await store.refreshTable({ tableName });
 
     if (docs !== null) {
-      const oldIds = this._tableDocuments.get(tableName);
+      const oldIds = tableDocuments.get(tableName);
       let changed = !oldIds || oldIds.size !== docs.length;
       if (!changed) {
         for (const doc of docs) {
@@ -677,7 +632,7 @@ export class Database {
             changed = true;
             break;
           }
-          if (!structuralEqual(this._documents.get(doc._id), doc)) {
+          if (!structuralEqual(documents.get(doc._id), doc)) {
             changed = true;
             break;
           }
@@ -685,233 +640,216 @@ export class Database {
       }
 
       for (const id of oldIds ?? []) {
-        this._documents.delete(id as DocumentId);
-        this._idTableMap.delete(id);
+        documents.delete(id as DocumentId);
+        idTableMap.delete(id);
       }
-      this._tableDocuments.set(tableName, new Set());
+      tableDocuments.set(tableName, new Set());
 
       for (const doc of docs) {
-        this._documents.set(doc._id, doc);
-        this._idTableMap.set(doc._id as string, tableName);
-        this._addCommittedIdToTable(tableName, doc._id as string);
+        documents.set(doc._id, doc);
+        idTableMap.set(doc._id as string, tableName);
+        addCommittedIdToTable(tableName, doc._id as string);
       }
 
       if (changed) {
-        this._rebuildTableIndexes(tableName);
-        this._rebuildTableSearchIndexes(tableName);
-        this._rebuildTableVectorIndexes(tableName);
+        rebuildTableIndexes(tableName);
+        rebuildTableSearchIndexes(tableName);
+        rebuildTableVectorIndexes(tableName);
       }
     }
 
     if (meta !== null) {
-      if (meta.timestamp > this._timestamp) {
-        this._timestamp = meta.timestamp;
+      if (meta.timestamp > timestamp) {
+        timestamp = meta.timestamp;
       }
-      if (meta.lastCreationTime > this._lastCreationTime) {
-        this._lastCreationTime = meta.lastCreationTime;
+      if (meta.lastCreationTime > lastCreationTime) {
+        lastCreationTime = meta.lastCreationTime;
       }
     }
   }
 
-  /** Current MVCC timestamp. */
-  get timestamp(): Timestamp {
-    return this._timestamp;
+  function startTransaction(): void {
+    writes.push({});
+    writeCounts.push(0);
+    writeTables.push(new Map());
   }
 
-  /** Begin a new (possibly nested) transaction. */
-  startTransaction(): void {
-    this._writes.push({});
-    this._writeCounts.push(0);
-    this._writeTables.push(new Map());
-  }
+  function commit(): DatabaseCommitResult {
+    const lastWrites = popCommittedWriteLevel();
 
-  /**
-   * Commit the current transaction level synchronously.
-   *
-   * Top-level callers should use {@link commitAsync} so SQL-backed adapters can
-   * authoritatively apply the commit and serve subsequent committed reads.
-   * This synchronous path remains for nested commits and opaque storage.
-   */
-  commit(): DatabaseCommitResult {
-    const lastWrites = this._popCommittedWriteLevel();
-
-    if (this._writes.length === 0) {
-      if (
-        this._store.usesExternalCommitPath() &&
-        this._tablesWritten.size > 0
-      ) {
+    if (writes.length === 0) {
+      if (store.usesExternalCommitPath() && tablesWritten.size > 0) {
         throw new Error(
           "SQL-backed outer commits with adapter apply support must use commitAsync()",
         );
       }
 
       const { puts, deletes, rowChanges, stateChanges, invalidation } =
-        this._buildCommittedWriteArtifacts(lastWrites);
-      this._applyCommittedRowChanges(rowChanges);
+        buildCommittedWriteArtifacts(lastWrites);
+      applyCommittedRowChanges(rowChanges);
 
-      const tablesWritten = new Set(this._tablesWritten);
-      if (tablesWritten.size > 0) {
-        this._timestamp += 1;
-        this.bumpTableVersions(tablesWritten);
-        this._applyCommittedStateChanges(stateChanges);
+      const written = new Set(tablesWritten);
+      if (written.size > 0) {
+        timestamp += 1;
+        bumpTableVersions(written);
+        applyCommittedStateChanges(stateChanges);
       }
-      this._tablesWritten.clear();
-      this._pendingTableState.clear();
+      tablesWritten.clear();
+      pendingTableState.clear();
 
-      const persisted = this._persistCommitBatch({
+      const persisted = persistCommitBatch({
         puts,
         deletes,
         meta: {
-          timestamp: this._timestamp,
-          lastCreationTime: this._lastCreationTime,
+          timestamp,
+          lastCreationTime,
         },
       });
 
       return {
-        timestamp: this._timestamp,
-        tablesWritten,
+        timestamp,
+        tablesWritten: written,
         invalidation,
         persisted,
       };
     }
 
-    return this._mergeNestedCommittedWriteLevel(lastWrites);
+    return mergeNestedCommittedWriteLevel(lastWrites);
   }
 
-  async commitAsync(): Promise<DatabaseCommitResult> {
+  async function commitAsync(): Promise<DatabaseCommitResult> {
     return withSpan("convex-embedded.db.commit", () => {
       recordCounter("commit");
-      return this._commitAsyncImpl();
+      return commitAsyncImpl();
     });
   }
 
-  private async _commitAsyncImpl(): Promise<DatabaseCommitResult> {
-    const isSqlCommit = this._store.usesExternalCommitPath();
+  async function commitAsyncImpl(): Promise<DatabaseCommitResult> {
+    const isSqlCommit = store.usesExternalCommitPath();
     if (!isSqlCommit) {
-      return this.commit();
+      return commit();
     }
 
-    if (this._writes.length === 0) {
+    if (writes.length === 0) {
       throw new Error("Transaction already committed or rolled back");
     }
 
-    if (this._writes.length > 1) {
-      const lastWrites = this._popCommittedWriteLevel();
-      return this._mergeNestedCommittedWriteLevel(lastWrites);
+    if (writes.length > 1) {
+      const lastWrites = popCommittedWriteLevel();
+      return mergeNestedCommittedWriteLevel(lastWrites);
     }
 
-    const lastWrites = this._writes[this._writes.length - 1] ?? {};
-    const tablesWritten = new Set(this._tablesWritten);
+    const lastWrites = writes[writes.length - 1] ?? {};
+    const written = new Set(tablesWritten);
     for (const id of Object.keys(lastWrites)) {
-      const tableName = this._idTableMap.get(id);
+      const tableName = idTableMap.get(id);
       if (tableName !== undefined) {
-        tablesWritten.add(tableName);
+        written.add(tableName);
       }
     }
 
-    if (tablesWritten.size === 0) {
-      this._popCommittedWriteLevel();
-      this._tablesWritten.clear();
+    if (written.size === 0) {
+      popCommittedWriteLevel();
+      tablesWritten.clear();
       return {
-        timestamp: this._timestamp,
-        tablesWritten,
+        timestamp,
+        tablesWritten: written,
         invalidation: { tables: new Set(), changes: [] },
         persisted: Promise.resolve(),
       };
     }
 
     const { puts, deletes, rowChanges, stateChanges, invalidation } =
-      this._buildCommittedWriteArtifacts(lastWrites);
-    const nextTimestamp = this._timestamp + 1;
-    this.bumpTableVersions(tablesWritten);
+      buildCommittedWriteArtifacts(lastWrites);
+    const nextTimestamp = timestamp + 1;
+    bumpTableVersions(written);
 
     const batch = {
       puts,
       deletes,
       meta: {
         timestamp: nextTimestamp,
-        lastCreationTime: this._lastCreationTime,
+        lastCreationTime,
       },
     } satisfies CommitBatch;
 
-    const materializedTables = Array.from(tablesWritten).filter(
-      (tableName) => !this._isQueryableTable(tableName),
+    const materializedTables = Array.from(written).filter(
+      (tableName) => !isQueryableTable(tableName),
     );
 
     const writeOptions = {
       materializedTables,
-      tableSearchIndexes: this._collectTableSearchIndexes(),
-      tableVectorIndexes: this._collectTableVectorIndexes(),
+      tableSearchIndexes: collectTableSearchIndexes(),
+      tableVectorIndexes: collectTableVectorIndexes(),
     };
 
     const allWrittenTablesAlreadyHydrated = materializedTables.every(
-      (tableName) => this.isTableHydrationAttempted(tableName),
+      (tableName) => isTableHydrationAttempted(tableName),
     );
 
     if (allWrittenTablesAlreadyHydrated) {
-      this._popCommittedWriteLevel();
-      this._applyCommittedIdHints(rowChanges);
-      this._timestamp = nextTimestamp;
-      this._lastCreationTime = batch.meta.lastCreationTime;
+      popCommittedWriteLevel();
+      applyCommittedIdHints(rowChanges);
+      timestamp = nextTimestamp;
+      lastCreationTime = batch.meta.lastCreationTime;
       if (rowChanges.length > 0) {
-        this._applyCommittedRowChanges(rowChanges);
-        this._applyCommittedStateChanges(stateChanges, {
+        applyCommittedRowChanges(rowChanges);
+        applyCommittedStateChanges(stateChanges, {
           skipQueryable: false,
         });
       }
-      this._tablesWritten.clear();
+      tablesWritten.clear();
 
-      const persisted = this._enqueueAsyncCommit(batch, writeOptions);
+      const persisted = enqueueAsyncCommit(batch, writeOptions);
 
       return {
-        timestamp: this._timestamp,
-        tablesWritten,
+        timestamp,
+        tablesWritten: written,
         invalidation,
         persisted,
       };
     }
 
-    const applied = await this._store.write(batch, writeOptions);
+    const applied = await store.write(batch, writeOptions);
     if (applied === null) {
       throw new Error(
         "[convex-embedded] expected committed store to apply external top-level commit",
       );
     }
 
-    this._popCommittedWriteLevel();
-    this._applyCommittedIdHints(rowChanges);
-    this._timestamp = applied.meta.timestamp;
-    this._lastCreationTime = applied.meta.lastCreationTime;
+    popCommittedWriteLevel();
+    applyCommittedIdHints(rowChanges);
+    timestamp = applied.meta.timestamp;
+    lastCreationTime = applied.meta.lastCreationTime;
     for (const snapshot of applied.tables) {
-      this._replaceCommittedTableSnapshot(snapshot.tableName, snapshot.docs);
+      replaceCommittedTableSnapshot(snapshot.tableName, snapshot.docs);
     }
     const queryableRowChanges = rowChanges.filter(
-      (change) =>
-        change.tableName !== "" && this._isQueryableTable(change.tableName),
+      (change) => change.tableName !== "" && isQueryableTable(change.tableName),
     );
     if (queryableRowChanges.length > 0) {
-      this._applyCommittedRowChanges(queryableRowChanges);
+      applyCommittedRowChanges(queryableRowChanges);
       const dirtyTables = new Set<string>();
       for (const change of queryableRowChanges) {
         dirtyTables.add(change.tableName);
       }
       for (const tableName of dirtyTables) {
-        this._rebuildTableIndexes(tableName);
-        this._rebuildTableSearchIndexes(tableName);
-        this._rebuildTableVectorIndexes(tableName);
+        rebuildTableIndexes(tableName);
+        rebuildTableSearchIndexes(tableName);
+        rebuildTableVectorIndexes(tableName);
       }
     }
-    this._tablesWritten.clear();
+    tablesWritten.clear();
 
     return {
-      timestamp: this._timestamp,
-      tablesWritten,
+      timestamp,
+      tablesWritten: written,
       invalidation,
       persisted: Promise.resolve(),
     };
   }
 
-  private _enqueueAsyncCommit(
+  function enqueueAsyncCommit(
     batch: CommitBatch,
     options: {
       materializedTables: string[];
@@ -925,64 +863,55 @@ export class Database {
       >;
     },
   ): Promise<void> {
-    const previous = this._pendingPersistChain;
+    const previous = pendingPersistChain;
     const next = previous
       .catch(() => undefined)
       .then(async () => {
-        await this._store.write(batch, options);
+        await store.write(batch, options);
       });
-    this._pendingPersistChain = next.catch(() => undefined);
+    pendingPersistChain = next.catch(() => undefined);
     return next;
   }
 
-  async waitForPersistence(): Promise<void> {
-    await this._pendingPersistChain;
+  async function waitForPersistence(): Promise<void> {
+    await pendingPersistChain;
   }
 
-  /** Discard the deepest pending write level. */
-  rollbackWrites(): void {
-    if (this._writes.length === 0) {
+  function rollbackWrites(): void {
+    if (writes.length === 0) {
       throw new Error("Transaction already committed or rolled back");
     }
-    this._writes.pop();
-    this._pendingWriteCount -= this._writeCounts.pop() ?? 0;
-    this._writeTables.pop();
-    this._pendingTableState.clear();
+    writes.pop();
+    pendingWriteCount -= writeCounts.pop() ?? 0;
+    writeTables.pop();
+    pendingTableState.clear();
   }
 
-  /**
-   * Read a single document by ID.
-   *
-   * Reads through the write stack (most-recent first) before falling back
-   * to committed storage. Returns `null` when the document has been deleted
-   * or never existed.
-   */
-  get(
+  function get(
     tableName: TableName | undefined,
     id: DocumentId,
     _options: { countRead?: boolean } = {},
   ): StoredDocument | null {
-    if (!this._validateId(tableName, id)) {
+    if (!validateId(tableName, id)) {
       return null;
     }
 
-    const document = this._getRaw(id);
-    if (document === null || !this._isVisibleInScope(tableName, document)) {
+    const document = getRaw(id);
+    if (document === null || !isVisibleInScope(tableName, document)) {
       return null;
     }
 
-    return this._stripIdentityScope(document);
+    return stripIdentityScope(document);
   }
 
-  /** Insert a new document. Returns the generated UUID `_id`. */
-  insert(table: TableName, value: Record<string, unknown>): DocumentId {
-    this._validate(table, value as GenericDocument);
+  function insert(table: TableName, value: Record<string, unknown>): DocumentId {
+    validate(table, value as GenericDocument);
     let _id: DocumentId | null = null;
     for (let attempt = 0; attempt < 8; attempt += 1) {
-      const candidate = this._crypto.randomUUID() as unknown as DocumentId;
+      const candidate = cryptoProvider.randomUUID() as unknown as DocumentId;
       if (
-        !this._idTableMap.has(candidate as string) &&
-        this._getRaw(candidate) === null
+        !idTableMap.has(candidate as string) &&
+        getRaw(candidate) === null
       ) {
         _id = candidate;
         break;
@@ -993,27 +922,26 @@ export class Database {
         `[convex-embedded] Failed to allocate a unique document id for table "${table}".`,
       );
     }
-    this._idTableMap.set(_id as string, table);
+    idTableMap.set(_id as string, table);
     const now = Date.now();
     const _creationTime =
-      now <= this._lastCreationTime ? this._lastCreationTime + 0.001 : now;
-    this._lastCreationTime = _creationTime;
-    this._addWrite(
+      now <= lastCreationTime ? lastCreationTime + 0.001 : now;
+    lastCreationTime = _creationTime;
+    addWrite(
       _id,
-      this._withIdentityScope(table, { ...value, _id, _creationTime }),
+      withIdentityScope(table, { ...value, _id, _creationTime }),
     );
     return _id;
   }
 
-  /** Merge `value` into an existing document (like `Object.assign`). */
-  patch(
+  function patch(
     tableName: TableName | undefined,
     id: DocumentId,
     value: Record<string, unknown>,
   ): void {
     const idText = formatValueForError(id);
-    if (!this._validateId(tableName, id)) {
-      throw this._patchMissingDocError("Patch", tableName, idText);
+    if (!validateId(tableName, id)) {
+      throw patchMissingDocError("Patch", tableName, idText);
     }
 
     if (typeof value !== "object" || value === null) {
@@ -1022,14 +950,11 @@ export class Database {
       );
     }
 
-    const rawDocument = this._getRaw(id);
-    if (
-      rawDocument === null ||
-      !this._isVisibleInScope(tableName, rawDocument)
-    ) {
-      throw this._patchMissingDocError("Patch", tableName, idText);
+    const rawDocument = getRaw(id);
+    if (rawDocument === null || !isVisibleInScope(tableName, rawDocument)) {
+      throw patchMissingDocError("Patch", tableName, idText);
     }
-    const document = this._stripIdentityScope(rawDocument);
+    const document = stripIdentityScope(rawDocument);
 
     const { _id, _creationTime, ...fields } = document;
 
@@ -1058,25 +983,21 @@ export class Database {
     }
 
     const merged = { ...fields, ...convexValue };
-    this._validate(
-      this._idTableMap.get(_id as string)!,
-      merged as GenericDocument,
-    );
-    this._addWrite(
+    validate(idTableMap.get(_id as string)!, merged as GenericDocument);
+    addWrite(
       id,
-      this._withIdentityScope(tableName, { _id, _creationTime, ...merged }),
+      withIdentityScope(tableName, { _id, _creationTime, ...merged }),
     );
   }
 
-  /** Replace all user fields of an existing document. */
-  replace(
+  function replace(
     tableName: TableName | undefined,
     id: DocumentId,
     value: Record<string, unknown>,
   ): void {
     const idText = formatValueForError(id);
-    if (!this._validateId(tableName, id)) {
-      throw this._patchMissingDocError("Replace", tableName, idText);
+    if (!validateId(tableName, id)) {
+      throw patchMissingDocError("Replace", tableName, idText);
     }
 
     if (typeof value !== "object" || value === null) {
@@ -1085,14 +1006,11 @@ export class Database {
       );
     }
 
-    const rawDocument = this._getRaw(id);
-    if (
-      rawDocument === null ||
-      !this._isVisibleInScope(tableName, rawDocument)
-    ) {
-      throw this._patchMissingDocError("Replace", tableName, idText);
+    const rawDocument = getRaw(id);
+    if (rawDocument === null || !isVisibleInScope(tableName, rawDocument)) {
+      throw patchMissingDocError("Replace", tableName, idText);
     }
-    const document = this._stripIdentityScope(rawDocument);
+    const document = stripIdentityScope(rawDocument);
 
     if (value._id !== undefined && value._id !== document._id) {
       throw new Error(
@@ -1118,13 +1036,13 @@ export class Database {
       convexValue[key] = evaluateValue(v as JSONValue);
     }
 
-    this._validate(
-      this._idTableMap.get(document._id as string)!,
+    validate(
+      idTableMap.get(document._id as string)!,
       convexValue as GenericDocument,
     );
-    this._addWrite(
+    addWrite(
       id,
-      this._withIdentityScope(tableName, {
+      withIdentityScope(tableName, {
         ...convexValue,
         _id: document._id,
         _creationTime: document._creationTime,
@@ -1132,38 +1050,22 @@ export class Database {
     );
   }
 
-  /** Mark a document as deleted. */
-  delete(tableName: TableName | undefined, id: DocumentId): void {
-    if (!this._validateId(tableName, id)) {
+  function deleteDoc(
+    tableName: TableName | undefined,
+    id: DocumentId,
+  ): void {
+    if (!validateId(tableName, id)) {
       throw new Error("Delete on non-existent doc");
     }
 
-    const rawDocument = this._getRaw(id);
-    if (
-      rawDocument === null ||
-      !this._isVisibleInScope(tableName, rawDocument)
-    ) {
+    const rawDocument = getRaw(id);
+    if (rawDocument === null || !isVisibleInScope(tableName, rawDocument)) {
       throw new Error("Delete on non-existent doc");
     }
-    this._addWrite(id, null);
+    addWrite(id, null);
   }
 
-  /**
-   * Upsert a document with a caller-supplied `_id` and `_creationTime`.
-   *
-   * Used when ingesting authoritative documents from a remote source
-   * (e.g. a remote Convex backend). Unlike {@link insert}, this method
-   * does **not** generate a new UUID — it uses the provided `_id` as-is.
-   *
-   * - If the `_id` already exists in the database and belongs to the
-   *   same table, the document is **replaced** with the incoming values.
-   * - If the `_id` is new, it is registered in the ID table map and
-   *   inserted as a new document.
-   * - Throws if the `_id` belongs to a **different** table.
-   *
-   * Must be called within an active transaction.
-   */
-  writeDocument(
+  function writeDocument(
     table: TableName,
     doc: Record<string, unknown> & { _id: string; _creationTime: number },
     options: { validate?: boolean } = {},
@@ -1177,10 +1079,10 @@ export class Database {
     const docId = _id as unknown as DocumentId;
 
     if (options.validate ?? true) {
-      this._validate(table, userFields as GenericDocument);
+      validate(table, userFields as GenericDocument);
     }
 
-    const existingTable = this._idTableMap.get(_id);
+    const existingTable = idTableMap.get(_id);
 
     if (existingTable !== undefined) {
       if (existingTable !== table) {
@@ -1189,24 +1091,24 @@ export class Database {
             `not "${table}"`,
         );
       }
-      this._addWrite(
+      addWrite(
         docId,
-        this._withIdentityScope(table, {
+        withIdentityScope(table, {
           _id: docId,
           _creationTime,
           ...userFields,
         }),
       );
     } else {
-      this._idTableMap.set(_id, table);
+      idTableMap.set(_id, table);
 
-      if (_creationTime > this._lastCreationTime) {
-        this._lastCreationTime = _creationTime;
+      if (_creationTime > lastCreationTime) {
+        lastCreationTime = _creationTime;
       }
 
-      this._addWrite(
+      addWrite(
         docId,
-        this._withIdentityScope(table, {
+        withIdentityScope(table, {
           _id: docId,
           _creationTime,
           ...userFields,
@@ -1215,19 +1117,8 @@ export class Database {
     }
   }
 
-  /**
-   * Remove a document by ID if it exists. Returns `true` if the document
-   * was found and deleted, `false` if it was not present (no-op).
-   *
-   * Unlike {@link delete}, this method does **not** throw when the
-   * document is missing — it silently returns `false`. This is useful
-   * when syncing deletions from a remote source where the local state
-   * may already be out of remote.
-   *
-   * Must be called within an active transaction.
-   */
-  deleteDocument(table: TableName, id: DocumentId): boolean {
-    const existingTable = this._idTableMap.get(id as string);
+  function deleteDocument(table: TableName, id: DocumentId): boolean {
+    const existingTable = idTableMap.get(id as string);
     if (existingTable === undefined) {
       return false;
     }
@@ -1239,82 +1130,70 @@ export class Database {
       );
     }
 
-    const rawDocument = this._getRaw(id);
-    if (rawDocument === null || !this._isVisibleInScope(table, rawDocument)) {
+    const rawDocument = getRaw(id);
+    if (rawDocument === null || !isVisibleInScope(table, rawDocument)) {
       return false;
     }
 
-    this._addWrite(id, null);
+    addWrite(id, null);
     return true;
   }
 
-  /**
-   * Return all committed + pending documents for a given table.
-   *
-   * Reads through the write stack so in-transaction changes are visible.
-   * Deleted documents (write === null) are excluded.
-   */
-  getDocumentsForTable(tableName: string): StoredDocument[] {
+  function getDocumentsForTable(tableName: string): StoredDocument[] {
     const results: StoredDocument[] = [];
-    this._iterateDocs(tableName, (doc) => results.push(doc));
+    iterateDocs(tableName, (doc) => results.push(doc));
     return results;
   }
 
-  hasDocumentsForTable(tableName: string): boolean {
-    return (this._tableDocuments.get(tableName)?.size ?? 0) > 0;
+  function hasDocumentsForTable(tableName: string): boolean {
+    return (tableDocuments.get(tableName)?.size ?? 0) > 0;
   }
 
-  getTableNames(): string[] {
+  function getTableNames(): string[] {
     const names = new Set<string>();
-    if (this._schema) {
-      for (const name of this._schema.tables.keys()) {
+    if (schema) {
+      for (const name of schema.tables.keys()) {
         names.add(name);
       }
     }
-    for (const name of this._tableDocuments.keys()) {
+    for (const name of tableDocuments.keys()) {
       names.add(name);
     }
     return [...names].sort();
   }
 
-  getIndexDefinitions(
+  function getIndexDefinitions(
     tableName: string,
   ): Array<{ indexName: string; fields: string[] }> {
-    return this._getIndexDefinitions(tableName).map((definition) => ({
+    return getIndexDefinitionsInternal(tableName).map((definition) => ({
       indexName: definition.indexName,
       fields: [...definition.fields],
     }));
   }
 
-  migrateAnonymousDataToIdentity(identityKey: string): Set<string> {
-    const tablesWritten = new Set<string>();
-    for (const [id, doc] of this._documents) {
-      const tableName = this._idTableMap.get(id);
-      if (!tableName || !this._isIdentityScopedTable(tableName)) {
+  function migrateAnonymousDataToIdentity(identityKey: string): Set<string> {
+    const written = new Set<string>();
+    for (const [id, doc] of documents) {
+      const tableName = idTableMap.get(id);
+      if (!tableName || !isIdentityScopedTable(tableName)) {
         continue;
       }
       if ((doc as IdentityScopedDocument)[IDENTITY_SCOPE_FIELD] != null) {
         continue;
       }
-      this._addWrite(id as DocumentId, {
+      addWrite(id as DocumentId, {
         ...(doc as IdentityScopedDocument),
         [IDENTITY_SCOPE_FIELD]: identityKey,
       });
-      tablesWritten.add(tableName);
+      written.add(tableName);
     }
-    return tablesWritten;
+    return written;
   }
 
-  /**
-   * Re-stamp anonymous (`identity_key IS NULL`) rows that live only in SQLite —
-   * the in-memory {@link migrateAnonymousDataToIdentity} pass cannot see them
-   * because user tables are SQLite-as-truth and never bulk-hydrated. Returns the
-   * logical tables changed; their committed cache is evicted so reads re-fetch.
-   */
-  async reStampAnonymousUserTablesInStorage(
+  async function reStampAnonymousUserTablesInStorage(
     identityKey: string,
   ): Promise<string[]> {
-    const adapter = this._storage as
+    const adapter = storageAdapter as
       | (StorageAdapter & {
           reStampAnonymousIdentity?: (key: string) => Promise<string[]>;
         })
@@ -1324,107 +1203,99 @@ export class Database {
     }
     const changed = await adapter.reStampAnonymousIdentity(identityKey);
     for (const tableName of changed) {
-      this._evictCommittedTable(tableName);
+      evictCommittedTable(tableName);
     }
     return changed;
   }
 
-  private _evictCommittedTable(tableName: string): void {
-    const ids = this._tableDocuments.get(tableName);
+  function evictCommittedTable(tableName: string): void {
+    const ids = tableDocuments.get(tableName);
     if (!ids) {
       return;
     }
     for (const id of ids) {
-      this._documents.delete(id as DocumentId);
+      documents.delete(id as DocumentId);
     }
-    this._tableDocuments.delete(tableName);
+    tableDocuments.delete(tableName);
   }
 
-  /**
-   * If `idString` is a valid ID that belongs to `table`, return it.
-   * Otherwise return `null`.
-   */
-  normalizeId(table: TableName, idString: string): DocumentId | null {
+  function normalizeId(table: TableName, idString: string): DocumentId | null {
     if (typeof idString !== "string") return null;
-    return this._idTableMap.get(idString) === table
+    return idTableMap.get(idString) === table
       ? (idString as DocumentId)
       : null;
   }
 
-  /**
-   * Look up the table name for a given document ID.
-   * Returns `undefined` if the ID is not known.
-   */
-  getTableForId(id: string): string | undefined {
-    return this._idTableMap.get(id);
+  function getTableForId(id: string): string | undefined {
+    return idTableMap.get(id);
   }
 
-  async storeFile(storageId: DocumentId, blob: Blob): Promise<void> {
-    this._blobStorage.set(storageId, blob);
+  async function storeFile(storageId: DocumentId, blob: Blob): Promise<void> {
+    blobStorage.set(storageId, blob);
 
-    if (this._storage) {
-      await this._storage.storeBlob(storageId as string, blob);
+    if (storageAdapter) {
+      await storageAdapter.storeBlob(storageId as string, blob);
     }
   }
 
-  deleteBlob(storageId: string): void {
-    this._blobStorage.delete(storageId as DocumentId);
+  function deleteBlob(storageId: string): void {
+    blobStorage.delete(storageId as DocumentId);
 
-    if (this._storage) {
-      this._storage.deleteBlob(storageId).catch((error) => {
+    if (storageAdapter) {
+      storageAdapter.deleteBlob(storageId).catch((error) => {
         log.error("blob delete failed:", error);
       });
     }
   }
 
-  async loadFile(storageId: DocumentId): Promise<Blob | null> {
-    if (this.get("_storage", storageId) === null) {
+  async function loadFile(storageId: DocumentId): Promise<Blob | null> {
+    if (get("_storage", storageId) === null) {
       return null;
     }
 
-    const cached = this._blobStorage.get(storageId) ?? null;
+    const cached = blobStorage.get(storageId) ?? null;
     if (cached !== null) {
       return cached;
     }
 
-    if (this._storage === null) {
+    if (storageAdapter === null) {
       return null;
     }
 
-    const blob = await this._storage.getBlob(storageId as string);
+    const blob = await storageAdapter.getBlob(storageId as string);
     if (blob !== null) {
-      this._blobStorage.set(storageId, blob);
+      blobStorage.set(storageId, blob);
     }
     return blob;
   }
 
-  startQuery(query: SerializedQuery): QueryId {
-    return this.queryEngine.startQuery(query);
+  function startQuery(query: SerializedQuery): QueryId {
+    return queryEngine.startQuery(query);
   }
 
-  startQueryAsync(query: SerializedQuery): QueryId {
-    return this.queryEngine.startQueryAsync(query);
+  function startQueryAsync(query: SerializedQuery): QueryId {
+    return queryEngine.startQueryAsync(query);
   }
 
-  queryNext(queryId: QueryId): {
+  function queryNext(queryId: QueryId): {
     value: GenericDocument | null;
     done: boolean;
   } {
-    return this.queryEngine.queryNext(queryId);
+    return queryEngine.queryNext(queryId);
   }
 
-  queryNextAsync(queryId: QueryId): Promise<{
+  function queryNextAsync(queryId: QueryId): Promise<{
     value: GenericDocument | null;
     done: boolean;
   }> {
-    return this.queryEngine.queryNextAsync(queryId);
+    return queryEngine.queryNextAsync(queryId);
   }
 
-  queryCleanup(queryId: QueryId): void {
-    this.queryEngine.queryCleanup(queryId);
+  function queryCleanup(queryId: QueryId): void {
+    queryEngine.queryCleanup(queryId);
   }
 
-  paginateAsync(args: {
+  function paginateAsync(args: {
     query: SerializedQuery;
     cursor: string | null;
     endCursor?: string | null;
@@ -1436,147 +1307,148 @@ export class Database {
       span.setAttribute("convex.page.size", args.pageSize);
       span.setAttribute("convex.page.has_cursor", args.cursor !== null);
       span.setAttribute("convex.page.has_end_cursor", args.endCursor != null);
-      const result = await this.queryEngine.paginateAsync(args);
+      const result = await queryEngine.paginateAsync(args);
       span.setAttribute("convex.page.returned", result.page.length);
       span.setAttribute("convex.page.is_done", result.isDone);
       return result;
     });
   }
 
-  count(tableName: string): number {
-    return this.queryEngine.count(tableName);
+  function count(tableName: string): number {
+    return queryEngine.count(tableName);
   }
 
-  countAsync(tableName: string): Promise<number> {
-    if (!this._hasPendingWritesForTable(tableName)) {
-      return this._store
+  function countAsync(tableName: string): Promise<number> {
+    if (!hasPendingWritesForTable(tableName)) {
+      return store
         .countDocuments(
           tableName as TableName,
-          this._storageReadOptions(tableName),
+          storageReadOptions(tableName),
         )
-        .then((count) => count ?? this.count(tableName));
+        .then((c) => c ?? count(tableName));
     }
-    return Promise.resolve(this.count(tableName));
+    return Promise.resolve(count(tableName));
   }
 
-  async getAsync(
+  async function getAsync(
     tableName: TableName | undefined,
     id: DocumentId,
     options: { countRead?: boolean } = {},
   ): Promise<StoredDocument | null> {
     let resolvedTable =
-      tableName ??
-      (this._idTableMap.get(id as string) as TableName | undefined);
+      tableName ?? (idTableMap.get(id as string) as TableName | undefined);
     if (
       resolvedTable !== undefined &&
-      this.isTableHydrationAttempted(resolvedTable) &&
-      !this._hasPendingWritesForTable(resolvedTable)
+      isTableHydrationAttempted(resolvedTable) &&
+      !hasPendingWritesForTable(resolvedTable)
     ) {
-      const inMemory = this._getRaw(id);
+      const inMemory = getRaw(id);
       if (inMemory !== null) {
-        return this._visibleDocumentInScope(resolvedTable, inMemory);
+        return visibleDocumentInScope(resolvedTable, inMemory);
       }
     }
     if (resolvedTable === undefined) {
-      resolvedTable = (await this._findTableForIdViaBackend(id)) as
+      resolvedTable = (await findTableForIdViaBackend(id)) as
         | TableName
         | undefined;
     }
     if (
       resolvedTable !== undefined &&
-      !this._hasPendingWritesForTable(resolvedTable)
+      !hasPendingWritesForTable(resolvedTable)
     ) {
-      const document = await this._store.getDocument(
+      const document = await store.getDocument(
         resolvedTable,
         id,
-        this._storageReadOptions(resolvedTable),
+        storageReadOptions(resolvedTable),
       );
       if (document !== null) {
-        this._rememberCommittedLookup(resolvedTable, [document]);
+        rememberCommittedLookup(resolvedTable, [document]);
       }
       if (document !== null) {
-        return this._stripIdentityScope(document as IdentityScopedDocument);
+        return stripIdentityScope(document as IdentityScopedDocument);
       }
     }
-    return this.get(resolvedTable, id, options);
+    return get(resolvedTable, id, options);
   }
 
-  private async _findTableForIdViaBackend(
+  async function findTableForIdViaBackend(
     id: DocumentId,
   ): Promise<string | undefined> {
-    if (!this._schema) {
+    if (!schema) {
       return undefined;
     }
-    for (const [tableName] of this._schema.tables) {
-      if (this._isSystemTable(tableName)) {
+    for (const [tableName] of schema.tables) {
+      if (isSystemTable(tableName)) {
         continue;
       }
-      const found = await this._store.getDocument(
+      const found = await store.getDocument(
         tableName,
         id,
-        this._storageReadOptions(tableName),
+        storageReadOptions(tableName),
       );
       if (found !== null) {
-        this._idTableMap.set(id as string, tableName);
+        idTableMap.set(id as string, tableName);
         return tableName;
       }
     }
     return undefined;
   }
 
-  async ensureCommittedDocumentForWrite(
+  async function ensureCommittedDocumentForWrite(
     tableName: TableName,
     id: DocumentId,
   ): Promise<boolean> {
-    if (this._getRaw(id) !== null) {
+    if (getRaw(id) !== null) {
       return true;
     }
 
-    if (this.isTableHydrationAttempted(tableName)) {
+    if (isTableHydrationAttempted(tableName)) {
       return false;
     }
 
-    const document = await this._store.getDocument(
+    const document = await store.getDocument(
       tableName,
       id,
-      this._storageReadOptions(tableName),
+      storageReadOptions(tableName),
     );
     if (document === null) {
       return false;
     }
 
-    this._idTableMap.set(id, tableName);
-    this._cacheCommittedDocument(tableName, document);
+    idTableMap.set(id, tableName);
+    cacheCommittedDocument(tableName, document);
     return true;
   }
 
-  async listDocumentsAsync(tableName: TableName): Promise<StoredDocument[]> {
-    if (this.isTableHydrationAttempted(tableName)) {
-      return this.getDocumentsForTable(tableName);
+  async function listDocumentsAsync(
+    tableName: TableName,
+  ): Promise<StoredDocument[]> {
+    if (isTableHydrationAttempted(tableName)) {
+      return getDocumentsForTable(tableName);
     }
-    if (!this._hasPendingWritesForTable(tableName)) {
-      const docs = await this._store.getDocuments(
+    if (!hasPendingWritesForTable(tableName)) {
+      const docs = await store.getDocuments(
         tableName,
-        this._storageReadOptions(tableName),
+        storageReadOptions(tableName),
       );
       if (docs !== null) {
-        this._rememberCommittedLookup(tableName, docs);
-        return this._stripIdentityScopes(docs);
+        rememberCommittedLookup(tableName, docs);
+        return stripIdentityScopes(docs);
       }
     }
-    return this.getDocumentsForTable(tableName);
+    return getDocumentsForTable(tableName);
   }
 
-  async listDocumentsForScopeAsync(
+  async function listDocumentsForScopeAsync(
     tableName: TableName,
     scopeArgs: Record<string, unknown>,
   ): Promise<StoredDocument[] | null> {
     const scopeKeys = Object.keys(scopeArgs);
     if (scopeKeys.length === 0) {
-      return this.listDocumentsAsync(tableName);
+      return listDocumentsAsync(tableName);
     }
     const wantedKeys = new Set(scopeKeys);
-    const index = this.getIndexDefinitions(tableName).find((definition) => {
+    const index = getIndexDefinitions(tableName).find((definition) => {
       if (definition.fields.length < scopeKeys.length) return false;
       return definition.fields
         .slice(0, scopeKeys.length)
@@ -1595,17 +1467,20 @@ export class Database {
       })),
       order: null,
     };
-    const evaluation = await this._readOptimizedSourceAsync(source);
+    const evaluation = await readOptimizedSourceAsync(source);
     return evaluation?.results ?? null;
   }
 
-  getCommittedTableCount(tableName: string): number {
-    return this._tableDocuments.get(tableName)?.size ?? 0;
+  function getCommittedTableCount(tableName: string): number {
+    return tableDocuments.get(tableName)?.size ?? 0;
   }
 
-  getIndexedDocuments(tableName: string, indexName: string): StoredDocument[] {
+  function getIndexedDocuments(
+    tableName: string,
+    indexName: string,
+  ): StoredDocument[] {
     const indexKey = `${tableName}.${indexName}`;
-    const ids = this._indexDocuments.get(indexKey);
+    const ids = indexDocuments.get(indexKey);
     if (!ids) {
       if (
         indexName === "by_creation_time" ||
@@ -1638,21 +1513,21 @@ export class Database {
       log.warn(
         `duplicate committed ids detected for ${indexKey}: ${Array.from(duplicateIds).join(", ")}; rebuilding index`,
       );
-      this._rebuildTableIndexes(tableName);
-      const rebuiltIds = this._indexDocuments.get(indexKey) ?? [];
+      rebuildTableIndexes(tableName);
+      const rebuiltIds = indexDocuments.get(indexKey) ?? [];
       return rebuiltIds
-        .map((id) => this._documents.get(id as DocumentId))
+        .map((id) => documents.get(id as DocumentId))
         .filter((doc): doc is StoredDocument => doc !== undefined)
-        .map((doc) => this._stripIdentityScope(doc as IdentityScopedDocument));
+        .map((doc) => stripIdentityScope(doc as IdentityScopedDocument));
     }
 
     return uniqueIds
-      .map((id) => this._documents.get(id as DocumentId))
+      .map((id) => documents.get(id as DocumentId))
       .filter((doc): doc is StoredDocument => doc !== undefined)
-      .map((doc) => this._stripIdentityScope(doc as IdentityScopedDocument));
+      .map((doc) => stripIdentityScope(doc as IdentityScopedDocument));
   }
 
-  vectorSearch(
+  function vectorSearch(
     tableAndIndexName: string,
     vector: number[],
     filter: VectorSearchExpression | null,
@@ -1662,44 +1537,39 @@ export class Database {
       string,
       string,
     ];
-    const state = this._vectorIndexes.get(`${tableName}.${indexName}`);
+    const state = vectorIndexes.get(`${tableName}.${indexName}`);
     if (state) {
       getVectorIndexDefinition(
-        this._schema?.tables.get(tableName)?.vectorIndexes,
+        schema?.tables.get(tableName)?.vectorIndexes,
         tableName,
         indexName,
       );
 
-      if (!this._hasPendingWritesForTable(tableName)) {
+      if (!hasPendingWritesForTable(tableName)) {
         return executeVectorSearch(state, {
           vector,
           limit,
           filter,
-          activeIdentityKey: this._activeIdentityKey,
+          activeIdentityKey,
         });
       }
 
       return executeOverlayVectorSearch(
         state,
-        this._buildPendingVectorOverlay(tableName, state),
+        buildPendingVectorOverlay(tableName, state),
         {
           vector,
           limit,
           filter,
-          activeIdentityKey: this._activeIdentityKey,
+          activeIdentityKey,
         },
       );
     }
 
-    return this.queryEngine.vectorSearch(
-      tableAndIndexName,
-      vector,
-      filter,
-      limit,
-    );
+    return queryEngine.vectorSearch(tableAndIndexName, vector, filter, limit);
   }
 
-  async vectorSearchAsync(
+  async function vectorSearchAsync(
     tableAndIndexName: string,
     vector: number[],
     filter: VectorSearchExpression | null,
@@ -1710,21 +1580,21 @@ export class Database {
       string,
     ];
     const definition = getVectorIndexDefinition(
-      this._schema?.tables.get(tableName)?.vectorIndexes,
+      schema?.tables.get(tableName)?.vectorIndexes,
       tableName,
       indexName,
     );
 
-    if (this._isQueryableTable(tableName)) {
+    if (isQueryableTable(tableName)) {
       const candidates =
-        (await this._store.vectorSearch({
+        (await store.vectorSearch({
           tableName,
           indexName,
           definition,
           filter,
-          activeIdentityKey: this._activeIdentityKey,
+          activeIdentityKey,
         })) ?? [];
-      this._rememberCommittedLookup(tableName, candidates);
+      rememberCommittedLookup(tableName, candidates);
       const baseState = buildVectorIndexState({
         docs: candidates.map((doc) => {
           const raw = (doc as Record<string, unknown>)[IDENTITY_SCOPE_FIELD];
@@ -1735,39 +1605,30 @@ export class Database {
         }),
         definition,
       });
-      if (!this._hasPendingWritesForTable(tableName)) {
+      if (!hasPendingWritesForTable(tableName)) {
         return executeVectorSearch(baseState, {
           vector,
           limit,
           filter,
-          activeIdentityKey: this._activeIdentityKey,
+          activeIdentityKey,
         });
       }
       return executeOverlayVectorSearch(
         baseState,
-        this._buildPendingVectorOverlay(tableName, baseState),
+        buildPendingVectorOverlay(tableName, baseState),
         {
           vector,
           limit,
           filter,
-          activeIdentityKey: this._activeIdentityKey,
+          activeIdentityKey,
         },
       );
     }
 
-    return this.vectorSearch(tableAndIndexName, vector, filter, limit);
+    return vectorSearch(tableAndIndexName, vector, filter, limit);
   }
 
-  /**
-   * Validate that `id` is a string whose table (looked up in `_idTableMap`)
-   * matches `expectedTableName` (when non-undefined).
-   *
-   * Returns `true` if the ID is known and valid, `false` if the ID is a
-   * valid UUID string but not present in `_idTableMap` (deleted or never
-   * existed). Throws only for genuinely invalid arguments (wrong type,
-   * wrong table).
-   */
-  private _validateId(
+  function validateId(
     expectedTableName: unknown,
     id: unknown,
   ): id is DocumentId {
@@ -1787,7 +1648,7 @@ export class Database {
       );
     }
 
-    const actualTableName = this._idTableMap.get(id);
+    const actualTableName = idTableMap.get(id);
     if (actualTableName === undefined) {
       return false;
     }
@@ -1801,15 +1662,15 @@ export class Database {
     return true;
   }
 
-  private _patchMissingDocError(
+  function patchMissingDocError(
     op: "Patch" | "Replace",
     tableName: TableName | undefined,
     idText: string,
   ): Error {
     if (
       typeof tableName === "string" &&
-      this._isQueryableTable(tableName) &&
-      !this._tableDocuments.has(tableName)
+      isQueryableTable(tableName) &&
+      !tableDocuments.has(tableName)
     ) {
       return new Error(
         `[convex-embedded] ${op} on SQL-backed table "${tableName}" requires the document to be hydrated first (id ${idText}). ` +
@@ -1819,111 +1680,97 @@ export class Database {
     return new Error(`${op} on non-existent document with ID "${idText}"`);
   }
 
-  /**
-   * Validate a document against the schema for `tableName`.
-   * No-op when running schema-less or when validation is disabled.
-   */
-  private _validate(tableName: string, doc: GenericDocument): void {
-    if (this._schema === null || !this._schema.schemaValidation) {
+  function validate(tableName: string, doc: GenericDocument): void {
+    if (schema === null || !schema.schemaValidation) {
       return;
     }
-    const validator = this._schema.tables.get(tableName)?.documentType;
+    const validator = schema.tables.get(tableName)?.documentType;
     if (validator === undefined) {
       return;
     }
-    validateValidator(validator, doc, (id) => this._idTableMap.get(id));
+    validateValidator(validator, doc, (id) => idTableMap.get(id));
   }
 
-  /**
-   * Stage a write into the deepest pending transaction level.
-   * Throws if no transaction is active.
-   */
-  private _addWrite(id: DocumentId, newValue: StoredDocument | null): void {
-    if (this._writes.length === 0) {
+  function addWrite(id: DocumentId, newValue: StoredDocument | null): void {
+    if (writes.length === 0) {
       throw new Error(`Write outside of transaction ${id}`);
     }
-    this._registerWrite(this._writes.length - 1, id, newValue);
+    registerWrite(writes.length - 1, id, newValue);
   }
 
-  /**
-   * Low-level write into the current deepest transaction level.
-   * Used during nested commit to merge child writes into the parent —
-   * skips the "no transaction" check because the parent level exists.
-   */
-  private _addWriteRaw(id: DocumentId, newValue: StoredDocument | null): void {
-    this._registerWrite(this._writes.length - 1, id, newValue);
+  function addWriteRaw(id: DocumentId, newValue: StoredDocument | null): void {
+    registerWrite(writes.length - 1, id, newValue);
   }
 
-  private _registerWrite(
+  function registerWrite(
     level: number,
     id: DocumentId,
     newValue: StoredDocument | null,
   ): void {
-    const writes = this._writes[level]!;
-    if (writes[id] === undefined) {
-      this._pendingWriteCount += 1;
-      this._writeCounts[level] = (this._writeCounts[level] ?? 0) + 1;
-      const tableName = this._idTableMap.get(id as string);
+    const levelWrites = writes[level]!;
+    if (levelWrites[id] === undefined) {
+      pendingWriteCount += 1;
+      writeCounts[level] = (writeCounts[level] ?? 0) + 1;
+      const tableName = idTableMap.get(id as string);
       if (tableName) {
-        this._pendingTableState.delete(tableName);
-        let ids = this._writeTables[level]?.get(tableName);
+        pendingTableState.delete(tableName);
+        let ids = writeTables[level]?.get(tableName);
         if (!ids) {
           ids = new Set();
-          this._writeTables[level]?.set(tableName, ids);
+          writeTables[level]?.set(tableName, ids);
         }
         ids.add(id as string);
       }
     }
 
-    writes[id] = newValue;
+    levelWrites[id] = newValue;
   }
 
-  private _popCommittedWriteLevel(): Record<DocumentId, StoredDocument | null> {
-    const lastWrites = this._writes.pop();
-    const lastWriteCount = this._writeCounts.pop();
-    this._writeTables.pop();
+  function popCommittedWriteLevel(): Record<DocumentId, StoredDocument | null> {
+    const lastWrites = writes.pop();
+    const lastWriteCount = writeCounts.pop();
+    writeTables.pop();
     if (lastWrites === undefined) {
       throw new Error("Transaction already committed or rolled back");
     }
-    this._pendingWriteCount -= lastWriteCount ?? 0;
-    this._pendingTableState.clear();
+    pendingWriteCount -= lastWriteCount ?? 0;
+    pendingTableState.clear();
 
     for (const id of Object.keys(lastWrites)) {
-      const table = this._idTableMap.get(id);
+      const table = idTableMap.get(id);
       if (table !== undefined) {
-        this._tablesWritten.add(table);
+        tablesWritten.add(table);
       }
     }
 
     return lastWrites;
   }
 
-  private _mergeNestedCommittedWriteLevel(
+  function mergeNestedCommittedWriteLevel(
     lastWrites: Record<DocumentId, StoredDocument | null>,
   ): DatabaseCommitResult {
     for (const [id, write] of Object.entries(lastWrites)) {
-      this._addWriteRaw(id as DocumentId, write);
+      addWriteRaw(id as DocumentId, write);
     }
 
     return {
-      timestamp: this._timestamp,
-      tablesWritten: new Set(this._tablesWritten),
+      timestamp,
+      tablesWritten: new Set(tablesWritten),
       invalidation: { tables: new Set(), changes: [] },
       persisted: Promise.resolve(),
     };
   }
 
-  private _buildCommittedWriteArtifacts(
+  function buildCommittedWriteArtifacts(
     lastWrites: Record<DocumentId, StoredDocument | null>,
   ): CommittedWriteArtifacts {
     return Object.entries(lastWrites).reduce<CommittedWriteArtifacts>(
       (acc, [id, write]) => {
         const docId = id as DocumentId;
-        const tableName = this._idTableMap.get(id) ?? "";
+        const tableName = idTableMap.get(id) ?? "";
         const shouldMaterialize = true;
         const before =
-          (this._documents.get(docId) as IdentityScopedDocument | undefined) ??
-          null;
+          (documents.get(docId) as IdentityScopedDocument | undefined) ?? null;
 
         if (write === null) {
           acc.deletes.push({ id, tableName });
@@ -1938,7 +1785,7 @@ export class Database {
             if (shouldMaterialize) {
               acc.invalidation.changes.push({
                 tableName,
-                before: before ? this._stripIdentityScope(before) : null,
+                before: before ? stripIdentityScope(before) : null,
                 after: null,
               });
               acc.invalidation.tables.add(tableName);
@@ -1967,8 +1814,8 @@ export class Database {
           if (shouldMaterialize) {
             acc.invalidation.changes.push({
               tableName,
-              before: before ? this._stripIdentityScope(before) : null,
-              after: this._stripIdentityScope(write as IdentityScopedDocument),
+              before: before ? stripIdentityScope(before) : null,
+              after: stripIdentityScope(write as IdentityScopedDocument),
             });
             acc.invalidation.tables.add(tableName);
           }
@@ -1993,81 +1840,76 @@ export class Database {
     );
   }
 
-  private _applyCommittedRowChanges(changes: CommittedRowChange[]): void {
+  function applyCommittedRowChanges(changes: CommittedRowChange[]): void {
     for (const change of changes) {
       const { tableName, id, after, shouldMaterialize } = change;
       if (after === null) {
-        this._documents.delete(id);
+        documents.delete(id);
         if (tableName) {
-          this._removeCommittedIdFromTable(tableName, id);
+          removeCommittedIdFromTable(tableName, id);
         }
-        this._idTableMap.delete(id);
+        idTableMap.delete(id);
         continue;
       }
 
       if (shouldMaterialize) {
-        this._documents.set(id, after);
+        documents.set(id, after);
         if (tableName) {
-          this._addCommittedIdToTable(tableName, id);
+          addCommittedIdToTable(tableName, id);
         }
       } else {
-        this._documents.delete(id);
+        documents.delete(id);
         if (tableName) {
-          this._removeCommittedIdFromTable(tableName, id);
+          removeCommittedIdFromTable(tableName, id);
         }
       }
       if (tableName) {
-        this._idTableMap.set(id, tableName);
+        idTableMap.set(id, tableName);
       }
     }
   }
 
-  private _applyCommittedIdHints(changes: CommittedRowChange[]): void {
+  function applyCommittedIdHints(changes: CommittedRowChange[]): void {
     for (const change of changes) {
       const { tableName, id, after } = change;
       if (after === null) {
-        this._idTableMap.delete(id);
+        idTableMap.delete(id);
         if (tableName) {
-          this._removeCommittedIdFromTable(tableName, id);
+          removeCommittedIdFromTable(tableName, id);
         }
         continue;
       }
       if (tableName) {
-        this._idTableMap.set(id, tableName);
+        idTableMap.set(id, tableName);
       }
     }
   }
 
-  private _persistCommitBatch(batch: CommitBatch): Promise<void> {
-    if (this._storage === null) return Promise.resolve();
+  function persistCommitBatch(batch: CommitBatch): Promise<void> {
+    if (storageAdapter === null) return Promise.resolve();
     if (batch.puts.length === 0 && batch.deletes.length === 0) {
       return Promise.resolve();
     }
     const write = (
-      this._storage as { write?: (b: CommitBatch) => Promise<unknown> }
+      storageAdapter as { write?: (b: CommitBatch) => Promise<unknown> }
     ).write;
     if (typeof write !== "function") return Promise.resolve();
-    return write.call(this._storage, batch).then(() => {});
+    return write.call(storageAdapter, batch).then(() => {});
   }
 
-  /**
-   * Iterate over all visible documents in `tableName`, including pending
-   * writes at every nesting level.  Deleted documents (write === null)
-   * are skipped.
-   */
-  private _iterateDocs(
+  function iterateDocs(
     tableName: string,
     callback: (doc: StoredDocument) => void,
   ): void {
-    if (!this._hasPendingWritesForTable(tableName)) {
-      for (const id of this._tableDocuments.get(tableName) ?? []) {
-        const document = this._documents.get(id as DocumentId) as
+    if (!hasPendingWritesForTable(tableName)) {
+      for (const id of tableDocuments.get(tableName) ?? []) {
+        const document = documents.get(id as DocumentId) as
           | IdentityScopedDocument
           | undefined;
         const visible =
           document === undefined
             ? null
-            : this._visibleDocumentInScope(tableName, document);
+            : visibleDocumentInScope(tableName, document);
         if (visible !== null) {
           callback(visible);
         }
@@ -2076,8 +1918,8 @@ export class Database {
     }
 
     const seen = new Set<string>();
-    for (let level = this._writes.length - 1; level >= 0; level -= 1) {
-      const ids = this._writeTables[level]?.get(tableName);
+    for (let level = writes.length - 1; level >= 0; level -= 1) {
+      const ids = writeTables[level]?.get(tableName);
       if (!ids) {
         continue;
       }
@@ -2088,43 +1930,43 @@ export class Database {
         }
         seen.add(id);
 
-        const document = this._writes[level]?.[id as DocumentId] as
+        const document = writes[level]?.[id as DocumentId] as
           | IdentityScopedDocument
           | null
           | undefined;
         const visible =
           document === undefined || document === null
             ? null
-            : this._visibleDocumentInScope(tableName, document);
+            : visibleDocumentInScope(tableName, document);
         if (visible !== null) {
           callback(visible);
         }
       }
     }
 
-    for (const id of this._tableDocuments.get(tableName) ?? []) {
+    for (const id of tableDocuments.get(tableName) ?? []) {
       if (seen.has(id)) {
         continue;
       }
-      const document = this._documents.get(id as DocumentId) as
+      const document = documents.get(id as DocumentId) as
         | IdentityScopedDocument
         | undefined;
       const visible =
         document === undefined
           ? null
-          : this._visibleDocumentInScope(tableName, document);
+          : visibleDocumentInScope(tableName, document);
       if (visible !== null) {
         callback(visible);
       }
     }
   }
 
-  private _getRaw(id: DocumentId): IdentityScopedDocument | null {
+  function getRaw(id: DocumentId): IdentityScopedDocument | null {
     let hasPendingWrite = false;
     let document: IdentityScopedDocument | null = null;
 
-    for (let i = this._writes.length - 1; i >= 0; i--) {
-      const write = this._writes[i]![id];
+    for (let i = writes.length - 1; i >= 0; i--) {
+      const write = writes[i]![id];
       if (write !== undefined) {
         hasPendingWrite = true;
         document = write as IdentityScopedDocument | null;
@@ -2134,41 +1976,41 @@ export class Database {
 
     if (!hasPendingWrite) {
       document =
-        (this._documents.get(id) as IdentityScopedDocument | undefined) ?? null;
+        (documents.get(id) as IdentityScopedDocument | undefined) ?? null;
     }
 
     return document;
   }
 
-  private _isIdentityScopedTable(tableName: TableName | undefined): boolean {
+  function isIdentityScopedTable(tableName: TableName | undefined): boolean {
     return typeof tableName === "string" && !tableName.startsWith("_");
   }
 
-  private _isVisibleInScope(
+  function isVisibleInScope(
     tableName: TableName | undefined,
     document: IdentityScopedDocument,
   ): boolean {
-    if (!this._isIdentityScopedTable(tableName)) {
+    if (!isIdentityScopedTable(tableName)) {
       return true;
     }
-    return (document[IDENTITY_SCOPE_FIELD] ?? null) === this._activeIdentityKey;
+    return (document[IDENTITY_SCOPE_FIELD] ?? null) === activeIdentityKey;
   }
 
-  private _withIdentityScope<T extends Record<string, unknown>>(
+  function withIdentityScope<T extends Record<string, unknown>>(
     tableName: TableName | undefined,
     document: T,
   ): T & { [IDENTITY_SCOPE_FIELD]?: string | null } {
-    if (!this._isIdentityScopedTable(tableName)) {
+    if (!isIdentityScopedTable(tableName)) {
       return document;
     }
 
     return {
       ...document,
-      [IDENTITY_SCOPE_FIELD]: this._activeIdentityKey,
+      [IDENTITY_SCOPE_FIELD]: activeIdentityKey,
     };
   }
 
-  private _stripIdentityScope(
+  function stripIdentityScope(
     document: IdentityScopedDocument,
   ): StoredDocument {
     if (!(IDENTITY_SCOPE_FIELD in document)) {
@@ -2178,33 +2020,31 @@ export class Database {
     return rest as StoredDocument;
   }
 
-  private _stripIdentityScopes(
-    documents: readonly StoredDocument[],
+  function stripIdentityScopes(
+    docs: readonly StoredDocument[],
   ): StoredDocument[] {
-    return documents.map((doc) =>
-      this._stripIdentityScope(doc as IdentityScopedDocument),
-    );
+    return docs.map((doc) => stripIdentityScope(doc as IdentityScopedDocument));
   }
 
-  private _visibleDocumentInScope(
+  function visibleDocumentInScope(
     tableName: TableName | undefined,
     document: IdentityScopedDocument,
   ): StoredDocument | null {
-    return this._isVisibleInScope(tableName, document)
-      ? this._stripIdentityScope(document)
+    return isVisibleInScope(tableName, document)
+      ? stripIdentityScope(document)
       : null;
   }
 
-  private _getPendingTableState(tableName: string): PendingTableState {
-    const cached = this._pendingTableState.get(tableName);
+  function getPendingTableState(tableName: string): PendingTableState {
+    const cached = pendingTableState.get(tableName);
     if (cached) {
       return cached;
     }
 
     const shadowedIds = new Set<string>();
     const rawVisibleDocs = new Map<string, IdentityScopedDocument>();
-    for (let level = this._writes.length - 1; level >= 0; level -= 1) {
-      const ids = this._writeTables[level]?.get(tableName);
+    for (let level = writes.length - 1; level >= 0; level -= 1) {
+      const ids = writeTables[level]?.get(tableName);
       if (!ids) {
         continue;
       }
@@ -2215,7 +2055,7 @@ export class Database {
         }
         shadowedIds.add(id);
 
-        const document = this._writes[level]?.[id as DocumentId] as
+        const document = writes[level]?.[id as DocumentId] as
           | IdentityScopedDocument
           | null
           | undefined;
@@ -2232,22 +2072,22 @@ export class Database {
       vectorOverlays: new Map(),
       searchOverlays: new Map(),
     };
-    this._pendingTableState.set(tableName, state);
+    pendingTableState.set(tableName, state);
     return state;
   }
 
-  private _getVisiblePendingDocs(tableName: string): Array<{
+  function getVisiblePendingDocs(tableName: string): Array<{
     doc: StoredDocument;
     identityKey: string | null;
   }> {
-    const pending = this._getPendingTableState(tableName);
+    const pending = getPendingTableState(tableName);
     if (pending.visiblePendingDocs) {
       return pending.visiblePendingDocs;
     }
 
     const docs: Array<{ doc: StoredDocument; identityKey: string | null }> = [];
     for (const document of pending.rawVisibleDocs.values()) {
-      const visible = this._visibleDocumentInScope(tableName, document);
+      const visible = visibleDocumentInScope(tableName, document);
       if (visible !== null) {
         docs.push({
           doc: visible,
@@ -2259,79 +2099,79 @@ export class Database {
     return docs;
   }
 
-  private _rememberCommittedLookup(
+  function rememberCommittedLookup(
     tableName: string,
     docs: readonly StoredDocument[],
   ): void {
     for (const doc of docs) {
       if (typeof doc._id === "string") {
-        this._idTableMap.set(doc._id, tableName);
-        this._cacheCommittedDocument(tableName, doc);
+        idTableMap.set(doc._id, tableName);
+        cacheCommittedDocument(tableName, doc);
       }
     }
   }
 
-  private _cacheCommittedDocument(
+  function cacheCommittedDocument(
     tableName: string,
     doc: StoredDocument,
   ): void {
     const scoped =
-      this._isIdentityScopedTable(tableName) &&
+      isIdentityScopedTable(tableName) &&
       (doc as IdentityScopedDocument)[IDENTITY_SCOPE_FIELD] === undefined
-        ? this._withIdentityScope(tableName, doc)
+        ? withIdentityScope(tableName, doc)
         : (doc as IdentityScopedDocument);
-    this._documents.set(doc._id as DocumentId, scoped);
-    this._addCommittedIdToTable(tableName, doc._id);
+    documents.set(doc._id as DocumentId, scoped);
+    addCommittedIdToTable(tableName, doc._id);
   }
 
-  private _addCommittedIdToTable(tableName: string, id: string): void {
-    let ids = this._tableDocuments.get(tableName);
+  function addCommittedIdToTable(tableName: string, id: string): void {
+    let ids = tableDocuments.get(tableName);
     if (!ids) {
       ids = new Set();
-      this._tableDocuments.set(tableName, ids);
+      tableDocuments.set(tableName, ids);
     }
     ids.add(id);
   }
 
-  private _removeCommittedIdFromTable(tableName: string, id: string): void {
-    const ids = this._tableDocuments.get(tableName);
+  function removeCommittedIdFromTable(tableName: string, id: string): void {
+    const ids = tableDocuments.get(tableName);
     if (!ids) {
       return;
     }
     ids.delete(id);
     if (ids.size === 0) {
-      this._tableDocuments.delete(tableName);
+      tableDocuments.delete(tableName);
     }
   }
 
-  private _clearCommittedTable(tableName: string): void {
-    for (const id of this._tableDocuments.get(tableName) ?? []) {
-      this._documents.delete(id as DocumentId);
-      this._idTableMap.delete(id);
+  function clearCommittedTable(tableName: string): void {
+    for (const id of tableDocuments.get(tableName) ?? []) {
+      documents.delete(id as DocumentId);
+      idTableMap.delete(id);
     }
-    this._tableDocuments.set(tableName, new Set());
+    tableDocuments.set(tableName, new Set());
   }
 
-  private _replaceCommittedTableSnapshot(
+  function replaceCommittedTableSnapshot(
     tableName: string,
     docs: readonly StoredDocument[],
   ): void {
-    this._clearCommittedTable(tableName);
+    clearCommittedTable(tableName);
     for (const doc of docs) {
-      this._documents.set(doc._id, this._withIdentityScope(tableName, doc));
-      this._idTableMap.set(doc._id as string, tableName);
-      this._addCommittedIdToTable(tableName, doc._id as string);
+      documents.set(doc._id, withIdentityScope(tableName, doc));
+      idTableMap.set(doc._id as string, tableName);
+      addCommittedIdToTable(tableName, doc._id as string);
     }
-    this._rebuildTableIndexes(tableName);
-    this._rebuildTableSearchIndexes(tableName);
-    this._rebuildTableVectorIndexes(tableName);
+    rebuildTableIndexes(tableName);
+    rebuildTableSearchIndexes(tableName);
+    rebuildTableVectorIndexes(tableName);
   }
 
-  private _resetBlobState(): void {
-    this._blobStorage.clear();
+  function resetBlobState(): void {
+    blobStorage.clear();
   }
 
-  private _readOptimizedSource(
+  function readOptimizedSource(
     source: SerializedQuery["source"],
     limit?: number | null,
     seek?: SeekBound,
@@ -2340,10 +2180,10 @@ export class Database {
       const indexName =
         source.order === "desc" ? "by_creation_time_desc" : "by_creation_time";
       const order = source.order ?? "asc";
-      if (this._hasPendingWritesForTable(source.tableName)) {
+      if (hasPendingWritesForTable(source.tableName)) {
         return {
-          results: this._applySeekToOrderedDocs(
-            this._getMergedIndexedDocuments(source.tableName, indexName),
+          results: applySeekToOrderedDocs(
+            getMergedIndexedDocuments(source.tableName, indexName),
             seek,
           ),
           fieldPathsToSortBy: [],
@@ -2351,11 +2191,11 @@ export class Database {
           presorted: true,
         };
       }
-      const ids = this._indexedIds(source.tableName, indexName);
+      const ids = indexedIds(source.tableName, indexName);
       if (ids === null) {
         return {
-          results: this._applySeekToOrderedDocs(
-            this.getIndexedDocuments(source.tableName, indexName),
+          results: applySeekToOrderedDocs(
+            getIndexedDocuments(source.tableName, indexName),
             seek,
           ),
           fieldPathsToSortBy: [],
@@ -2364,7 +2204,7 @@ export class Database {
         };
       }
       return {
-        results: this._readIndexWindow({
+        results: readIndexWindow({
           ids,
           fields: ["_creationTime", "_id"],
           lower: null,
@@ -2385,7 +2225,7 @@ export class Database {
         string,
         string,
       ];
-      const fields = this._getIndexDefinitions(tableName).find(
+      const fields = getIndexDefinitionsInternal(tableName).find(
         (entry) => entry.indexName === indexName,
       )?.fields;
       if (!fields) {
@@ -2394,15 +2234,15 @@ export class Database {
         );
       }
 
-      const lower = this._buildRangeBound([...source.range], fields, "lower");
-      const upper = this._buildRangeBound([...source.range], fields, "upper");
-      const predicate = this._buildRangePredicate(source.range);
-      const hasPending = this._hasPendingWritesForTable(tableName);
+      const lower = buildRangeBound([...source.range], fields, "lower");
+      const upper = buildRangeBound([...source.range], fields, "upper");
+      const predicate = buildRangePredicate(source.range);
+      const hasPending = hasPendingWritesForTable(tableName);
 
       if (hasPending && source.order === "asc") {
         return {
-          results: this._applySeekToOrderedDocs(
-            this._collectMergedIndexRangeDocs(
+          results: applySeekToOrderedDocs(
+            collectMergedIndexRangeDocs(
               tableName,
               indexName,
               [],
@@ -2421,10 +2261,10 @@ export class Database {
       }
 
       if (!hasPending) {
-        const ids = this._indexedIds(tableName, indexName);
+        const ids = indexedIds(tableName, indexName);
         if (ids !== null) {
           return {
-            results: this._readIndexWindow({
+            results: readIndexWindow({
               ids,
               fields,
               lower,
@@ -2442,19 +2282,19 @@ export class Database {
       }
 
       const sourceDocs = hasPending
-        ? this._getMergedIndexedDocuments(tableName, indexName)
-        : this.getIndexedDocuments(tableName, indexName);
+        ? getMergedIndexedDocuments(tableName, indexName)
+        : getIndexedDocuments(tableName, indexName);
       const start = lower
-        ? this._binarySearchLowerBound(sourceDocs, fields, lower)
+        ? binarySearchLowerBound(sourceDocs, fields, lower)
         : 0;
       const end = upper
-        ? this._binarySearchUpperBound(sourceDocs, fields, upper)
+        ? binarySearchUpperBound(sourceDocs, fields, upper)
         : sourceDocs.length;
       const filteredDocs = sourceDocs.slice(start, end).filter(predicate);
       const ordered =
         source.order === "desc" ? [...filteredDocs].reverse() : filteredDocs;
       return {
-        results: this._applySeekToOrderedDocs(ordered, seek),
+        results: applySeekToOrderedDocs(ordered, seek),
         fieldPathsToSortBy: [],
         order: "asc",
         presorted: true,
@@ -2466,17 +2306,17 @@ export class Database {
         string,
         string,
       ];
-      const state = this._searchIndexes.get(`${tableName}.${indexName}`);
+      const state = searchIndexes.get(`${tableName}.${indexName}`);
       if (!state) return null;
       const args = {
         source,
-        activeIdentityKey: this._activeIdentityKey,
+        activeIdentityKey,
         limit: limit ?? undefined,
       };
-      const results = this._hasPendingWritesForTable(tableName)
+      const results = hasPendingWritesForTable(tableName)
         ? executeOverlaySearch(
             state,
-            this._buildPendingSearchOverlay(tableName, state),
+            buildPendingSearchOverlay(tableName, state),
             args,
           )
         : executeSearch(state, args);
@@ -2491,34 +2331,31 @@ export class Database {
     return null;
   }
 
-  private async _readOptimizedSourceAsync(
+  async function readOptimizedSourceAsync(
     source: SerializedQuery["source"],
     limit?: number | null,
     seek?: SeekBound,
   ): Promise<SourceEvaluationLike | null> {
     const sourceTable = sourceTableName(source);
-    if (
-      this.isTableHydrationAttempted(sourceTable) &&
-      source.type !== "Search"
-    ) {
-      const inMemory = this._readOptimizedSource(source, limit, seek);
+    if (isTableHydrationAttempted(sourceTable) && source.type !== "Search") {
+      const inMemory = readOptimizedSource(source, limit, seek);
       if (inMemory !== null) return inMemory;
     }
 
-    if (!this._hasPendingWritesForAnySource(source)) {
-      const results = await this._store.source(source, {
+    if (!hasPendingWritesForAnySource(source)) {
+      const results = await store.source(source, {
         limit,
-        indexFields: this._indexFieldsForSource(source) ?? undefined,
-        searchDefinition: this._searchDefinitionForSource(source),
-        activeIdentityKey: this._activeIdentityKey,
+        indexFields: indexFieldsForSource(source) ?? undefined,
+        searchDefinition: searchDefinitionForSource(source),
+        activeIdentityKey,
         seek: source.type === "Search" ? undefined : seek,
       });
       if (results !== null) {
-        this._rememberCommittedLookup(sourceTableName(source), results);
+        rememberCommittedLookup(sourceTableName(source), results);
         const order =
           source.type === "Search" ? "asc" : (source.order ?? "asc");
         return {
-          results: this._stripIdentityScopes(results),
+          results: stripIdentityScopes(results),
           fieldPathsToSortBy:
             source.type === "FullTableScan" ? ["_creationTime"] : [],
           order,
@@ -2529,17 +2366,17 @@ export class Database {
 
     if (
       source.type === "FullTableScan" &&
-      !this._hasPendingWritesForTable(source.tableName)
+      !hasPendingWritesForTable(source.tableName)
     ) {
-      const docs = await this._store.getDocuments(
+      const docs = await store.getDocuments(
         source.tableName,
-        this._storageReadOptions(source.tableName),
+        storageReadOptions(source.tableName),
       );
       if (docs !== null) {
-        this._rememberCommittedLookup(source.tableName, docs);
+        rememberCommittedLookup(source.tableName, docs);
         const order = source.order ?? "asc";
         return {
-          results: this._stripIdentityScopes(docs),
+          results: stripIdentityScopes(docs),
           fieldPathsToSortBy: ["_creationTime"],
           order,
           presorted: order === "asc",
@@ -2548,11 +2385,11 @@ export class Database {
     }
 
     if (
-      this._hasPendingWritesForAnySource(source) &&
-      this._isQueryableTable(sourceTable) &&
-      !this.isTableHydrationAttempted(sourceTable)
+      hasPendingWritesForAnySource(source) &&
+      isQueryableTable(sourceTable) &&
+      !isTableHydrationAttempted(sourceTable)
     ) {
-      const overlaid = await this._readPushdownWithPendingOverlay(
+      const overlaid = await readPushdownWithPendingOverlay(
         source,
         limit,
         seek,
@@ -2560,10 +2397,10 @@ export class Database {
       if (overlaid !== null) return overlaid;
     }
 
-    return this._readOptimizedSource(source, limit);
+    return readOptimizedSource(source, limit);
   }
 
-  private async _readPushdownWithPendingOverlay(
+  async function readPushdownWithPendingOverlay(
     source: SerializedQuery["source"],
     limit?: number | null,
     seek?: SeekBound,
@@ -2576,23 +2413,23 @@ export class Database {
       source.type === "IndexRange" ? splitIndexName(source.indexName) : null;
     const indexFields =
       indexParts !== null
-        ? (this._getIndexDefinitions(indexParts[0]).find(
+        ? (getIndexDefinitionsInternal(indexParts[0]).find(
             (entry) => entry.indexName === indexParts[1],
           )?.fields ?? null)
         : null;
-    const committed = await this._store.source(source, {
+    const committed = await store.source(source, {
       limit,
       indexFields: indexFields ?? undefined,
-      activeIdentityKey: this._activeIdentityKey,
+      activeIdentityKey,
       seek,
     });
     if (committed === null) {
       return null;
     }
-    const { shadowedIds } = this._getPendingTableState(tableName);
+    const { shadowedIds } = getPendingTableState(tableName);
     const rangePredicate =
       source.type === "IndexRange"
-        ? this._buildRangePredicate(source.range)
+        ? buildRangePredicate(source.range)
         : () => true;
     const byId = new Map<string, StoredDocument>();
     for (const doc of committed) {
@@ -2600,12 +2437,12 @@ export class Database {
         byId.set(doc._id as string, doc);
       }
     }
-    for (const { doc } of this._getVisiblePendingDocs(tableName)) {
+    for (const { doc } of getVisiblePendingDocs(tableName)) {
       if (rangePredicate(doc)) {
         byId.set(doc._id as string, doc);
       }
     }
-    const merged = this._stripIdentityScopes([...byId.values()]);
+    const merged = stripIdentityScopes([...byId.values()]);
     const sortIndexName =
       indexParts !== null ? indexParts[1] : "by_creation_time";
     const sortFields =
@@ -2613,7 +2450,7 @@ export class Database {
         ? indexFields
         : ["_creationTime"];
     merged.sort((left, right) =>
-      this._compareDocsForIndex(sortIndexName, sortFields, left, right),
+      compareDocsForIndex(sortIndexName, sortFields, left, right),
     );
     if ((source.order ?? "asc") === "desc") {
       merged.reverse();
@@ -2626,19 +2463,17 @@ export class Database {
     };
   }
 
-  private _readOptimizedQuery(
+  function readOptimizedQuery(
     query: SerializedQuery,
   ): Array<GenericDocument> | null {
-    const { filters, limit } = this._extractNormalizedOperators(
-      query.operators,
-    );
+    const { filters, limit } = extractNormalizedOperators(query.operators);
     if (query.source.type === "FullTableScan") {
       const indexName =
         query.source.order === "desc"
           ? "by_creation_time_desc"
           : "by_creation_time";
-      if (this._hasPendingWritesForTable(query.source.tableName)) {
-        return this._collectMergedIndexDocs(
+      if (hasPendingWritesForTable(query.source.tableName)) {
+        return collectMergedIndexDocs(
           query.source.tableName,
           indexName,
           filters,
@@ -2646,8 +2481,8 @@ export class Database {
         );
       }
 
-      const docs = this.getIndexedDocuments(query.source.tableName, indexName);
-      return this._filterOrderedDocs(docs, filters, limit);
+      const docs = getIndexedDocuments(query.source.tableName, indexName);
+      return filterOrderedDocs(docs, filters, limit);
     }
 
     if (query.source.type === "IndexRange") {
@@ -2655,27 +2490,19 @@ export class Database {
         string,
         string,
       ];
-      const fields = this._getIndexDefinitions(tableName).find(
+      const fields = getIndexDefinitionsInternal(tableName).find(
         (entry) => entry.indexName === indexName,
       )?.fields;
       if (!fields) {
         return null;
       }
 
-      const lower = this._buildRangeBound(
-        [...query.source.range],
-        fields,
-        "lower",
-      );
-      const upper = this._buildRangeBound(
-        [...query.source.range],
-        fields,
-        "upper",
-      );
-      const predicate = this._buildRangePredicate(query.source.range);
-      const hasPending = this._hasPendingWritesForTable(tableName);
+      const lower = buildRangeBound([...query.source.range], fields, "lower");
+      const upper = buildRangeBound([...query.source.range], fields, "upper");
+      const predicate = buildRangePredicate(query.source.range);
+      const hasPending = hasPendingWritesForTable(tableName);
       if (hasPending && query.source.order === "asc") {
-        return this._collectMergedIndexRangeDocs(
+        return collectMergedIndexRangeDocs(
           tableName,
           indexName,
           filters,
@@ -2688,16 +2515,16 @@ export class Database {
       }
 
       const docs = hasPending
-        ? this._getMergedIndexedDocuments(tableName, indexName)
-        : this.getIndexedDocuments(tableName, indexName);
+        ? getMergedIndexedDocuments(tableName, indexName)
+        : getIndexedDocuments(tableName, indexName);
       const start = lower
-        ? this._binarySearchLowerBound(docs, fields, lower)
+        ? binarySearchLowerBound(docs, fields, lower)
         : 0;
       const end = upper
-        ? this._binarySearchUpperBound(docs, fields, upper)
+        ? binarySearchUpperBound(docs, fields, upper)
         : docs.length;
 
-      return this._filterOrderedDocs(
+      return filterOrderedDocs(
         docs.slice(start, end),
         filters,
         limit,
@@ -2709,47 +2536,43 @@ export class Database {
     return null;
   }
 
-  private _indexFieldsForSource(
+  function indexFieldsForSource(
     source: SerializedQuery["source"],
   ): string[] | null {
     if (source.type !== "IndexRange") return null;
     const [tableName, indexName] = splitIndexName(source.indexName);
     return (
-      this._getIndexDefinitions(tableName).find(
+      getIndexDefinitionsInternal(tableName).find(
         (entry) => entry.indexName === indexName,
       )?.fields ?? null
     );
   }
 
-  private _searchDefinitionForSource(
+  function searchDefinitionForSource(
     source: SerializedQuery["source"],
   ): SearchIndexDefinition | undefined {
     if (source.type !== "Search") return undefined;
     const [tableName, indexName] = splitIndexName(source.indexName);
     return getSearchIndexDefinition(
-      this._schema?.tables.get(tableName)?.searchIndexes,
+      schema?.tables.get(tableName)?.searchIndexes,
       tableName,
       indexName,
     );
   }
 
-  private async _readOptimizedQueryAsync(
+  async function readOptimizedQueryAsync(
     query: SerializedQuery,
   ): Promise<Array<GenericDocument> | null> {
-    const { filters, limit } = this._extractNormalizedOperators(
-      query.operators,
-    );
+    const { filters, limit } = extractNormalizedOperators(query.operators);
     const queryTable = sourceTableName(query.source);
-    const indexFields = this._indexFieldsForSource(query.source);
-    const hasPendingForAnySource = this._hasPendingWritesForAnySource(
-      query.source,
-    );
+    const indexFields = indexFieldsForSource(query.source);
+    const hasPendingForAnySource = hasPendingWritesForAnySource(query.source);
 
     if (
       query.source.type !== "Search" &&
-      this.isTableHydrationAttempted(queryTable)
+      isTableHydrationAttempted(queryTable)
     ) {
-      const inMemory = this._readOptimizedQuery(query);
+      const inMemory = readOptimizedQuery(query);
       if (inMemory !== null) return inMemory;
     }
 
@@ -2758,52 +2581,52 @@ export class Database {
         query.source.type === "IndexRange") &&
       !hasPendingForAnySource
     ) {
-      const pushedDown = await this._store.query({
+      const pushedDown = await store.query({
         source: query.source,
         filters,
         limit: limit ?? null,
         indexFields: indexFields ?? undefined,
         searchDefinition: undefined,
-        activeIdentityKey: this._activeIdentityKey,
+        activeIdentityKey,
       });
       if (pushedDown !== null) {
-        this._rememberCommittedLookup(queryTable, pushedDown);
-        return this._stripIdentityScopes(pushedDown);
+        rememberCommittedLookup(queryTable, pushedDown);
+        return stripIdentityScopes(pushedDown);
       }
     }
 
     if (!hasPendingForAnySource) {
-      const sourceResults = await this._store.source(query.source, {
+      const sourceResults = await store.source(query.source, {
         limit,
         indexFields: indexFields ?? undefined,
-        searchDefinition: this._searchDefinitionForSource(query.source),
-        activeIdentityKey: this._activeIdentityKey,
+        searchDefinition: searchDefinitionForSource(query.source),
+        activeIdentityKey,
       });
       if (sourceResults !== null) {
-        this._rememberCommittedLookup(queryTable, sourceResults);
+        rememberCommittedLookup(queryTable, sourceResults);
         if (query.source.type !== "Search") {
-          const stripped = this._stripIdentityScopes(sourceResults);
+          const stripped = stripIdentityScopes(sourceResults);
           const ordered =
             query.source.order === "desc" ? [...stripped].reverse() : stripped;
-          return this._filterOrderedDocs(ordered, filters, limit ?? null);
+          return filterOrderedDocs(ordered, filters, limit ?? null);
         }
       }
     }
 
     if (
       query.source.type === "FullTableScan" &&
-      !this._hasPendingWritesForTable(query.source.tableName)
+      !hasPendingWritesForTable(query.source.tableName)
     ) {
-      const docs = await this._store.getDocuments(
+      const docs = await store.getDocuments(
         query.source.tableName,
-        this._storageReadOptions(query.source.tableName),
+        storageReadOptions(query.source.tableName),
       );
       if (docs !== null) {
-        this._rememberCommittedLookup(query.source.tableName, docs);
+        rememberCommittedLookup(query.source.tableName, docs);
         const orderedDocs =
           query.source.order === "desc" ? [...docs].reverse() : docs;
-        return this._stripIdentityScopes(
-          this._filterOrderedDocs(orderedDocs, filters, limit ?? null),
+        return stripIdentityScopes(
+          filterOrderedDocs(orderedDocs, filters, limit ?? null),
         );
       }
     }
@@ -2812,39 +2635,35 @@ export class Database {
       (query.source.type === "FullTableScan" ||
         query.source.type === "IndexRange") &&
       hasPendingForAnySource &&
-      this._isQueryableTable(queryTable) &&
-      !this.isTableHydrationAttempted(queryTable)
+      isQueryableTable(queryTable) &&
+      !isTableHydrationAttempted(queryTable)
     ) {
-      const overlaid = await this._readPushdownWithPendingOverlay(
+      const overlaid = await readPushdownWithPendingOverlay(
         query.source,
         limit ?? null,
       );
       if (overlaid !== null) {
-        return this._filterOrderedDocs(
-          overlaid.results,
-          filters,
-          limit ?? null,
-        );
+        return filterOrderedDocs(overlaid.results, filters, limit ?? null);
       }
     }
 
-    return this._readOptimizedQuery(query);
+    return readOptimizedQuery(query);
   }
 
-  private _hasPendingWritesForAnySource(
+  function hasPendingWritesForAnySource(
     source: SerializedQuery["source"],
   ): boolean {
     if (source.type === "FullTableScan") {
-      return this._hasPendingWritesForTable(source.tableName);
+      return hasPendingWritesForTable(source.tableName);
     }
     if (source.type === "IndexRange" || source.type === "Search") {
       const [tableName] = source.indexName.split(".") as [string];
-      return this._hasPendingWritesForTable(tableName);
+      return hasPendingWritesForTable(tableName);
     }
-    return this._hasPendingWrites();
+    return hasPendingWrites();
   }
 
-  private _extractNormalizedOperators(
+  function extractNormalizedOperators(
     operators: SerializedQuery["operators"],
   ): {
     filters: FilterNode[];
@@ -2866,7 +2685,7 @@ export class Database {
     return { filters, limit };
   }
 
-  private _filterOrderedDocs(
+  function filterOrderedDocs(
     docs: StoredDocument[],
     filters: FilterNode[],
     limit: number | null,
@@ -2900,13 +2719,13 @@ export class Database {
     return results;
   }
 
-  private _collectMergedIndexDocs(
+  function collectMergedIndexDocs(
     tableName: string,
     indexName: string,
     filters: FilterNode[],
     limit: number | null,
   ): StoredDocument[] {
-    const indexDefinition = this._getIndexDefinitions(tableName).find(
+    const indexDefinition = getIndexDefinitionsInternal(tableName).find(
       (entry) => entry.indexName === indexName,
     );
     if (!indexDefinition) {
@@ -2915,19 +2734,13 @@ export class Database {
       );
     }
 
-    const pendingState = this._getPendingTableState(tableName);
-    const pendingDocs = this._getVisiblePendingDocs(tableName)
+    const pendingState = getPendingTableState(tableName);
+    const pendingDocs = getVisiblePendingDocs(tableName)
       .map(({ doc }) => doc)
       .sort((left, right) =>
-        this._compareDocsForIndex(
-          indexName,
-          indexDefinition.fields,
-          left,
-          right,
-        ),
+        compareDocsForIndex(indexName, indexDefinition.fields, left, right),
       );
-    const committedIds =
-      this._indexDocuments.get(`${tableName}.${indexName}`) ?? [];
+    const committedIds = indexDocuments.get(`${tableName}.${indexName}`) ?? [];
     const results: StoredDocument[] = [];
     const seenIds = new Set<string>();
 
@@ -2940,13 +2753,13 @@ export class Database {
         if (pendingState.shadowedIds.has(id)) {
           continue;
         }
-        const raw = this._documents.get(id as DocumentId) as
+        const raw = documents.get(id as DocumentId) as
           | IdentityScopedDocument
           | undefined;
         const visible =
           raw === undefined
             ? null
-            : this._visibleDocumentInScope(this._idTableMap.get(id), raw);
+            : visibleDocumentInScope(idTableMap.get(id), raw);
         if (visible !== null) {
           return visible;
         }
@@ -2972,7 +2785,7 @@ export class Database {
     let committedDoc = nextCommittedDoc();
     while (committedDoc !== null && pendingIndex < pendingDocs.length) {
       const nextDoc =
-        this._compareDocsForIndex(
+        compareDocsForIndex(
           indexName,
           indexDefinition.fields,
           committedDoc,
@@ -3006,7 +2819,7 @@ export class Database {
     return results;
   }
 
-  private _collectMergedIndexRangeDocs(
+  function collectMergedIndexRangeDocs(
     tableName: string,
     indexName: string,
     filters: FilterNode[],
@@ -3016,14 +2829,13 @@ export class Database {
     upper: { values: Array<Value | undefined>; inclusive: boolean } | null,
     predicate: (doc: StoredDocument) => boolean,
   ): StoredDocument[] {
-    const pendingState = this._getPendingTableState(tableName);
-    const pendingDocs = this._getVisiblePendingDocs(tableName)
+    const pendingState = getPendingTableState(tableName);
+    const pendingDocs = getVisiblePendingDocs(tableName)
       .map(({ doc }) => doc)
       .sort((left, right) =>
-        this._compareDocsForIndex(indexName, fields, left, right),
+        compareDocsForIndex(indexName, fields, left, right),
       );
-    const committedIds =
-      this._indexDocuments.get(`${tableName}.${indexName}`) ?? [];
+    const committedIds = indexDocuments.get(`${tableName}.${indexName}`) ?? [];
     const results: StoredDocument[] = [];
     const seenIds = new Set<string>();
     let committedIndex = 0;
@@ -3031,11 +2843,11 @@ export class Database {
 
     const compareBounds = (doc: StoredDocument): boolean => {
       if (lower !== null) {
-        const cmp = this._compareDocToBound(doc, fields, lower);
+        const cmp = compareDocToBound(doc, fields, lower);
         if (lower.inclusive ? cmp < 0 : cmp <= 0) return false;
       }
       if (upper !== null) {
-        const cmp = this._compareDocToBound(doc, fields, upper);
+        const cmp = compareDocToBound(doc, fields, upper);
         if (upper.inclusive ? cmp > 0 : cmp >= 0) return false;
       }
       return true;
@@ -3047,13 +2859,13 @@ export class Database {
         if (pendingState.shadowedIds.has(id)) {
           continue;
         }
-        const raw = this._documents.get(id as DocumentId) as
+        const raw = documents.get(id as DocumentId) as
           | IdentityScopedDocument
           | undefined;
         const visible =
           raw === undefined
             ? null
-            : this._visibleDocumentInScope(this._idTableMap.get(id), raw);
+            : visibleDocumentInScope(idTableMap.get(id), raw);
         if (visible !== null) {
           return visible;
         }
@@ -3082,7 +2894,7 @@ export class Database {
     let committedDoc = nextCommittedDoc();
     while (committedDoc !== null && pendingIndex < pendingDocs.length) {
       const nextDoc =
-        this._compareDocsForIndex(
+        compareDocsForIndex(
           indexName,
           fields,
           committedDoc,
@@ -3115,11 +2927,11 @@ export class Database {
     return results;
   }
 
-  private _buildPendingVectorOverlay(
+  function buildPendingVectorOverlay(
     tableName: string,
     baseState: VectorIndexState,
   ): VectorOverlayState {
-    const pendingState = this._getPendingTableState(tableName);
+    const pendingState = getPendingTableState(tableName);
     const key = baseState.definition.indexDescriptor;
     const cached = pendingState.vectorOverlays.get(key);
     if (cached) {
@@ -3129,7 +2941,7 @@ export class Database {
     const overlay: VectorOverlayState = {
       shadowedIds: pendingState.shadowedIds,
       state: buildVectorIndexState({
-        docs: this._getVisiblePendingDocs(tableName),
+        docs: getVisiblePendingDocs(tableName),
         definition: baseState.definition,
       }),
     };
@@ -3137,11 +2949,11 @@ export class Database {
     return overlay;
   }
 
-  private _buildPendingSearchOverlay(
+  function buildPendingSearchOverlay(
     tableName: string,
     baseState: SearchIndexState,
   ): SearchOverlayState {
-    const pendingState = this._getPendingTableState(tableName);
+    const pendingState = getPendingTableState(tableName);
     const key = baseState.definition.indexDescriptor;
     const cached = pendingState.searchOverlays.get(key);
     if (cached) {
@@ -3151,7 +2963,7 @@ export class Database {
     const overlay: SearchOverlayState = {
       shadowedIds: pendingState.shadowedIds,
       state: buildSearchIndexState({
-        docs: this._getVisiblePendingDocs(tableName),
+        docs: getVisiblePendingDocs(tableName),
         definition: baseState.definition,
       }),
     };
@@ -3159,19 +2971,18 @@ export class Database {
     return overlay;
   }
 
-  private _getMergedIndexedDocuments(
+  function getMergedIndexedDocuments(
     tableName: string,
     indexName: string,
   ): StoredDocument[] {
-    const pendingState = this._getPendingTableState(tableName);
+    const pendingState = getPendingTableState(tableName);
     const cached = pendingState.mergedIndexes.get(indexName);
     if (cached) {
       return cached;
     }
 
-    const committedIds =
-      this._indexDocuments.get(`${tableName}.${indexName}`) ?? [];
-    const indexDefinition = this._getIndexDefinitions(tableName).find(
+    const committedIds = indexDocuments.get(`${tableName}.${indexName}`) ?? [];
+    const indexDefinition = getIndexDefinitionsInternal(tableName).find(
       (entry) => entry.indexName === indexName,
     );
 
@@ -3181,34 +2992,24 @@ export class Database {
       );
     }
 
-    const pendingDocs = this._getVisiblePendingDocs(tableName)
+    const pendingDocs = getVisiblePendingDocs(tableName)
       .map(({ doc }) => doc)
       .sort((left, right) =>
-        this._compareDocsForIndex(
-          indexName,
-          indexDefinition.fields,
-          left,
-          right,
-        ),
+        compareDocsForIndex(indexName, indexDefinition.fields, left, right),
       );
 
-    const merged = this._mergeCommittedIdsAndPendingDocs(
+    const merged = mergeCommittedIdsAndPendingDocs(
       committedIds,
       pendingDocs,
       pendingState.shadowedIds,
       (left, right) =>
-        this._compareDocsForIndex(
-          indexName,
-          indexDefinition.fields,
-          left,
-          right,
-        ),
+        compareDocsForIndex(indexName, indexDefinition.fields, left, right),
     );
     pendingState.mergedIndexes.set(indexName, merged);
     return merged;
   }
 
-  private _mergeCommittedIdsAndPendingDocs(
+  function mergeCommittedIdsAndPendingDocs(
     leftIds: string[],
     rightDocs: StoredDocument[],
     shadowedIds: Set<string>,
@@ -3225,13 +3026,13 @@ export class Database {
         if (shadowedIds.has(id)) {
           continue;
         }
-        const raw = this._documents.get(id as DocumentId) as
+        const raw = documents.get(id as DocumentId) as
           | IdentityScopedDocument
           | undefined;
         const visible =
           raw === undefined
             ? null
-            : this._visibleDocumentInScope(this._idTableMap.get(id), raw);
+            : visibleDocumentInScope(idTableMap.get(id), raw);
         if (visible !== null) {
           return visible;
         }
@@ -3277,23 +3078,23 @@ export class Database {
     return merged;
   }
 
-  private _allKnownTableNames(): Set<string> {
-    const names = new Set(this._tableDocuments.keys());
-    if (this._schema) {
-      for (const name of this._schema.tables.keys()) {
+  function allKnownTableNames(): Set<string> {
+    const names = new Set(tableDocuments.keys());
+    if (schema) {
+      for (const name of schema.tables.keys()) {
         names.add(name);
       }
     }
     return names;
   }
 
-  private _rebuildAllIndexes(): void {
-    this._indexDocuments.clear();
-    for (const tableName of this._allKnownTableNames()) {
-      const rowCount = this._tableDocuments.get(tableName)?.size ?? 0;
+  function rebuildAllIndexes(): void {
+    indexDocuments.clear();
+    for (const tableName of allKnownTableNames()) {
+      const rowCount = tableDocuments.get(tableName)?.size ?? 0;
       withSpanSync(
         "convex-embedded.db.rebuildTableIndexes",
-        () => this._rebuildTableIndexes(tableName),
+        () => rebuildTableIndexes(tableName),
         {
           attributes: {
             "convex.table": tableName,
@@ -3304,13 +3105,13 @@ export class Database {
     }
   }
 
-  private _rebuildAllSearchIndexes(): void {
-    this._searchIndexes.clear();
-    for (const tableName of this._allKnownTableNames()) {
-      const rowCount = this._tableDocuments.get(tableName)?.size ?? 0;
+  function rebuildAllSearchIndexes(): void {
+    searchIndexes.clear();
+    for (const tableName of allKnownTableNames()) {
+      const rowCount = tableDocuments.get(tableName)?.size ?? 0;
       withSpanSync(
         "convex-embedded.db.rebuildTableSearchIndexes",
-        () => this._rebuildTableSearchIndexes(tableName),
+        () => rebuildTableSearchIndexes(tableName),
         {
           attributes: {
             "convex.table": tableName,
@@ -3321,7 +3122,7 @@ export class Database {
     }
   }
 
-  private _collectTableSearchIndexes(): Record<
+  function collectTableSearchIndexes(): Record<
     string,
     import("@/runtime/db/schema").SearchIndexDefinition[]
   > {
@@ -3329,8 +3130,8 @@ export class Database {
       string,
       import("@/runtime/db/schema").SearchIndexDefinition[]
     > = {};
-    if (!this._schema) return result;
-    for (const [tableName, tableSchema] of this._schema.tables) {
+    if (!schema) return result;
+    for (const [tableName, tableSchema] of schema.tables) {
       if (tableSchema.searchIndexes && tableSchema.searchIndexes.length > 0) {
         result[tableName] = [...tableSchema.searchIndexes];
       }
@@ -3338,7 +3139,7 @@ export class Database {
     return result;
   }
 
-  private _collectTableVectorIndexes(): Record<
+  function collectTableVectorIndexes(): Record<
     string,
     import("@/runtime/db/schema").VectorIndexDefinition[]
   > {
@@ -3346,8 +3147,8 @@ export class Database {
       string,
       import("@/runtime/db/schema").VectorIndexDefinition[]
     > = {};
-    if (!this._schema) return result;
-    for (const [tableName, tableSchema] of this._schema.tables) {
+    if (!schema) return result;
+    for (const [tableName, tableSchema] of schema.tables) {
       if (tableSchema.vectorIndexes && tableSchema.vectorIndexes.length > 0) {
         result[tableName] = [...tableSchema.vectorIndexes];
       }
@@ -3355,13 +3156,13 @@ export class Database {
     return result;
   }
 
-  private _rebuildAllVectorIndexes(): void {
-    this._vectorIndexes.clear();
-    for (const tableName of this._allKnownTableNames()) {
-      const rowCount = this._tableDocuments.get(tableName)?.size ?? 0;
+  function rebuildAllVectorIndexes(): void {
+    vectorIndexes.clear();
+    for (const tableName of allKnownTableNames()) {
+      const rowCount = tableDocuments.get(tableName)?.size ?? 0;
       withSpanSync(
         "convex-embedded.db.rebuildTableVectorIndexes",
-        () => this._rebuildTableVectorIndexes(tableName),
+        () => rebuildTableVectorIndexes(tableName),
         {
           attributes: {
             "convex.table": tableName,
@@ -3372,18 +3173,18 @@ export class Database {
     }
   }
 
-  private _rebuildTableIndexes(tableName: string): void {
+  function rebuildTableIndexes(tableName: string): void {
     const ids: string[] = [];
-    const docs = this._documents;
-    for (const id of this._tableDocuments.get(tableName) ?? []) {
+    const docs = documents;
+    for (const id of tableDocuments.get(tableName) ?? []) {
       if (docs.get(id as DocumentId) !== undefined) {
         ids.push(id);
       }
     }
 
-    for (const { indexName, fields } of this._getIndexDefinitions(tableName)) {
+    for (const { indexName, fields } of getIndexDefinitionsInternal(tableName)) {
       if (ids.length === 0) {
-        this._indexDocuments.set(`${tableName}.${indexName}`, []);
+        indexDocuments.set(`${tableName}.${indexName}`, []);
         continue;
       }
 
@@ -3416,40 +3217,40 @@ export class Database {
       for (let i = 0; i < keyed.length; i++) {
         sortedIds[i] = keyed[i]!.id;
       }
-      this._indexDocuments.set(`${tableName}.${indexName}`, sortedIds);
+      indexDocuments.set(`${tableName}.${indexName}`, sortedIds);
     }
   }
 
-  private _rebuildTableSearchIndexes(tableName: string): void {
-    const searchIndexes =
-      this._schema?.tables.get(tableName)?.searchIndexes ?? [];
-    for (const key of this._searchIndexes.keys()) {
+  function rebuildTableSearchIndexes(tableName: string): void {
+    const tableSearchIndexes =
+      schema?.tables.get(tableName)?.searchIndexes ?? [];
+    for (const key of searchIndexes.keys()) {
       if (key.startsWith(`${tableName}.`)) {
-        this._searchIndexes.delete(key);
+        searchIndexes.delete(key);
       }
     }
-    if (searchIndexes.length === 0) {
+    if (tableSearchIndexes.length === 0) {
       return;
     }
-    const rawDocs = [...(this._tableDocuments.get(tableName) ?? [])]
+    const rawDocs = [...(tableDocuments.get(tableName) ?? [])]
       .map(
         (id) =>
-          this._documents.get(id as DocumentId) as
+          documents.get(id as DocumentId) as
             | IdentityScopedDocument
             | undefined,
       )
       .filter((doc): doc is IdentityScopedDocument => doc !== undefined);
 
-    for (const definition of searchIndexes) {
-      this._searchIndexes.set(
+    for (const definition of tableSearchIndexes) {
+      searchIndexes.set(
         `${tableName}.${definition.indexDescriptor}`,
         buildSearchIndexState({
           docs: rawDocs.map((doc) => ({
-            doc: this._stripIdentityScope(doc),
+            doc: stripIdentityScope(doc),
             identityKey: doc[IDENTITY_SCOPE_FIELD] ?? null,
           })),
           definition: getSearchIndexDefinition(
-            searchIndexes,
+            tableSearchIndexes,
             tableName,
             definition.indexDescriptor,
           ),
@@ -3458,36 +3259,36 @@ export class Database {
     }
   }
 
-  private _rebuildTableVectorIndexes(tableName: string): void {
-    const vectorIndexes =
-      this._schema?.tables.get(tableName)?.vectorIndexes ?? [];
-    for (const key of this._vectorIndexes.keys()) {
+  function rebuildTableVectorIndexes(tableName: string): void {
+    const tableVectorIndexes =
+      schema?.tables.get(tableName)?.vectorIndexes ?? [];
+    for (const key of vectorIndexes.keys()) {
       if (key.startsWith(`${tableName}.`)) {
-        this._vectorIndexes.delete(key);
+        vectorIndexes.delete(key);
       }
     }
-    if (vectorIndexes.length === 0) {
+    if (tableVectorIndexes.length === 0) {
       return;
     }
-    const rawDocs = [...(this._tableDocuments.get(tableName) ?? [])]
+    const rawDocs = [...(tableDocuments.get(tableName) ?? [])]
       .map(
         (id) =>
-          this._documents.get(id as DocumentId) as
+          documents.get(id as DocumentId) as
             | IdentityScopedDocument
             | undefined,
       )
       .filter((doc): doc is IdentityScopedDocument => doc !== undefined);
 
-    for (const definition of vectorIndexes) {
-      this._vectorIndexes.set(
+    for (const definition of tableVectorIndexes) {
+      vectorIndexes.set(
         `${tableName}.${definition.indexDescriptor}`,
         buildVectorIndexState({
           docs: rawDocs.map((doc) => ({
-            doc: this._stripIdentityScope(doc),
+            doc: stripIdentityScope(doc),
             identityKey: doc[IDENTITY_SCOPE_FIELD] ?? null,
           })),
           definition: getVectorIndexDefinition(
-            vectorIndexes,
+            tableVectorIndexes,
             tableName,
             definition.indexDescriptor,
           ),
@@ -3496,17 +3297,17 @@ export class Database {
     }
   }
 
-  private _applyCommittedStateChanges(
+  function applyCommittedStateChanges(
     changes: CommittedStateChange[],
     options: { skipQueryable?: boolean } = {},
   ): void {
     withSpanSync("convex-embedded.db.applyIndexChanges", (span) => {
       span.setAttribute("convex.change_count", changes.length);
-      this._applyCommittedStateChangesImpl(changes, options);
+      applyCommittedStateChangesImpl(changes, options);
     });
   }
 
-  private _applyCommittedStateChangesImpl(
+  function applyCommittedStateChangesImpl(
     changes: CommittedStateChange[],
     options: { skipQueryable?: boolean } = {},
   ): void {
@@ -3522,12 +3323,12 @@ export class Database {
     }
 
     for (const [tableName, tableChanges] of changesByTable) {
-      if (skipQueryable && this._isQueryableTable(tableName)) {
+      if (skipQueryable && isQueryableTable(tableName)) {
         continue;
       }
 
-      const committedCount = this.getCommittedTableCount(tableName);
-      const hasCommittedState = this._indexDocuments.has(
+      const committedCount = getCommittedTableCount(tableName);
+      const hasCommittedState = indexDocuments.has(
         `${tableName}.by_creation_time`,
       );
       const shouldRebuild =
@@ -3535,39 +3336,39 @@ export class Database {
         tableChanges.length > Math.max(32, committedCount >> 3);
 
       if (shouldRebuild) {
-        this._rebuildTableIndexes(tableName);
-        this._rebuildTableSearchIndexes(tableName);
-        this._rebuildTableVectorIndexes(tableName);
+        rebuildTableIndexes(tableName);
+        rebuildTableSearchIndexes(tableName);
+        rebuildTableVectorIndexes(tableName);
         continue;
       }
 
-      this._applyIncrementalIndexChanges(tableName, tableChanges);
-      this._applyIncrementalSearchChanges(tableName, tableChanges);
-      this._applyIncrementalVectorChanges(tableName, tableChanges);
+      applyIncrementalIndexChanges(tableName, tableChanges);
+      applyIncrementalSearchChanges(tableName, tableChanges);
+      applyIncrementalVectorChanges(tableName, tableChanges);
     }
   }
 
-  private _isSystemTable(tableName: string): boolean {
+  function isSystemTable(tableName: string): boolean {
     return tableName.startsWith("_");
   }
 
-  private _storageReadOptions(tableName: string): ReadOptions | undefined {
-    return this._isSystemTable(tableName)
+  function storageReadOptions(tableName: string): ReadOptions | undefined {
+    return isSystemTable(tableName)
       ? undefined
-      : { activeIdentityKey: this._activeIdentityKey };
+      : { activeIdentityKey };
   }
 
-  private _isQueryableTable(tableName: string): boolean {
-    return this._store.isQueryable() && !tableName.startsWith("_");
+  function isQueryableTable(tableName: string): boolean {
+    return store.isQueryable() && !tableName.startsWith("_");
   }
 
-  private _applyIncrementalIndexChanges(
+  function applyIncrementalIndexChanges(
     tableName: string,
     changes: CommittedStateChange[],
   ): void {
-    for (const { indexName, fields } of this._getIndexDefinitions(tableName)) {
+    for (const { indexName, fields } of getIndexDefinitionsInternal(tableName)) {
       const key = `${tableName}.${indexName}`;
-      const ids = this._indexDocuments.get(key);
+      const ids = indexDocuments.get(key);
       if (!ids) {
         continue;
       }
@@ -3593,7 +3394,7 @@ export class Database {
           continue;
         }
         const changeId = change.id as string;
-        const insertAt = this._binarySearchIndexInsertPosition(
+        const insertAt = binarySearchIndexInsertPosition(
           ids,
           indexName,
           fields,
@@ -3603,7 +3404,7 @@ export class Database {
           log.warn(
             `duplicate incremental id detected for ${key}; rebuilding index`,
           );
-          this._rebuildTableIndexes(tableName);
+          rebuildTableIndexes(tableName);
           return;
         }
         ids.splice(insertAt, 0, changeId);
@@ -3611,14 +3412,14 @@ export class Database {
     }
   }
 
-  private _applyIncrementalVectorChanges(
+  function applyIncrementalVectorChanges(
     tableName: string,
     changes: CommittedStateChange[],
   ): void {
-    const vectorIndexes =
-      this._schema?.tables.get(tableName)?.vectorIndexes ?? [];
-    for (const definition of vectorIndexes) {
-      const state = this._vectorIndexes.get(
+    const tableVectorIndexes =
+      schema?.tables.get(tableName)?.vectorIndexes ?? [];
+    for (const definition of tableVectorIndexes) {
+      const state = vectorIndexes.get(
         `${tableName}.${definition.indexDescriptor}`,
       );
       if (!state) {
@@ -3631,7 +3432,7 @@ export class Database {
       for (const change of changes) {
         if (change.after !== null) {
           addDocumentToVectorIndexState(state, {
-            doc: this._stripIdentityScope(change.after),
+            doc: stripIdentityScope(change.after),
             identityKey: change.after[IDENTITY_SCOPE_FIELD] ?? null,
           });
         }
@@ -3639,14 +3440,14 @@ export class Database {
     }
   }
 
-  private _applyIncrementalSearchChanges(
+  function applyIncrementalSearchChanges(
     tableName: string,
     changes: CommittedStateChange[],
   ): void {
-    const searchIndexes =
-      this._schema?.tables.get(tableName)?.searchIndexes ?? [];
-    for (const definition of searchIndexes) {
-      const state = this._searchIndexes.get(
+    const tableSearchIndexes =
+      schema?.tables.get(tableName)?.searchIndexes ?? [];
+    for (const definition of tableSearchIndexes) {
+      const state = searchIndexes.get(
         `${tableName}.${definition.indexDescriptor}`,
       );
       if (!state) {
@@ -3659,7 +3460,7 @@ export class Database {
       for (const change of changes) {
         if (change.after !== null) {
           addDocumentToSearchIndexState(state, {
-            doc: this._stripIdentityScope(change.after),
+            doc: stripIdentityScope(change.after),
             identityKey: change.after[IDENTITY_SCOPE_FIELD] ?? null,
           });
         }
@@ -3667,7 +3468,7 @@ export class Database {
     }
   }
 
-  private _compareDocsForIndex(
+  function compareDocsForIndex(
     indexName: string,
     fields: string[],
     left: StoredDocument,
@@ -3685,7 +3486,7 @@ export class Database {
     return 0;
   }
 
-  private _binarySearchIndexInsertPosition(
+  function binarySearchIndexInsertPosition(
     ids: string[],
     indexName: string,
     fields: string[],
@@ -3696,13 +3497,13 @@ export class Database {
 
     while (low < high) {
       const mid = (low + high) >> 1;
-      const current = this._documents.get(ids[mid] as DocumentId);
+      const current = documents.get(ids[mid] as DocumentId);
       if (current === undefined) {
         ids.splice(mid, 1);
         high = ids.length;
         continue;
       }
-      const comparison = this._compareDocsForIndex(
+      const comparison = compareDocsForIndex(
         indexName,
         fields,
         current,
@@ -3718,15 +3519,15 @@ export class Database {
     return low;
   }
 
-  private _getIndexDefinitions(
+  function getIndexDefinitionsInternal(
     tableName: string,
   ): Array<{ indexName: string; fields: string[] }> {
-    const cached = this._indexDefsCache.get(tableName);
+    const cached = indexDefsCache.get(tableName);
     if (cached !== undefined) {
       return cached;
     }
 
-    const tableSchema = this._schema?.tables.get(tableName);
+    const tableSchema = schema?.tables.get(tableName);
     const schemaIndexes =
       tableSchema?.indexes.map((index) => ({
         indexName: index.indexDescriptor,
@@ -3741,23 +3542,23 @@ export class Database {
       ...systemIndexes,
       ...schemaIndexes,
     ];
-    this._indexDefsCache.set(tableName, definitions);
+    indexDefsCache.set(tableName, definitions);
     return definitions;
   }
 
-  private _hasPendingWrites(): boolean {
-    return this._pendingWriteCount > 0;
+  function hasPendingWrites(): boolean {
+    return pendingWriteCount > 0;
   }
 
-  private _hasPendingWritesForTable(tableName: string): boolean {
-    if (!this._hasPendingWrites()) {
+  function hasPendingWritesForTable(tableName: string): boolean {
+    if (!hasPendingWrites()) {
       return false;
     }
 
-    return this._writeTables.some((tables) => tables.has(tableName));
+    return writeTables.some((tables) => tables.has(tableName));
   }
 
-  private _buildRangePredicate(
+  function buildRangePredicate(
     range: ReadonlyArray<{
       type: "Eq" | "Gt" | "Gte" | "Lt" | "Lte";
       fieldPath: string;
@@ -3795,7 +3596,7 @@ export class Database {
     };
   }
 
-  private _applySeekToOrderedDocs(
+  function applySeekToOrderedDocs(
     docs: StoredDocument[],
     seek: SeekBound | undefined,
   ): StoredDocument[] {
@@ -3813,11 +3614,11 @@ export class Database {
       }
       return seek.inclusive ? comparison <= 0 : comparison < 0;
     };
-    const start = this._seekStartIndex(docs, keep);
+    const start = seekStartIndex(docs, keep);
     return start === 0 ? docs : docs.slice(start);
   }
 
-  private _seekStartIndex(
+  function seekStartIndex(
     docs: StoredDocument[],
     keep: (doc: StoredDocument) => boolean,
   ): number {
@@ -3834,7 +3635,7 @@ export class Database {
     return low;
   }
 
-  private _buildRangeBound(
+  function buildRangeBound(
     range: SerializedRangeExpression[],
     fields: string[],
     side: "lower" | "upper",
@@ -3880,19 +3681,19 @@ export class Database {
     return values.length === 0 ? null : { values, inclusive };
   }
 
-  private _indexedIds(tableName: string, indexName: string): string[] | null {
-    const ids = this._indexDocuments.get(`${tableName}.${indexName}`);
+  function indexedIds(tableName: string, indexName: string): string[] | null {
+    const ids = indexDocuments.get(`${tableName}.${indexName}`);
     return ids === undefined ? null : (ids as string[]);
   }
 
-  private _materializeIndexedId(id: string): StoredDocument | null {
-    const raw = this._documents.get(id as DocumentId) as
+  function materializeIndexedId(id: string): StoredDocument | null {
+    const raw = documents.get(id as DocumentId) as
       | IdentityScopedDocument
       | undefined;
-    return raw === undefined ? null : this._stripIdentityScope(raw);
+    return raw === undefined ? null : stripIdentityScope(raw);
   }
 
-  private _readIndexWindow(input: {
+  function readIndexWindow(input: {
     ids: string[];
     fields: string[];
     lower: { values: Array<Value | undefined>; inclusive: boolean } | null;
@@ -3905,12 +3706,12 @@ export class Database {
     const { ids, fields, lower, upper, predicate, iterate, seek, limit } =
       input;
     const docAt = (index: number): StoredDocument | null =>
-      this._materializeIndexedId(ids[index]!);
+      materializeIndexedId(ids[index]!);
     const lowerIndex = lower
-      ? this._binarySearchBoundIds(ids, fields, lower, docAt, "lower")
+      ? binarySearchBoundIds(ids, fields, lower, docAt, "lower")
       : 0;
     const upperIndex = upper
-      ? this._binarySearchBoundIds(ids, fields, upper, docAt, "upper")
+      ? binarySearchBoundIds(ids, fields, upper, docAt, "upper")
       : ids.length;
 
     const seekValue =
@@ -3935,9 +3736,9 @@ export class Database {
     const stop = iterate === "backward" ? lowerIndex - 1 : upperIndex;
 
     if (iterate === "forward" && seek !== undefined) {
-      index = this._seekIndexInRange(lowerIndex, upperIndex, docAt, passesSeek);
+      index = seekIndexInRange(lowerIndex, upperIndex, docAt, passesSeek);
     } else if (iterate === "backward" && seek !== undefined) {
-      index = this._seekIndexInRangeBackward(
+      index = seekIndexInRangeBackward(
         lowerIndex,
         upperIndex,
         docAt,
@@ -3957,7 +3758,7 @@ export class Database {
     return results;
   }
 
-  private _seekIndexInRange(
+  function seekIndexInRange(
     lowerIndex: number,
     upperIndex: number,
     docAt: (index: number) => StoredDocument | null,
@@ -3977,7 +3778,7 @@ export class Database {
     return low;
   }
 
-  private _seekIndexInRangeBackward(
+  function seekIndexInRangeBackward(
     lowerIndex: number,
     upperIndex: number,
     docAt: (index: number) => StoredDocument | null,
@@ -3997,7 +3798,7 @@ export class Database {
     return low - 1;
   }
 
-  private _binarySearchBoundIds(
+  function binarySearchBoundIds(
     ids: string[],
     fields: string[],
     bound: { values: Array<Value | undefined>; inclusive: boolean },
@@ -4010,7 +3811,7 @@ export class Database {
       const mid = (low + high) >>> 1;
       const doc = docAt(mid);
       const comparison =
-        doc === null ? 0 : this._compareDocToBound(doc, fields, bound);
+        doc === null ? 0 : compareDocToBound(doc, fields, bound);
       const moveRight =
         side === "lower"
           ? bound.inclusive
@@ -4028,7 +3829,7 @@ export class Database {
     return low;
   }
 
-  private _compareDocToBound(
+  function compareDocToBound(
     doc: StoredDocument,
     fields: string[],
     bound: { values: Array<Value | undefined> },
@@ -4045,7 +3846,7 @@ export class Database {
     return 0;
   }
 
-  private _binarySearchLowerBound(
+  function binarySearchLowerBound(
     docs: StoredDocument[],
     fields: string[],
     bound: { values: Array<Value | undefined>; inclusive: boolean },
@@ -4054,7 +3855,7 @@ export class Database {
     let high = docs.length;
     while (low < high) {
       const mid = (low + high) >> 1;
-      const comparison = this._compareDocToBound(docs[mid]!, fields, bound);
+      const comparison = compareDocToBound(docs[mid]!, fields, bound);
       const moveRight = bound.inclusive ? comparison < 0 : comparison <= 0;
       if (moveRight) {
         low = mid + 1;
@@ -4065,7 +3866,7 @@ export class Database {
     return low;
   }
 
-  private _binarySearchUpperBound(
+  function binarySearchUpperBound(
     docs: StoredDocument[],
     fields: string[],
     bound: { values: Array<Value | undefined>; inclusive: boolean },
@@ -4074,7 +3875,7 @@ export class Database {
     let high = docs.length;
     while (low < high) {
       const mid = (low + high) >> 1;
-      const comparison = this._compareDocToBound(docs[mid]!, fields, bound);
+      const comparison = compareDocToBound(docs[mid]!, fields, bound);
       const keepLeft = bound.inclusive ? comparison > 0 : comparison >= 0;
       if (keepLeft) {
         high = mid;
@@ -4084,4 +3885,114 @@ export class Database {
     }
     return low;
   }
+
+  const iterateDocsReader: DocumentIterator = (tableName, callback) => {
+    iterateDocs(tableName, callback);
+  };
+  const countTable: TableCountReader = (tableName) =>
+    hasPendingWritesForTable(tableName) || isIdentityScopedTable(tableName)
+      ? getDocumentsForTable(tableName).length
+      : (tableDocuments.get(tableName)?.size ?? 0);
+  const countTableAsync: AsyncTableCountReader = async (tableName) => {
+    if (
+      hasPendingWritesForTable(tableName) ||
+      isIdentityScopedTable(tableName)
+    ) {
+      return getDocumentsForTable(tableName).length;
+    }
+    if (isTableHydrationAttempted(tableName)) {
+      return tableDocuments.get(tableName)?.size ?? 0;
+    }
+    const storeCount = await store.countDocuments(
+      tableName,
+      storageReadOptions(tableName),
+    );
+    if (storeCount !== null) return storeCount;
+    return tableDocuments.get(tableName)?.size ?? 0;
+  };
+  const queryReader: QueryReader = (query) => readOptimizedQuery(query);
+  const readQueryAsync: AsyncQueryReader = (query) =>
+    readOptimizedQueryAsync(query);
+  const sourceReader: SourceReader = (source, limit, seek) =>
+    readOptimizedSource(source, limit, seek);
+  const readSourceAsync: AsyncSourceReader = (source, limit, seek) =>
+    readOptimizedSourceAsync(source, limit, seek);
+
+  const queryEngine: QueryEngine = createQueryEngine(
+    schema,
+    iterateDocsReader,
+    countTable,
+    queryReader,
+    sourceReader,
+    countTableAsync,
+    readQueryAsync,
+    readSourceAsync,
+    (tableName: string) => getTableVersion(tableName),
+  );
+
+  return {
+    get queryEngine() {
+      return queryEngine;
+    },
+    get timestamp() {
+      return timestamp;
+    },
+    getTableVersion,
+    bumpTableVersions,
+    setStorage,
+    setReadBackendForTests,
+    setActiveIdentityKey,
+    getActiveIdentityKey,
+    hydrate,
+    hydrateSystemTables,
+    isTableHydrationAttempted,
+    tableHydrated,
+    replicateTable,
+    startTransaction,
+    commit,
+    commitAsync,
+    waitForPersistence,
+    rollbackWrites,
+    get,
+    insert,
+    patch,
+    replace,
+    delete: deleteDoc,
+    writeDocument,
+    deleteDocument,
+    getDocumentsForTable,
+    hasDocumentsForTable,
+    getTableNames,
+    getIndexDefinitions,
+    migrateAnonymousDataToIdentity,
+    reStampAnonymousUserTablesInStorage,
+    normalizeId,
+    getTableForId,
+    storeFile,
+    deleteBlob,
+    loadFile,
+    startQuery,
+    startQueryAsync,
+    queryNext,
+    queryNextAsync,
+    queryCleanup,
+    paginateAsync,
+    count,
+    countAsync,
+    getAsync,
+    ensureCommittedDocumentForWrite,
+    listDocumentsAsync,
+    listDocumentsForScopeAsync,
+    getCommittedTableCount,
+    getIndexedDocuments,
+    vectorSearch,
+    vectorSearchAsync,
+    get _indexDocuments() {
+      return indexDocuments;
+    },
+    get _idTableMap() {
+      return idTableMap;
+    },
+    _addWriteRaw: addWriteRaw,
+  };
 }

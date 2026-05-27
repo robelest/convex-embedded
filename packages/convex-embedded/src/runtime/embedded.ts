@@ -23,7 +23,10 @@ import type { ConvexInput, FunctionPath } from "@/kernel/modules";
 import { getFunctionPath } from "@/kernel/modules";
 import { SYSTEM_FUNCTIONS } from "@/kernel/system";
 import type { SystemFunctionDef } from "@/kernel/system";
-import { TransactionManager } from "@/kernel/transaction";
+import {
+  createTransactionManager,
+  type TransactionManager,
+} from "@/kernel/transaction";
 import { UdfExecutor } from "@/kernel/udf";
 import { ReplicationProtocolHandler } from "@/replication/protocol";
 import type {
@@ -32,7 +35,7 @@ import type {
   ProtocolExecutor,
   ServerMessage,
 } from "@/replication/protocol";
-import { SessionManager } from "@/replication/session";
+import { createSessionManager, type SessionManager } from "@/replication/session";
 import { SubscriptionManager } from "@/replication/subscriptions";
 import {
   blobShaBase64,
@@ -2758,7 +2761,7 @@ export class EmbeddedRuntime {
     const crypto = options.crypto ?? createAmbientCryptoProvider();
     const db = new Database(schema, options.storage, crypto);
     const moduleLoader = new ModuleLoader(options.convex.modules);
-    const transactionManager = new TransactionManager();
+    const transactionManager = createTransactionManager();
     const subscriptions = new SubscriptionManager();
     const tableVersionGetter = (tableName: string): number =>
       db.getTableVersion(tableName);
@@ -2800,7 +2803,7 @@ export class EmbeddedRuntime {
       queryStore: protocolQueries,
       auth: runtime._buildProtocolAuth(),
     });
-    const sessions = new SessionManager();
+    const sessions = createSessionManager();
     const writeFanout = options.writeBroadcast ?? createNoopWriteBroadcast();
     const scheduler = createSchedulerExecutor({
       db,

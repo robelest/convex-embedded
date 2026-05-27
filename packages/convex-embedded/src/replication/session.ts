@@ -48,52 +48,51 @@ export function createSession(id: string): Session {
 /**
  * Creates, retrieves, and removes {@link Session} instances.
  */
-export class SessionManager {
-  private _sessions: Map<string, Session> = new Map();
-  private _counter = 0;
+export interface SessionManager {
+  createSession(): string;
+  getSession(id: string): Session;
+  deleteSession(id: string): void;
+  clear(): void;
+}
 
-  /** Create a new session and return its ID. */
-  createSession(): string {
-    let id: string;
-    if (
-      typeof crypto !== "undefined" &&
-      typeof crypto.randomUUID === "function"
-    ) {
-      id = crypto.randomUUID();
-    } else {
-      this._counter += 1;
-      id = `session_${this._counter}`;
-    }
-    this._sessions.set(id, createSession(id));
-    return id;
-  }
+export function createSessionManager(): SessionManager {
+  const sessions = new Map<string, Session>();
+  let counter = 0;
 
-  /**
-   * Retrieve a session by ID.
-   * @throws if the session does not exist.
-   */
-  getSession(id: string): Session {
-    const session = this._sessions.get(id);
-    if (!session) {
-      throw new Error(`Session not found: ${id}`);
-    }
-    return session;
-  }
-
-  /** Remove a session, cleaning up its subscriptions. */
-  deleteSession(id: string): void {
-    const session = this._sessions.get(id);
-    if (session) {
-      session.cleanup();
-      this._sessions.delete(id);
-    }
-  }
-
-  /** Remove all sessions, cleaning up their subscriptions. */
-  clear(): void {
-    for (const session of this._sessions.values()) {
-      session.cleanup();
-    }
-    this._sessions.clear();
-  }
+  return {
+    createSession(): string {
+      let id: string;
+      if (
+        typeof crypto !== "undefined" &&
+        typeof crypto.randomUUID === "function"
+      ) {
+        id = crypto.randomUUID();
+      } else {
+        counter += 1;
+        id = `session_${counter}`;
+      }
+      sessions.set(id, createSession(id));
+      return id;
+    },
+    getSession(id: string): Session {
+      const session = sessions.get(id);
+      if (!session) {
+        throw new Error(`Session not found: ${id}`);
+      }
+      return session;
+    },
+    deleteSession(id: string): void {
+      const session = sessions.get(id);
+      if (session) {
+        session.cleanup();
+        sessions.delete(id);
+      }
+    },
+    clear(): void {
+      for (const session of sessions.values()) {
+        session.cleanup();
+      }
+      sessions.clear();
+    },
+  };
 }

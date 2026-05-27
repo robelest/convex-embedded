@@ -2,7 +2,7 @@ import {
   OCC_MAX_RETRIES,
   OccConflictError,
   OccTransaction,
-  TransactionManager,
+  createTransactionManager,
   type TransactionDatabase,
 } from "@embedded/kernel/transaction";
 import type { DocumentId, Timestamp } from "@embedded/runtime/db/types";
@@ -47,13 +47,13 @@ function createMockDb(): MockTransactionDb {
 
 describe("TransactionManager", () => {
   it("isInTransaction() returns false initially", () => {
-    const tm = new TransactionManager();
+    const tm = createTransactionManager();
 
     expect(tm.isInTransaction()).toBe(false);
   });
 
   it("isInTransaction() flips true after begin and false after commit", async () => {
-    const tm = new TransactionManager();
+    const tm = createTransactionManager();
 
     await tm.begin(false);
     expect(tm.isInTransaction()).toBe(true);
@@ -63,7 +63,7 @@ describe("TransactionManager", () => {
   });
 
   it("serializes two concurrent top-level transactions", async () => {
-    const tm = new TransactionManager();
+    const tm = createTransactionManager();
     const order: string[] = [];
 
     await tm.begin(false);
@@ -87,7 +87,7 @@ describe("TransactionManager", () => {
   });
 
   it("nested begin(true) does not block or release the lock", async () => {
-    const tm = new TransactionManager();
+    const tm = createTransactionManager();
 
     await tm.begin(false);
     expect(tm.isInTransaction()).toBe(true);
@@ -103,7 +103,7 @@ describe("TransactionManager", () => {
   });
 
   it("rollback releases the lock for the next caller", async () => {
-    const tm = new TransactionManager();
+    const tm = createTransactionManager();
     const order: string[] = [];
 
     await tm.begin(false);
@@ -127,13 +127,13 @@ describe("TransactionManager", () => {
   });
 
   it("throws when committing with no active transaction", () => {
-    const tm = new TransactionManager();
+    const tm = createTransactionManager();
 
     expect(() => tm.commit(false)).toThrow(/no active transaction/);
   });
 
   it("throws when rolling back with no active transaction", () => {
-    const tm = new TransactionManager();
+    const tm = createTransactionManager();
 
     expect(() => tm.rollback(false)).toThrow(/no active transaction/);
   });

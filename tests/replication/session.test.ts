@@ -1,6 +1,6 @@
 import {
   createSession,
-  SessionManager,
+  createSessionManager,
   type Session,
 } from "@embedded/replication/session";
 import { describe, expect, it, vi } from "@tests/testkit";
@@ -80,13 +80,13 @@ describe.concurrent("Session", () => {
 describe.concurrent("SessionManager", () => {
   describe("createSession", () => {
     it("returns a unique session ID", () => {
-      const manager = new SessionManager();
+      const manager = createSessionManager();
 
       expect(manager.createSession()).not.toBe(manager.createSession());
     });
 
     it("returns a non-empty string", () => {
-      const id = new SessionManager().createSession();
+      const id = createSessionManager().createSession();
 
       expect(typeof id).toBe("string");
       expect(id.length).toBeGreaterThan(0);
@@ -95,7 +95,7 @@ describe.concurrent("SessionManager", () => {
 
   describe("getSession", () => {
     it("returns the session by ID", () => {
-      const manager = new SessionManager();
+      const manager = createSessionManager();
       const id = manager.createSession();
 
       const session = manager.getSession(id);
@@ -105,7 +105,7 @@ describe.concurrent("SessionManager", () => {
     });
 
     it("returns the same Session instance on repeated calls", () => {
-      const manager = new SessionManager();
+      const manager = createSessionManager();
       const id = manager.createSession();
 
       expect(manager.getSession(id)).toBe(manager.getSession(id));
@@ -114,13 +114,13 @@ describe.concurrent("SessionManager", () => {
 
   describe("session not found", () => {
     it("throws for an unknown session ID", () => {
-      expect(() => new SessionManager().getSession("nonexistent")).toThrow(
+      expect(() => createSessionManager().getSession("nonexistent")).toThrow(
         "Session not found",
       );
     });
 
     it("throws with the missing session ID in the message", () => {
-      expect(() => new SessionManager().getSession("abc-999")).toThrow(
+      expect(() => createSessionManager().getSession("abc-999")).toThrow(
         "abc-999",
       );
     });
@@ -128,7 +128,7 @@ describe.concurrent("SessionManager", () => {
 
   describe("deleteSession", () => {
     it("cleans up the session's active queries", () => {
-      const manager = new SessionManager();
+      const manager = createSessionManager();
       const id = manager.createSession();
       const session = manager.getSession(id);
       const unsub = vi.fn();
@@ -146,7 +146,7 @@ describe.concurrent("SessionManager", () => {
     });
 
     it("deletes the session so it can no longer be retrieved", () => {
-      const manager = new SessionManager();
+      const manager = createSessionManager();
       const id = manager.createSession();
 
       manager.deleteSession(id);
@@ -156,14 +156,14 @@ describe.concurrent("SessionManager", () => {
 
     it("is a no-op for unknown session IDs", () => {
       expect(() =>
-        new SessionManager().deleteSession("nonexistent"),
+        createSessionManager().deleteSession("nonexistent"),
       ).not.toThrow();
     });
   });
 
   describe("multiple sessions", () => {
     it("each has independent state", () => {
-      const manager = new SessionManager();
+      const manager = createSessionManager();
       const id1 = manager.createSession();
       const id2 = manager.createSession();
 
@@ -180,7 +180,7 @@ describe.concurrent("SessionManager", () => {
     });
 
     it("removing one session does not affect others", () => {
-      const manager = new SessionManager();
+      const manager = createSessionManager();
       const id1 = manager.createSession();
       const id2 = manager.createSession();
 

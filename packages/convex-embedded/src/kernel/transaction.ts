@@ -46,62 +46,50 @@ const OCC_BASE_DELAY_MS = 50;
  * a loop that awaits the current promise ensures correctness even when
  * multiple waiters are woken simultaneously.
  */
-export class TransactionManager {
-  private _waitOnCurrentFunction: Promise<void> | null = null;
-  private _markTransactionDone: (() => void) | null = null;
+export interface TransactionManager {
+  begin(isNested: boolean): Promise<void>;
+  commit(isNested: boolean): void;
+  rollback(isNested: boolean): void;
+  isInTransaction(): boolean;
+}
 
-  /**
-   * Acquire the transaction lock.
-   *
-   * For **top-level** calls (`isNested === false`) this waits until any
-   * in-flight transaction completes, then sets up a new promise gate.
-   *
-   * For **nested** calls the lock is already held by the parent — we just
-   * pass through.
-   */
-  async begin(isNested: boolean): Promise<void> {
+export function createTransactionManager(): TransactionManager {
+  let waitOnCurrentFunction: Promise<void> | null = null;
+  let markTransactionDone: (() => void) | null = null;
+
+  function endTransaction(isNested: boolean): void {
     if (!isNested) {
-      while (this._waitOnCurrentFunction !== null) {
-        await this._waitOnCurrentFunction;
-      }
-      this._waitOnCurrentFunction = new Promise<void>((resolve) => {
-        this._markTransactionDone = resolve;
-      });
-    }
-  }
-
-  /**
-   * Commit the transaction and release the lock (top-level only).
-   */
-  commit(isNested: boolean): void {
-    this._endTransaction(isNested);
-  }
-
-  /**
-   * Rollback the transaction and release the lock (top-level only).
-   */
-  rollback(isNested: boolean): void {
-    this._endTransaction(isNested);
-  }
-
-  /**
-   * Returns `true` when a transaction lock is currently held.
-   */
-  isInTransaction(): boolean {
-    return this._waitOnCurrentFunction !== null;
-  }
-
-  private _endTransaction(isNested: boolean): void {
-    if (!isNested) {
-      if (this._markTransactionDone === null) {
+      if (markTransactionDone === null) {
         throw new Error("TransactionManager: no active transaction to end");
       }
-      const done = this._markTransactionDone;
-      this._waitOnCurrentFunction = null;
-      this._markTransactionDone = null;
+      const done = markTransactionDone;
+      waitOnCurrentFunction = null;
+      markTransactionDone = null;
       done();
     }
   }
+
+  return {
+    async begin(isNested: boolean): Promise<void> {
+      if (!isNested) {
+        while (waitOnCurrentFunction !== null) {
+          await waitOnCurrentFunction;
+        }
+        waitOnCurrentFunction = new Promise<void>((resolve) => {
+          markTransactionDone = resolve;
+        });
+      }
+    },
+    commit(isNested: boolean): void {
+      endTransaction(isNested);
+    },
+    rollback(isNested: boolean): void {
+      endTransaction(isNested);
+    },
+    isInTransaction(): boolean {
+      return waitOnCurrentFunction !== null;
+    },
+  };
 }
 
 /**

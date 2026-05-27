@@ -2,7 +2,10 @@ import type { ProtocolExecutor } from "@embedded/replication/protocol";
 import { ReplicationProtocolHandler } from "@embedded/replication/protocol";
 import { createSubscriptionManager, type SubscriptionManager } from "@embedded/replication/subscriptions";
 import type { DocumentId } from "@embedded/runtime/db/types";
-import { RuntimeProtocolQueryRegistry } from "@embedded/runtime/registry";
+import {
+  createRuntimeProtocolQueryRegistry,
+  createRuntimeQueryObserverRegistry,
+} from "@embedded/runtime/registry";
 import { bench, describe } from "@tests/testkit";
 
 function createExecutor(): ProtocolExecutor {
@@ -48,7 +51,9 @@ async function seedProtocol(
   const subscriptions = createSubscriptionManager();
   const protocol = new ReplicationProtocolHandler({
     executor: createExecutor(),
-    queryStore: new RuntimeProtocolQueryRegistry(subscriptions),
+    queryStore: createRuntimeProtocolQueryRegistry(
+      createRuntimeQueryObserverRegistry(subscriptions),
+    ),
     auth: { verifyToken: async () => ({ identity: null, identityKey: null }) },
   });
 

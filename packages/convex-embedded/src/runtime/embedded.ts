@@ -58,10 +58,12 @@ import {
 } from "@/runtime/platform";
 import {
   LocalQueryEvaluationError,
-  RuntimeProtocolQueryRegistry,
-  RuntimeQueryObserverRegistry,
+  createRuntimeProtocolQueryRegistry,
+  createRuntimeQueryObserverRegistry,
   type ProtocolQueryRecord,
+  type RuntimeProtocolQueryRegistry,
   type RuntimeQueryObserver,
+  type RuntimeQueryObserverRegistry,
 } from "@/runtime/registry";
 import type { StorageSurface } from "@/runtime/storage";
 import { createTransport } from "@/runtime/transport";
@@ -2769,21 +2771,21 @@ export class EmbeddedRuntime {
     const tableVersionGetter = (tableName: string): number =>
       db.getTableVersion(tableName);
     const protocolQueryObservers =
-      new RuntimeQueryObserverRegistry<ProtocolQueryRecord>(
+      createRuntimeQueryObserverRegistry<ProtocolQueryRecord>(
         subscriptions,
         tableVersionGetter,
       );
     const localQueryWatches =
-      new RuntimeQueryObserverRegistry<LocalQueryWatchRecord>(
+      createRuntimeQueryObserverRegistry<LocalQueryWatchRecord>(
         subscriptions,
         tableVersionGetter,
       );
     const localPaginatedQueryWatches =
-      new RuntimeQueryObserverRegistry<LocalPaginatedWatchRecord>(
+      createRuntimeQueryObserverRegistry<LocalPaginatedWatchRecord>(
         subscriptions,
         tableVersionGetter,
       );
-    const protocolQueries = new RuntimeProtocolQueryRegistry(
+    const protocolQueries = createRuntimeProtocolQueryRegistry(
       protocolQueryObservers,
     );
     const auth = createAuthResolver();

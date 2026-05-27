@@ -10,7 +10,11 @@ import {
   createSubscriptionManager,
   type SubscriptionManager,
 } from "@embedded/replication/subscriptions";
-import { RuntimeProtocolQueryRegistry } from "@embedded/runtime/registry";
+import {
+  createRuntimeProtocolQueryRegistry,
+  createRuntimeQueryObserverRegistry,
+  type RuntimeProtocolQueryRegistry,
+} from "@embedded/runtime/registry";
 import { flushMicrotasks } from "@tests/helpers/time";
 import { describe, expect, it, vi, type Mock } from "@tests/testkit";
 import { ConvexError } from "convex/values";
@@ -60,7 +64,9 @@ function createMocks(): Mocks {
     runAction: vi.fn().mockResolvedValue("actionResult"),
   };
   const subscriptions = createSubscriptionManager();
-  const queryStore = new RuntimeProtocolQueryRegistry(subscriptions);
+  const queryStore = createRuntimeProtocolQueryRegistry(
+    createRuntimeQueryObserverRegistry(subscriptions),
+  );
   const auth: AuthMock = {
     verifyToken: vi.fn<ProtocolAuth["verifyToken"]>().mockResolvedValue({
       identity: { subject: "user1", issuer: "test" },

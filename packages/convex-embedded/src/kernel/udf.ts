@@ -38,6 +38,13 @@ import { isLogCaptureActive } from "@/tracing/spans";
 const log = createLogger("udf");
 const loaderLog = createLogger("loader");
 
+const MATH_RANDOM_DESCRIPTOR = Object.getOwnPropertyDescriptor(Math, "random");
+const DATE_NOW_DESCRIPTOR = Object.getOwnPropertyDescriptor(Date, "now");
+const CRYPTO_RANDOM_UUID_DESCRIPTOR =
+  typeof crypto !== "undefined"
+    ? Object.getOwnPropertyDescriptor(crypto, "randomUUID")
+    : undefined;
+
 declare global {
   var Convex:
     | {
@@ -78,12 +85,9 @@ function patchGlobals(ops: OpsContext): SavedGlobals {
       typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
         ? crypto.randomUUID.bind(crypto)
         : undefined,
-    mathRandomDescriptor: Object.getOwnPropertyDescriptor(Math, "random"),
-    dateNowDescriptor: Object.getOwnPropertyDescriptor(Date, "now"),
-    cryptoRandomUUIDDescriptor:
-      typeof crypto !== "undefined"
-        ? Object.getOwnPropertyDescriptor(crypto, "randomUUID")
-        : undefined,
+    mathRandomDescriptor: MATH_RANDOM_DESCRIPTOR,
+    dateNowDescriptor: DATE_NOW_DESCRIPTOR,
+    cryptoRandomUUIDDescriptor: CRYPTO_RANDOM_UUID_DESCRIPTOR,
     patchedMathRandom: false,
     patchedDateNow: false,
     patchedCryptoRandomUUID: false,

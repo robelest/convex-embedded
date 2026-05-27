@@ -125,7 +125,7 @@ function applyByteBudget(
 
 type SourceEvaluation = {
   results: QueryResults;
-  fieldPathsToSortBy: string[];
+  fieldPathsToSortBy: readonly string[];
   order: "asc" | "desc";
   presorted?: boolean;
 };
@@ -151,7 +151,7 @@ type RangeValidationState = {
 type RangeValidationContext = {
   filter: SerializedRangeExpression;
   filterIndex: number;
-  fields: string[];
+  fields: readonly string[];
   source: Source & { type: "IndexRange" };
   validation: RangeValidationState;
 };
@@ -180,6 +180,8 @@ const builtInIndexFields = {
   by_id: ["_id"],
   by_table: ["table", "_creationTime", "_id"],
 } as const satisfies Record<string, readonly string[]>;
+
+const resolvedFieldsCache = new Map<string, readonly string[]>();
 
 const filterNormalizers = [
   {
@@ -507,7 +509,7 @@ function evaluateRangeFilter(
 
 function validateIndexRangeExpression(
   source: Source & { type: "IndexRange" },
-  fields: string[],
+  fields: readonly string[],
 ): void {
   source.range.reduce<RangeValidationState>(
     (validation, filter, filterIndex) => {
@@ -838,11 +840,20 @@ export function createQueryEngine(
     return results;
   }
 
-  function resolveIndexFields(tableName: string, indexName: string): string[] {
+  function resolveIndexFields(
+    tableName: string,
+    indexName: string,
+  ): readonly string[] {
     const builtInFields =
       builtInIndexFields[indexName as keyof typeof builtInIndexFields];
     if (builtInFields) {
-      return [...builtInFields];
+      return builtInFields;
+    }
+
+    const cacheKey = `${tableName}:${indexName}`;
+    const cached = resolvedFieldsCache.get(cacheKey);
+    if (cached !== undefined) {
+      return cached;
     }
 
     const indexes = schema?.tables.get(tableName)?.indexes;
@@ -850,13 +861,18 @@ export function createQueryEngine(
       ({ indexDescriptor }) => indexDescriptor === indexName,
     );
 
-    return index
-      ? [...index.fields, "_creationTime", "_id"]
-      : (() => {
-          throw new Error(
-            `Cannot use index "${indexName}" for table "${tableName}" because it is not declared in the schema.`,
-          );
-        })();
+    if (!index) {
+      throw new Error(
+        `Cannot use index "${indexName}" for table "${tableName}" because it is not declared in the schema.`,
+      );
+    }
+    const resolved = Object.freeze([
+      ...index.fields,
+      "_creationTime",
+      "_id",
+    ]) as readonly string[];
+    resolvedFieldsCache.set(cacheKey, resolved);
+    return resolved;
   }
 
   function extractQueryOperators(operators: QueryOperator[]): {
@@ -892,7 +908,7 @@ export function createQueryEngine(
 
   function sortResults(
     results: QueryResults,
-    fieldPathsToSortBy: string[],
+    fieldPathsToSortBy: readonly string[],
     order: "asc" | "desc",
   ): QueryResults {
     if (results.length < 2 || fieldPathsToSortBy.length === 0) {
@@ -955,16 +971,17 @@ export function createQueryEngine(
       string,
     ];
     const fields = resolveIndexFields(tableName, indexName);
-    const pinned = new Set<string>();
+    let pinned: Set<string> | null = null;
     for (const expr of src.range) {
       if (expr.type === "Eq") {
+        if (pinned === null) pinned = new Set();
         pinned.add(expr.fieldPath);
       }
     }
     const seekFields: string[] = [];
     let prefix = true;
     for (const field of fields) {
-      if (prefix && pinned.has(field)) {
+      if (prefix && pinned !== null && pinned.has(field)) {
         continue;
       }
       prefix = false;
@@ -998,14 +1015,23 @@ export function createQueryEngine(
     return `${CURSOR_PREFIX}${JSON.stringify(values)}`;
   }
 
+  let lastDecodedCursor: string | null = null;
+  let lastDecodedValue: Array<Value | undefined> | null = null;
+
   function decodeCursor(cursor: string): Array<Value | undefined> | null {
     if (!cursor.startsWith(CURSOR_PREFIX)) {
       return null;
     }
+    if (cursor === lastDecodedCursor) {
+      return lastDecodedValue;
+    }
     const parsed = JSON.parse(
       cursor.slice(CURSOR_PREFIX.length),
     ) as JSONValue[];
-    return parsed.map((value) => jsonToConvex(value));
+    const value = parsed.map((v) => jsonToConvex(v));
+    lastDecodedCursor = cursor;
+    lastDecodedValue = value;
+    return value;
   }
 
   function compareOrderKey(
@@ -1072,6 +1098,36 @@ export function createQueryEngine(
     return { splitCursor, pageStatus };
   }
 
+  function filterDocsAfter(
+    orderKey: OrderKey,
+    docs: readonly GenericDocument[],
+    decoded: Array<Value | undefined>,
+  ): GenericDocument[] {
+    const out: GenericDocument[] = [];
+    for (let i = 0; i < docs.length; i++) {
+      const doc = docs[i]!;
+      if (compareOrderKey(orderKey, doc, decoded) > 0) {
+        out.push(doc);
+      }
+    }
+    return out;
+  }
+
+  function filterDocsBeforeOrEq(
+    orderKey: OrderKey,
+    docs: readonly GenericDocument[],
+    endDecoded: Array<Value | undefined>,
+  ): GenericDocument[] {
+    const out: GenericDocument[] = [];
+    for (let i = 0; i < docs.length; i++) {
+      const doc = docs[i]!;
+      if (compareOrderKey(orderKey, doc, endDecoded) <= 0) {
+        out.push(doc);
+      }
+    }
+    return out;
+  }
+
   async function paginateSeekAsync({
     query,
     cursor,
@@ -1129,9 +1185,7 @@ export function createQueryEngine(
       const afterStart =
         decoded === null
           ? filtered
-          : filtered.filter(
-              (doc) => compareOrderKey(orderKey, doc, decoded) > 0,
-            );
+          : filterDocsAfter(orderKey, filtered, decoded);
       const exhausted = src.results.length < cappedLimit;
 
       if (pinnedEnd) {
@@ -1148,8 +1202,10 @@ export function createQueryEngine(
             ...pageSplit(orderKey, afterStart, target),
           };
         }
-        const inRange = afterStart.filter(
-          (doc) => compareOrderKey(orderKey, doc, endDecoded) <= 0,
+        const inRange = filterDocsBeforeOrEq(
+          orderKey,
+          afterStart,
+          endDecoded,
         );
         const sawBeyondEnd = inRange.length < afterStart.length;
         if (sawBeyondEnd || exhausted) {

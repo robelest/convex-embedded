@@ -1496,35 +1496,41 @@ export function createDatabase(
         `Cannot use index "${indexName}" for table "${tableName}" because it is not declared in the schema.`,
       );
     }
-    const duplicateIds = new Set<string>();
+    if (ids.length === 0) {
+      return [];
+    }
+    if (ids.length === 1) {
+      const doc = documents.get(ids[0] as DocumentId);
+      return doc === undefined
+        ? []
+        : [stripIdentityScope(doc as IdentityScopedDocument)];
+    }
+
     const uniqueIds: string[] = [];
     const seenIds = new Set<string>();
     for (const id of ids) {
       const key = id as string;
-      if (seenIds.has(key)) {
-        duplicateIds.add(key);
-        continue;
-      }
+      if (seenIds.has(key)) continue;
       seenIds.add(key);
       uniqueIds.push(key);
     }
 
-    if (duplicateIds.size > 0) {
+    if (uniqueIds.length !== ids.length) {
+      const duplicates = new Set<string>();
+      const seen = new Set<string>();
+      for (const id of ids) {
+        const key = id as string;
+        if (seen.has(key)) duplicates.add(key);
+        else seen.add(key);
+      }
       log.warn(
-        `duplicate committed ids detected for ${indexKey}: ${Array.from(duplicateIds).join(", ")}; rebuilding index`,
+        `duplicate committed ids detected for ${indexKey}: ${Array.from(duplicates).join(", ")}; rebuilding index`,
       );
       rebuildTableIndexes(tableName);
-      const rebuiltIds = indexDocuments.get(indexKey) ?? [];
-      return rebuiltIds
-        .map((id) => documents.get(id as DocumentId))
-        .filter((doc): doc is StoredDocument => doc !== undefined)
-        .map((doc) => stripIdentityScope(doc as IdentityScopedDocument));
+      return lookupAndStrip(indexDocuments.get(indexKey) ?? []);
     }
 
-    return uniqueIds
-      .map((id) => documents.get(id as DocumentId))
-      .filter((doc): doc is StoredDocument => doc !== undefined)
-      .map((doc) => stripIdentityScope(doc as IdentityScopedDocument));
+    return lookupAndStrip(uniqueIds);
   }
 
   function vectorSearch(
@@ -2024,6 +2030,16 @@ export function createDatabase(
     docs: readonly StoredDocument[],
   ): StoredDocument[] {
     return docs.map((doc) => stripIdentityScope(doc as IdentityScopedDocument));
+  }
+
+  function lookupAndStrip(ids: readonly string[]): StoredDocument[] {
+    const out: StoredDocument[] = [];
+    for (let i = 0; i < ids.length; i++) {
+      const doc = documents.get(ids[i] as DocumentId);
+      if (doc !== undefined)
+        out.push(stripIdentityScope(doc as IdentityScopedDocument));
+    }
+    return out;
   }
 
   function visibleDocumentInScope(

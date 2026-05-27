@@ -13,9 +13,13 @@ export const DEFAULT_KEEP_COLLECTION_TAIL_COUNT = 256;
 const EMPTY_YJS_V2_UPDATE = [0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0];
 
 export function toArrayBuffer(data: Uint8Array): ArrayBuffer {
-  const buffer = new ArrayBuffer(data.byteLength);
-  new Uint8Array(buffer).set(data);
-  return buffer;
+  const buffer = data.buffer;
+  if (buffer instanceof ArrayBuffer) {
+    return buffer.slice(data.byteOffset, data.byteOffset + data.byteLength);
+  }
+  const copy = new ArrayBuffer(data.byteLength);
+  new Uint8Array(copy).set(data);
+  return copy;
 }
 
 export function isEmptyUpdate(update: Uint8Array): boolean {

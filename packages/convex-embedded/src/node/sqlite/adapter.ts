@@ -24,23 +24,31 @@ export async function openNodeStorage(options: {
     `schema ready for ${filename} in ${(now() - openStarted).toFixed(1)}ms`,
   );
 
+  const stmtCache = new Map<string, ReturnType<typeof client.db.prepare>>();
+  function prepare(sql: string) {
+    let stmt = stmtCache.get(sql);
+    if (stmt === undefined) {
+      stmt = client.db.prepare(sql);
+      stmtCache.set(sql, stmt);
+    }
+    return stmt;
+  }
+
   return new SqliteAdapter(
     {
       query<T extends Record<string, unknown> = Record<string, unknown>>(
         sql: string,
         params?: readonly unknown[],
       ): Promise<T[]> {
-        return Promise.resolve(
-          client.db.prepare(sql).all(...(params ?? [])) as T[],
-        );
+        return Promise.resolve(prepare(sql).all(...(params ?? [])) as T[]);
       },
       async execute(sql, params) {
-        client.db.prepare(sql).run(...(params ?? []));
+        prepare(sql).run(...(params ?? []));
       },
       async executeBatch(statements) {
         const txn = client.db.transaction(() => {
           for (const statement of statements) {
-            client.db.prepare(statement.sql).run(...(statement.params ?? []));
+            prepare(statement.sql).run(...(statement.params ?? []));
           }
         });
         txn();

@@ -11,6 +11,7 @@
 import type { ConvexClient } from "convex/browser";
 import * as Y from "yjs";
 
+import { CrdtDirtyState } from "@/client/engine/crdt";
 import { PullBatchCoordinator } from "@/client/engine/pullbatch";
 import {
   EngineStatusEmitter,
@@ -39,7 +40,7 @@ import { parseErrorMetadata } from "@/shared/errors";
 import { createLogger } from "@/shared/logger";
 import { matchTag } from "@/shared/match";
 import { getFunctionName, makeFunctionReference } from "@/shared/refs";
-import { getCrdtType, type Definition } from "@/shared/schema";
+import type { Definition } from "@/shared/schema";
 import type {
   EngineStatus,
   PullDocumentResponse,
@@ -1822,32 +1823,7 @@ function createEngine(config: EngineConfig): EngineInstance {
   let isOnline = false;
   let offlineTransitionsSinceBoot = 0;
   let cameOnlineAfterOfflinePeriod = false;
-  const dirtyCrdtRows = new Set<string>();
-  const crdtFieldsByTable = new Map<string, Set<string>>();
-  for (const [tableName, tableConfig] of Object.entries(tables)) {
-    const shape = tableConfig.schema?.getShape?.() as
-      | Record<string, unknown>
-      | undefined;
-    if (!shape) continue;
-    const crdtFields = new Set<string>();
-    for (const [fieldName, fieldDef] of Object.entries(shape)) {
-      if (getCrdtType(fieldDef) !== null) {
-        crdtFields.add(fieldName);
-      }
-    }
-    if (crdtFields.size > 0) {
-      crdtFieldsByTable.set(tableName, crdtFields);
-    }
-  }
-
-  function markCrdtRowDirty(tableName: string, docId: string): void {
-    if (!crdtFieldsByTable.has(tableName)) return;
-    dirtyCrdtRows.add(`${tableName}:${docId}`);
-  }
-
-  function clearCrdtRowDirty(tableName: string, docId: string): void {
-    dirtyCrdtRows.delete(`${tableName}:${docId}`);
-  }
+  const crdt = new CrdtDirtyState(tables);
 
   let queueProcessingPromise: Promise<Set<string>> | null = null;
   let queueProcessingRequestedWhileActive = false;
@@ -2657,7 +2633,7 @@ function createEngine(config: EngineConfig): EngineInstance {
           isOnline,
           started,
           offlineTransitionsSinceBoot,
-          hasDirtyCrdtRows: dirtyCrdtRows.size > 0,
+          hasDirtyCrdtRows: crdt.hasDirty(),
         });
 
         if (route._tag === "Skip") {
@@ -2672,14 +2648,14 @@ function createEngine(config: EngineConfig): EngineInstance {
         } else if (route._tag === "Resolve") {
           if (
             !options?.forceResolve &&
-            dirtyCrdtRows.size > 0 &&
+            crdt.hasDirty() &&
             offlineTransitionsSinceBoot > 0
           ) {
             await mergeDirtyCrdtRows(signal);
           } else {
             await pullAll(signal);
             if (!signal.aborted) {
-              dirtyCrdtRows.clear();
+              crdt.clearAll();
             }
           }
         }
@@ -2717,29 +2693,18 @@ function createEngine(config: EngineConfig): EngineInstance {
   }
 
   async function mergeDirtyCrdtRowsImpl(signal?: AbortSignal): Promise<void> {
-    if (dirtyCrdtRows.size === 0) {
+    if (!crdt.hasDirty()) {
       return;
     }
 
-    const rowsByTable = new Map<string, Set<string>>();
-    for (const key of dirtyCrdtRows) {
-      const sep = key.indexOf(":");
-      if (sep < 0) continue;
-      const tableName = key.slice(0, sep);
-      const docId = key.slice(sep + 1);
-      if (!crdtFieldsByTable.has(tableName)) continue;
-      const set = rowsByTable.get(tableName) ?? new Set<string>();
-      set.add(docId);
-      rowsByTable.set(tableName, set);
-    }
-
-    if (rowsByTable.size === 0) {
-      dirtyCrdtRows.clear();
+    const grouped = crdt.iterateGrouped(orderedTables);
+    if (grouped.length === 0) {
+      crdt.clearAll();
       return;
     }
-
-    const orderedDirtyTables = orderedTables.filter((tableName) =>
-      rowsByTable.has(tableName),
+    const orderedDirtyTables = grouped.map((entry) => entry.tableName);
+    const rowsByTable = new Map(
+      grouped.map((entry) => [entry.tableName, entry.docIds] as const),
     );
 
     emit({
@@ -2805,7 +2770,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     );
     if (dirtyLocalDocs.length === 0) {
       for (const docId of docIds) {
-        clearCrdtRowDirty(tableName, docId);
+        crdt.clear(tableName, docId);
       }
       return;
     }
@@ -2826,7 +2791,7 @@ function createEngine(config: EngineConfig): EngineInstance {
 
     if (pullDocuments.length === 0) {
       for (const docId of docIds) {
-        clearCrdtRowDirty(tableName, docId);
+        crdt.clear(tableName, docId);
       }
       return;
     }
@@ -2908,7 +2873,7 @@ function createEngine(config: EngineConfig): EngineInstance {
     });
 
     for (const docId of docIds) {
-      clearCrdtRowDirty(tableName, docId);
+      crdt.clear(tableName, docId);
     }
   }
 
@@ -4188,14 +4153,14 @@ function createEngine(config: EngineConfig): EngineInstance {
         log.debug(
           `engine.mutation queue.push push=${(__pushDone - __pushStart).toFixed(1)}ms ref=${refName}`,
         );
-        if (!isOnline && crdtFieldsByTable.has(table)) {
+        if (!isOnline && crdt.shouldTrack(table)) {
           const docId =
             typeof localResult === "string"
               ? localResult
               : ((localArgs?.id as string | undefined) ??
                 (localArgs?._id as string | undefined));
           if (docId) {
-            markCrdtRowDirty(table, docId);
+            crdt.mark(table, docId);
           }
         }
         if (isOnline) {

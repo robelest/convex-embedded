@@ -917,7 +917,8 @@ class EngineImpl implements EngineInstance {
       buildScopeKey,
       projectRemoteSnapshot: replay.projectRemoteSnapshot,
       getDocumentsForTable,
-      filterAfterHydratingReferences,
+      filterAfterHydratingReferences: (input) =>
+        pull.filterAfterHydratingReferences(pullDeps, input),
       ingestDocuments,
       runSpan,
       yieldToEventLoop,
@@ -949,30 +950,6 @@ class EngineImpl implements EngineInstance {
     const clearBufferedSnapshots = () =>
       subscriptions.clearAll(subsState, subsDeps);
 
-    function ensureReplayProcessing(): void {
-      replay.ensureProcessing(replayState, replayDeps);
-    }
-
-    function processUploadQueue(signal?: AbortSignal): Promise<void> {
-      return replay.processUploadQueue(replayState, replayDeps, signal);
-    }
-
-    function processQueue(signal?: AbortSignal): Promise<Set<string>> {
-      return replay.processQueue(replayState, replayDeps, signal);
-    }
-
-    function rollbackDeadLetteredTables(
-      deadLettered: Set<string>,
-      signal?: AbortSignal,
-    ): Promise<void> {
-      return replay.rollbackDeadLetteredTables(
-        replayState,
-        replayDeps,
-        deadLettered,
-        signal,
-      );
-    }
-
     function emit(newStatus: EngineStatus): void {
       statusEmitter.emit(newStatus);
     }
@@ -995,14 +972,6 @@ class EngineImpl implements EngineInstance {
      * On failure, the entry stays in the queue for retry on next cycle.
      */
 
-    async function mergeDirtyCrdtRows(signal?: AbortSignal): Promise<void> {
-      return pull.runMerge(pullState, mergeState, pullDeps, signal);
-    }
-
-    async function pullAll(signal?: AbortSignal): Promise<void> {
-      return pull.pullAll(pullState, pullDeps, signal);
-    }
-
     async function getTableSpec(
       tableName: string,
       tableConfig: TableConfig,
@@ -1017,17 +986,6 @@ class EngineImpl implements EngineInstance {
         signal,
         scopeArgs,
       );
-    }
-
-    async function filterAfterHydratingReferences(input: {
-      docs: Array<Record<string, unknown>>;
-      tableName: string;
-      signal?: AbortSignal;
-    }): Promise<{
-      accepted: Array<Record<string, unknown>>;
-      skipped: Array<Record<string, unknown>>;
-    }> {
-      return pull.filterAfterHydratingReferences(pullDeps, input);
     }
 
     /**
@@ -1421,11 +1379,20 @@ class EngineImpl implements EngineInstance {
     };
 
     const schedulerDeps: SchedulerDeps = {
-      processUploadQueue,
-      processQueue,
-      rollbackDeadLetteredTables,
-      mergeDirtyCrdtRows,
-      pullAll,
+      processUploadQueue: (signal) =>
+        replay.processUploadQueue(replayState, replayDeps, signal),
+      processQueue: (signal) =>
+        replay.processQueue(replayState, replayDeps, signal),
+      rollbackDeadLetteredTables: (deadLettered, signal) =>
+        replay.rollbackDeadLetteredTables(
+          replayState,
+          replayDeps,
+          deadLettered,
+          signal,
+        ),
+      mergeDirtyCrdtRows: (signal) =>
+        pull.runMerge(pullState, mergeState, pullDeps, signal),
+      pullAll: (signal) => pull.pullAll(pullState, pullDeps, signal),
       stopRemoteSubscriptions,
       startRemoteSubscriptions,
       clearBufferedSnapshots,
@@ -1634,7 +1601,7 @@ class EngineImpl implements EngineInstance {
           }
         }
         if (scheduler.isOnline(schedulerState)) {
-          ensureReplayProcessing();
+          replay.ensureProcessing(replayState, replayDeps);
         } else {
           log.debug("sync: offline — mutation queued for later push");
         }

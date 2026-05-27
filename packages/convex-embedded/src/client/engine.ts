@@ -14,6 +14,7 @@ import * as Y from "yjs";
 import { ConnectivityState } from "@/client/engine/connectivity";
 import { CrdtDirtyState } from "@/client/engine/crdt";
 import { PullBatchCoordinator } from "@/client/engine/pullbatch";
+import { ReplayGracePeriod } from "@/client/engine/replay";
 import { CycleScheduler } from "@/client/engine/scheduler";
 import { ScopeRegistry, type ActiveScope } from "@/client/engine/scope";
 import { SnapshotIngest } from "@/client/engine/snapshot";
@@ -1699,34 +1700,9 @@ function createEngine(config: EngineConfig): EngineInstance {
   const activatedRemoteTables = new Set(rootTablesByDependencies(tables));
   const processorHeartbeatMs = Math.max(1_000, Math.floor(leaseMs / 3));
 
-  const REPLAY_GRACE_MS = 3_000;
-  const recentlyReplayedIds = new Map<string, number>();
-
-  function sweepRecentlyReplayed(now: number): void {
-    for (const [id, timestamp] of recentlyReplayedIds) {
-      if (now - timestamp >= REPLAY_GRACE_MS) {
-        recentlyReplayedIds.delete(id);
-      }
-    }
-  }
-
-  function addRecentlyReplayed(id: string): void {
-    const now = Date.now();
-    sweepRecentlyReplayed(now);
-    recentlyReplayedIds.set(id, now);
-  }
-
-  function getRecentlyReplayedIdSet(): ReadonlySet<string> {
-    const now = Date.now();
-    sweepRecentlyReplayed(now);
-    const active = new Set<string>();
-    for (const [id, timestamp] of recentlyReplayedIds) {
-      if (now - timestamp < REPLAY_GRACE_MS) {
-        active.add(id);
-      }
-    }
-    return active;
-  }
+  const replayGrace = new ReplayGracePeriod();
+  const addRecentlyReplayed = (id: string) => replayGrace.add(id);
+  const getRecentlyReplayedIdSet = () => replayGrace.snapshot();
   const pullServices: EngineResolveInput = {
     remoteClient,
     ingestDocuments,

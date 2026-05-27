@@ -789,7 +789,11 @@ export interface EngineInstance {
    *
    * Returns the local mutation result immediately.
    */
-  mutation(ref: unknown, args: Record<string, unknown>): Promise<unknown>;
+  mutation(
+    ref: unknown,
+    args: Record<string, unknown>,
+    options?: { enqueueForReplay?: boolean },
+  ): Promise<unknown>;
 
   /** Manually trigger a resolve cycle (e.g., after coming back online). */
   pullNow(): Promise<void>;
@@ -3971,7 +3975,106 @@ function createEngine(config: EngineConfig): EngineInstance {
   };
 }
 
+/**
+ * Engine — owned-state façade around the createEngine factory.
+ *
+ * This is the architectural boundary the rest of the package interacts
+ * with. The implementation still lives in the createEngine factory body
+ * (it's mid-refactor — subsystem state has been extracted into
+ * `client/engine/*.ts` classes but the orchestration methods still close
+ * over the factory scope). Each public method delegates to the factory's
+ * returned interface.
+ *
+ * As inner methods migrate onto this class one by one, the impl shrinks
+ * until createEngine becomes the constructor body itself.
+ *
+ * @internal
+ */
+export class Engine implements EngineInstance {
+  private readonly impl: EngineInstance;
+
+  constructor(config: EngineConfig) {
+    this.impl = createEngine(config);
+  }
+
+  start(): void {
+    this.impl.start();
+  }
+
+  stop(): void {
+    this.impl.stop();
+  }
+
+  on(event: "change", listener: ChangeListener): () => void {
+    return this.impl.on(event, listener);
+  }
+
+  getStatus(): EngineStatus {
+    return this.impl.getStatus();
+  }
+
+  mutation(
+    ref: unknown,
+    args: Record<string, unknown>,
+    options?: { enqueueForReplay?: boolean },
+  ): Promise<unknown> {
+    return this.impl.mutation(ref, args, options);
+  }
+
+  pullNow(): Promise<void> {
+    return this.impl.pullNow();
+  }
+
+  ensureTableReady(tableName: string): Promise<void> {
+    return this.impl.ensureTableReady(tableName);
+  }
+
+  ensureScopeReady(
+    tableName: string,
+    scopeArgs?: Record<string, unknown>,
+    readKey?: string,
+  ): Promise<void> {
+    return this.impl.ensureScopeReady(tableName, scopeArgs, readKey);
+  }
+
+  releaseScopeRead(
+    tableName: string,
+    scopeArgs: Record<string, unknown> | undefined,
+    readKey: string,
+  ): void {
+    this.impl.releaseScopeRead(tableName, scopeArgs, readKey);
+  }
+
+  onScopeResolved(
+    tableName: string,
+    scopeArgs: Record<string, unknown> | undefined,
+    cb: () => void,
+  ): () => void {
+    return this.impl.onScopeResolved(tableName, scopeArgs, cb);
+  }
+
+  reloadIdentity(): Promise<void> {
+    return this.impl.reloadIdentity();
+  }
+
+  pendingCount(): number {
+    return this.impl.pendingCount();
+  }
+
+  get idMap(): IdMap {
+    return this.impl.idMap;
+  }
+
+  get pendingQueue(): PendingQueue {
+    return this.impl.pendingQueue;
+  }
+
+  [Symbol.asyncDispose](): Promise<void> {
+    return this.impl[Symbol.asyncDispose]();
+  }
+}
+
 /** @internal */
 export const engine = {
-  create: createEngine,
+  create: (config: EngineConfig): EngineInstance => new Engine(config),
 };

@@ -11,6 +11,10 @@
 import type { ConvexClient } from "convex/browser";
 import * as Y from "yjs";
 
+import {
+  EngineStatusEmitter,
+  type ChangeListener,
+} from "@/client/engine/status";
 import { IdMap, extractSchemaIdFields } from "@/client/ids";
 import { MAX_REPLAY_RETRIES, PendingQueue } from "@/client/pending/queue";
 import type { PendingEntry } from "@/client/pending/queue";
@@ -697,8 +701,6 @@ export interface EngineConfig {
   /** Return the current queued payload version for a mutation ref. */
   getReplayPayloadVersion?: (refName: string) => number;
 }
-
-type ChangeListener = (status: EngineStatus) => void;
 
 type ReplicationCycleRoute =
   | { _tag: "Skip" }
@@ -1775,8 +1777,7 @@ function createEngine(config: EngineConfig): EngineInstance {
         })
     : undefined;
 
-  let status: EngineStatus = { status: "idle" };
-  const listeners = new Set<ChangeListener>();
+  const statusEmitter = new EngineStatusEmitter();
   let started = false;
   let scopeActivationEpoch = 0;
   let abortController: AbortController | null = null;
@@ -2336,18 +2337,8 @@ function createEngine(config: EngineConfig): EngineInstance {
     }, "[sync] ensureReplayProcessing:");
   }
 
-  function emit(newStatus: EngineStatus) {
-    if (newStatus.status === "resolved" && status.status !== "resolved") {
-      recordCounter("sync.cycle");
-    }
-    status = newStatus;
-    for (const listener of listeners) {
-      try {
-        listener(newStatus);
-      } catch (err) {
-        log.error("sync: listener threw", err);
-      }
-    }
+  function emit(newStatus: EngineStatus): void {
+    statusEmitter.emit(newStatus);
   }
 
   async function gatherUnmappedStorageDependencies(
@@ -4271,16 +4262,15 @@ function createEngine(config: EngineConfig): EngineInstance {
       onOffline = null;
 
       emit({ status: "idle" });
-      listeners.clear();
+      statusEmitter.clearListeners();
     },
 
     on(_event: "change", listener: ChangeListener): () => void {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
+      return statusEmitter.on(listener);
     },
 
     getStatus(): EngineStatus {
-      return status;
+      return statusEmitter.get();
     },
 
     async mutation(

@@ -8,16 +8,7 @@ import { runDetached } from "@/utils/detached";
 
 const log = createLogger("resolve");
 
-export interface SchedulerState {
-  inFlight: Promise<void> | null;
-  abort: AbortController | null;
-  heartbeatTimer: ReturnType<typeof setInterval> | null;
-  online: boolean;
-  offlineTransitions: number;
-  cameOnlineAfterOffline: boolean;
-}
-
-export interface SchedulerDeps {
+export interface SchedulerRefs {
   processUploadQueue: (signal: AbortSignal) => Promise<void>;
   processQueue: (signal: AbortSignal) => Promise<Set<string>>;
   rollbackDeadLetteredTables: (
@@ -37,55 +28,35 @@ export interface SchedulerDeps {
   heartbeat: () => Promise<void>;
 }
 
-export function createSchedulerState(): SchedulerState {
-  return {
-    inFlight: null,
-    abort: null,
-    heartbeatTimer: null,
-    online: false,
-    offlineTransitions: 0,
-    cameOnlineAfterOffline: false,
-  };
+export interface Scheduler {
+  run(options?: { forcePull?: boolean }): Promise<void>;
+  currentSignal(): AbortSignal | undefined;
+  abortCurrent(): void;
+  isOnline(): boolean;
+  markOffline(): void;
+  handleOnline(): void;
+  handleOffline(): void;
+  startHeartbeat(): void;
+  stopHeartbeat(): void;
 }
 
-export function currentSignal(state: SchedulerState): AbortSignal | undefined {
-  return state.abort?.signal;
-}
+export type StartLifecycleRoute =
+  | { _tag: "Offline" }
+  | { _tag: "WaitForHydrationThenOnline" };
 
-export function abortCurrent(state: SchedulerState): void {
-  state.abort?.abort();
-  state.abort = null;
-}
-
-export function isOnline(state: SchedulerState): boolean {
-  return state.online;
-}
-
-function markOnline(state: SchedulerState): boolean {
-  const wasReconnect = state.cameOnlineAfterOffline;
-  if (wasReconnect) {
-    state.offlineTransitions += 1;
-    state.cameOnlineAfterOffline = false;
-  }
-  state.online = true;
-  return wasReconnect;
-}
-
-export function markOffline(state: SchedulerState): void {
-  if (state.online) {
-    state.cameOnlineAfterOffline = true;
-  }
-  state.online = false;
+export function getStartLifecycleRoute(input: {
+  hasNavigator: boolean;
+  navigatorOnline: boolean | undefined;
+}): StartLifecycleRoute {
+  return input.hasNavigator && input.navigatorOnline === false
+    ? { _tag: "Offline" }
+    : { _tag: "WaitForHydrationThenOnline" };
 }
 
 type Route =
   | { _tag: "Skip" }
   | { _tag: "DeferUntilQueueDrains" }
   | { _tag: "Pull" };
-
-export type StartLifecycleRoute =
-  | { _tag: "Offline" }
-  | { _tag: "WaitForHydrationThenOnline" };
 
 function getRoute(input: {
   aborted: boolean;
@@ -129,142 +100,189 @@ function shouldStartRemoteSubscriptions(input: {
   );
 }
 
-export function getStartLifecycleRoute(input: {
-  hasNavigator: boolean;
-  navigatorOnline: boolean | undefined;
-}): StartLifecycleRoute {
-  return input.hasNavigator && input.navigatorOnline === false
-    ? { _tag: "Offline" }
-    : { _tag: "WaitForHydrationThenOnline" };
-}
+export function createScheduler(refs: SchedulerRefs): Scheduler {
+  const {
+    processUploadQueue,
+    processQueue,
+    rollbackDeadLetteredTables,
+    mergeDirtyCrdtRows,
+    pullAll,
+    stopRemoteSubscriptions,
+    startRemoteSubscriptions,
+    clearBufferedSnapshots,
+    emit,
+    pendingQueue,
+    mergeState,
+    isStarted,
+    heartbeatMs,
+    heartbeat,
+  } = refs;
 
-export function run(
-  state: SchedulerState,
-  deps: SchedulerDeps,
-  options?: { forcePull?: boolean },
-): Promise<void> {
-  if (state.inFlight) {
-    if (options?.forcePull) {
-      return state.inFlight.then(() => run(state, deps, options));
-    }
-    return state.inFlight;
+  let inFlight: Promise<void> | null = null;
+  let abort: AbortController | null = null;
+  let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  let online = false;
+  let offlineTransitions = 0;
+  let cameOnlineAfterOffline = false;
+
+  function currentSignal(): AbortSignal | undefined {
+    return abort?.signal;
   }
 
-  abortCurrent(state);
-  const controller = new AbortController();
-  state.abort = controller;
-  const signal = controller.signal;
+  function abortCurrent(): void {
+    abort?.abort();
+    abort = null;
+  }
 
-  const inFlight = (async () => {
-    try {
-      await deps.processUploadQueue(signal);
-      const deadLettered = await deps.processQueue(signal);
-      await deps.rollbackDeadLetteredTables(deadLettered, signal);
+  function isOnlineImpl(): boolean {
+    return online;
+  }
 
-      const route = getRoute({
-        aborted: signal.aborted,
-        forcePull: options?.forcePull ?? false,
-        hasPending: !deps.pendingQueue.isEmpty,
-        isOnline: state.online,
-        started: deps.isStarted(),
-        offlineTransitionsSinceBoot: state.offlineTransitions,
-        hasDirtyCrdtRows: pull.hasDirty(deps.mergeState),
-      });
+  function markOnline(): void {
+    if (cameOnlineAfterOffline) {
+      offlineTransitions += 1;
+      cameOnlineAfterOffline = false;
+    }
+    online = true;
+  }
 
-      if (route._tag === "Skip") {
-        if (state.online && deps.isStarted() && !signal.aborted) {
-          deps.emit({ status: "resolved" });
-        }
-      } else if (route._tag === "DeferUntilQueueDrains") {
-        deps.stopRemoteSubscriptions();
-        log.warn(
-          "sync: deferring pull and remote subscriptions until pending queue drains",
-        );
-      } else if (route._tag === "Pull") {
-        if (
-          !options?.forcePull &&
-          pull.hasDirty(deps.mergeState) &&
-          state.offlineTransitions > 0
-        ) {
-          await deps.mergeDirtyCrdtRows(signal);
-        } else {
-          await deps.pullAll(signal);
-          if (!signal.aborted) {
-            pull.clearAllDirty(deps.mergeState);
-          }
-        }
+  function markOffline(): void {
+    if (online) {
+      cameOnlineAfterOffline = true;
+    }
+    online = false;
+  }
+
+  function run(options?: { forcePull?: boolean }): Promise<void> {
+    if (inFlight) {
+      if (options?.forcePull) {
+        return inFlight.then(() => run(options));
       }
+      return inFlight;
+    }
 
-      if (
-        shouldStartRemoteSubscriptions({
+    abortCurrent();
+    const controller = new AbortController();
+    abort = controller;
+    const signal = controller.signal;
+
+    const next = (async () => {
+      try {
+        await processUploadQueue(signal);
+        const deadLettered = await processQueue(signal);
+        await rollbackDeadLetteredTables(deadLettered, signal);
+
+        const route = getRoute({
           aborted: signal.aborted,
           forcePull: options?.forcePull ?? false,
-          hasPending: !deps.pendingQueue.isEmpty,
-          isOnline: state.online,
-          started: deps.isStarted(),
-        })
-      ) {
-        deps.startRemoteSubscriptions();
+          hasPending: !pendingQueue.isEmpty,
+          isOnline: online,
+          started: isStarted(),
+          offlineTransitionsSinceBoot: offlineTransitions,
+          hasDirtyCrdtRows: pull.hasDirty(mergeState),
+        });
+
+        if (route._tag === "Skip") {
+          if (online && isStarted() && !signal.aborted) {
+            emit({ status: "resolved" });
+          }
+        } else if (route._tag === "DeferUntilQueueDrains") {
+          stopRemoteSubscriptions();
+          log.warn(
+            "sync: deferring pull and remote subscriptions until pending queue drains",
+          );
+        } else if (route._tag === "Pull") {
+          if (
+            !options?.forcePull &&
+            pull.hasDirty(mergeState) &&
+            offlineTransitions > 0
+          ) {
+            await mergeDirtyCrdtRows(signal);
+          } else {
+            await pullAll(signal);
+            if (!signal.aborted) {
+              pull.clearAllDirty(mergeState);
+            }
+          }
+        }
+
+        if (
+          shouldStartRemoteSubscriptions({
+            aborted: signal.aborted,
+            forcePull: options?.forcePull ?? false,
+            hasPending: !pendingQueue.isEmpty,
+            isOnline: online,
+            started: isStarted(),
+          })
+        ) {
+          startRemoteSubscriptions();
+        }
+      } catch (err) {
+        if (!(err instanceof DOMException && err.name === "AbortError")) {
+          log.error("sync: replication pass failed", err);
+        }
       }
-    } catch (err) {
-      if (!(err instanceof DOMException && err.name === "AbortError")) {
-        log.error("sync: replication pass failed", err);
+    })().finally(() => {
+      inFlight = null;
+      if (abort?.signal === signal) {
+        abort = null;
       }
-    }
-  })().finally(() => {
-    state.inFlight = null;
-    if (state.abort?.signal === signal) {
-      state.abort = null;
-    }
-  });
+    });
 
-  state.inFlight = inFlight;
-  return inFlight;
-}
-
-export function handleOnline(state: SchedulerState, deps: SchedulerDeps): void {
-  log.info("sync: online event — flushing queue, resolving, subscribing");
-  markOnline(state);
-  recordCounter("connectivity.transition", { state: "online" });
-  runDetached(() => run(state, deps), "[sync] handleOnline:");
-}
-
-export function handleOffline(
-  state: SchedulerState,
-  deps: SchedulerDeps,
-): void {
-  log.info("sync: offline event");
-  markOffline(state);
-  recordCounter("connectivity.transition", { state: "offline" });
-  abortCurrent(state);
-  deps.stopRemoteSubscriptions();
-  deps.clearBufferedSnapshots();
-  deps.emit({ status: "offline" });
-}
-
-export function startHeartbeat(
-  state: SchedulerState,
-  deps: SchedulerDeps,
-): void {
-  const safeBeat = async (): Promise<void> => {
-    try {
-      await deps.heartbeat();
-    } catch (err) {
-      log.debug("sync: processor heartbeat failed", err);
-    }
-  };
-  runDetached(safeBeat, "[sync] processor heartbeat:");
-  if (state.heartbeatTimer !== null) {
-    clearInterval(state.heartbeatTimer);
+    inFlight = next;
+    return next;
   }
-  state.heartbeatTimer = setInterval(() => {
+
+  function handleOnline(): void {
+    log.info("sync: online event — flushing queue, resolving, subscribing");
+    markOnline();
+    recordCounter("connectivity.transition", { state: "online" });
+    runDetached(() => run(), "[sync] handleOnline:");
+  }
+
+  function handleOffline(): void {
+    log.info("sync: offline event");
+    markOffline();
+    recordCounter("connectivity.transition", { state: "offline" });
+    abortCurrent();
+    stopRemoteSubscriptions();
+    clearBufferedSnapshots();
+    emit({ status: "offline" });
+  }
+
+  function startHeartbeat(): void {
+    const safeBeat = async (): Promise<void> => {
+      try {
+        await heartbeat();
+      } catch (err) {
+        log.debug("sync: processor heartbeat failed", err);
+      }
+    };
     runDetached(safeBeat, "[sync] processor heartbeat:");
-  }, deps.heartbeatMs);
-}
-
-export function stopHeartbeat(state: SchedulerState): void {
-  if (state.heartbeatTimer !== null) {
-    clearInterval(state.heartbeatTimer);
-    state.heartbeatTimer = null;
+    if (heartbeatTimer !== null) {
+      clearInterval(heartbeatTimer);
+    }
+    heartbeatTimer = setInterval(() => {
+      runDetached(safeBeat, "[sync] processor heartbeat:");
+    }, heartbeatMs);
   }
+
+  function stopHeartbeat(): void {
+    if (heartbeatTimer !== null) {
+      clearInterval(heartbeatTimer);
+      heartbeatTimer = null;
+    }
+  }
+
+  return {
+    run,
+    currentSignal,
+    abortCurrent,
+    isOnline: isOnlineImpl,
+    markOffline,
+    handleOnline,
+    handleOffline,
+    startHeartbeat,
+    stopHeartbeat,
+  };
 }

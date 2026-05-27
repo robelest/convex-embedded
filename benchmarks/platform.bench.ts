@@ -4,7 +4,7 @@ import { createAmbientCryptoProvider } from "@embedded/runtime/crypto";
 import { Database } from "@embedded/runtime/db/database";
 import type { DocumentId } from "@embedded/runtime/db/types";
 import { EmbeddedRuntime } from "@embedded/runtime/embedded";
-import { SchedulerExecutor } from "@embedded/scheduler/executor";
+import { createSchedulerExecutor } from "@embedded/scheduler/executor";
 import { bench, describe } from "@tests/testkit";
 
 const STUB_MODULES: Record<string, () => Promise<Record<string, unknown>>> = {
@@ -108,7 +108,7 @@ function buildSubscriptionManager(
 
 const runtime = await seedSystemRuntime();
 const executor = createExecutor();
-const scheduler = new SchedulerExecutor({
+const scheduler = createSchedulerExecutor({
   db: new Database(null),
   runFunction: async () => {},
 });

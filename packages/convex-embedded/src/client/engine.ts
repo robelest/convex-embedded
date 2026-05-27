@@ -14,8 +14,12 @@ import * as pull from "@/client/engine/pull";
 import type { PullDeps } from "@/client/engine/pull";
 import * as replay from "@/client/engine/replay";
 import type { ReplayDeps } from "@/client/engine/replay";
-import * as scheduler from "@/client/engine/scheduler";
-import type { SchedulerDeps } from "@/client/engine/scheduler";
+import {
+  createScheduler,
+  getStartLifecycleRoute,
+  type Scheduler,
+  type SchedulerRefs,
+} from "@/client/engine/scheduler";
 import {
   createSubscriptions,
   type ScopeRecord,
@@ -856,7 +860,10 @@ class EngineImpl implements EngineInstance {
     const statusEmitter = createEngineStatusEmitter();
     this._statusEmitter = statusEmitter;
     let started = false;
-    const schedulerState = scheduler.createSchedulerState();
+    // schedulerInst is assigned later in the constructor body (after its
+    // refs are defined). Earlier closures capture the binding and read it
+    // at call time, after assignment.
+    let schedulerInst!: Scheduler;
 
     const schemaIdFields = extractSchemaIdFields(
       Object.values(tables)
@@ -1179,7 +1186,7 @@ class EngineImpl implements EngineInstance {
         scopeArgs: normalizedScope,
       });
       if (
-        !scheduler.isOnline(schedulerState) ||
+        !schedulerInst.isOnline() ||
         !started ||
         !pendingQueue.isEmpty
       ) {
@@ -1198,7 +1205,7 @@ class EngineImpl implements EngineInstance {
           await getTableSpec(
             tableName,
             tableConfig,
-            scheduler.currentSignal(schedulerState),
+            schedulerInst.currentSignal(),
             normalizedScope,
           );
         }
@@ -1353,15 +1360,15 @@ class EngineImpl implements EngineInstance {
       softResetSubsBuffers: () => subs.softResetBuffers(),
       hasActiveSubs: () => subs.hasActive(),
       emit,
-      isOnline: () => scheduler.isOnline(schedulerState),
+      isOnline: () => schedulerInst.isOnline(),
       isStarted: () => started,
-      runScheduler: () => scheduler.run(schedulerState, schedulerDeps),
+      runScheduler: () => schedulerInst.run(),
       stopRemoteSubscriptions,
       pullTable: (tableName, tableConfig, signal) =>
         getTableSpec(tableName, tableConfig, signal),
     };
 
-    const schedulerDeps: SchedulerDeps = {
+    const schedulerRefs: SchedulerRefs = {
       processUploadQueue: (signal) =>
         replay.processUploadQueue(replayState, replayDeps, signal),
       processQueue: (signal) =>
@@ -1387,20 +1394,14 @@ class EngineImpl implements EngineInstance {
       heartbeat: heartbeatProcessor,
     };
 
-    function handleOnline(): void {
-      scheduler.handleOnline(schedulerState, schedulerDeps);
-    }
+    schedulerInst = createScheduler(schedulerRefs);
 
-    function handleOffline(): void {
-      scheduler.handleOffline(schedulerState, schedulerDeps);
-    }
-
-    function startProcessorHeartbeat(): void {
-      scheduler.startHeartbeat(schedulerState, schedulerDeps);
-    }
+    const handleOnline = (): void => schedulerInst.handleOnline();
+    const handleOffline = (): void => schedulerInst.handleOffline();
+    const startProcessorHeartbeat = (): void => schedulerInst.startHeartbeat();
 
     function stopProcessorHeartbeat(): void {
-      scheduler.stopHeartbeat(schedulerState);
+      schedulerInst.stopHeartbeat();
       runDetached(
         () =>
           runLocalSystemMutation(SystemPaths.processorRemove, {
@@ -1431,14 +1432,14 @@ class EngineImpl implements EngineInstance {
 
       const connectivity = getConnectivityAdapter(config.connectivity);
 
-      const startRoute = scheduler.getStartLifecycleRoute({
+      const startRoute = getStartLifecycleRoute({
         hasNavigator: true,
         navigatorOnline: connectivity?.isOnline(),
       });
 
       matchTag(startRoute, "_tag", {
         Offline: () => {
-          scheduler.markOffline(schedulerState);
+          schedulerInst.markOffline();
           emit({ status: "offline" });
         },
         WaitForHydrationThenOnline: () => {
@@ -1463,7 +1464,7 @@ class EngineImpl implements EngineInstance {
       unregisterPendingDepth();
       unregisterPendingUploadsDepth();
 
-      scheduler.abortCurrent(schedulerState);
+      schedulerInst.abortCurrent();
       const claimedEntry = replay.activeEntry(replayState);
       if (claimedEntry) {
         replay.setActiveEntry(replayState, null);
@@ -1513,7 +1514,7 @@ class EngineImpl implements EngineInstance {
       try {
         localResult = await executeMutationLocally(ref, localArgs);
       } catch (err) {
-        if (!scheduler.isOnline(schedulerState)) {
+        if (!schedulerInst.isOnline()) {
           throw err;
         }
         localFailed = true;
@@ -1565,7 +1566,7 @@ class EngineImpl implements EngineInstance {
           `engine.mutation queue.push push=${(__pushDone - __pushStart).toFixed(1)}ms ref=${refName}`,
         );
         if (
-          !scheduler.isOnline(schedulerState) &&
+          !schedulerInst.isOnline() &&
           pull.shouldTrackCrdt(mergeState, table)
         ) {
           const docId =
@@ -1577,7 +1578,7 @@ class EngineImpl implements EngineInstance {
             pull.markDirty(mergeState, table, docId);
           }
         }
-        if (scheduler.isOnline(schedulerState)) {
+        if (schedulerInst.isOnline()) {
           replay.ensureProcessing(replayState, replayDeps);
         } else {
           log.debug("sync: offline — mutation queued for later push");
@@ -1592,10 +1593,10 @@ class EngineImpl implements EngineInstance {
     };
 
     this.pullNow = (): Promise<void> => {
-      if (scheduler.isOnline(schedulerState)) {
+      if (schedulerInst.isOnline()) {
         stopRemoteSubscriptions();
       }
-      return scheduler.run(schedulerState, schedulerDeps, { forcePull: true });
+      return schedulerInst.run({ forcePull: true });
     };
 
     this.ensureTableReady = (tableName: string): Promise<void> => {
@@ -1639,9 +1640,9 @@ class EngineImpl implements EngineInstance {
         return;
       }
 
-      if (scheduler.isOnline(schedulerState)) {
+      if (schedulerInst.isOnline()) {
         stopRemoteSubscriptions();
-        await scheduler.run(schedulerState, schedulerDeps, { forcePull: true });
+        await schedulerInst.run({ forcePull: true });
         return;
       }
 

@@ -1,5 +1,3 @@
-import * as pull from "@/client/engine/pull";
-import type { MergeState } from "@/client/engine/pull";
 import type { PendingQueue } from "@/client/pending/queue";
 import { createLogger } from "@/shared/logger";
 import type { EngineStatus } from "@/shared/types";
@@ -22,7 +20,8 @@ export interface SchedulerRefs {
   clearBufferedSnapshots: () => void;
   emit: (status: EngineStatus) => void;
   pendingQueue: PendingQueue;
-  mergeState: MergeState;
+  hasDirtyCrdtRows: () => boolean;
+  clearDirtyCrdtRows: () => void;
   isStarted: () => boolean;
   heartbeatMs: number;
   heartbeat: () => Promise<void>;
@@ -112,7 +111,8 @@ export function createScheduler(refs: SchedulerRefs): Scheduler {
     clearBufferedSnapshots,
     emit,
     pendingQueue,
-    mergeState,
+    hasDirtyCrdtRows,
+    clearDirtyCrdtRows,
     isStarted,
     heartbeatMs,
     heartbeat,
@@ -179,7 +179,7 @@ export function createScheduler(refs: SchedulerRefs): Scheduler {
           isOnline: online,
           started: isStarted(),
           offlineTransitionsSinceBoot: offlineTransitions,
-          hasDirtyCrdtRows: pull.hasDirty(mergeState),
+          hasDirtyCrdtRows: hasDirtyCrdtRows(),
         });
 
         if (route._tag === "Skip") {
@@ -194,14 +194,14 @@ export function createScheduler(refs: SchedulerRefs): Scheduler {
         } else if (route._tag === "Pull") {
           if (
             !options?.forcePull &&
-            pull.hasDirty(mergeState) &&
+            hasDirtyCrdtRows() &&
             offlineTransitions > 0
           ) {
             await mergeDirtyCrdtRows(signal);
           } else {
             await pullAll(signal);
             if (!signal.aborted) {
-              pull.clearAllDirty(mergeState);
+              clearDirtyCrdtRows();
             }
           }
         }

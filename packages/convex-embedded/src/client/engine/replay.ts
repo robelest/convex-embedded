@@ -1,8 +1,6 @@
 import type { ConvexClient } from "convex/browser";
 
 import type { EmbeddedClientLike, TableConfig } from "@/client/engine";
-import * as pull from "@/client/engine/pull";
-import type { PullState } from "@/client/engine/pull";
 import type { IdMap } from "@/client/ids";
 import {
   MAX_REPLAY_RETRIES,
@@ -56,7 +54,8 @@ export interface ReplayRefs {
   leaseMs: number;
   uploadUrlRef?: unknown;
   uploadFetch?: typeof globalThis.fetch;
-  pullState: PullState;
+  recordExpectedSelfCausedSignal: (table: string, postCommitSeq: number) => void;
+  nextExpectedSelfCausedSeq: (table: string) => number;
   softResetSubsBuffers: () => void;
   hasActiveSubs: () => boolean;
   isOnline: () => boolean;
@@ -427,7 +426,8 @@ export function createReplay(refs: ReplayRefs): Replay {
     leaseMs,
     uploadUrlRef,
     uploadFetch,
-    pullState,
+    recordExpectedSelfCausedSignal,
+    nextExpectedSelfCausedSeq,
     softResetSubsBuffers,
     hasActiveSubs,
     isOnline,
@@ -769,10 +769,9 @@ export function createReplay(refs: ReplayRefs): Replay {
                 heartbeat.stop();
               }
 
-              pull.recordExpectedSelfCausedSignal(
-                pullState,
+              recordExpectedSelfCausedSignal(
                 entry.table,
-                pull.nextExpectedSelfCausedSeq(pullState, entry.table),
+                nextExpectedSelfCausedSeq(entry.table),
               );
 
               if (

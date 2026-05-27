@@ -10,8 +10,7 @@
 
 import type { ConvexClient } from "convex/browser";
 
-import * as pull from "@/client/engine/pull";
-import type { PullDeps } from "@/client/engine/pull";
+import { createPull, type Pull, type PullRefs } from "@/client/engine/pull";
 import * as replay from "@/client/engine/replay";
 import { createReplay } from "@/client/engine/replay";
 import type { Replay, ReplayRefs } from "@/client/engine/replay";
@@ -864,6 +863,7 @@ class EngineImpl implements EngineInstance {
     // refs are defined). Earlier closures capture the binding and read it
     // at call time, after assignment.
     let schedulerInst!: Scheduler;
+    let pullInst!: Pull;
 
     const schemaIdFields = extractSchemaIdFields(
       Object.values(tables)
@@ -901,15 +901,11 @@ class EngineImpl implements EngineInstance {
     const processorIdForReplay =
       processorId ?? `processor_${Math.random().toString(36).slice(2)}`;
 
-    const mergeState = pull.createMergeState(tables);
-
     let onOnline: (() => void) | null = null;
     let onOffline: (() => void) | null = null;
     let cleanupOnlineListener: (() => void) | null = null;
     let cleanupOfflineListener: (() => void) | null = null;
     const SCOPE_TEARDOWN_DEBOUNCE_MS = config.scopeTeardownDebounceMs ?? 3000;
-
-    const pullState = pull.createPullState();
 
     const subs: SubscriptionsSubsystem = createSubscriptions({
       orderedTables,
@@ -918,14 +914,14 @@ class EngineImpl implements EngineInstance {
       projectRemoteSnapshot: replay.projectRemoteSnapshot,
       getDocumentsForTable,
       filterAfterHydratingReferences: (input) =>
-        pull.filterAfterHydratingReferences(pullDeps, input),
+        pullInst.filterAfterHydratingReferences(input),
       ingestDocuments,
       runSpan,
       yieldToEventLoop,
       getRecentlyReplayedIdSet: () => getRecentlyReplayedIdSet(),
       getPendingEntries: () => pendingQueue.entries(),
       getAliases: (id) => idMap.getAliases(id),
-      clearPullSequencing: () => pull.clearAll(pullState),
+      clearPullSequencing: () => pullInst.clearAll(),
     });
 
     function getRemoteApplyOrder(): string[] {
@@ -971,14 +967,7 @@ class EngineImpl implements EngineInstance {
       signal?: AbortSignal,
       scopeArgs?: Record<string, unknown>,
     ): Promise<void> {
-      return pull.getTableSpec(
-        pullState,
-        pullDeps,
-        tableName,
-        tableConfig,
-        signal,
-        scopeArgs,
-      );
+      return pullInst.getTableSpec(tableName, tableConfig, signal, scopeArgs);
     }
 
     /**
@@ -1029,13 +1018,11 @@ class EngineImpl implements EngineInstance {
           tableName: entry.tableName,
           scopeArgs: entry.scopeArgs,
           consumeExpectedSelfCausedSignal: (table, signalSeq) =>
-            pull.consumeExpectedSelfCausedSignal(pullState, table, signalSeq),
+            pullInst.consumeExpectedSelfCausedSignal(table, signalSeq),
           scheduleTableCoalesce: (input) =>
-            pull.scheduleTableCoalesce(pullState, input),
+            pullInst.scheduleTableCoalesce(input),
           shouldSkipRedundantPartialPull: (table, scopeArgs, signalSeq) =>
-            pull.shouldSkipRedundantPartialPull(
-              pullState,
-              { buildScopeKey },
+            pullInst.shouldSkipRedundantPartialPull(
               table,
               scopeArgs,
               signalSeq,
@@ -1053,7 +1040,7 @@ class EngineImpl implements EngineInstance {
             );
           },
         });
-        if (!pull.hasPulledScopeSeq(pullState, key)) {
+        if (!pullInst.hasPulledScopeSeq(key)) {
           runDetached(
             () =>
               getTableSpec(
@@ -1201,7 +1188,7 @@ class EngineImpl implements EngineInstance {
       const epochAtStart = subs.getEpoch();
 
       const activation = (async () => {
-        if (!pull.hasPulledScopeSeq(pullState, key)) {
+        if (!pullInst.hasPulledScopeSeq(key)) {
           await getTableSpec(
             tableName,
             tableConfig,
@@ -1229,13 +1216,11 @@ class EngineImpl implements EngineInstance {
           tableName,
           scopeArgs: normalizedScope,
           consumeExpectedSelfCausedSignal: (table, signalSeq) =>
-            pull.consumeExpectedSelfCausedSignal(pullState, table, signalSeq),
+            pullInst.consumeExpectedSelfCausedSignal(table, signalSeq),
           scheduleTableCoalesce: (input) =>
-            pull.scheduleTableCoalesce(pullState, input),
+            pullInst.scheduleTableCoalesce(input),
           shouldSkipRedundantPartialPull: (table, scopeArgs, signalSeq) =>
-            pull.shouldSkipRedundantPartialPull(
-              pullState,
-              { buildScopeKey },
+            pullInst.shouldSkipRedundantPartialPull(
               table,
               scopeArgs,
               signalSeq,
@@ -1321,11 +1306,11 @@ class EngineImpl implements EngineInstance {
       });
     }
 
-    const pullDeps: PullDeps = {
+    const pullRefs: PullRefs = {
       tables,
       orderedTables,
       getRemoteApplyOrder,
-      activeScopes: subs.scopes(),
+      activeScopes: () => subs.scopes(),
       buildScopeKey,
       ingestDocuments,
       getDocumentsForTable,
@@ -1341,6 +1326,7 @@ class EngineImpl implements EngineInstance {
       runLocalSystemMutation,
       getCurrentIdentityKey,
     };
+    pullInst = createPull(pullRefs);
 
     const replayRefs: ReplayRefs = {
       pendingQueue,
@@ -1354,7 +1340,10 @@ class EngineImpl implements EngineInstance {
       leaseMs,
       uploadUrlRef,
       uploadFetch,
-      pullState,
+      recordExpectedSelfCausedSignal: (table, postCommitSeq) =>
+        pullInst.recordExpectedSelfCausedSignal(table, postCommitSeq),
+      nextExpectedSelfCausedSeq: (table) =>
+        pullInst.nextExpectedSelfCausedSeq(table),
       softResetSubsBuffers: () => subs.softResetBuffers(),
       hasActiveSubs: () => subs.hasActive(),
       isOnline: () => schedulerInst.isOnline(),
@@ -1371,15 +1360,15 @@ class EngineImpl implements EngineInstance {
       processQueue: (signal) => replayInst.processQueue(signal),
       rollbackDeadLetteredTables: (deadLettered, signal) =>
         replayInst.rollbackDeadLetteredTables(deadLettered, signal),
-      mergeDirtyCrdtRows: (signal) =>
-        pull.runMerge(pullState, mergeState, pullDeps, signal),
-      pullAll: (signal) => pull.pullAll(pullState, pullDeps, signal),
+      mergeDirtyCrdtRows: (signal) => pullInst.runMerge(signal),
+      pullAll: (signal) => pullInst.pullAll(signal),
       stopRemoteSubscriptions,
       startRemoteSubscriptions,
       clearBufferedSnapshots,
       emit,
       pendingQueue,
-      mergeState,
+      hasDirtyCrdtRows: () => pullInst.hasDirty(),
+      clearDirtyCrdtRows: () => pullInst.clearAllDirty(),
       isStarted: () => started,
       heartbeatMs: processorHeartbeatMs,
       heartbeat: heartbeatProcessor,
@@ -1558,7 +1547,7 @@ class EngineImpl implements EngineInstance {
         );
         if (
           !schedulerInst.isOnline() &&
-          pull.shouldTrackCrdt(mergeState, table)
+          pullInst.shouldTrackCrdt(table)
         ) {
           const docId =
             typeof localResult === "string"
@@ -1566,7 +1555,7 @@ class EngineImpl implements EngineInstance {
               : ((localArgs?.id as string | undefined) ??
                 (localArgs?._id as string | undefined));
           if (docId) {
-            pull.markDirty(mergeState, table, docId);
+            pullInst.markDirty(table, docId);
           }
         }
         if (schedulerInst.isOnline()) {

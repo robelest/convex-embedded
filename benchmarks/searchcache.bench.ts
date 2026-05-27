@@ -1,4 +1,7 @@
-import { QueryEngine } from "@embedded/runtime/db/query";
+import {
+  createQueryEngine,
+  type QueryEngine,
+} from "@embedded/runtime/db/query";
 import type { ParsedSchema } from "@embedded/runtime/db/schema";
 import type {
   SerializedQuery,
@@ -46,7 +49,7 @@ const docs: StoredDocument[] = makeRows(medium.docs).map((row, index) => ({
 })) as unknown as StoredDocument[];
 
 function makeEngine(version: () => number | null): QueryEngine {
-  return new QueryEngine(
+  return createQueryEngine(
     searchSchema,
     (_tableName, callback) => {
       for (const doc of docs) callback(doc);

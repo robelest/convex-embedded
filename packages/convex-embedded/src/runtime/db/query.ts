@@ -568,124 +568,511 @@ type VectorIndexCacheEntry = {
  * Stateful query engine. Manages active streaming queries and
  * evaluates them against documents provided by a callback.
  */
-export class QueryEngine {
-  private _nextQueryId: QueryId = 1;
-  private _queryResults: Record<QueryId, ActiveQuery> = {};
-  private _asyncQueryResults: Record<QueryId, AsyncActiveQuery> = {};
-  private _searchIndexCache = new Map<string, SearchIndexCacheEntry>();
-  private _vectorIndexCache = new Map<string, VectorIndexCacheEntry>();
-
-  constructor(
-    private _schema: ParsedSchema | null,
-    private _iterateDocs: DocumentIterator,
-    private _countTable: TableCountReader = () => 0,
-    private _query: QueryReader = () => null,
-    private _source: SourceReader = () => null,
-    private _countTableAsync: AsyncTableCountReader = async (tableName) =>
-      this._countTable(tableName),
-    private _readQueryAsync: AsyncQueryReader = async (query) =>
-      this._query(query),
-    private _readSourceAsync: AsyncSourceReader = async (source, limit, seek) =>
-      this._source(source, limit, seek),
-    private _tableVersion: TableVersionReader = () => null,
-  ) {}
-
-  startQuery(query: SerializedQuery): QueryId {
-    const id = this._nextQueryId;
-    const results = this._evaluateQuery(query);
-    this._queryResults[id] = { results, index: 0 };
-    this._nextQueryId += 1;
-    return id;
-  }
-
-  startQueryAsync(query: SerializedQuery): QueryId {
-    const id = this._nextQueryId;
-    const resultsPromise = this._evaluateQueryAsync(query).then((results) => {
-      const active = this._asyncQueryResults[id];
-      if (active) {
-        active.results = results;
-      }
-      return results;
-    });
-    this._asyncQueryResults[id] = { resultsPromise, results: null, index: 0 };
-    this._nextQueryId += 1;
-    return id;
-  }
-
-  queryNext(queryId: QueryId): {
-    value: GenericDocument | null;
-    done: boolean;
-  } {
-    const query = this._queryResults[queryId];
-    return query === undefined
-      ? (() => {
-          throw new Error("Bad queryId");
-        })()
-      : query.index >= query.results.length
-        ? { value: null, done: true }
-        : { value: query.results[query.index++]!, done: false };
-  }
-
-  async queryNextAsync(queryId: QueryId): Promise<{
-    value: GenericDocument | null;
-    done: boolean;
-  }> {
-    const query = this._asyncQueryResults[queryId];
-    if (query === undefined) {
-      throw new Error("Bad queryId");
-    }
-
-    const results = query.results ?? (await query.resultsPromise);
-    return query.index >= results.length
-      ? { value: null, done: true }
-      : { value: results[query.index++]!, done: false };
-  }
-
-  queryCleanup(queryId: QueryId): void {
-    delete this._queryResults[queryId];
-    delete this._asyncQueryResults[queryId];
-  }
-
-  async paginateAsync({
-    query,
-    cursor,
-    endCursor,
-    pageSize,
-    maximumRowsRead,
-    maximumBytesRead,
-  }: {
+export interface QueryEngine {
+  startQuery(query: SerializedQuery): QueryId;
+  startQueryAsync(query: SerializedQuery): QueryId;
+  queryNext(queryId: QueryId): { value: GenericDocument | null; done: boolean };
+  queryNextAsync(
+    queryId: QueryId,
+  ): Promise<{ value: GenericDocument | null; done: boolean }>;
+  queryCleanup(queryId: QueryId): void;
+  paginateAsync(args: {
     query: SerializedQuery;
     cursor: string | null;
     endCursor?: string | null;
     pageSize: number;
     maximumRowsRead?: number | null;
     maximumBytesRead?: number | null;
-  }): Promise<PaginateResult> {
-    const budget: ReadBudget = {
-      maximumRowsRead: maximumRowsRead ?? null,
-      maximumBytesRead: maximumBytesRead ?? null,
-    };
-    const orderKey = this._resolveOrderKey(query);
-    if (orderKey === null) {
-      return this._paginateLinearAsync({
-        query,
-        cursor,
-        endCursor: endCursor ?? null,
-        pageSize,
-        budget,
-      });
+  }): Promise<PaginateResult>;
+  count(tableName: string): number;
+  countAsync(tableName: string): Promise<number>;
+  vectorSearch(
+    tableAndIndexName: string,
+    vector: number[],
+    filter: VectorSearchExpression | null,
+    limit?: number,
+  ): Array<{ _id: string; _score: number }>;
+}
+
+export function createQueryEngine(
+  schema: ParsedSchema | null,
+  iterateDocs: DocumentIterator,
+  countTable: TableCountReader = () => 0,
+  query: QueryReader = () => null,
+  source: SourceReader = () => null,
+  countTableAsync?: AsyncTableCountReader,
+  readQueryAsync?: AsyncQueryReader,
+  readSourceAsync?: AsyncSourceReader,
+  tableVersion: TableVersionReader = () => null,
+): QueryEngine {
+  let nextQueryId: QueryId = 1;
+  const queryResults: Record<QueryId, ActiveQuery> = {};
+  const asyncQueryResults: Record<QueryId, AsyncActiveQuery> = {};
+  const searchIndexCache = new Map<string, SearchIndexCacheEntry>();
+  const vectorIndexCache = new Map<string, VectorIndexCacheEntry>();
+
+  const countTableAsyncFn: AsyncTableCountReader =
+    countTableAsync ?? (async (tableName) => countTable(tableName));
+  const readQueryAsyncFn: AsyncQueryReader =
+    readQueryAsync ?? (async (q) => query(q));
+  const readSourceAsyncFn: AsyncSourceReader =
+    readSourceAsync ?? (async (s, l, k) => source(s, l, k));
+
+  function evaluateQuery(q: SerializedQuery): Array<GenericDocument> {
+    const optimizedQuery = query(q);
+    if (optimizedQuery !== null) {
+      return optimizedQuery;
     }
-    return this._paginateSeekAsync({
-      query,
-      cursor,
-      endCursor: endCursor ?? null,
-      pageSize,
-      orderKey,
-      budget,
+
+    const { filters, limit } = extractQueryOperators(q.operators);
+
+    if (limit !== null && filters.length > 0) {
+      const probe = evaluateSource(q.source, limit);
+      if (probe.presorted === true) {
+        return boundedFilteredRead(
+          (readLimit) => evaluateSource(q.source, readLimit),
+          probe,
+          filters,
+          limit,
+        );
+      }
+      return finalizeSource(probe, filters, limit);
+    }
+
+    const src = evaluateSource(q.source, filters.length === 0 ? limit : null);
+    return finalizeSource(src, filters, limit);
+  }
+
+  async function evaluateQueryAsync(
+    query: SerializedQuery,
+  ): Promise<Array<GenericDocument>> {
+    const optimizedQuery = await readQueryAsyncFn(query);
+    if (optimizedQuery !== null) {
+      return optimizedQuery;
+    }
+
+    const { filters, limit } = extractQueryOperators(query.operators);
+
+    if (limit !== null && filters.length > 0) {
+      const probe = await evaluateSourceAsync(query.source, limit);
+      if (probe.presorted === true) {
+        return boundedFilteredReadAsync(
+          (readLimit) => evaluateSourceAsync(query.source, readLimit),
+          probe,
+          filters,
+          limit,
+        );
+      }
+      return finalizeSource(probe, filters, limit);
+    }
+
+    const src = await evaluateSourceAsync(
+      query.source,
+      filters.length === 0 ? limit : null,
+    );
+    return finalizeSource(src, filters, limit);
+  }
+
+  function finalizeSource(
+    src: SourceEvaluation,
+    filters: FilterNode[],
+    limit: number | null,
+  ): Array<GenericDocument> {
+    const filtered = applyFilters(src.results, filters);
+    const sorted =
+      src.presorted === true
+        ? filtered
+        : sortResults(filtered, src.fieldPathsToSortBy, src.order);
+    return applyLimit(sorted, limit);
+  }
+
+  function boundedFilteredRead(
+    read: (readLimit: number) => SourceEvaluation,
+    firstRead: SourceEvaluation,
+    filters: FilterNode[],
+    limit: number,
+  ): Array<GenericDocument> {
+    let readLimit = limit;
+    let src = firstRead;
+    for (;;) {
+      const survivors = applyFilters(src.results, filters);
+      const exhausted = src.results.length < readLimit;
+      if (survivors.length >= limit || exhausted) {
+        return survivors.slice(0, limit);
+      }
+      readLimit *= 2;
+      src = read(readLimit);
+    }
+  }
+
+  async function boundedFilteredReadAsync(
+    read: (readLimit: number) => Promise<SourceEvaluation>,
+    firstRead: SourceEvaluation,
+    filters: FilterNode[],
+    limit: number,
+  ): Promise<Array<GenericDocument>> {
+    let readLimit = limit;
+    let src = firstRead;
+    for (;;) {
+      const survivors = applyFilters(src.results, filters);
+      const exhausted = src.results.length < readLimit;
+      if (survivors.length >= limit || exhausted) {
+        return survivors.slice(0, limit);
+      }
+      readLimit *= 2;
+      src = await read(readLimit);
+    }
+  }
+
+  function evaluateSource(
+    src: Source,
+    limit: number | null = null,
+    seek?: SeekBound,
+  ): SourceEvaluation {
+    const optimized = source(src, limit, seek);
+    if (optimized !== null) {
+      return optimized;
+    }
+
+    return matchTag(src, "type", {
+      FullTableScan: (current) => evaluateFullTableScanSource(current),
+      IndexRange: (current) => evaluateIndexRangeSource(current),
+      Search: (current) => evaluateSearchSource(current, limit),
     });
   }
 
-  private async _paginateSeekAsync({
+  async function evaluateSourceAsync(
+    src: Source,
+    limit: number | null = null,
+    seek?: SeekBound,
+  ): Promise<SourceEvaluation> {
+    const optimized = await readSourceAsyncFn(src, limit, seek);
+    if (optimized !== null) {
+      return optimized;
+    }
+
+    return evaluateSource(src, limit, seek);
+  }
+
+  function evaluateFullTableScanSource(
+    src: Extract<Source, { type: "FullTableScan" }>,
+  ): SourceEvaluation {
+    return {
+      results: readDocs(src.tableName),
+      fieldPathsToSortBy: ["_creationTime", "_id"],
+      order: src.order ?? "asc",
+    };
+  }
+
+  function evaluateIndexRangeSource(
+    src: Extract<Source, { type: "IndexRange" }>,
+  ): SourceEvaluation {
+    const [tableName, indexName] = src.indexName.split(".") as [
+      string,
+      string,
+    ];
+    const fields = resolveIndexFields(tableName, indexName);
+    validateIndexRangeExpression(src, fields);
+    const rangePredicate = buildRangePredicate(src.range);
+
+    return {
+      results: readDocs(tableName, rangePredicate),
+      fieldPathsToSortBy: fields,
+      order: src.order ?? "asc",
+    };
+  }
+
+  function evaluateSearchSource(
+    src: Extract<Source, { type: "Search" }>,
+    limit: number | null,
+  ): SourceEvaluation {
+    const [tableName, indexName] = src.indexName.split(".") as [
+      string,
+      string,
+    ];
+    const definition = getSearchIndexDefinition(
+      schema?.tables.get(tableName)?.searchIndexes,
+      tableName,
+      indexName,
+    );
+    const cacheKey = `${tableName}.${indexName}`;
+    const version = tableVersion(tableName);
+    const cached =
+      version === null ? undefined : searchIndexCache.get(cacheKey);
+    let state: ReturnType<typeof buildSearchIndexState>;
+    if (cached !== undefined && cached.version === version) {
+      state = cached.state;
+    } else {
+      state = buildSearchIndexState({
+        docs: readDocs(tableName).map((doc) => ({
+          doc: doc as StoredDocument,
+          identityKey: null,
+        })),
+        definition,
+      });
+      if (version !== null) {
+        searchIndexCache.set(cacheKey, { version, state });
+      }
+    }
+    return {
+      results: executeSearch(state, {
+        source: src,
+        activeIdentityKey: null,
+        limit: limit ?? undefined,
+      }),
+      fieldPathsToSortBy: [],
+      order: "asc",
+    };
+  }
+
+  function readDocs(
+    tableName: string,
+    predicate: (doc: StoredDocument) => boolean = () => true,
+  ): QueryResults {
+    const results: QueryResults = [];
+    iterateDocs(tableName, (doc) => {
+      if (predicate(doc)) {
+        results.push(doc);
+      }
+    });
+    return results;
+  }
+
+  function resolveIndexFields(tableName: string, indexName: string): string[] {
+    const builtInFields =
+      builtInIndexFields[indexName as keyof typeof builtInIndexFields];
+    if (builtInFields) {
+      return [...builtInFields];
+    }
+
+    const indexes = schema?.tables.get(tableName)?.indexes;
+    const index = indexes?.find(
+      ({ indexDescriptor }) => indexDescriptor === indexName,
+    );
+
+    return index
+      ? [...index.fields, "_creationTime", "_id"]
+      : (() => {
+          throw new Error(
+            `Cannot use index "${indexName}" for table "${tableName}" because it is not declared in the schema.`,
+          );
+        })();
+  }
+
+  function extractQueryOperators(operators: QueryOperator[]): {
+    filters: FilterNode[];
+    limit: number | null;
+  } {
+    const filters: FilterNode[] = [];
+    let limit: number | null = null;
+
+    for (const operator of operators) {
+      if (operatorTypeGuards.filter(operator)) {
+        filters.push(normalizeFilter(operator.filter));
+        continue;
+      }
+      if (limit === null && operatorTypeGuards.limit(operator)) {
+        limit = operator.limit;
+      }
+    }
+
+    return { filters, limit };
+  }
+
+  function applyFilters(
+    results: QueryResults,
+    filters: FilterNode[],
+  ): QueryResults {
+    return filters.length === 0
+      ? results
+      : results.filter((doc) =>
+          filters.every((filter) => evaluateNormalizedFilter(doc, filter)),
+        );
+  }
+
+  function sortResults(
+    results: QueryResults,
+    fieldPathsToSortBy: string[],
+    order: "asc" | "desc",
+  ): QueryResults {
+    if (results.length < 2 || fieldPathsToSortBy.length === 0) {
+      return results;
+    }
+
+    const orderMultiplier = order === "asc" ? 1 : -1;
+    return results.sort((left, right) => {
+      const comparison = fieldPathsToSortBy.reduce(
+        (acc, fieldPath) =>
+          acc !== 0
+            ? acc
+            : compareValues(
+                evaluateFieldPath(fieldPath, left),
+                evaluateFieldPath(fieldPath, right),
+              ),
+        0,
+      );
+      return comparison * orderMultiplier;
+    });
+  }
+
+  function applyLimit(
+    results: QueryResults,
+    limit: number | null,
+  ): QueryResults {
+    return limit === null ? results : results.slice(0, limit);
+  }
+
+  function buildRangePredicate(
+    range: ReadonlyArray<SerializedRangeExpression>,
+  ): (doc: StoredDocument) => boolean {
+    if (range.length === 0) {
+      return () => true;
+    }
+
+    return (doc) => {
+      for (const filter of range) {
+        if (!evaluateRangeFilter(doc, filter)) {
+          return false;
+        }
+      }
+      return true;
+    };
+  }
+
+  function resolveOrderKey(query: SerializedQuery): OrderKey | null {
+    const src = query.source;
+    if (src.type === "Search") {
+      return null;
+    }
+    if (src.type === "FullTableScan") {
+      return {
+        seekFields: ["_creationTime", "_id"],
+        order: src.order ?? "asc",
+      };
+    }
+    const [tableName, indexName] = src.indexName.split(".") as [
+      string,
+      string,
+    ];
+    const fields = resolveIndexFields(tableName, indexName);
+    const pinned = new Set<string>();
+    for (const expr of src.range) {
+      if (expr.type === "Eq") {
+        pinned.add(expr.fieldPath);
+      }
+    }
+    const seekFields: string[] = [];
+    let prefix = true;
+    for (const field of fields) {
+      if (prefix && pinned.has(field)) {
+        continue;
+      }
+      prefix = false;
+      seekFields.push(field);
+    }
+    if (
+      seekFields.length === 0 ||
+      seekFields[seekFields.length - 1] !== "_id"
+    ) {
+      return null;
+    }
+    return { seekFields, order: src.order ?? "asc" };
+  }
+
+  function buildSeek(
+    orderKey: OrderKey,
+    cursor: Array<Value | undefined>,
+  ): SeekBound {
+    return {
+      field: orderKey.seekFields[0]!,
+      value: convexToJson(cursor[0] ?? null) as JSONValue,
+      inclusive: true,
+      direction: orderKey.order,
+    };
+  }
+
+  function encodeCursor(orderKey: OrderKey, doc: GenericDocument): string {
+    const values = orderKey.seekFields.map((field) =>
+      convexToJson((evaluateFieldPath(field, doc) ?? null) as Value),
+    );
+    return `${CURSOR_PREFIX}${JSON.stringify(values)}`;
+  }
+
+  function decodeCursor(cursor: string): Array<Value | undefined> | null {
+    if (!cursor.startsWith(CURSOR_PREFIX)) {
+      return null;
+    }
+    const parsed = JSON.parse(
+      cursor.slice(CURSOR_PREFIX.length),
+    ) as JSONValue[];
+    return parsed.map((value) => jsonToConvex(value));
+  }
+
+  function compareOrderKey(
+    orderKey: OrderKey,
+    doc: GenericDocument,
+    cursor: Array<Value | undefined>,
+  ): number {
+    const multiplier = orderKey.order === "asc" ? 1 : -1;
+    for (let index = 0; index < orderKey.seekFields.length; index += 1) {
+      const field = orderKey.seekFields[index]!;
+      const comparison = compareValues(
+        evaluateFieldPath(field, doc),
+        cursor[index],
+      );
+      if (comparison !== 0) {
+        return comparison * multiplier;
+      }
+    }
+    return 0;
+  }
+
+  function budgetBoundedPage(
+    orderKey: OrderKey,
+    candidates: GenericDocument[],
+    target: number,
+    options: { continueCursor: string | null },
+  ): PaginateResult {
+    const page =
+      target > 0 && candidates.length > target
+        ? candidates.slice(0, target)
+        : candidates;
+    const last = page.at(-1) ?? null;
+    const continueCursor =
+      options.continueCursor ??
+      (last === null ? "_end_cursor" : encodeCursor(orderKey, last));
+    const split = pageSplit(orderKey, page, target);
+    return {
+      page,
+      isDone: false,
+      continueCursor,
+      splitCursor: split.splitCursor,
+      pageStatus: "SplitRequired",
+    };
+  }
+
+  function pageSplit(
+    orderKey: OrderKey,
+    page: GenericDocument[],
+    target: number,
+  ): { splitCursor: string | null; pageStatus: PaginateResult["pageStatus"] } {
+    if (page.length < 2 || target <= 0) {
+      return { splitCursor: null, pageStatus: null };
+    }
+    const midIndex = Math.floor((page.length - 1) / 2);
+    const midpoint = page[midIndex] ?? null;
+    const splitCursor =
+      midpoint === null ? null : encodeCursor(orderKey, midpoint);
+    let pageStatus: PaginateResult["pageStatus"] = null;
+    if (page.length > target * SPLIT_REQUIRED_FACTOR) {
+      pageStatus = "SplitRequired";
+    } else if (page.length > target * SPLIT_RECOMMENDED_FACTOR) {
+      pageStatus = "SplitRecommended";
+    }
+    return { splitCursor, pageStatus };
+  }
+
+  async function paginateSeekAsync({
     query,
     cursor,
     endCursor,
@@ -700,15 +1087,14 @@ export class QueryEngine {
     orderKey: OrderKey;
     budget: ReadBudget;
   }): Promise<PaginateResult> {
-    const { filters } = this._extractQueryOperators(query.operators);
-    const decoded = cursor === null ? null : this._decodeCursor(cursor);
+    const { filters } = extractQueryOperators(query.operators);
+    const decoded = cursor === null ? null : decodeCursor(cursor);
     const endDecoded =
       endCursor === null || endCursor === "_end_cursor"
         ? null
-        : this._decodeCursor(endCursor);
+        : decodeCursor(endCursor);
     const pinnedEnd = endCursor !== null;
-    const seek =
-      decoded === null ? undefined : this._buildSeek(orderKey, decoded);
+    const seek = decoded === null ? undefined : buildSeek(orderKey, decoded);
     const target = pageSize <= 0 ? 0 : pageSize;
     const rowCap = budget.maximumRowsRead;
 
@@ -723,35 +1109,35 @@ export class QueryEngine {
             : Math.min(readLimit, rowCap);
       const effectiveLimit =
         unboundedRead && rowCap === null ? null : cappedLimit;
-      const source = await this._evaluateSourceAsync(
+      const src = await evaluateSourceAsync(
         query.source,
         effectiveLimit,
         seek,
       );
-      const rowsExceeded = rowCap !== null && source.results.length >= rowCap;
+      const rowsExceeded = rowCap !== null && src.results.length >= rowCap;
       const { results: budgetedRaw, bytesExceeded } = applyByteBudget(
-        source.results,
+        src.results,
         budget.maximumBytesRead,
       );
       const budgetHit = rowsExceeded || bytesExceeded;
-      const ordered = this._sortResults(
+      const ordered = sortResults(
         budgetedRaw,
-        source.fieldPathsToSortBy,
-        source.order,
+        src.fieldPathsToSortBy,
+        src.order,
       );
-      const filtered = this._applyFilters(ordered, filters);
+      const filtered = applyFilters(ordered, filters);
       const afterStart =
         decoded === null
           ? filtered
           : filtered.filter(
-              (doc) => this._compareOrderKey(orderKey, doc, decoded) > 0,
+              (doc) => compareOrderKey(orderKey, doc, decoded) > 0,
             );
-      const exhausted = source.results.length < cappedLimit;
+      const exhausted = src.results.length < cappedLimit;
 
       if (pinnedEnd) {
         if (endDecoded === null) {
           if (budgetHit) {
-            return this._budgetBoundedPage(orderKey, afterStart, target, {
+            return budgetBoundedPage(orderKey, afterStart, target, {
               continueCursor: null,
             });
           }
@@ -759,11 +1145,11 @@ export class QueryEngine {
             page: afterStart,
             isDone: true,
             continueCursor: "_end_cursor",
-            ...this._pageSplit(orderKey, afterStart, target),
+            ...pageSplit(orderKey, afterStart, target),
           };
         }
         const inRange = afterStart.filter(
-          (doc) => this._compareOrderKey(orderKey, doc, endDecoded) <= 0,
+          (doc) => compareOrderKey(orderKey, doc, endDecoded) <= 0,
         );
         const sawBeyondEnd = inRange.length < afterStart.length;
         if (sawBeyondEnd || exhausted) {
@@ -771,11 +1157,11 @@ export class QueryEngine {
             page: inRange,
             isDone: false,
             continueCursor: endCursor as string,
-            ...this._pageSplit(orderKey, inRange, target),
+            ...pageSplit(orderKey, inRange, target),
           };
         }
         if (budgetHit) {
-          return this._budgetBoundedPage(orderKey, inRange, target, {
+          return budgetBoundedPage(orderKey, inRange, target, {
             continueCursor: endCursor as string,
           });
         }
@@ -787,12 +1173,12 @@ export class QueryEngine {
         const page = afterStart.slice(0, target);
         const last = page.at(-1) ?? null;
         const continueCursor =
-          last === null ? "_end_cursor" : this._encodeCursor(orderKey, last);
+          last === null ? "_end_cursor" : encodeCursor(orderKey, last);
         return {
           page,
           isDone: false,
           continueCursor,
-          ...this._pageSplit(orderKey, page, target),
+          ...pageSplit(orderKey, page, target),
         };
       }
 
@@ -802,12 +1188,12 @@ export class QueryEngine {
           page,
           isDone: true,
           continueCursor: "_end_cursor",
-          ...this._pageSplit(orderKey, page, target),
+          ...pageSplit(orderKey, page, target),
         };
       }
 
       if (budgetHit) {
-        return this._budgetBoundedPage(orderKey, afterStart, target, {
+        return budgetBoundedPage(orderKey, afterStart, target, {
           continueCursor: null,
         });
       }
@@ -816,52 +1202,7 @@ export class QueryEngine {
     }
   }
 
-  private _budgetBoundedPage(
-    orderKey: OrderKey,
-    candidates: GenericDocument[],
-    target: number,
-    options: { continueCursor: string | null },
-  ): PaginateResult {
-    const page =
-      target > 0 && candidates.length > target
-        ? candidates.slice(0, target)
-        : candidates;
-    const last = page.at(-1) ?? null;
-    const continueCursor =
-      options.continueCursor ??
-      (last === null ? "_end_cursor" : this._encodeCursor(orderKey, last));
-    const split = this._pageSplit(orderKey, page, target);
-    return {
-      page,
-      isDone: false,
-      continueCursor,
-      splitCursor: split.splitCursor,
-      pageStatus: "SplitRequired",
-    };
-  }
-
-  private _pageSplit(
-    orderKey: OrderKey,
-    page: GenericDocument[],
-    target: number,
-  ): { splitCursor: string | null; pageStatus: PaginateResult["pageStatus"] } {
-    if (page.length < 2 || target <= 0) {
-      return { splitCursor: null, pageStatus: null };
-    }
-    const midIndex = Math.floor((page.length - 1) / 2);
-    const midpoint = page[midIndex] ?? null;
-    const splitCursor =
-      midpoint === null ? null : this._encodeCursor(orderKey, midpoint);
-    let pageStatus: PaginateResult["pageStatus"] = null;
-    if (page.length > target * SPLIT_REQUIRED_FACTOR) {
-      pageStatus = "SplitRequired";
-    } else if (page.length > target * SPLIT_RECOMMENDED_FACTOR) {
-      pageStatus = "SplitRecommended";
-    }
-    return { splitCursor, pageStatus };
-  }
-
-  private async _paginateLinearAsync({
+  async function paginateLinearAsync({
     query,
     cursor,
     endCursor,
@@ -875,7 +1216,7 @@ export class QueryEngine {
     budget: ReadBudget;
   }): Promise<PaginateResult> {
     const pinnedEnd = endCursor !== null && endCursor !== "_end_cursor";
-    const queryId = this.startQueryAsync(query);
+    const queryId = api.startQueryAsync(query);
     const page: GenericDocument[] = [];
     let isInPage = cursor === null;
     let isDone = false;
@@ -885,7 +1226,7 @@ export class QueryEngine {
     let budgetBounded = false;
 
     for (;;) {
-      const { value, done } = await this.queryNextAsync(queryId);
+      const { value, done } = await api.queryNextAsync(queryId);
       if (done) {
         isDone = true;
         continueCursor = "_end_cursor";
@@ -932,10 +1273,10 @@ export class QueryEngine {
       }
     }
 
-    this.queryCleanup(queryId);
+    api.queryCleanup(queryId);
 
     if (cursor !== null && !isInPage && page.length === 0) {
-      return this._paginateLinearAsync({
+      return paginateLinearAsync({
         query,
         cursor: null,
         endCursor,
@@ -963,467 +1304,136 @@ export class QueryEngine {
     };
   }
 
-  private _resolveOrderKey(query: SerializedQuery): OrderKey | null {
-    const source = query.source;
-    if (source.type === "Search") {
-      return null;
-    }
-    if (source.type === "FullTableScan") {
-      return {
-        seekFields: ["_creationTime", "_id"],
-        order: source.order ?? "asc",
+  const api: QueryEngine = {
+    startQuery(query) {
+      const id = nextQueryId;
+      const results = evaluateQuery(query);
+      queryResults[id] = { results, index: 0 };
+      nextQueryId += 1;
+      return id;
+    },
+
+    startQueryAsync(query) {
+      const id = nextQueryId;
+      const resultsPromise = evaluateQueryAsync(query).then((results) => {
+        const active = asyncQueryResults[id];
+        if (active) {
+          active.results = results;
+        }
+        return results;
+      });
+      asyncQueryResults[id] = { resultsPromise, results: null, index: 0 };
+      nextQueryId += 1;
+      return id;
+    },
+
+    queryNext(queryId) {
+      const query = queryResults[queryId];
+      return query === undefined
+        ? (() => {
+            throw new Error("Bad queryId");
+          })()
+        : query.index >= query.results.length
+          ? { value: null, done: true }
+          : { value: query.results[query.index++]!, done: false };
+    },
+
+    async queryNextAsync(queryId) {
+      const query = asyncQueryResults[queryId];
+      if (query === undefined) {
+        throw new Error("Bad queryId");
+      }
+
+      const results = query.results ?? (await query.resultsPromise);
+      return query.index >= results.length
+        ? { value: null, done: true }
+        : { value: results[query.index++]!, done: false };
+    },
+
+    queryCleanup(queryId) {
+      delete queryResults[queryId];
+      delete asyncQueryResults[queryId];
+    },
+
+    async paginateAsync({
+      query,
+      cursor,
+      endCursor,
+      pageSize,
+      maximumRowsRead,
+      maximumBytesRead,
+    }) {
+      const budget: ReadBudget = {
+        maximumRowsRead: maximumRowsRead ?? null,
+        maximumBytesRead: maximumBytesRead ?? null,
       };
-    }
-    const [tableName, indexName] = source.indexName.split(".") as [
-      string,
-      string,
-    ];
-    const fields = this._resolveIndexFields(tableName, indexName);
-    const pinned = new Set<string>();
-    for (const expr of source.range) {
-      if (expr.type === "Eq") {
-        pinned.add(expr.fieldPath);
+      const orderKey = resolveOrderKey(query);
+      if (orderKey === null) {
+        return paginateLinearAsync({
+          query,
+          cursor,
+          endCursor: endCursor ?? null,
+          pageSize,
+          budget,
+        });
       }
-    }
-    const seekFields: string[] = [];
-    let prefix = true;
-    for (const field of fields) {
-      if (prefix && pinned.has(field)) {
-        continue;
-      }
-      prefix = false;
-      seekFields.push(field);
-    }
-    if (
-      seekFields.length === 0 ||
-      seekFields[seekFields.length - 1] !== "_id"
-    ) {
-      return null;
-    }
-    return { seekFields, order: source.order ?? "asc" };
-  }
-
-  private _buildSeek(
-    orderKey: OrderKey,
-    cursor: Array<Value | undefined>,
-  ): SeekBound {
-    return {
-      field: orderKey.seekFields[0]!,
-      value: convexToJson(cursor[0] ?? null) as JSONValue,
-      inclusive: true,
-      direction: orderKey.order,
-    };
-  }
-
-  private _encodeCursor(orderKey: OrderKey, doc: GenericDocument): string {
-    const values = orderKey.seekFields.map((field) =>
-      convexToJson((evaluateFieldPath(field, doc) ?? null) as Value),
-    );
-    return `${CURSOR_PREFIX}${JSON.stringify(values)}`;
-  }
-
-  private _decodeCursor(cursor: string): Array<Value | undefined> | null {
-    if (!cursor.startsWith(CURSOR_PREFIX)) {
-      return null;
-    }
-    const parsed = JSON.parse(
-      cursor.slice(CURSOR_PREFIX.length),
-    ) as JSONValue[];
-    return parsed.map((value) => jsonToConvex(value));
-  }
-
-  private _compareOrderKey(
-    orderKey: OrderKey,
-    doc: GenericDocument,
-    cursor: Array<Value | undefined>,
-  ): number {
-    const multiplier = orderKey.order === "asc" ? 1 : -1;
-    for (let index = 0; index < orderKey.seekFields.length; index += 1) {
-      const field = orderKey.seekFields[index]!;
-      const comparison = compareValues(
-        evaluateFieldPath(field, doc),
-        cursor[index],
-      );
-      if (comparison !== 0) {
-        return comparison * multiplier;
-      }
-    }
-    return 0;
-  }
-
-  count(tableName: string): number {
-    return this._countTable(tableName);
-  }
-
-  async countAsync(tableName: string): Promise<number> {
-    return this._countTableAsync(tableName);
-  }
-
-  vectorSearch(
-    tableAndIndexName: string,
-    vector: number[],
-    filter: VectorSearchExpression | null,
-    limit?: number,
-  ): Array<{ _id: string; _score: number }> {
-    const [tableName, indexName] = tableAndIndexName.split(".") as [
-      string,
-      string,
-    ];
-    const definition = getVectorIndexDefinition(
-      this._schema?.tables.get(tableName)?.vectorIndexes,
-      tableName,
-      indexName,
-    );
-
-    const cacheKey = `${tableName}.${indexName}`;
-    const version = this._tableVersion(tableName);
-    const cached =
-      version === null ? undefined : this._vectorIndexCache.get(cacheKey);
-    let state: ReturnType<typeof buildVectorIndexState>;
-    if (cached !== undefined && cached.version === version) {
-      state = cached.state;
-    } else {
-      state = buildVectorIndexState({
-        docs: this._readDocs(tableName).map((doc) => ({
-          doc: doc as StoredDocument,
-          identityKey: null,
-        })),
-        definition,
+      return paginateSeekAsync({
+        query,
+        cursor,
+        endCursor: endCursor ?? null,
+        pageSize,
+        orderKey,
+        budget,
       });
-      if (version !== null) {
-        this._vectorIndexCache.set(cacheKey, { version, state });
-      }
-    }
+    },
 
-    return executeVectorSearch(state, {
-      vector,
-      limit,
-      filter,
-      activeIdentityKey: null,
-    });
-  }
+    count(tableName) {
+      return countTable(tableName);
+    },
 
-  private _evaluateQuery(query: SerializedQuery): Array<GenericDocument> {
-    const optimizedQuery = this._query(query);
-    if (optimizedQuery !== null) {
-      return optimizedQuery;
-    }
+    async countAsync(tableName) {
+      return countTableAsyncFn(tableName);
+    },
 
-    const { filters, limit } = this._extractQueryOperators(query.operators);
-
-    if (limit !== null && filters.length > 0) {
-      const probe = this._evaluateSource(query.source, limit);
-      if (probe.presorted === true) {
-        return this._boundedFilteredRead(
-          (readLimit) => this._evaluateSource(query.source, readLimit),
-          probe,
-          filters,
-          limit,
-        );
-      }
-      return this._finalizeSource(probe, filters, limit);
-    }
-
-    const source = this._evaluateSource(
-      query.source,
-      filters.length === 0 ? limit : null,
-    );
-    return this._finalizeSource(source, filters, limit);
-  }
-
-  private async _evaluateQueryAsync(
-    query: SerializedQuery,
-  ): Promise<Array<GenericDocument>> {
-    const optimizedQuery = await this._readQueryAsync(query);
-    if (optimizedQuery !== null) {
-      return optimizedQuery;
-    }
-
-    const { filters, limit } = this._extractQueryOperators(query.operators);
-
-    if (limit !== null && filters.length > 0) {
-      const probe = await this._evaluateSourceAsync(query.source, limit);
-      if (probe.presorted === true) {
-        return this._boundedFilteredReadAsync(
-          (readLimit) => this._evaluateSourceAsync(query.source, readLimit),
-          probe,
-          filters,
-          limit,
-        );
-      }
-      return this._finalizeSource(probe, filters, limit);
-    }
-
-    const source = await this._evaluateSourceAsync(
-      query.source,
-      filters.length === 0 ? limit : null,
-    );
-    return this._finalizeSource(source, filters, limit);
-  }
-
-  private _finalizeSource(
-    source: SourceEvaluation,
-    filters: FilterNode[],
-    limit: number | null,
-  ): Array<GenericDocument> {
-    const filtered = this._applyFilters(source.results, filters);
-    const sorted =
-      source.presorted === true
-        ? filtered
-        : this._sortResults(filtered, source.fieldPathsToSortBy, source.order);
-    return this._applyLimit(sorted, limit);
-  }
-
-  private _boundedFilteredRead(
-    read: (readLimit: number) => SourceEvaluation,
-    firstRead: SourceEvaluation,
-    filters: FilterNode[],
-    limit: number,
-  ): Array<GenericDocument> {
-    let readLimit = limit;
-    let source = firstRead;
-    for (;;) {
-      const survivors = this._applyFilters(source.results, filters);
-      const exhausted = source.results.length < readLimit;
-      if (survivors.length >= limit || exhausted) {
-        return survivors.slice(0, limit);
-      }
-      readLimit *= 2;
-      source = read(readLimit);
-    }
-  }
-
-  private async _boundedFilteredReadAsync(
-    read: (readLimit: number) => Promise<SourceEvaluation>,
-    firstRead: SourceEvaluation,
-    filters: FilterNode[],
-    limit: number,
-  ): Promise<Array<GenericDocument>> {
-    let readLimit = limit;
-    let source = firstRead;
-    for (;;) {
-      const survivors = this._applyFilters(source.results, filters);
-      const exhausted = source.results.length < readLimit;
-      if (survivors.length >= limit || exhausted) {
-        return survivors.slice(0, limit);
-      }
-      readLimit *= 2;
-      source = await read(readLimit);
-    }
-  }
-
-  private _evaluateSource(
-    source: Source,
-    limit: number | null = null,
-    seek?: SeekBound,
-  ): SourceEvaluation {
-    const optimized = this._source(source, limit, seek);
-    if (optimized !== null) {
-      return optimized;
-    }
-
-    return matchTag(source, "type", {
-      FullTableScan: (current) => this._evaluateFullTableScanSource(current),
-      IndexRange: (current) => this._evaluateIndexRangeSource(current),
-      Search: (current) => this._evaluateSearchSource(current, limit),
-    });
-  }
-
-  private async _evaluateSourceAsync(
-    source: Source,
-    limit: number | null = null,
-    seek?: SeekBound,
-  ): Promise<SourceEvaluation> {
-    const optimized = await this._readSourceAsync(source, limit, seek);
-    if (optimized !== null) {
-      return optimized;
-    }
-
-    return this._evaluateSource(source, limit, seek);
-  }
-
-  private _evaluateFullTableScanSource(
-    source: Extract<Source, { type: "FullTableScan" }>,
-  ): SourceEvaluation {
-    return {
-      results: this._readDocs(source.tableName),
-      fieldPathsToSortBy: ["_creationTime", "_id"],
-      order: source.order ?? "asc",
-    };
-  }
-
-  private _evaluateIndexRangeSource(
-    source: Extract<Source, { type: "IndexRange" }>,
-  ): SourceEvaluation {
-    const [tableName, indexName] = source.indexName.split(".") as [
-      string,
-      string,
-    ];
-    const fields = this._resolveIndexFields(tableName, indexName);
-    validateIndexRangeExpression(source, fields);
-    const rangePredicate = this._buildRangePredicate(source.range);
-
-    return {
-      results: this._readDocs(tableName, rangePredicate),
-      fieldPathsToSortBy: fields,
-      order: source.order ?? "asc",
-    };
-  }
-
-  private _evaluateSearchSource(
-    source: Extract<Source, { type: "Search" }>,
-    limit: number | null,
-  ): SourceEvaluation {
-    const [tableName, indexName] = source.indexName.split(".") as [
-      string,
-      string,
-    ];
-    const definition = getSearchIndexDefinition(
-      this._schema?.tables.get(tableName)?.searchIndexes,
-      tableName,
-      indexName,
-    );
-    const cacheKey = `${tableName}.${indexName}`;
-    const version = this._tableVersion(tableName);
-    const cached =
-      version === null ? undefined : this._searchIndexCache.get(cacheKey);
-    let state: ReturnType<typeof buildSearchIndexState>;
-    if (cached !== undefined && cached.version === version) {
-      state = cached.state;
-    } else {
-      state = buildSearchIndexState({
-        docs: this._readDocs(tableName).map((doc) => ({
-          doc: doc as StoredDocument,
-          identityKey: null,
-        })),
-        definition,
-      });
-      if (version !== null) {
-        this._searchIndexCache.set(cacheKey, { version, state });
-      }
-    }
-    return {
-      results: executeSearch(state, {
-        source,
-        activeIdentityKey: null,
-        limit: limit ?? undefined,
-      }),
-      fieldPathsToSortBy: [],
-      order: "asc",
-    };
-  }
-
-  private _readDocs(
-    tableName: string,
-    predicate: (doc: StoredDocument) => boolean = () => true,
-  ): QueryResults {
-    const results: QueryResults = [];
-    this._iterateDocs(tableName, (doc) => {
-      if (predicate(doc)) {
-        results.push(doc);
-      }
-    });
-    return results;
-  }
-
-  private _resolveIndexFields(tableName: string, indexName: string): string[] {
-    const builtInFields =
-      builtInIndexFields[indexName as keyof typeof builtInIndexFields];
-    if (builtInFields) {
-      return [...builtInFields];
-    }
-
-    const indexes = this._schema?.tables.get(tableName)?.indexes;
-    const index = indexes?.find(
-      ({ indexDescriptor }) => indexDescriptor === indexName,
-    );
-
-    return index
-      ? [...index.fields, "_creationTime", "_id"]
-      : (() => {
-          throw new Error(
-            `Cannot use index "${indexName}" for table "${tableName}" because it is not declared in the schema.`,
-          );
-        })();
-  }
-
-  private _extractQueryOperators(operators: QueryOperator[]): {
-    filters: FilterNode[];
-    limit: number | null;
-  } {
-    const filters: FilterNode[] = [];
-    let limit: number | null = null;
-
-    for (const operator of operators) {
-      if (operatorTypeGuards.filter(operator)) {
-        filters.push(normalizeFilter(operator.filter));
-        continue;
-      }
-      if (limit === null && operatorTypeGuards.limit(operator)) {
-        limit = operator.limit;
-      }
-    }
-
-    return { filters, limit };
-  }
-
-  private _applyFilters(
-    results: QueryResults,
-    filters: FilterNode[],
-  ): QueryResults {
-    return filters.length === 0
-      ? results
-      : results.filter((doc) =>
-          filters.every((filter) => evaluateNormalizedFilter(doc, filter)),
-        );
-  }
-
-  private _sortResults(
-    results: QueryResults,
-    fieldPathsToSortBy: string[],
-    order: "asc" | "desc",
-  ): QueryResults {
-    if (results.length < 2 || fieldPathsToSortBy.length === 0) {
-      return results;
-    }
-
-    const orderMultiplier = order === "asc" ? 1 : -1;
-    return results.sort((left, right) => {
-      const comparison = fieldPathsToSortBy.reduce(
-        (acc, fieldPath) =>
-          acc !== 0
-            ? acc
-            : compareValues(
-                evaluateFieldPath(fieldPath, left),
-                evaluateFieldPath(fieldPath, right),
-              ),
-        0,
+    vectorSearch(tableAndIndexName, vector, filter, limit) {
+      const [tableName, indexName] = tableAndIndexName.split(".") as [
+        string,
+        string,
+      ];
+      const definition = getVectorIndexDefinition(
+        schema?.tables.get(tableName)?.vectorIndexes,
+        tableName,
+        indexName,
       );
-      return comparison * orderMultiplier;
-    });
-  }
 
-  private _applyLimit(
-    results: QueryResults,
-    limit: number | null,
-  ): QueryResults {
-    return limit === null ? results : results.slice(0, limit);
-  }
-
-  private _buildRangePredicate(
-    range: ReadonlyArray<SerializedRangeExpression>,
-  ): (doc: StoredDocument) => boolean {
-    if (range.length === 0) {
-      return () => true;
-    }
-
-    return (doc) => {
-      for (const filter of range) {
-        if (!evaluateRangeFilter(doc, filter)) {
-          return false;
+      const cacheKey = `${tableName}.${indexName}`;
+      const version = tableVersion(tableName);
+      const cached =
+        version === null ? undefined : vectorIndexCache.get(cacheKey);
+      let state: ReturnType<typeof buildVectorIndexState>;
+      if (cached !== undefined && cached.version === version) {
+        state = cached.state;
+      } else {
+        state = buildVectorIndexState({
+          docs: readDocs(tableName).map((doc) => ({
+            doc: doc as StoredDocument,
+            identityKey: null,
+          })),
+          definition,
+        });
+        if (version !== null) {
+          vectorIndexCache.set(cacheKey, { version, state });
         }
       }
-      return true;
-    };
-  }
+
+      return executeVectorSearch(state, {
+        vector,
+        limit,
+        filter,
+        activeIdentityKey: null,
+      });
+    },
+  };
+
+  return api;
 }

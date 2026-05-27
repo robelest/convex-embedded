@@ -1,4 +1,7 @@
-import { QueryEngine } from "@embedded/runtime/db/query";
+import {
+  createQueryEngine,
+  type QueryEngine,
+} from "@embedded/runtime/db/query";
 import type { ParsedSchema } from "@embedded/runtime/db/schema";
 import type {
   SerializedQuery,
@@ -61,7 +64,7 @@ function makeStore(docs: StoredDocument[]): Store {
 }
 
 function makeEngine(schema: ParsedSchema, store: Store): QueryEngine {
-  return new QueryEngine(
+  return createQueryEngine(
     schema,
     (_tableName, callback) => {
       store.iterateCalls += 1;
@@ -147,7 +150,7 @@ describe("QueryEngine search-index cache", () => {
 
   it("does not cache when no version is tracked", async () => {
     const store = makeStore([doc("1", { title: "a", body: "hello world" })]);
-    const engine = new QueryEngine(
+    const engine = createQueryEngine(
       searchSchema,
       (_tableName, callback) => {
         store.iterateCalls += 1;

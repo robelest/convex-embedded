@@ -8,7 +8,7 @@ import {
 import type { AsyncReadBackend } from "@/runtime/db/backend";
 import { compareValues } from "@/runtime/db/compare";
 import { evaluateFieldPath } from "@/runtime/db/fieldpath";
-import { QueryEngine } from "@/runtime/db/query";
+import { createQueryEngine, type QueryEngine } from "@/runtime/db/query";
 import {
   evaluateNormalizedFilter,
   normalizeFilter,
@@ -426,7 +426,7 @@ export class Database {
     const readSourceAsync: AsyncSourceReader = (source, limit, seek) =>
       this._readOptimizedSourceAsync(source, limit, seek);
 
-    this.queryEngine = new QueryEngine(
+    this.queryEngine = createQueryEngine(
       schema,
       iterateDocs,
       countTable,
@@ -435,7 +435,7 @@ export class Database {
       countTableAsync,
       readQueryAsync,
       readSourceAsync,
-      (tableName) => this.getTableVersion(tableName),
+      (tableName: string) => this.getTableVersion(tableName),
     );
   }
 

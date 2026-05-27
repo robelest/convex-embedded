@@ -83,7 +83,7 @@ import {
 } from "@/storage/sqlite/factory";
 import { captureValueAttr, withSpan } from "@/tracing/spans";
 import { runDetached } from "@/utils/detached";
-import { DisposableScope } from "@/utils/scope";
+import { createDisposableScope } from "@/utils/scope";
 
 const storageLog = createLogger("runtime-storage");
 const runtimeLog = createLogger("runtime");
@@ -379,7 +379,7 @@ export class EmbeddedRuntime {
   private _storageHydratedComplete = false;
   private _crossTabSyncChain: Promise<void> = Promise.resolve();
   private _shutdown = false;
-  private readonly _scope = new DisposableScope();
+  private readonly _scope = createDisposableScope();
 
   /**
    * Shared set of active timer IDs from scheduled function `setTimeout`

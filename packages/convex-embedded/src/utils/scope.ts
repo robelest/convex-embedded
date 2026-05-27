@@ -8,27 +8,26 @@ const log = createLogger("scope");
  *
  * ```ts
  * {
- *   await using scope = new DisposableScope();
+ *   await using scope = createDisposableScope();
  *   scope.addFinalizer(() => stream.close());
  * } // scope.close() runs automatically here
  * ```
  */
-export class DisposableScope {
-  private finalizers: Array<() => void | Promise<void>> = [];
-  private closed = false;
+export interface DisposableScope {
+  addFinalizer(fn: () => void | Promise<void>): void;
+  close(): Promise<void>;
+  [Symbol.asyncDispose](): Promise<void>;
+}
 
-  addFinalizer(fn: () => void | Promise<void>): void {
-    if (this.closed) {
-      throw new Error("Cannot add finalizer to a closed scope.");
-    }
-    this.finalizers.push(fn);
-  }
+export function createDisposableScope(): DisposableScope {
+  const finalizers: Array<() => void | Promise<void>> = [];
+  let closed = false;
 
-  async close(): Promise<void> {
-    if (this.closed) return;
-    this.closed = true;
-    const reversed = [...this.finalizers].reverse();
-    this.finalizers.length = 0;
+  async function close(): Promise<void> {
+    if (closed) return;
+    closed = true;
+    const reversed = [...finalizers].reverse();
+    finalizers.length = 0;
     for (const fn of reversed) {
       try {
         await fn();
@@ -38,7 +37,16 @@ export class DisposableScope {
     }
   }
 
-  async [Symbol.asyncDispose](): Promise<void> {
-    await this.close();
-  }
+  return {
+    addFinalizer(fn: () => void | Promise<void>): void {
+      if (closed) {
+        throw new Error("Cannot add finalizer to a closed scope.");
+      }
+      finalizers.push(fn);
+    },
+    close,
+    async [Symbol.asyncDispose](): Promise<void> {
+      await close();
+    },
+  };
 }

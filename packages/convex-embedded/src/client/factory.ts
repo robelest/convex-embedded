@@ -54,7 +54,7 @@ import type { PendingReplayMeta } from "@/shared/symbols";
 import type { StorageAdapter } from "@/storage/adapter";
 import type { SqliteDriver } from "@/storage/sqlite/driver";
 import { PubSub } from "@/utils/pubsub";
-import { DisposableScope } from "@/utils/scope";
+import { createDisposableScope } from "@/utils/scope";
 
 const log = createLogger("setup");
 
@@ -238,7 +238,7 @@ export function createEmbeddedClient(input: {
   let clientClosed = false;
   let installedStorageSurface: { close(): void } | null = null;
   let client!: EmbeddedClient;
-  const rootScope = new DisposableScope();
+  const rootScope = createDisposableScope();
 
   const platformConfig: PlatformConfig = {
     runtime,

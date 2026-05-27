@@ -1,5 +1,5 @@
 import type { SessionBroadcast, SessionEvent } from "@/runtime/platform";
-import { DisposableScope } from "@/utils/scope";
+import { createDisposableScope } from "@/utils/scope";
 
 const DEFAULT_CHANNEL_NAME = "convex-embedded-session";
 
@@ -30,7 +30,7 @@ export class BrowserSessionBroadcast implements SessionBroadcast {
   private _callbacks: Set<(event: SessionEvent) => void> = new Set();
   private _storageHandler: ((ev: StorageEvent) => void) | null = null;
   private _closed = false;
-  private _scope = new DisposableScope();
+  private _scope = createDisposableScope();
   private _senderId =
     typeof globalThis.crypto?.randomUUID === "function"
       ? globalThis.crypto.randomUUID()

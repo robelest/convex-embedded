@@ -37,7 +37,7 @@ import type { RouteMode } from "@/shared/route";
 import type { EngineStatus } from "@/shared/types";
 import { stableValueKey } from "@/shared/valuekey";
 import { PubSub } from "@/utils/pubsub";
-import { DisposableScope } from "@/utils/scope";
+import { createDisposableScope, type DisposableScope } from "@/utils/scope";
 
 const log = createLogger("remote");
 
@@ -636,7 +636,7 @@ export function attachResolve(input: {
     discovery: null,
     discoveryReady: false,
     closed: false,
-    scope: new DisposableScope(),
+    scope: createDisposableScope(),
   };
 
   entry.scope.addFinalizer(async () => {

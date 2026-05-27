@@ -56,14 +56,3 @@ export const sidebar: SidebarGroup[] = [
   },
 ];
 
-/** Flat list of all items in sidebar order, for prev/next navigation */
-const allPages = sidebar.flatMap((group) => group.items);
-
-function getPrevNext(currentSlug: string) {
-  const normalized = currentSlug.replace(/\/$/, "");
-  const idx = allPages.findIndex((p) => p.slug === normalized);
-  return {
-    prev: idx > 0 ? allPages[idx - 1] : null,
-    next: idx < allPages.length - 1 ? allPages[idx + 1] : null,
-  };
-}

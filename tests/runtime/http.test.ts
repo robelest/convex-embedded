@@ -1,5 +1,8 @@
 import type { ConvexModuleRegistry } from "@embedded/kernel/modules";
-import { EmbeddedRuntime } from "@embedded/runtime/embedded";
+import {
+  createEmbeddedRuntime,
+  type EmbeddedRuntime,
+} from "@embedded/runtime/embedded";
 import { remoteOnly } from "@embedded/server/markers";
 import type { TestFixtures } from "@tests/testkit";
 import { describe, expect, it } from "@tests/testkit";
@@ -56,7 +59,7 @@ async function startRuntime(
   track: TestFixtures["track"],
   modules: ConvexModuleRegistry,
 ): Promise<EmbeddedRuntime> {
-  const runtime = new EmbeddedRuntime({ convex: { modules } });
+  const runtime = createEmbeddedRuntime({ convex: { modules } });
   track({ close: () => runtime.shutdown() });
   await runtime.hydrate();
   return runtime;

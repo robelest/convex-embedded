@@ -66,5 +66,3 @@ export const it = vitest.it.extend<TestFixtures>({
     });
   },
 });
-
-const test = it;

@@ -1,7 +1,7 @@
 import type { ConvexModuleRegistry } from "@embedded/kernel/modules";
 import type { AsyncReadBackend } from "@embedded/runtime/db/backend";
 import type { Source, StoredDocument } from "@embedded/runtime/db/types";
-import { EmbeddedRuntime } from "@embedded/runtime/embedded";
+import { createEmbeddedRuntime } from "@embedded/runtime/embedded";
 import { runLocalMigrations } from "@embedded/runtime/migrations/coordinator";
 import type { PendingReplayMeta } from "@embedded/shared/symbols";
 import { mockAdapter } from "@tests/helpers/adapter";
@@ -77,7 +77,7 @@ describe("runLocalMigrations", () => {
         pendingRow("pending-b", 2, "user:b", { title: "b" }),
       ],
     });
-    const runtime = new EmbeddedRuntime({
+    const runtime = createEmbeddedRuntime({
       convex: { modules: STUB_MODULES },
       storage,
     });

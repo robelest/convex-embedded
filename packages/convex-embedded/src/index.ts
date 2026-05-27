@@ -27,7 +27,8 @@
  */
 
 export {
-  EmbeddedRuntime,
+  createEmbeddedRuntime,
+  type EmbeddedRuntime,
   type EmbeddedRuntimeOptions,
 } from "@/runtime/embedded";
 
@@ -114,25 +115,3 @@ export type {
   InMemoryTracingOptions,
 } from "@/tracing/memory";
 
-import {
-  EmbeddedRuntime,
-  type EmbeddedRuntimeOptions,
-} from "@/runtime/embedded";
-
-/**
- * Create an embedded Convex runtime.
- *
- * This is the primary entry point. Pass a lazy ESM registry keyed by your
- * Convex module ids and optionally your schema definition.
- *
- * @param options.modules  Lazy ESM registry keyed by canonical module id.
- * @param options.schema   Default export from your `convex/schema.ts`.
- * @returns An {@link EmbeddedRuntime} instance.
- *
- * @category Factory
- */
-export function createEmbeddedRuntime(
-  options: EmbeddedRuntimeOptions,
-): EmbeddedRuntime {
-  return new EmbeddedRuntime(options);
-}

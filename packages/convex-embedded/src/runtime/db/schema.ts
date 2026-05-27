@@ -194,14 +194,16 @@ export function validateValidator(
         formatValueForError(validator.value),
         value,
       );
-    case "id":
+    case "id": {
       assertType(typeof value === "string", "string", value);
-      if (tableNameFromId(value as string, idLookup) !== validator.tableName) {
+      const idString = value as string;
+      if (tableNameFromId(idString, idLookup) !== validator.tableName) {
         throw new Error(
-          `Validator error: Expected ID for table "${validator.tableName}", got \`${String(value)}\``,
+          `Validator error: Expected ID for table "${validator.tableName}", got \`${idString}\``,
         );
       }
       return;
+    }
     case "array":
       assertType(Array.isArray(value), "Array", value);
       for (const v of value as Value[]) {

@@ -48,7 +48,7 @@ import {
 import { Database } from "@/runtime/db/database";
 import type { DatabaseCommitResult } from "@/runtime/db/database";
 import { parseSchema } from "@/runtime/db/schema";
-import type { ParsedSchema, SchemaExport } from "@/runtime/db/schema";
+import type { SchemaExport } from "@/runtime/db/schema";
 import type { QueryDependency } from "@/runtime/db/types";
 import type { DocumentId, StoredDocument } from "@/runtime/db/types";
 import { createHttpDispatcher, type HttpDispatcher } from "@/runtime/http";
@@ -63,7 +63,6 @@ import {
   type ProtocolQueryRecord,
   type RuntimeProtocolQueryRegistry,
   type RuntimeQueryObserver,
-  type RuntimeQueryObserverRegistry,
 } from "@/runtime/registry";
 import type { StorageSurface } from "@/runtime/storage";
 import { createTransport } from "@/runtime/transport";
@@ -226,33 +225,6 @@ type LocalPaginatedWatchRecord = {
   pageCache: Map<string, LocalPaginatedPageCacheEntry>;
 };
 
-type RuntimeState = {
-  schema: ParsedSchema | null;
-  storageAdapter: StorageAdapter | null;
-  verifyTokenHook: ((token: string) => Promise<UserIdentity | null>) | null;
-  crypto: EmbeddedCryptoProvider;
-  db: Database;
-  moduleLoader: ModuleLoader;
-  executor: UdfExecutor;
-  transactionManager: TransactionManager;
-  subscriptions: SubscriptionManager;
-  protocolQueryObservers: RuntimeQueryObserverRegistry<ProtocolQueryRecord>;
-  localQueryWatches: RuntimeQueryObserverRegistry<LocalQueryWatchRecord>;
-  localPaginatedQueryWatches: RuntimeQueryObserverRegistry<LocalPaginatedWatchRecord>;
-  protocolQueries: RuntimeProtocolQueryRegistry;
-  auth: AuthResolver;
-  syncProtocol: ReplicationProtocolHandler;
-  sessions: SessionManager;
-  writeFanout: WriteBroadcast;
-  scheduler: SchedulerExecutor;
-  cronRunner: CronRunner;
-};
-
-interface RuntimeInput {
-  readonly runtime: EmbeddedRuntime;
-  readonly options: EmbeddedRuntimeOptions;
-}
-
 /**
  * Controls how {@link EmbeddedRuntime.ingestDocuments} reconciles the
  * incoming snapshot against local state.
@@ -347,7 +319,7 @@ function extractOmittedFieldsByTable(
  * ```ts
  * import { modules } from "./convex-modules";
  *
- * const runtime = new EmbeddedRuntime({
+ * const runtime = createEmbeddedRuntime({
  *   modules,
  *   schema,
  * });
@@ -355,9 +327,8 @@ function extractOmittedFieldsByTable(
  * const client = new ConvexClient(url, { webSocketConstructor });
  * ```
  */
-export class EmbeddedRuntime {
+export interface EmbeddedRuntime {
   readonly crypto: EmbeddedCryptoProvider;
-
   readonly db: Database;
   readonly moduleLoader: ModuleLoader;
   readonly executor: UdfExecutor;
@@ -368,231 +339,15 @@ export class EmbeddedRuntime {
   readonly sessions: SessionManager;
   readonly writeFanout: WriteBroadcast;
   readonly auth: AuthResolver;
-  private readonly _verifyTokenHook:
-    | ((token: string) => Promise<UserIdentity | null>)
-    | null;
   readonly scheduler: SchedulerExecutor;
   readonly cronRunner: CronRunner;
-  private _httpDispatcher: HttpDispatcher | null = null;
-  private readonly _localQueryWatches: RuntimeQueryObserverRegistry<LocalQueryWatchRecord>;
-  private readonly _localPaginatedQueryWatches: RuntimeQueryObserverRegistry<LocalPaginatedWatchRecord>;
-  private readonly _queryTablesReadCache = new Map<string, Set<string>>();
-  private readonly _tableWriteListeners = new Map<
-    string,
-    Set<(source: "local" | "remote") => void>
-  >();
-  private readonly _uploadTokenSources = new Map<string, string>();
-  private readonly _userTableSpecs: Map<string, InternalTableSpec> | null;
 
-  private _storageAdapter: StorageAdapter | null;
-  private _transports: EmbeddedTransport[] = [];
-  private _storageHydrated: Promise<void>;
-  private _storageHydratedComplete = false;
-  private _crossTabSyncChain: Promise<void> = Promise.resolve();
-  private _shutdown = false;
-  private readonly _scope = createDisposableScope();
-
-  /**
-   * Shared set of active timer IDs from scheduled function `setTimeout`
-   * calls (via `1.0/schedule` syscall). Cleared on {@link shutdown} to
-   * prevent leaked timers accessing the database after teardown.
-   */
-  private _activeTimers = new Set<ReturnType<typeof setTimeout>>();
-  private _scheduledRecovery = new Set<string>();
-
-  constructor(options: EmbeddedRuntimeOptions) {
-    if (options.debug === true || readDebugEnvFlag()) {
-      setLoggerDebug(true);
-    }
-    runtimeLog.debug(
-      "creating runtime, modules:",
-      Object.keys(options.convex.modules).length,
-    );
-    const state = this._buildRuntimeState({ runtime: this, options });
-    this._storageAdapter = state.storageAdapter;
-    this._verifyTokenHook = state.verifyTokenHook;
-    this.crypto = state.crypto;
-    this.db = state.db;
-    this.moduleLoader = state.moduleLoader;
-    this.executor = state.executor;
-    this.transactionManager = state.transactionManager;
-    this.subscriptions = state.subscriptions;
-    this._localQueryWatches = state.localQueryWatches;
-    this._localPaginatedQueryWatches = state.localPaginatedQueryWatches;
-    this.protocolQueries = state.protocolQueries;
-    this.auth = state.auth;
-    this.syncProtocol = state.syncProtocol;
-    this.sessions = state.sessions;
-    this.writeFanout = state.writeFanout;
-    this.scheduler = state.scheduler;
-    this.cronRunner = state.cronRunner;
-    this._userTableSpecs = state.schema
-      ? buildUserTableSpecs(
-          state.schema,
-          extractOmittedFieldsByTable(options.schema),
-        )
-      : null;
-    if (this._storageAdapter && this._userTableSpecs) {
-      const setUserTableSpecs = (
-        this._storageAdapter as {
-          setUserTableSpecs?: (
-            specs: Map<string, InternalTableSpec> | undefined,
-          ) => void;
-        }
-      ).setUserTableSpecs;
-      if (typeof setUserTableSpecs === "function") {
-        try {
-          setUserTableSpecs.call(this._storageAdapter, this._userTableSpecs);
-        } catch (error) {
-          runtimeLog.warn(
-            "failed to install user table specs on storage adapter",
-            error,
-          );
-        }
-      }
-    }
-
-    this.writeFanout.onNotification((tablesWritten) => {
-      this._crossTabSyncChain = this._crossTabSyncChain
-        .then(() => this._handleCrossTabSync(tablesWritten))
-        .catch((err) => runtimeLog.error("cross-tab sync:", err));
-    });
-
-    this._scope.addFinalizer(() => {
-      for (const transport of this._transports) {
-        transport.closeAll();
-      }
-      this._transports.length = 0;
-      this.scheduler.shutdown();
-      this.cronRunner.shutdown();
-      for (const timerId of this._activeTimers) {
-        clearTimeout(timerId);
-      }
-      this._activeTimers.clear();
-      this._scheduledRecovery.clear();
-      this.sessions.clear();
-      this.protocolQueries.clear();
-      this.subscriptions.clear();
-      this._localQueryWatches.clear();
-      this._localPaginatedQueryWatches.clear();
-      this._tableWriteListeners.clear();
-      this.writeFanout.close();
-    });
-    this._scope.addFinalizer(async () => {
-      await this.db.waitForPersistence();
-      if (this._storageAdapter?.close) {
-        await Promise.resolve(this._storageAdapter.close());
-      }
-    });
-
-    const hasInitialStorage = options.storage != null;
-    const db = this.db;
-    const moduleLoader = this.moduleLoader;
-
-    this._storageHydrated = (async () => {
-      try {
-        if (hasInitialStorage) {
-          await db.hydrateSystemTables();
-        }
-        if (hasInitialStorage) {
-          await this._resumeScheduledFunctions();
-        }
-        await Promise.all([
-          this._startCronRunner(),
-          this._initializeHttpDispatcher(),
-        ]);
-        // Preload user modules so the first user-triggered query / mutation
-        // doesn't pay the dynamic-import cost on its critical path. Runs
-        // concurrently with the cron / http startup above where it would
-        // overlap, but is sequenced last here so failures don't mask
-        // hydration errors.
-        await moduleLoader.preloadAll();
-      } catch (err) {
-        storageLog.error("hydration failed:", err);
-        throw err;
-      } finally {
-        this._storageHydratedComplete = true;
-      }
-    })();
-  }
-
-  /**
-   * Wait for storage hydration to complete.
-   *
-   * Hydration starts automatically in the constructor. Callers that need
-   * to guarantee the database is populated before proceeding can `await`
-   * this method, but it is not required — {@link handleMessage} gates
-   * on the same promise internally.
-   *
-   * @returns A promise that resolves when persisted state and scheduled job
-   * recovery have finished loading.
-   */
-  hydrate(): Promise<void> {
-    return this._storageHydrated;
-  }
-
-  /**
-   * Execute a public Convex query directly against the embedded runtime.
-   *
-   * This is the runtime-first query helper for SSR flows where you want to
-   * render from embedded data without constructing a browser client. The query
-   * runs after storage hydration completes.
-   *
-   * @typeParam Query - The Convex query reference type.
-   * @param query - Query reference to execute locally.
-   * @param args - Query arguments. Omit for zero-arg queries.
-   * @returns The local query result.
-   *
-   * @example
-   * ```ts
-   * const tasks = await runtime.query(api.tasks.list, {});
-   * ```
-   *
-   * @see paginate
-   * @category Execution
-   */
-  async query<Query extends FunctionReference<"query">>(
+  hydrate(): Promise<void>;
+  query<Query extends FunctionReference<"query">>(
     query: Query,
     ...args: OptionalRestArgs<Query>
-  ): Promise<FunctionReturnType<Query>> {
-    return (await this.executeLocal({
-      kind: "query",
-      path: getFunctionName(query),
-      args: (args[0] ?? {}) as Record<string, unknown>,
-    })) as FunctionReturnType<Query>;
-  }
-
-  /**
-   * Execute one page of a paginated Convex query against the embedded runtime.
-   *
-   * This mirrors Convex pagination at the runtime layer by injecting the
-   * standard `paginationOpts` argument shape expected by paginated queries.
-   * Use it during SSR when first render needs page-shaped data before a browser
-   * client exists.
-   *
-   * @typeParam Query - The Convex query reference type.
-   * @param query - Paginated query reference to execute locally.
-   * @param args - Query arguments excluding `paginationOpts`.
-   * @param options - Pagination options for the requested page.
-   * @param options.initialNumItems - Number of documents to request.
-   * @param options.cursor - Optional cursor returned by a previous page.
-   * @returns The paginated query result returned by the embedded function.
-   *
-   * @throws {Error} When `initialNumItems` is missing, non-finite, or less than 1.
-   *
-   * @example
-   * ```ts
-   * const page = await runtime.paginate(
-   *   api.tasks.list,
-   *   {},
-   *   { initialNumItems: 20 },
-   * );
-   * ```
-   *
-   * @see query
-   * @category Execution
-   */
-  async paginate<Query extends FunctionReference<"query">>(
+  ): Promise<FunctionReturnType<Query>>;
+  paginate<Query extends FunctionReference<"query">>(
     query: Query,
     ...argsAndOptions: ArgsAndOptions<
       Query,
@@ -601,64 +356,354 @@ export class EmbeddedRuntime {
         cursor?: string | null;
       }
     >
+  ): Promise<FunctionReturnType<Query>>;
+  resumePersistedState(): Promise<void>;
+  setStorageSurface(surface: StorageSurface | null): void;
+  setUploadQueueEnabled(enabled: boolean): void;
+  setStorage(storage: StorageAdapter | null): void;
+  getStorage(): StorageAdapter | null;
+  getUserTableSpecs(): Map<string, InternalTableSpec> | null;
+  extendStorageReady(ready: Promise<void>): void;
+  getStorageBlob(storageId: string): Promise<Blob | null>;
+  getStorageMetadata(
+    storageId: string,
+  ): Promise<Record<string, unknown> | null>;
+  storeUploadedBlob(blob: Blob): Promise<string>;
+  storeUploadedBlobWithMetadata(
+    blob: Blob,
+    metadata: { uploadSourceRef?: string },
+  ): Promise<string>;
+  registerUploadUrlSource(uploadUrl: string, refName: string): void;
+  consumeUploadUrlSource(token: string): string | undefined;
+  createTransport(ready?: Promise<void>): EmbeddedTransport;
+  setIdentity(identity: UserIdentity | null): void;
+  setActiveIdentityKey(identityKey: string | null): void;
+  getIdentity(): UserIdentity | null;
+  getIdentityKey(): string | null;
+  migrateAnonymousDataToIdentity(identityKey: string): Promise<void>;
+  teardownSession(sessionId: string): void;
+  handleMessage(message: string): Promise<string[]>;
+  onMutationCommit(commit: DatabaseCommitResult): void;
+  pushLocalQueryUpdates(commit: DatabaseCommitResult): Promise<void>;
+  ingestDocuments(
+    table: string,
+    remoteDocs: Array<Record<string, unknown>>,
+    scopeArgs?: Record<string, unknown>,
+    options?: IngestDocumentsOptions,
+  ): Promise<void>;
+  writeDocsFromCache(
+    table: string,
+    docs: Array<Record<string, unknown>>,
+  ): Promise<void>;
+  canonicalizeMappedCreate(input: {
+    localId: string;
+    remoteId: string;
+    tableName: string;
+    schemas: Record<string, Definition>;
+  }): Promise<void>;
+  getDocumentsForTable(
+    table: string,
+  ): Promise<Array<Record<string, unknown>>>;
+  getDocumentsForScope(
+    table: string,
+    scopeArgs: Record<string, unknown>,
+  ): Promise<Array<Record<string, unknown>> | null>;
+  hasLocalDocumentId(id: string): boolean;
+  getDocument(
+    table: string,
+    id: string,
+  ): Promise<Record<string, unknown> | null>;
+  subscribeTableWrites(
+    table: string,
+    callback: (source: "local" | "remote") => void,
+  ): TableWriteSubscription;
+  watchLocalQuery<T = unknown>(
+    path: string,
+    args: Record<string, unknown>,
+  ): LocalQueryWatch<T>;
+  watchLocalPaginatedQuery<T = unknown>(
+    path: string,
+    args: Record<string, unknown>,
+    options: { initialNumItems: number },
+  ): LocalPaginatedQueryWatch<T>;
+  refreshLocalQueryWatches(): Promise<void>;
+  executeLocal(request: LocalExecutionRequest): Promise<unknown>;
+  shutdown(): void;
+  dispatchHttpRequest(request: Request): Promise<Response>;
+  [Symbol.asyncDispose](): Promise<void>;
+  _runUdf(
+    type: "query" | "mutation" | "action",
+    path: FunctionPath,
+    args: Record<string, unknown>,
+    context?: {
+      holdsTransactionLock?: boolean;
+      identity?: unknown;
+      identityKey?: string | null;
+      dependencies?: QueryDependency[];
+    },
+  ): Promise<unknown>;
+  _evaluateLocalQuery(
+    pathName: string,
+    args: Record<string, unknown>,
+  ): Promise<LocalQueryEvaluation>;
+  _evaluateLocalPaginatedPage(
+    pathName: string,
+    args: Record<string, unknown>,
+    cursor: string | null,
+    endCursor: string | null,
+    numItems: number,
+  ): Promise<{
+    result: LocalPaginatedPageResult;
+    tablesRead: Set<string>;
+    dependencies: QueryDependency[];
+  }>;
+  _buildProtocolAuth(): {
+    verifyToken(token: string): Promise<{
+      identity: UserIdentity;
+      identityKey: string | null;
+    }>;
+  };
+  readonly _crossTabSyncChain: Promise<void>;
+}
+
+export function createEmbeddedRuntime(
+  options: EmbeddedRuntimeOptions,
+): EmbeddedRuntime {
+  if (options.debug === true || readDebugEnvFlag()) {
+    setLoggerDebug(true);
+  }
+  runtimeLog.debug(
+    "creating runtime, modules:",
+    Object.keys(options.convex.modules).length,
+  );
+
+  let httpDispatcher: HttpDispatcher | null = null;
+  const queryTablesReadCache = new Map<string, Set<string>>();
+  const tableWriteListeners = new Map<
+    string,
+    Set<(source: "local" | "remote") => void>
+  >();
+  const uploadTokenSources = new Map<string, string>();
+  const transports: EmbeddedTransport[] = [];
+  let storageHydratedComplete = false;
+  let crossTabSyncChain: Promise<void> = Promise.resolve();
+  let shutdownFlag = false;
+  const scope = createDisposableScope();
+  const activeTimers = new Set<ReturnType<typeof setTimeout>>();
+  const scheduledRecovery = new Set<string>();
+
+  const schemaExport = extractConvexSchemaExport(options.schema);
+  const parsedSchema = schemaExport
+    ? parseSchema(schemaExport as SchemaExport)
+    : null;
+  let storageAdapter: StorageAdapter | null = options.storage ?? null;
+  const verifyTokenHook = options.verifyToken ?? null;
+  const crypto = options.crypto ?? createAmbientCryptoProvider();
+  const db = new Database(parsedSchema, options.storage, crypto);
+  const moduleLoader = new ModuleLoader(options.convex.modules);
+  const transactionManager = createTransactionManager();
+  const subscriptions = createSubscriptionManager();
+  const tableVersionGetter = (tableName: string): number =>
+    db.getTableVersion(tableName);
+  const protocolQueryObservers =
+    createRuntimeQueryObserverRegistry<ProtocolQueryRecord>(
+      subscriptions,
+      tableVersionGetter,
+    );
+  const localQueryWatches =
+    createRuntimeQueryObserverRegistry<LocalQueryWatchRecord>(
+      subscriptions,
+      tableVersionGetter,
+    );
+  const localPaginatedQueryWatches =
+    createRuntimeQueryObserverRegistry<LocalPaginatedWatchRecord>(
+      subscriptions,
+      tableVersionGetter,
+    );
+  const protocolQueries = createRuntimeProtocolQueryRegistry(
+    protocolQueryObservers,
+  );
+  const auth = createAuthResolver();
+  const executor = new UdfExecutor({
+    db,
+    crypto,
+    moduleLoader,
+    runUdf: (
+      type: "query" | "mutation" | "action",
+      path: FunctionPath,
+      args: Record<string, unknown>,
+      context?: { holdsTransactionLock?: boolean },
+    ) => runUdf(type, path, args, context),
+    getIdentity: () => auth.getUserIdentity(),
+    activeTimers,
+    runWithTransactionLock: (fn) => runWithTransactionLock(fn),
+  });
+  const syncProtocol = new ReplicationProtocolHandler({
+    executor: buildProtocolExecutor(),
+    queryStore: protocolQueries,
+    auth: buildProtocolAuth(),
+  });
+  const sessions = createSessionManager();
+  const writeFanout = options.writeBroadcast ?? createNoopWriteBroadcast();
+  const scheduler = createSchedulerExecutor({
+    db,
+    runFunction: async (path: string, args: Record<string, unknown>) => {
+      await runUdf("mutation", getFunctionPath({ name: path }), args);
+    },
+  });
+  const cronRunner = new CronRunner({
+    jobs: [],
+    runFunction: async (type, functionName, args) => {
+      await runUdf(type, getFunctionPath({ name: functionName }), args);
+    },
+  });
+
+  const userTableSpecs = parsedSchema
+    ? buildUserTableSpecs(
+        parsedSchema,
+        extractOmittedFieldsByTable(options.schema),
+      )
+    : null;
+  if (storageAdapter && userTableSpecs) {
+    const setUserTableSpecs = (
+      storageAdapter as {
+        setUserTableSpecs?: (
+          specs: Map<string, InternalTableSpec> | undefined,
+        ) => void;
+      }
+    ).setUserTableSpecs;
+    if (typeof setUserTableSpecs === "function") {
+      try {
+        setUserTableSpecs.call(storageAdapter, userTableSpecs);
+      } catch (error) {
+        runtimeLog.warn(
+          "failed to install user table specs on storage adapter",
+          error,
+        );
+      }
+    }
+  }
+
+  writeFanout.onNotification((tablesWritten) => {
+    crossTabSyncChain = crossTabSyncChain
+      .then(() => handleCrossTabSync(tablesWritten))
+      .catch((err) => runtimeLog.error("cross-tab sync:", err));
+  });
+
+  scope.addFinalizer(() => {
+    for (const transport of transports) {
+      transport.closeAll();
+    }
+    transports.length = 0;
+    scheduler.shutdown();
+    cronRunner.shutdown();
+    for (const timerId of activeTimers) {
+      clearTimeout(timerId);
+    }
+    activeTimers.clear();
+    scheduledRecovery.clear();
+    sessions.clear();
+    protocolQueries.clear();
+    subscriptions.clear();
+    localQueryWatches.clear();
+    localPaginatedQueryWatches.clear();
+    tableWriteListeners.clear();
+    writeFanout.close();
+  });
+  scope.addFinalizer(async () => {
+    await db.waitForPersistence();
+    if (storageAdapter?.close) {
+      await Promise.resolve(storageAdapter.close());
+    }
+  });
+
+  const hasInitialStorage = options.storage != null;
+
+  const storageHydratedRef: { current: Promise<void> } = {
+    current: (async () => {
+      try {
+        if (hasInitialStorage) {
+          await db.hydrateSystemTables();
+        }
+        if (hasInitialStorage) {
+          await resumeScheduledFunctions();
+        }
+        await Promise.all([startCronRunner(), initializeHttpDispatcher()]);
+        await moduleLoader.preloadAll();
+      } catch (err) {
+        storageLog.error("hydration failed:", err);
+        throw err;
+      } finally {
+        storageHydratedComplete = true;
+      }
+    })(),
+  };
+
+  function hydrate(): Promise<void> {
+    return storageHydratedRef.current;
+  }
+
+  async function query<Query extends FunctionReference<"query">>(
+    queryRef: Query,
+    ...args: OptionalRestArgs<Query>
   ): Promise<FunctionReturnType<Query>> {
-    const [args, options] = argsAndOptions;
-    if (!options || !Number.isFinite(options.initialNumItems)) {
+    return (await runtime.executeLocal({
+      kind: "query",
+      path: getFunctionName(queryRef),
+      args: (args[0] ?? {}) as Record<string, unknown>,
+    })) as FunctionReturnType<Query>;
+  }
+
+  async function paginate<Query extends FunctionReference<"query">>(
+    queryRef: Query,
+    ...argsAndOptions: ArgsAndOptions<
+      Query,
+      {
+        initialNumItems: number;
+        cursor?: string | null;
+      }
+    >
+  ): Promise<FunctionReturnType<Query>> {
+    const [args, opts] = argsAndOptions;
+    if (!opts || !Number.isFinite(opts.initialNumItems)) {
       throw new Error(
         "[convex-embedded] paginate requires a finite initialNumItems value.",
       );
     }
-    if (options.initialNumItems <= 0) {
+    if (opts.initialNumItems <= 0) {
       throw new Error(
         "[convex-embedded] paginate requires initialNumItems to be greater than zero.",
       );
     }
 
-    return (await this.executeLocal({
+    return (await runtime.executeLocal({
       kind: "query",
-      path: getFunctionName(query),
+      path: getFunctionName(queryRef),
       args: {
         ...((args ?? {}) as Record<string, unknown>),
         paginationOpts: {
-          cursor: options.cursor ?? null,
-          numItems: options.initialNumItems,
+          cursor: opts.cursor ?? null,
+          numItems: opts.initialNumItems,
           id: -1,
         },
       },
     })) as FunctionReturnType<Query>;
   }
 
-  async resumePersistedState(): Promise<void> {
-    await this._resumeScheduledFunctions();
+  async function resumePersistedState(): Promise<void> {
+    await resumeScheduledFunctions();
   }
 
-  /**
-   * Install or clear the storage surface used by local file upload helpers.
-   *
-   * @param surface - Browser/Expo storage surface, or `null` to disable file helpers.
-   */
-  setStorageSurface(surface: StorageSurface | null): void {
-    this.executor.setStorageSurface(surface);
+  function setStorageSurface(surface: StorageSurface | null): void {
+    executor.setStorageSurface(surface);
   }
 
-  /**
-   * Toggle the storage upload queue. When enabled, every
-   * `ctx.storage.store(blob)` call also writes a row into
-   * `_resolve_pending_uploads` so the engine can replay the upload to the
-   * remote deployment on reconnect. The sync engine flips this on at attach
-   * time and off on detach.
-   */
-  setUploadQueueEnabled(enabled: boolean): void {
-    this.executor.setShouldQueueUploads(enabled);
+  function setUploadQueueEnabled(enabled: boolean): void {
+    executor.setShouldQueueUploads(enabled);
   }
 
-  /**
-   * Replace the durable storage adapter backing the runtime.
-   *
-   * @param storage - Storage adapter for durable writes.
-   */
-  setStorage(storage: StorageAdapter | null): void {
-    if (storage && this._userTableSpecs) {
+  function setStorage(storage: StorageAdapter | null): void {
+    if (storage && userTableSpecs) {
       const setUserTableSpecs = (
         storage as {
           setUserTableSpecs?: (
@@ -668,7 +713,7 @@ export class EmbeddedRuntime {
       ).setUserTableSpecs;
       if (typeof setUserTableSpecs === "function") {
         try {
-          setUserTableSpecs.call(storage, this._userTableSpecs);
+          setUserTableSpecs.call(storage, userTableSpecs);
         } catch (error) {
           runtimeLog.warn(
             "failed to install user table specs on storage adapter",
@@ -677,55 +722,46 @@ export class EmbeddedRuntime {
         }
       }
     }
-    this._storageAdapter = storage;
-    this.db.setStorage(storage);
+    storageAdapter = storage;
+    db.setStorage(storage);
   }
 
-  /** Read-only access to the underlying storage adapter, if any. */
-  getStorage(): StorageAdapter | null {
-    return this._storageAdapter;
+  function getStorage(): StorageAdapter | null {
+    return storageAdapter;
   }
 
-  /** Read-only access to the per-table SQL column specs derived from the schema. */
-  getUserTableSpecs(): Map<string, InternalTableSpec> | null {
-    return this._userTableSpecs;
+  function getUserTableSpecs(): Map<string, InternalTableSpec> | null {
+    return userTableSpecs;
   }
 
-  /** Chain an additional readiness promise into the hydration gate. */
-  extendStorageReady(ready: Promise<void>): void {
-    const prior = this._storageHydrated;
-    this._storageHydratedComplete = false;
-    this._storageHydrated = (async () => {
+  function extendStorageReady(ready: Promise<void>): void {
+    const prior = storageHydratedRef.current;
+    storageHydratedComplete = false;
+    storageHydratedRef.current = (async () => {
       try {
         await prior;
         await ready;
       } finally {
-        this._storageHydratedComplete = true;
+        storageHydratedComplete = true;
       }
     })();
   }
 
-  /**
-   * Read a blob stored in the embedded `_storage` table.
-   *
-   * @param storageId - Embedded storage id.
-   * @returns The blob, or `null` when the storage id is unknown.
-   */
-  async getStorageBlob(storageId: string): Promise<Blob | null> {
-    await this._storageHydrated;
+  async function getStorageBlob(storageId: string): Promise<Blob | null> {
+    await storageHydratedRef.current;
     const started = globalThis.performance?.now?.() ?? Date.now();
-    const blob = await this.db.loadFile(storageId as DocumentId);
+    const blob = await db.loadFile(storageId as DocumentId);
     storageLog.debug(
       `getStorageBlob(${storageId}) -> ${blob === null ? "null" : `${blob.size} bytes`} in ${((globalThis.performance?.now?.() ?? Date.now()) - started).toFixed(1)}ms`,
     );
     return blob;
   }
 
-  async getStorageMetadata(
+  async function getStorageMetadata(
     storageId: string,
   ): Promise<Record<string, unknown> | null> {
-    await this._storageHydrated;
-    const metadata = (await this.db.getAsync(
+    await storageHydratedRef.current;
+    const metadata = (await db.getAsync(
       "_storage",
       storageId as DocumentId,
     )) as Record<string, unknown> | null;
@@ -735,77 +771,57 @@ export class EmbeddedRuntime {
     return metadata;
   }
 
-  async storeUploadedBlob(blob: Blob): Promise<string> {
-    return this.storeUploadedBlobWithMetadata(blob, {});
+  async function storeUploadedBlob(blob: Blob): Promise<string> {
+    return storeUploadedBlobWithMetadata(blob, {});
   }
 
-  /**
-   * Persist a blob and optional upload provenance metadata in the embedded
-   * `_storage` table.
-   *
-   * @param blob - Blob to persist locally.
-   * @param metadata - Optional metadata such as the upload URL source ref.
-   * @returns The generated embedded storage id.
-   */
-  async storeUploadedBlobWithMetadata(
+  async function storeUploadedBlobWithMetadata(
     blob: Blob,
     metadata: { uploadSourceRef?: string },
   ): Promise<string> {
-    await this._storageHydrated;
+    await storageHydratedRef.current;
     storageLog.info(
       `storeUploadedBlob start (${blob.size} bytes, ${blob.type || "unknown type"})`,
     );
 
-    this.db.startTransaction();
+    db.startTransaction();
     try {
-      const sha256 = await blobShaBase64(blob, this.crypto);
+      const sha256 = await blobShaBase64(blob, crypto);
       storageLog.debug(
         `computed blob sha256 for upload (${sha256.slice(0, 12)}...)`,
       );
-      const storageId = this.db.insert("_storage", {
+      const storageId = db.insert("_storage", {
         size: blob.size,
         sha256,
         contentType: blob.type || undefined,
         uploadSourceRef: metadata.uploadSourceRef,
       });
-      await this.db.storeFile(storageId, blob);
-      const commit = await this.db.commitAsync();
-      this.onMutationCommit(commit);
+      await db.storeFile(storageId, blob);
+      const commit = await db.commitAsync();
+      onMutationCommit(commit);
       storageLog.info(`storeUploadedBlob committed as ${storageId}`);
       return storageId as string;
     } catch (error) {
-      this.db.rollbackWrites();
+      db.rollbackWrites();
       storageLog.error("storeUploadedBlob failed", error);
       throw error;
     }
   }
 
-  /**
-   * Associate an upload URL token with the Convex function that generated it.
-   *
-   * @param uploadUrl - Signed upload URL emitted by a remote function.
-   * @param refName - Function reference name that produced the URL.
-   */
-  registerUploadUrlSource(uploadUrl: string, refName: string): void {
-    const token = this.extractUploadToken(uploadUrl);
+  function registerUploadUrlSource(uploadUrl: string, refName: string): void {
+    const token = extractUploadToken(uploadUrl);
     if (token !== null) {
-      this._uploadTokenSources.set(token, refName);
+      uploadTokenSources.set(token, refName);
     }
   }
 
-  /**
-   * Consume and clear the function reference associated with an upload token.
-   *
-   * @param token - Upload token extracted from an embedded upload URL.
-   * @returns The originating function reference name, if known.
-   */
-  consumeUploadUrlSource(token: string): string | undefined {
-    const refName = this._uploadTokenSources.get(token);
-    this._uploadTokenSources.delete(token);
+  function consumeUploadUrlSource(token: string): string | undefined {
+    const refName = uploadTokenSources.get(token);
+    uploadTokenSources.delete(token);
     return refName;
   }
 
-  private extractUploadToken(uploadUrl: string): string | null {
+  function extractUploadToken(uploadUrl: string): string | null {
     try {
       const url = new URL(uploadUrl, "http://convex-embedded.local");
       const prefix = "/__convex_embedded/upload/";
@@ -817,111 +833,76 @@ export class EmbeddedRuntime {
     }
   }
 
-  /**
-   * Build the transport config that ConvexClient needs.
-   *
-   * Returns `{ url, webSocketConstructor }` — pass these to the
-   * `ConvexClient` constructor.
-   *
-   * @returns Loopback transport config for a `ConvexClient` instance.
-   */
-  createTransport(ready?: Promise<void>): EmbeddedTransport {
-    const transport = createTransport(this, ready);
-    this._transports.push(transport);
+  function makeTransport(ready?: Promise<void>): EmbeddedTransport {
+    const transport = createTransport(runtime, ready);
+    transports.push(transport);
     return transport;
   }
 
-  /**
-   * Set (or clear) the current user identity.
-   * Delegates to the {@link AuthResolver} and updates the active storage
-   * identity key.
-   *
-   * @param identity - Identity to install, or `null` to clear auth state.
-   */
-  setIdentity(identity: UserIdentity | null): void {
-    this.auth.setIdentity(identity);
-    this.db.setActiveIdentityKey(getIdentityKey(identity));
+  function setIdentity(identity: UserIdentity | null): void {
+    auth.setIdentity(identity);
+    db.setActiveIdentityKey(getIdentityKey(identity));
   }
 
-  /**
-   * Set the active storage identity key directly.
-   *
-   * @param identityKey - Identity partition key for persisted local data.
-   */
-  setActiveIdentityKey(identityKey: string | null): void {
-    this.db.setActiveIdentityKey(identityKey);
+  function setActiveIdentityKey(identityKey: string | null): void {
+    db.setActiveIdentityKey(identityKey);
   }
 
-  /**
-   * Read the current embedded identity.
-   *
-   * @returns The active user identity, or `null` when unauthenticated.
-   */
-  getIdentity(): UserIdentity | null {
-    return this.auth.peekUserIdentity();
+  function getIdentity(): UserIdentity | null {
+    return auth.peekUserIdentity();
   }
 
-  getIdentityKey(): string | null {
-    return this.db.getActiveIdentityKey();
+  function getActiveIdentityKey(): string | null {
+    return db.getActiveIdentityKey();
   }
 
-  /**
-   * Move anonymous local data into an authenticated identity partition.
-   *
-   * @param identityKey - Authenticated identity key to migrate anonymous rows into.
-   */
-  async migrateAnonymousDataToIdentity(identityKey: string): Promise<void> {
-    await this._storageHydrated;
+  async function migrateAnonymousDataToIdentity(
+    identityKey: string,
+  ): Promise<void> {
+    await storageHydratedRef.current;
 
     const tablesWritten = new Set<string>();
-    this.db.startTransaction();
+    db.startTransaction();
     try {
-      for (const tableName of this.db.migrateAnonymousDataToIdentity(
-        identityKey,
-      )) {
+      for (const tableName of db.migrateAnonymousDataToIdentity(identityKey)) {
         tablesWritten.add(tableName);
       }
-      const commit = await this.db.commitAsync();
-      this.onMutationCommit(commit);
+      const commit = await db.commitAsync();
+      onMutationCommit(commit);
     } catch (error) {
-      this.db.rollbackWrites();
+      db.rollbackWrites();
       throw error;
     }
 
-    for (const tableName of await this.db.reStampAnonymousUserTablesInStorage(
+    for (const tableName of await db.reStampAnonymousUserTablesInStorage(
       identityKey,
     )) {
       tablesWritten.add(tableName);
     }
 
     if (tablesWritten.size === 0) {
-      await this.refreshLocalQueryWatches();
+      await refreshLocalQueryWatches();
       return;
     }
 
-    this.db.bumpTableVersions(tablesWritten);
-    this.subscriptions.invalidate(tablesWritten);
-    const updates = await this.syncProtocol.reEvaluateQueries(
+    db.bumpTableVersions(tablesWritten);
+    subscriptions.invalidate(tablesWritten);
+    const updates = await syncProtocol.reEvaluateQueries(
       Array.from(tablesWritten).map((tableName) => ({
         tableName,
         before: null,
         after: null,
       })),
     );
-    await this.refreshLocalQueryWatches();
-    await this._pushProtocolUpdates(updates);
+    await refreshLocalQueryWatches();
+    await pushProtocolUpdates(updates);
   }
 
-  /**
-   * Remove a sync-protocol session and stop routing messages to it.
-   *
-   * @param sessionId - Protocol session id to tear down.
-   */
-  teardownSession(sessionId: string): void {
-    this.syncProtocol.deleteSession(sessionId);
+  function teardownSession(sessionId: string): void {
+    syncProtocol.deleteSession(sessionId);
   }
 
-  private async _buildLocalDocumentMap(
+  async function buildLocalDocumentMap(
     table: string,
     scopeArgs?: Record<string, unknown>,
     candidateIds?: ReadonlySet<string>,
@@ -930,8 +911,8 @@ export class EmbeddedRuntime {
       const entries = await Promise.all(
         [...candidateIds].map(
           async (id): Promise<[string, StoredDocument] | null> => {
-            const doc = await this.db.getAsync(table, id as DocumentId);
-            return doc !== null && this._documentMatchesScope(doc, scopeArgs)
+            const doc = await db.getAsync(table, id as DocumentId);
+            return doc !== null && documentMatchesScope(doc, scopeArgs)
               ? [id, doc]
               : null;
           },
@@ -943,15 +924,15 @@ export class EmbeddedRuntime {
         ),
       );
     }
-    return (await this.db.listDocumentsAsync(table)).reduce((acc, doc) => {
-      if (this._documentMatchesScope(doc, scopeArgs)) {
+    return (await db.listDocumentsAsync(table)).reduce((acc, doc) => {
+      if (documentMatchesScope(doc, scopeArgs)) {
         acc.set(doc._id as string, doc);
       }
       return acc;
     }, new Map<string, StoredDocument>());
   }
 
-  private _documentMatchesScope(
+  function documentMatchesScope(
     doc: Record<string, unknown>,
     scopeArgs?: Record<string, unknown>,
   ): boolean {
@@ -971,7 +952,7 @@ export class EmbeddedRuntime {
     });
   }
 
-  private _buildRemoteDocumentMap(
+  function buildRemoteDocumentMap(
     remoteDocs: Array<Record<string, unknown>>,
   ): Map<string, Record<string, unknown>> {
     return remoteDocs.reduce((acc, doc) => {
@@ -980,10 +961,10 @@ export class EmbeddedRuntime {
     }, new Map<string, Record<string, unknown>>());
   }
 
-  private _diffIngestDocuments(
+  function diffIngestDocuments(
     localMap: Map<string, StoredDocument>,
     remoteMap: Map<string, Record<string, unknown>>,
-    options?: IngestDocumentsOptions,
+    opts?: IngestDocumentsOptions,
   ): {
     toDelete: string[];
     toUpsert: Array<
@@ -1002,11 +983,11 @@ export class EmbeddedRuntime {
         : [];
     });
 
-    if (options?.deleteAbsent === false) {
+    if (opts?.deleteAbsent === false) {
       return { toDelete: [], toUpsert };
     }
 
-    const keepIds = options?.keepIds;
+    const keepIds = opts?.keepIds;
     const toDelete = [...localMap.keys()].filter(
       (id) => !remoteMap.has(id) && !(keepIds?.has(id) ?? false),
     );
@@ -1014,28 +995,21 @@ export class EmbeddedRuntime {
     return { toDelete, toUpsert };
   }
 
-  private async _pushProtocolUpdates(
+  async function pushProtocolUpdates(
     updates: Map<string, ServerMessage[]>,
   ): Promise<void> {
     for (const [sessionId, messages] of updates) {
       for (const message of messages) {
         const data = JSON.stringify(message);
-        for (const transport of this._transports) {
+        for (const transport of transports) {
           transport.pushMessage(sessionId, data);
         }
       }
     }
   }
 
-  /**
-   * Route a raw JSON message from the loopback WebSocket to the sync
-   * protocol handler. Returns an array of JSON response strings.
-   *
-   * This is the method that {@link createTransport} binds to — it
-   * satisfies the `ProtocolHandler` interface expected by the transport.
-   */
-  async handleMessage(message: string): Promise<string[]> {
-    await this._storageHydrated;
+  async function handleMessage(message: string): Promise<string[]> {
+    await storageHydratedRef.current;
 
     let parsed: ClientMessage;
     try {
@@ -1052,7 +1026,7 @@ export class EmbeddedRuntime {
       "default";
 
     try {
-      const responses: ServerMessage[] = await this.syncProtocol.handleMessage(
+      const responses: ServerMessage[] = await syncProtocol.handleMessage(
         sessionId,
         parsed,
       );
@@ -1075,28 +1049,24 @@ export class EmbeddedRuntime {
     }
   }
 
-  /**
-   * Called after a mutation commits. Invalidates local subscriptions and
-   * schedules cross-tab fanout after the storage write settles.
-   */
-  onMutationCommit(commit: DatabaseCommitResult): void {
+  function onMutationCommit(commit: DatabaseCommitResult): void {
     if (commit.tablesWritten.size === 0) return;
     const startedAt = nowMs();
 
-    this.db.bumpTableVersions(commit.tablesWritten);
+    db.bumpTableVersions(commit.tablesWritten);
 
-    const changes = this._commitToQueryUpdates(commit.invalidation);
+    const changes = commitToQueryUpdates(commit.invalidation);
     const tablesWritten = commit.invalidation.tables;
     const invalidateStart = nowMs();
     if (changes.length > 0) {
-      this.subscriptions.invalidate(changes);
+      subscriptions.invalidate(changes);
     } else if (tablesWritten.size > 0) {
-      this.subscriptions.invalidate(tablesWritten);
+      subscriptions.invalidate(tablesWritten);
     }
     const invalidateMs = nowMs() - invalidateStart;
-    this._notifyTableWriteListeners(tablesWritten);
+    notifyTableWriteListeners(tablesWritten);
     runDetached(
-      () => this._notifyCrossTabAfterStorage(commit),
+      () => notifyCrossTabAfterStorage(commit),
       "[convex-embedded] post-commit fanout failed:",
     );
     runtimeLog.debug(
@@ -1104,12 +1074,12 @@ export class EmbeddedRuntime {
     );
   }
 
-  private _notifyTableWriteListeners(
+  function notifyTableWriteListeners(
     tablesWritten: Iterable<string>,
     source: "local" | "remote" = "local",
   ): void {
     for (const tableName of tablesWritten) {
-      const listeners = this._tableWriteListeners.get(tableName);
+      const listeners = tableWriteListeners.get(tableName);
       if (!listeners || listeners.size === 0) {
         continue;
       }
@@ -1126,7 +1096,7 @@ export class EmbeddedRuntime {
     }
   }
 
-  private _commitToQueryUpdates(batch: {
+  function commitToQueryUpdates(batch: {
     tables: Set<string>;
     changes: Array<ProtocolChange>;
   }): ProtocolChange[] {
@@ -1140,7 +1110,9 @@ export class EmbeddedRuntime {
     return changes;
   }
 
-  async pushLocalQueryUpdates(commit: DatabaseCommitResult): Promise<void> {
+  async function pushLocalQueryUpdates(
+    commit: DatabaseCommitResult,
+  ): Promise<void> {
     return withSpan("convex-embedded.pushLocalQueryUpdates", async (span) => {
       if (commit.tablesWritten.size === 0) {
         span.setAttributes({ "convex.commit.tables_written": 0 });
@@ -1150,62 +1122,53 @@ export class EmbeddedRuntime {
         "convex.commit.tables_written": commit.tablesWritten.size,
       });
 
-      const changes = this._commitToQueryUpdates(commit.invalidation);
+      const changes = commitToQueryUpdates(commit.invalidation);
       span.setAttributes({ "convex.commit.changes": changes.length });
       if (changes.length === 0) return;
 
-      const updates = await this.syncProtocol.reEvaluateQueries(changes);
-      await this._pushProtocolUpdates(updates);
+      const updates = await syncProtocol.reEvaluateQueries(changes);
+      await pushProtocolUpdates(updates);
     });
   }
 
-  private async _notifyCrossTabAfterStorage(
+  async function notifyCrossTabAfterStorage(
     commit: DatabaseCommitResult,
   ): Promise<void> {
     try {
       await commit.persisted;
-      this.writeFanout.notify(commit.tablesWritten);
+      writeFanout.notify(commit.tablesWritten);
     } catch (err) {
       runtimeLog.error("skipping cross-tab notify after storage failure:", err);
     }
   }
 
-  /**
-   * Handle a cross-tab write notification from another tab.
-   *
-   * 1. Re-read the affected tables from IndexedDB (each tab's wa-sqlite
-   *    worker reads the same shared database).
-   * 2. Re-evaluate all active queries against the now-updated in-memory
-   *    database.
-   * 3. Push `Transition` messages through the loopback WebSocket so the
-   *    ConvexClient sees the updated query results instantly.
-   */
-  private async _handleCrossTabSync(tablesWritten: Set<string>): Promise<void> {
+  async function handleCrossTabSync(
+    tablesWritten: Set<string>,
+  ): Promise<void> {
     try {
       const tablesToSync = Array.from(tablesWritten).filter(
         (table) =>
-          !(
-            this._storageAdapter != null && isQueryable(this._storageAdapter)
-          ) || this.db.isTableHydrationAttempted(table),
+          !(storageAdapter != null && isQueryable(storageAdapter)) ||
+          db.isTableHydrationAttempted(table),
       );
       await Promise.all(
-        tablesToSync.map((table) => this.db.replicateTable(table)),
+        tablesToSync.map((table) => db.replicateTable(table)),
       );
 
-      const updates = await this.syncProtocol.reEvaluateQueries(
+      const updates = await syncProtocol.reEvaluateQueries(
         Array.from(tablesWritten).map((tableName) => ({
           tableName,
           before: null,
           after: null,
         })),
       );
-      await this.refreshLocalQueryWatches();
-      this._notifyTableWriteListeners(tablesWritten, "remote");
+      await refreshLocalQueryWatches();
+      notifyTableWriteListeners(tablesWritten, "remote");
 
       for (const [sessionId, messages] of updates) {
         for (const msg of messages) {
           const data = JSON.stringify(msg);
-          for (const transport of this._transports) {
+          for (const transport of transports) {
             transport.pushMessage(sessionId, data);
           }
         }
@@ -1215,48 +1178,25 @@ export class EmbeddedRuntime {
     }
   }
 
-  /**
-   * Ingest authoritative documents from a remote source into the local
-   * embedded database.
-   *
-   * This is the primary mechanism for receiving reactive query results
-   * from a remote Convex backend. The method:
-   *
-   *  1. Diffs the incoming documents against the current local state.
-   *  2. Applies only the actual changes (inserts, updates, deletes)
-   *     within a single transaction.
-   *  3. Persists to IndexedDB (via the storage adapter).
-   *  4. Invalidates local subscriptions and notifies other tabs.
-   *  5. Re-evaluates all active queries and pushes `Transition`
-   *     messages to every connected `ConvexClient`.
-   *
-   * If the incoming data is identical to the local state the method
-   * is a no-op — no transaction is opened and no notifications fire.
-   *
-   * @param table       The table name to ingest into.
-   * @param remoteDocs  Authoritative documents from the remote backend.
-   *                    Each must have `_id` (string) and `_creationTime`
-   *                    (number) fields.
-   */
-  async ingestDocuments(
+  async function ingestDocuments(
     table: string,
     remoteDocs: Array<Record<string, unknown>>,
     scopeArgs?: Record<string, unknown>,
-    options?: IngestDocumentsOptions,
+    opts?: IngestDocumentsOptions,
   ): Promise<void> {
     try {
-      await this._storageHydrated;
+      await storageHydratedRef.current;
 
-      const remoteMap = this._buildRemoteDocumentMap(remoteDocs);
-      const localMap = await this._buildLocalDocumentMap(
+      const remoteMap = buildRemoteDocumentMap(remoteDocs);
+      const localMap = await buildLocalDocumentMap(
         table,
         scopeArgs,
-        options?.deleteAbsent === false ? new Set(remoteMap.keys()) : undefined,
+        opts?.deleteAbsent === false ? new Set(remoteMap.keys()) : undefined,
       );
-      const { toDelete, toUpsert } = this._diffIngestDocuments(
+      const { toDelete, toUpsert } = diffIngestDocuments(
         localMap,
         remoteMap,
-        options,
+        opts,
       );
 
       if (toUpsert.length === 0 && toDelete.length === 0) {
@@ -1268,53 +1208,53 @@ export class EmbeddedRuntime {
           `${toUpsert.length} upsert(s), ${toDelete.length} delete(s)`,
       );
 
-      this.db.startTransaction();
+      db.startTransaction();
       try {
         for (const doc of toUpsert) {
-          this.db.writeDocument(table, doc);
+          db.writeDocument(table, doc);
         }
         for (const id of toDelete) {
-          this.db.deleteDocument(table, id as unknown as DocumentId);
+          db.deleteDocument(table, id as unknown as DocumentId);
         }
-        const commit = await this.db.commitAsync();
+        const commit = await db.commitAsync();
 
-        this.db.bumpTableVersions(commit.tablesWritten);
+        db.bumpTableVersions(commit.tablesWritten);
 
-        const changes = this._commitToQueryUpdates(commit.invalidation);
+        const changes = commitToQueryUpdates(commit.invalidation);
         const tablesWritten = commit.invalidation.tables;
         if (changes.length > 0) {
-          this.subscriptions.invalidate(changes);
+          subscriptions.invalidate(changes);
         } else if (tablesWritten.size > 0) {
-          this.subscriptions.invalidate(tablesWritten);
+          subscriptions.invalidate(tablesWritten);
         }
-        this._notifyTableWriteListeners(tablesWritten, "remote");
+        notifyTableWriteListeners(tablesWritten, "remote");
         runDetached(
-          () => this._notifyCrossTabAfterStorage(commit),
+          () => notifyCrossTabAfterStorage(commit),
           "[convex-embedded] post-commit fanout failed:",
         );
       } catch (e) {
-        this.db.rollbackWrites();
+        db.rollbackWrites();
         throw e;
       }
 
-      const updates = await this.syncProtocol.reEvaluateQueries([
+      const updates = await syncProtocol.reEvaluateQueries([
         { tableName: table, before: null, after: null },
       ]);
-      await this._pushProtocolUpdates(updates);
+      await pushProtocolUpdates(updates);
     } catch (err) {
       runtimeLog.error(`ingestDocuments("${table}") failed:`, err);
       throw err;
     }
   }
 
-  async writeDocsFromCache(
+  async function writeDocsFromCache(
     table: string,
     docs: Array<Record<string, unknown>>,
   ): Promise<void> {
     if (docs.length === 0) return;
     const totalStart = nowMs();
     try {
-      await this._storageHydrated;
+      await storageHydratedRef.current;
     } catch {
       return;
     }
@@ -1325,7 +1265,7 @@ export class EmbeddedRuntime {
     );
     if (candidates.length === 0) return;
 
-    const tableSpec = this._userTableSpecs?.get(table) ?? null;
+    const tableSpec = userTableSpecs?.get(table) ?? null;
     const requiredFields = tableSpec
       ? Object.entries(tableSpec.fields)
           .filter(([, spec]) => spec.notNull === true)
@@ -1360,7 +1300,7 @@ export class EmbeddedRuntime {
     > = [];
     let skippedPartial = 0;
     for (const doc of candidates) {
-      const existing = this.db.get(
+      const existing = db.get(
         table,
         doc._id as unknown as DocumentId,
       ) as Record<string, unknown> | null;
@@ -1416,41 +1356,41 @@ export class EmbeddedRuntime {
     }
 
     const writeStart = nowMs();
-    this.db.startTransaction();
+    db.startTransaction();
     try {
       for (const doc of merged) {
         try {
-          this.db.writeDocument(table, doc, { validate: false });
+          db.writeDocument(table, doc, { validate: false });
         } catch (err) {
           runtimeLog.debug(
             `writeDocsFromCache skip ${table}/${doc._id}: ${err instanceof Error ? err.message : String(err)}`,
           );
         }
       }
-      const commit = await this.db.commitAsync();
-      this.db.bumpTableVersions(commit.tablesWritten);
+      const commit = await db.commitAsync();
+      db.bumpTableVersions(commit.tablesWritten);
       const tablesWritten = commit.invalidation.tables;
       if (tablesWritten.size > 0) {
-        this.subscriptions.invalidate(tablesWritten);
+        subscriptions.invalidate(tablesWritten);
       }
     } catch (err) {
       runtimeLog.warn(
         `writeDocsFromCache rollback (${table}): ${err instanceof Error ? err.message : String(err)}`,
       );
-      this.db.rollbackWrites();
+      db.rollbackWrites();
     }
     runtimeLog.debug(
       `writeDocsFromCache ${table} candidates=${candidates.length} merged=${merged.length} skipped_partial=${skippedPartial} diff_ms=${diffMs.toFixed(1)} write_ms=${(nowMs() - writeStart).toFixed(1)} total_ms=${(nowMs() - totalStart).toFixed(1)}`,
     );
   }
 
-  async canonicalizeMappedCreate(input: {
+  async function canonicalizeMappedCreate(input: {
     localId: string;
     remoteId: string;
     tableName: string;
     schemas: Record<string, Definition>;
   }): Promise<void> {
-    await this._storageHydrated;
+    await storageHydratedRef.current;
 
     const orderedTableNames = [
       input.tableName,
@@ -1459,7 +1399,6 @@ export class EmbeddedRuntime {
       ),
     ];
 
-    const db = this.db;
     let committed = false;
     let commit: DatabaseCommitResult;
 
@@ -1490,11 +1429,8 @@ export class EmbeddedRuntime {
           (acc, doc) => acc.set(doc._id as string, doc as StoredDocument),
           new Map<string, StoredDocument>(),
         );
-        const remoteMap = this._buildRemoteDocumentMap(documents);
-        const { toDelete, toUpsert } = this._diffIngestDocuments(
-          localMap,
-          remoteMap,
-        );
+        const remoteMap = buildRemoteDocumentMap(documents);
+        const { toDelete, toUpsert } = diffIngestDocuments(localMap, remoteMap);
 
         for (const doc of toUpsert) {
           db.writeDocument(currentTableName, doc, { validate: false });
@@ -1506,7 +1442,7 @@ export class EmbeddedRuntime {
 
       commit = await db.commitAsync();
       committed = true;
-      this.onMutationCommit(commit);
+      onMutationCommit(commit);
     } catch (error) {
       if (!committed) {
         db.rollbackWrites();
@@ -1518,118 +1454,80 @@ export class EmbeddedRuntime {
       return;
     }
 
-    await this.pushLocalQueryUpdates(commit);
+    await pushLocalQueryUpdates(commit);
   }
 
-  /**
-   * Return all documents for a given table from the local embedded database.
-   *
-   * Waits for storage hydration before reading so the result includes
-   * persisted data (not just the empty in-memory state).
-   *
-   * @param table - The table name to read.
-   * @returns All currently materialized documents for the table.
-   */
-  async getDocumentsForTable(
+  async function getDocumentsForTable(
     table: string,
   ): Promise<Array<Record<string, unknown>>> {
-    await this._storageHydrated;
-    return (await this.db.listDocumentsAsync(table)) as Array<
+    await storageHydratedRef.current;
+    return (await db.listDocumentsAsync(table)) as Array<
       Record<string, unknown>
     >;
   }
 
-  async getDocumentsForScope(
+  async function getDocumentsForScope(
     table: string,
     scopeArgs: Record<string, unknown>,
   ): Promise<Array<Record<string, unknown>> | null> {
-    await this._storageHydrated;
-    return (await this.db.listDocumentsForScopeAsync(
-      table,
-      scopeArgs,
-    )) as Array<Record<string, unknown>> | null;
+    await storageHydratedRef.current;
+    return (await db.listDocumentsForScopeAsync(table, scopeArgs)) as Array<
+      Record<string, unknown>
+    > | null;
   }
 
-  /**
-   * Check whether any local table currently contains the given document id.
-   *
-   * @param id - Document id to probe.
-   * @returns `true` when the id exists locally in any table.
-   */
-  hasLocalDocumentId(id: string): boolean {
-    return this.db.getTableForId(id) !== undefined;
+  function hasLocalDocumentId(id: string): boolean {
+    return db.getTableForId(id) !== undefined;
   }
 
-  /**
-   * Read one document from a specific table.
-   *
-   * @param table - Table name to read from.
-   * @param id - Document id.
-   * @returns The current local document, or `null` when absent.
-   */
-  async getDocument(
+  async function getDocument(
     table: string,
     id: string,
   ): Promise<Record<string, unknown> | null> {
-    await this._storageHydrated;
+    await storageHydratedRef.current;
     return (
-      ((await this.db.getAsync(table, id as DocumentId)) as Record<
+      ((await db.getAsync(table, id as DocumentId)) as Record<
         string,
         unknown
       > | null) ?? null
     );
   }
 
-  /**
-   * Subscribe to writes affecting one local table.
-   *
-   * @param table - Table name to watch.
-   * @param callback - Listener invoked after local or remote writes land.
-   * @returns A subscription handle with `unsubscribe()`.
-   */
-  subscribeTableWrites(
+  function subscribeTableWrites(
     table: string,
     callback: (source: "local" | "remote") => void,
   ): TableWriteSubscription {
     const listeners =
-      this._tableWriteListeners.get(table) ??
+      tableWriteListeners.get(table) ??
       new Set<(source: "local" | "remote") => void>();
     listeners.add(callback);
-    this._tableWriteListeners.set(table, listeners);
+    tableWriteListeners.set(table, listeners);
 
     return {
       unsubscribe: () => {
-        const current = this._tableWriteListeners.get(table);
+        const current = tableWriteListeners.get(table);
         if (!current) {
           return;
         }
         current.delete(callback);
         if (current.size === 0) {
-          this._tableWriteListeners.delete(table);
+          tableWriteListeners.delete(table);
         }
       },
     };
   }
 
-  /**
-   * Watch a local query and receive push-style updates when its result changes.
-   *
-   * @typeParam T - Query result type.
-   * @param path - Canonical query name.
-   * @param args - Serializable query arguments.
-   * @returns A watch handle with synchronous snapshot accessors.
-   */
-  watchLocalQuery<T = unknown>(
+  function watchLocalQuery<T = unknown>(
     path: string,
     args: Record<string, unknown>,
   ): LocalQueryWatch<T> {
-    const token = this._localQueryToken(path, args);
-    const observer = this._getOrCreateLocalQueryWatch(token, path, args);
+    const token = localQueryToken(path, args);
+    const observer = getOrCreateLocalQueryWatch(token, path, args);
 
     return {
       onUpdate: (callback) => {
-        const unsubscribe = this._localQueryWatches.subscribe(token, callback);
-        const current = this._localQueryWatches.get(token) ?? observer;
+        const unsubscribe = localQueryWatches.subscribe(token, callback);
+        const current = localQueryWatches.get(token) ?? observer;
         if (current.hasValue) {
           queueMicrotask(() => {
             if (current.listeners.has(callback)) {
@@ -1641,52 +1539,39 @@ export class EmbeddedRuntime {
         return unsubscribe;
       },
       localQueryResult: () => {
-        const current = this._localQueryWatches.get(token) ?? observer;
+        const current = localQueryWatches.get(token) ?? observer;
         if (current.currentError) {
           throw current.currentError;
         }
         return current.hasValue ? (current.currentValue as T) : undefined;
       },
       localQueryLogs: () => {
-        const current = this._localQueryWatches.get(token) ?? observer;
+        const current = localQueryWatches.get(token) ?? observer;
         return current.currentLogs;
       },
     };
   }
 
-  /**
-   * Watch a local paginated query and load additional pages on demand.
-   *
-   * @typeParam T - Row type returned by the paginated query.
-   * @param path - Canonical query name.
-   * @param args - Serializable query arguments excluding pagination opts.
-   * @param options - Initial pagination configuration.
-   * @returns A watch handle with the current paginated snapshot.
-   */
-  watchLocalPaginatedQuery<T = unknown>(
+  function watchLocalPaginatedQuery<T = unknown>(
     path: string,
     args: Record<string, unknown>,
-    options: { initialNumItems: number },
+    opts: { initialNumItems: number },
   ): LocalPaginatedQueryWatch<T> {
-    const token = this._localPaginatedQueryToken(
-      path,
-      args,
-      options.initialNumItems,
-    );
-    const observer = this._getOrCreateLocalPaginatedQueryWatch(
+    const token = localPaginatedQueryToken(path, args, opts.initialNumItems);
+    const observer = getOrCreateLocalPaginatedQueryWatch(
       token,
       path,
       args,
-      options.initialNumItems,
+      opts.initialNumItems,
     );
 
     return {
       onUpdate: (callback) => {
-        const unsubscribe = this._localPaginatedQueryWatches.subscribe(
+        const unsubscribe = localPaginatedQueryWatches.subscribe(
           token,
           callback,
         );
-        const current = this._localPaginatedQueryWatches.get(token) ?? observer;
+        const current = localPaginatedQueryWatches.get(token) ?? observer;
         if (current.hasValue) {
           queueMicrotask(() => {
             if (current.listeners.has(callback)) {
@@ -1698,69 +1583,62 @@ export class EmbeddedRuntime {
         return unsubscribe;
       },
       localQueryResult: () => {
-        const current = this._localPaginatedQueryWatches.get(token) ?? observer;
+        const current = localPaginatedQueryWatches.get(token) ?? observer;
         if (current.currentError) {
           throw current.currentError;
         }
         return current.currentValue as LocalPaginatedQueryResult<T> | undefined;
       },
       localQueryLogs: () => {
-        const current = this._localPaginatedQueryWatches.get(token) ?? observer;
+        const current = localPaginatedQueryWatches.get(token) ?? observer;
         return current.currentLogs;
       },
     };
   }
 
-  async refreshLocalQueryWatches(): Promise<void> {
+  async function refreshLocalQueryWatches(): Promise<void> {
     return withSpan(
       "convex-embedded.refreshLocalQueryWatches",
       async (span) => {
         const queryCount =
-          this._localQueryWatches.values().length +
-          this._localPaginatedQueryWatches.values().length;
+          localQueryWatches.values().length +
+          localPaginatedQueryWatches.values().length;
         span.setAttributes({ "convex.watches.count": queryCount });
         await Promise.all([
-          this._localQueryWatches.refreshAll(),
-          this._localPaginatedQueryWatches.refreshAll(),
+          localQueryWatches.refreshAll(),
+          localPaginatedQueryWatches.refreshAll(),
         ]);
       },
     );
   }
 
-  /**
-   * Execute a local function directly against the embedded runtime.
-   *
-   * This is the unified runtime-first execution primitive used by browser
-   * routing. Mutations may optionally apply local subscription/query-update
-   * effects immediately.
-   *
-   * @internal
-   */
-  async executeLocal(request: LocalExecutionRequest): Promise<unknown> {
-    if (!this._storageHydratedComplete) {
-      await this._storageHydrated;
-    }
-
-    return this._executeLocalResolved(request);
-  }
-
-  private async _executeLocalResolved(
+  async function executeLocal(
     request: LocalExecutionRequest,
   ): Promise<unknown> {
-    if (!this._storageHydratedComplete) {
-      await this._storageHydrated;
+    if (!storageHydratedComplete) {
+      await storageHydratedRef.current;
+    }
+
+    return executeLocalResolved(request);
+  }
+
+  async function executeLocalResolved(
+    request: LocalExecutionRequest,
+  ): Promise<unknown> {
+    if (!storageHydratedComplete) {
+      await storageHydratedRef.current;
     }
     return matchTag(request, "kind", {
       query: async (current) => {
         const path = getFunctionPath({ name: current.path });
         const systemFn = SYSTEM_FUNCTIONS[path.udfPath];
         if (systemFn !== undefined) {
-          return this._runSystemFunction(systemFn, "query", current.args);
+          return runSystemFunction(systemFn, "query", current.args);
         }
         return withSpan("convex-embedded.executeLocal.query", async (span) => {
           span.setAttribute("convex.udf_path", path.udfPath);
           captureValueAttr(span, "convex.args", current.args);
-          const result = await this._runUdf("query", path, current.args);
+          const result = await runUdf("query", path, current.args);
           captureValueAttr(span, "convex.result", result);
           return result;
         });
@@ -1769,13 +1647,11 @@ export class EmbeddedRuntime {
         const functionPath = getFunctionPath({ name: current.path });
         const systemFn = SYSTEM_FUNCTIONS[functionPath.udfPath];
         if (systemFn !== undefined) {
-          return await this._runSystemFunction(
+          return await runSystemFunction(
             systemFn,
             "mutation",
             current.args,
-            {
-              holdsTransactionLock: false,
-            },
+            { holdsTransactionLock: false },
           );
         }
         return withSpan(
@@ -1784,14 +1660,14 @@ export class EmbeddedRuntime {
             span.setAttribute("convex.udf_path", functionPath.udfPath);
             captureValueAttr(span, "convex.args", current.args);
             const runMutation = () =>
-              this.executor.executeMutation(functionPath, current.args, {
+              executor.executeMutation(functionPath, current.args, {
                 holdsTransactionLock: true,
               });
             const { result, commit } =
-              await this._runWithTransactionLock(runMutation);
+              await runWithTransactionLock(runMutation);
 
             if (current.applyLocalEffects) {
-              this.onMutationCommit(commit);
+              onMutationCommit(commit);
             }
 
             captureValueAttr(span, "convex.result", result);
@@ -1800,7 +1676,7 @@ export class EmbeddedRuntime {
         );
       },
       action: (current) =>
-        this._runUdf(
+        runUdf(
           "action",
           getFunctionPath({ name: current.path }),
           current.args,
@@ -1808,14 +1684,14 @@ export class EmbeddedRuntime {
     });
   }
 
-  private _localQueryToken(
+  function localQueryToken(
     path: string,
     args: Record<string, unknown>,
   ): string {
     return `${path}:${stableValueKey(args)}`;
   }
 
-  private _localPaginatedQueryToken(
+  function localPaginatedQueryToken(
     path: string,
     args: Record<string, unknown>,
     initialNumItems: number,
@@ -1823,12 +1699,12 @@ export class EmbeddedRuntime {
     return `${path}:${stableValueKey(args)}:paginated:${initialNumItems}`;
   }
 
-  private _getOrCreateLocalQueryWatch(
+  function getOrCreateLocalQueryWatch(
     token: string,
     path: string,
     args: Record<string, unknown>,
   ): RuntimeQueryObserver<LocalQueryWatchRecord> {
-    const existing = this._localQueryWatches.get(token);
+    const existing = localQueryWatches.get(token);
     if (existing) {
       return existing;
     }
@@ -1838,14 +1714,14 @@ export class EmbeddedRuntime {
       args,
     };
 
-    const observer = this._localQueryWatches.ensure(token, record, () =>
-      this._evaluateHydratedLocalQuery(path, args),
+    const observer = localQueryWatches.ensure(token, record, () =>
+      evaluateHydratedLocalQuery(path, args),
     );
-    void this._localQueryWatches.refresh(observer);
+    void localQueryWatches.refresh(observer);
     return observer;
   }
 
-  private _getOrCreateLocalPaginatedQueryWatch(
+  function getOrCreateLocalPaginatedQueryWatch(
     token: string,
     path: string,
     args: Record<string, unknown>,
@@ -1862,16 +1738,16 @@ export class EmbeddedRuntime {
       pageCache: new Map(),
     };
 
-    const observer = this._localPaginatedQueryWatches.ensure(
+    const observer = localPaginatedQueryWatches.ensure(
       token,
       initialMeta,
-      () => this._evaluateHydratedLocalPaginatedWatch(observer),
+      () => evaluateHydratedLocalPaginatedWatch(observer),
     );
-    void this._localPaginatedQueryWatches.refresh(observer);
+    void localPaginatedQueryWatches.refresh(observer);
     return observer;
   }
 
-  private async _evaluateOnePaginatedPage(
+  async function evaluateOnePaginatedPage(
     observer: RuntimeQueryObserver<LocalPaginatedWatchRecord>,
     cursor: string | null,
     endCursor: string | null,
@@ -1882,7 +1758,7 @@ export class EmbeddedRuntime {
     const cacheKey = `${cursor ?? " "}|${endCursor ?? " "}|${numItems}`;
     let evaluated;
     try {
-      evaluated = await this._evaluatePaginatedPageCached(
+      evaluated = await evaluatePaginatedPageCached(
         observer,
         cacheKey,
         cursor,
@@ -1904,7 +1780,7 @@ export class EmbeddedRuntime {
     return { result: evaluated.result, cacheKey };
   }
 
-  private _pruneStalePaginatedPageCache(
+  function pruneStalePaginatedPageCache(
     observer: RuntimeQueryObserver<LocalPaginatedWatchRecord>,
     liveKeys: Set<string>,
   ): void {
@@ -1913,7 +1789,7 @@ export class EmbeddedRuntime {
     }
   }
 
-  private _finalizePaginatedWatch(
+  function finalizePaginatedWatch(
     observer: RuntimeQueryObserver<LocalPaginatedWatchRecord>,
     pageResults: LocalPaginatedPageResult[],
     tablesRead: Set<string>,
@@ -1935,14 +1811,14 @@ export class EmbeddedRuntime {
         results,
         status,
         loadMore: (numItems: number) =>
-          this._loadMoreLocalPaginatedQuery(observer, numItems),
+          loadMoreLocalPaginatedQuery(observer, numItems),
       },
       tablesRead,
       dependencies,
     };
   }
 
-  private async _evaluateLocalPaginatedWatch(
+  async function evaluateLocalPaginatedWatch(
     observer: RuntimeQueryObserver<LocalPaginatedWatchRecord>,
   ): Promise<LocalQueryEvaluation> {
     const tablesRead = new Set<string>();
@@ -1961,7 +1837,7 @@ export class EmbeddedRuntime {
         const pageRecord = pages[index]!;
         const isLast = index === pages.length - 1;
         const endCursor = isLast ? null : pages[index + 1]!.cursor;
-        const { result, cacheKey } = await this._evaluateOnePaginatedPage(
+        const { result, cacheKey } = await evaluateOnePaginatedPage(
           observer,
           pageRecord.cursor,
           endCursor,
@@ -1973,11 +1849,11 @@ export class EmbeddedRuntime {
         pageResults.push(result);
         if (isLast && result.isDone) break;
       }
-      this._pruneStalePaginatedPageCache(observer, liveKeys);
-      if (!this._applyPaginatedSplits(observer, pageResults)) break;
+      pruneStalePaginatedPageCache(observer, liveKeys);
+      if (!applyPaginatedSplits(observer, pageResults)) break;
     }
 
-    return this._finalizePaginatedWatch(
+    return finalizePaginatedWatch(
       observer,
       pageResults,
       tablesRead,
@@ -1985,7 +1861,7 @@ export class EmbeddedRuntime {
     );
   }
 
-  private _applyPaginatedSplits(
+  function applyPaginatedSplits(
     observer: RuntimeQueryObserver<LocalPaginatedWatchRecord>,
     pageResults: LocalPaginatedPageResult[],
   ): boolean {
@@ -2020,7 +1896,7 @@ export class EmbeddedRuntime {
     return false;
   }
 
-  private async _evaluatePaginatedPageCached(
+  async function evaluatePaginatedPageCached(
     observer: RuntimeQueryObserver<LocalPaginatedWatchRecord>,
     cacheKey: string,
     cursor: string | null,
@@ -2032,7 +1908,7 @@ export class EmbeddedRuntime {
     dependencies: QueryDependency[];
   }> {
     const cached = observer.meta.pageCache.get(cacheKey);
-    if (cached !== undefined && this._depVersionsFresh(cached.depVersions)) {
+    if (cached !== undefined && depVersionsFresh(cached.depVersions)) {
       return {
         result: cached.result,
         tablesRead: cached.tablesRead,
@@ -2040,7 +1916,7 @@ export class EmbeddedRuntime {
       };
     }
 
-    const evaluated = await this._evaluateLocalPaginatedPage(
+    const evaluated = await runtime._evaluateLocalPaginatedPage(
       observer.meta.path,
       observer.meta.args,
       cursor,
@@ -2050,7 +1926,7 @@ export class EmbeddedRuntime {
 
     const depVersions = new Map<string, number>();
     for (const table of evaluated.tablesRead) {
-      depVersions.set(table, this.db.getTableVersion(table));
+      depVersions.set(table, db.getTableVersion(table));
     }
     observer.meta.pageCache.set(cacheKey, {
       result: evaluated.result,
@@ -2061,57 +1937,57 @@ export class EmbeddedRuntime {
     return evaluated;
   }
 
-  private _depVersionsFresh(depVersions: Map<string, number>): boolean {
+  function depVersionsFresh(depVersions: Map<string, number>): boolean {
     for (const [table, version] of depVersions) {
-      if (this.db.getTableVersion(table) !== version) {
+      if (db.getTableVersion(table) !== version) {
         return false;
       }
     }
     return true;
   }
 
-  private async _evaluateHydratedLocalQuery(
+  async function evaluateHydratedLocalQuery(
     pathName: string,
     args: Record<string, unknown>,
   ): Promise<LocalQueryEvaluation> {
-    await this._awaitTableHydrationFor(pathName);
-    const evaluation = await this._evaluateLocalQuery(pathName, args);
-    this._recordQueryTablesRead(pathName, evaluation.tablesRead);
+    await awaitTableHydrationFor(pathName);
+    const evaluation = await runtime._evaluateLocalQuery(pathName, args);
+    recordQueryTablesRead(pathName, evaluation.tablesRead);
     return evaluation;
   }
 
-  private async _evaluateHydratedLocalPaginatedWatch(
+  async function evaluateHydratedLocalPaginatedWatch(
     observer: RuntimeQueryObserver<LocalPaginatedWatchRecord>,
   ): Promise<LocalQueryEvaluation> {
-    await this._awaitTableHydrationFor(observer.meta.path);
-    const evaluation = await this._evaluateLocalPaginatedWatch(observer);
-    this._recordQueryTablesRead(observer.meta.path, evaluation.tablesRead);
+    await awaitTableHydrationFor(observer.meta.path);
+    const evaluation = await evaluateLocalPaginatedWatch(observer);
+    recordQueryTablesRead(observer.meta.path, evaluation.tablesRead);
     return evaluation;
   }
 
-  private async _awaitTableHydrationFor(pathName: string): Promise<void> {
-    const cached = this._queryTablesReadCache.get(pathName);
+  async function awaitTableHydrationFor(pathName: string): Promise<void> {
+    const cached = queryTablesReadCache.get(pathName);
     if (cached === undefined) {
-      if (this._storageHydratedComplete) return;
-      await this._storageHydrated;
+      if (storageHydratedComplete) return;
+      await storageHydratedRef.current;
       return;
     }
     if (cached.size === 0) {
       return;
     }
-    if (this._storageHydratedComplete) return;
+    if (storageHydratedComplete) return;
     await Promise.all(
-      Array.from(cached, (tableName) => this.db.tableHydrated(tableName)),
+      Array.from(cached, (tableName) => db.tableHydrated(tableName)),
     );
   }
 
-  private _recordQueryTablesRead(
+  function recordQueryTablesRead(
     pathName: string,
     tablesRead: Set<string>,
   ): void {
-    const existing = this._queryTablesReadCache.get(pathName);
+    const existing = queryTablesReadCache.get(pathName);
     if (existing === undefined) {
-      this._queryTablesReadCache.set(pathName, new Set(tablesRead));
+      queryTablesReadCache.set(pathName, new Set(tablesRead));
       return;
     }
     for (const tableName of tablesRead) {
@@ -2119,7 +1995,7 @@ export class EmbeddedRuntime {
     }
   }
 
-  private _loadMoreLocalPaginatedQuery(
+  function loadMoreLocalPaginatedQuery(
     observer: RuntimeQueryObserver<LocalPaginatedWatchRecord>,
     numItems: number,
   ): boolean {
@@ -2150,18 +2026,18 @@ export class EmbeddedRuntime {
         ...currentValue,
         status: "LoadingMore",
         loadMore: (nextNumItems: number) =>
-          this._loadMoreLocalPaginatedQuery(observer, nextNumItems),
+          loadMoreLocalPaginatedQuery(observer, nextNumItems),
       };
       for (const listener of Array.from(observer.listeners)) {
         listener();
       }
     }
     observer.depVersions = null;
-    void this._localPaginatedQueryWatches.refresh(observer);
+    void localPaginatedQueryWatches.refresh(observer);
     return true;
   }
 
-  private async _evaluateLocalQuery(
+  async function evaluateLocalQuery(
     pathName: string,
     args: Record<string, unknown>,
   ): Promise<LocalQueryEvaluation> {
@@ -2173,13 +2049,11 @@ export class EmbeddedRuntime {
         const systemFn = SYSTEM_FUNCTIONS[path.udfPath];
 
         if (systemFn !== undefined) {
-          const result = await this._runSystemFunction(
+          const result = await runSystemFunction(
             systemFn,
             "query",
             args,
-            {
-              holdsTransactionLock: false,
-            },
+            { holdsTransactionLock: false },
           );
           span.setAttributes({
             "convex.query.system": true,
@@ -2197,9 +2071,9 @@ export class EmbeddedRuntime {
         const dependencies: QueryDependency[] = [];
         let result: unknown;
         try {
-          result = await this._runWithTransactionLock(() => {
+          result = await runWithTransactionLock(() => {
             execStart = nowMs();
-            return this.executor.executeQuery(path, args, {
+            return executor.executeQuery(path, args, {
               holdsTransactionLock: true,
               dependencies,
             });
@@ -2243,7 +2117,7 @@ export class EmbeddedRuntime {
     );
   }
 
-  private async _evaluateLocalPaginatedPage(
+  async function evaluateLocalPaginatedPage(
     pathName: string,
     args: Record<string, unknown>,
     cursor: string | null,
@@ -2254,7 +2128,7 @@ export class EmbeddedRuntime {
     tablesRead: Set<string>;
     dependencies: QueryDependency[];
   }> {
-    const evaluation = await this._evaluateLocalQuery(pathName, {
+    const evaluation = await evaluateLocalQuery(pathName, {
       ...args,
       paginationOpts: {
         cursor,
@@ -2296,35 +2170,21 @@ export class EmbeddedRuntime {
     };
   }
 
-  /** Tear down all resources. */
-  shutdown(): void {
-    if (this._shutdown) return;
-    this._shutdown = true;
-    for (const transport of this._transports) {
+  function shutdown(): void {
+    if (shutdownFlag) return;
+    shutdownFlag = true;
+    for (const transport of transports) {
       transport.closeAll();
     }
-    this._transports.length = 0;
-    void this._scope.close();
+    transports.length = 0;
+    void scope.close();
   }
 
-  async [Symbol.asyncDispose](): Promise<void> {
-    this.shutdown();
+  async function asyncDispose(): Promise<void> {
+    shutdown();
   }
 
-  /**
-   * Central dispatch for running Convex UDFs. Used by:
-   * - The `runUdf` callback wired into syscalls (for nested calls)
-   * - The protocol executor bridge (for top-level calls from clients)
-   * - The scheduler (for deferred function execution)
-   *
-   * System functions (paths starting with `_system:`) are intercepted
-   * here and executed directly against the database — they bypass the
-   * module loader and UDF executor entirely.
-   *
-   * After a mutation executes, the commit result is inspected and
-   * subscriptions + fanout are notified of written tables.
-   */
-  private async _runUdf(
+  async function runUdf(
     type: "query" | "mutation" | "action",
     path: FunctionPath,
     args: Record<string, unknown>,
@@ -2343,7 +2203,7 @@ export class EmbeddedRuntime {
         }
         const systemFn = SYSTEM_FUNCTIONS[path.udfPath];
         if (systemFn !== undefined) {
-          return this._runSystemFunction(systemFn, type, args, context);
+          return runSystemFunction(systemFn, type, args, context);
         }
 
         if (path.componentPath.length > 0) {
@@ -2362,33 +2222,33 @@ export class EmbeddedRuntime {
         const out = await matchTag({ _tag: type }, "_tag", {
           query: () => {
             const runQuery = () =>
-              this.executor.executeQuery(path, args, {
+              executor.executeQuery(path, args, {
                 holdsTransactionLock: true,
               });
             return context.holdsTransactionLock
               ? runQuery()
-              : this._runWithTransactionLock(runQuery);
+              : runWithTransactionLock(runQuery);
           },
           mutation: async () => {
             const runMutation = () =>
-              this.executor.executeMutation(path, args, {
+              executor.executeMutation(path, args, {
                 holdsTransactionLock: true,
               });
             const { result, commit } = context.holdsTransactionLock
               ? await runMutation()
-              : await this._runWithTransactionLock(runMutation);
-            this.onMutationCommit(commit);
+              : await runWithTransactionLock(runMutation);
+            onMutationCommit(commit);
             return result;
           },
           action: () => {
             const runAction = () =>
-              this.executor.executeAction(path, args, {
+              executor.executeAction(path, args, {
                 ...context,
                 holdsTransactionLock: true,
               });
             return context.holdsTransactionLock
               ? runAction()
-              : this._runWithTransactionLock(runAction);
+              : runWithTransactionLock(runAction);
           },
         });
         if (type === "action") {
@@ -2407,15 +2267,7 @@ export class EmbeddedRuntime {
     );
   }
 
-  /**
-   * Execute a system function directly against the database.
-   *
-   * System functions run within a transaction managed by try/finally:
-   * - Start transaction
-   * - Run the handler, commit on success (mutations) or rollback (queries)
-   * - On failure: rollback
-   */
-  private async _runSystemFunction(
+  async function runSystemFunction(
     def: SystemFunctionDef,
     calledAs: "query" | "mutation" | "action",
     args: Record<string, unknown>,
@@ -2433,16 +2285,13 @@ export class EmbeddedRuntime {
       return Promise.reject(new Error(errorMessage));
     }
 
-    const db = this.db;
-    const onCommit = this.onMutationCommit.bind(this);
-
-    const runSystemFunction = async (): Promise<unknown> => {
+    const exec = async (): Promise<unknown> => {
       db.startTransaction();
       try {
         const result = await def.handler(db, args);
 
         if (def.type === "mutation") {
-          onCommit(await db.commitAsync());
+          onMutationCommit(await db.commitAsync());
         } else {
           db.rollbackWrites();
         }
@@ -2454,53 +2303,42 @@ export class EmbeddedRuntime {
       }
     };
 
-    return context.holdsTransactionLock
-      ? runSystemFunction()
-      : this._runWithTransactionLock(runSystemFunction);
+    return context.holdsTransactionLock ? exec() : runWithTransactionLock(exec);
   }
 
-  private async _startCronRunner(): Promise<void> {
+  async function startCronRunner(): Promise<void> {
     try {
-      const jobs = await discoverCronJobs(this.moduleLoader);
-      this.cronRunner.setJobs(jobs);
-      this.cronRunner.start();
+      const jobs = await discoverCronJobs(moduleLoader);
+      cronRunner.setJobs(jobs);
+      cronRunner.start();
       runtimeLog.debug(`cron runner started with ${jobs.length} job(s)`);
     } catch (err) {
       runtimeLog.error("cron runner start failed:", err);
     }
   }
 
-  private async _initializeHttpDispatcher(): Promise<void> {
+  async function initializeHttpDispatcher(): Promise<void> {
     try {
-      this._httpDispatcher = await createHttpDispatcher(
-        this.moduleLoader,
-        this.executor,
-        (fn) => this._runWithTransactionLock(fn),
+      httpDispatcher = await createHttpDispatcher(
+        moduleLoader,
+        executor,
+        (fn) => runWithTransactionLock(fn),
       );
       runtimeLog.debug(
-        `http dispatcher initialized (hasRoutes=${this._httpDispatcher.hasRoutes()})`,
+        `http dispatcher initialized (hasRoutes=${httpDispatcher.hasRoutes()})`,
       );
     } catch (err) {
       runtimeLog.error("http dispatcher init failed:", err);
     }
   }
 
-  /**
-   * Dispatch a `Request` against the user's `convex/http.ts` route table and
-   * return the resulting `Response`.
-   *
-   * Mirrors what Convex's hosted `httpAction` does, except the call is in-
-   * process. Use this directly from any Web fetch-handler runtime
-   * (Bun/Deno/Cloudflare Workers/Hono) or wrap with
-   * `@whatwg-node/server`'s `createServerAdapter` for Node.
-   */
-  async dispatchHttpRequest(request: Request): Promise<Response> {
-    await this._storageHydrated;
-    return (this._httpDispatcher ?? noopHttpDispatcher).dispatch(request);
+  async function dispatchHttpRequest(request: Request): Promise<Response> {
+    await storageHydratedRef.current;
+    return (httpDispatcher ?? noopHttpDispatcher).dispatch(request);
   }
 
-  private async _resumeScheduledFunctions(): Promise<void> {
-    const qid = this.db.startQueryAsync({
+  async function resumeScheduledFunctions(): Promise<void> {
+    const qid = db.startQueryAsync({
       source: {
         type: "FullTableScan",
         tableName: "_scheduled_functions",
@@ -2509,7 +2347,7 @@ export class EmbeddedRuntime {
       operators: [],
     });
 
-    let next = await this.db.queryNextAsync(qid);
+    let next = await db.queryNextAsync(qid);
     while (!next.done) {
       const job = next.value as
         | (StoredDocument & {
@@ -2525,7 +2363,7 @@ export class EmbeddedRuntime {
         typeof job.name === "string" &&
         typeof job.scheduledTime === "number"
       ) {
-        this._scheduleRecoveredJob(
+        scheduleRecoveredJob(
           String(job._id),
           job.name,
           Array.isArray(job.args) &&
@@ -2536,29 +2374,27 @@ export class EmbeddedRuntime {
           job.scheduledTime,
         );
       }
-      next = await this.db.queryNextAsync(qid);
+      next = await db.queryNextAsync(qid);
     }
-    this.db.queryCleanup(qid);
+    db.queryCleanup(qid);
   }
 
-  private _scheduleRecoveredJob(
+  function scheduleRecoveredJob(
     jobId: string,
     udfPath: string,
     args: Record<string, unknown>,
     scheduledTime: number,
   ): void {
-    if (this._scheduledRecovery.has(jobId)) {
+    if (scheduledRecovery.has(jobId)) {
       return;
     }
-    this._scheduledRecovery.add(jobId);
+    scheduledRecovery.add(jobId);
 
     let timerId: ReturnType<typeof setTimeout>;
     timerId = setTimeout(
       () => {
-        const db = this.db;
-        const runUdf = this._runUdf.bind(this);
-        this._activeTimers.delete(timerId);
-        this._scheduledRecovery.delete(jobId);
+        activeTimers.delete(timerId);
+        scheduledRecovery.delete(jobId);
 
         runDetached(async () => {
           const job = await db.getAsync(
@@ -2573,13 +2409,13 @@ export class EmbeddedRuntime {
             return;
           }
 
-          await this._runWithTransactionLock(async () => {
+          await runWithTransactionLock(async () => {
             db.startTransaction();
             try {
               db.patch("_scheduled_functions", jobId as DocumentId, {
                 state: { kind: "inProgress" },
               });
-              this.onMutationCommit(await db.commitAsync());
+              onMutationCommit(await db.commitAsync());
             } catch (error) {
               db.rollbackWrites();
               throw error;
@@ -2607,7 +2443,7 @@ export class EmbeddedRuntime {
             finalState === "failed" ||
             (finishedJob !== null && finishedState?.kind === "inProgress")
           ) {
-            await this._runWithTransactionLock(async () => {
+            await runWithTransactionLock(async () => {
               db.startTransaction();
               try {
                 db.patch("_scheduled_functions", jobId as DocumentId, {
@@ -2616,7 +2452,7 @@ export class EmbeddedRuntime {
                     ? { completedTime: Date.now() }
                     : {}),
                 });
-                this.onMutationCommit(await db.commitAsync());
+                onMutationCommit(await db.commitAsync());
               } catch (error) {
                 db.rollbackWrites();
                 throw error;
@@ -2628,44 +2464,30 @@ export class EmbeddedRuntime {
       Math.max(0, scheduledTime - Date.now()),
     );
 
-    this._activeTimers.add(timerId);
+    activeTimers.add(timerId);
   }
 
-  private async _runWithTransactionLock<T>(fn: () => Promise<T>): Promise<T> {
-    await this.transactionManager.begin(false);
+  async function runWithTransactionLock<T>(fn: () => Promise<T>): Promise<T> {
+    await transactionManager.begin(false);
 
     try {
       const result = await fn();
-      this.transactionManager.commit(false);
+      transactionManager.commit(false);
       return result;
     } catch (err) {
-      this.transactionManager.rollback(false);
+      transactionManager.rollback(false);
       throw err;
     }
   }
 
-  /**
-   * Build the executor facade that {@link ReplicationProtocolHandler} expects.
-   *
-   * The protocol calls:
-   *   - `executor.runQuery(udfPath, ...args)`
-   *   - `executor.runMutation(udfPath, ...args)`
-   *   - `executor.runAction(udfPath, ...args)`
-   *
-   * The SDK sends `args` as a single-element array `[convexToJson(userArgs)]`.
-   * Our `_runUdf` → `executeQuery/Mutation/Action` handles deserialization
-   * internally via `func.invokeQuery(argsStr)` which expects the raw
-   * JSON-serialized args. We pass the first element through as the args
-   * object.
-   */
-  private _buildProtocolExecutor(): ProtocolExecutor {
+  function buildProtocolExecutor(): ProtocolExecutor {
     return {
       runQuery: async (context, udfPath: string, ...args: unknown[]) => {
         const path = getFunctionPath({ name: udfPath });
         const convexArgs = (args[0] ?? {}) as Record<string, unknown>;
         const dependencies: QueryDependency[] = [];
-        const result = (await this._runWithTransactionLock(() =>
-          this.executor.executeQuery(path, convexArgs, {
+        const result = (await runWithTransactionLock(() =>
+          executor.executeQuery(path, convexArgs, {
             holdsTransactionLock: true,
             identity: context.identity,
             identityKey: context.identityKey,
@@ -2681,25 +2503,25 @@ export class EmbeddedRuntime {
       runMutation: async (context, udfPath: string, ...args: unknown[]) => {
         const path = getFunctionPath({ name: udfPath });
         const convexArgs = (args[0] ?? {}) as Record<string, unknown>;
-        const { result, commit } = await this._runWithTransactionLock(() =>
-          this.executor.executeMutation(path, convexArgs, {
+        const { result, commit } = await runWithTransactionLock(() =>
+          executor.executeMutation(path, convexArgs, {
             holdsTransactionLock: true,
             identity: context.identity,
             identityKey: context.identityKey,
           }),
         );
-        this.onMutationCommit(commit);
+        onMutationCommit(commit);
         return {
           result: result as JSONValue,
           tablesWritten: commit.tablesWritten,
-          changes: this._commitToQueryUpdates(commit.invalidation),
+          changes: commitToQueryUpdates(commit.invalidation),
         };
       },
 
       runAction: async (context, udfPath: string, ...args: unknown[]) => {
         const path = getFunctionPath({ name: udfPath });
         const convexArgs = (args[0] ?? {}) as Record<string, unknown>;
-        return (await this._runUdf("action", path, convexArgs, {
+        return (await runUdf("action", path, convexArgs, {
           identity: context.identity,
           identityKey: context.identityKey,
         })) as JSONValue;
@@ -2707,19 +2529,11 @@ export class EmbeddedRuntime {
     };
   }
 
-  /**
-   * Build the auth facade that {@link ReplicationProtocolHandler} expects.
-   *
-   * The protocol calls `auth.verifyToken(token)`. Since AuthResolver
-   * is a simple identity holder (no actual JWT verification for the
-   * embedded runtime), we treat any non-empty token as valid and
-   * return the currently set identity.
-   */
-  private _buildProtocolAuth() {
+  function buildProtocolAuth() {
     return {
       verifyToken: async (token: string) => {
-        if (this._verifyTokenHook) {
-          const verified = await this._verifyTokenHook(token);
+        if (verifyTokenHook) {
+          const verified = await verifyTokenHook(token);
           if (!verified) {
             throw new ConvexError({
               code: "AUTH_TOKEN_REJECTED",
@@ -2738,7 +2552,7 @@ export class EmbeddedRuntime {
             message: "No authentication token provided",
           });
         }
-        const identity = await this.auth.getUserIdentity();
+        const identity = await auth.getUserIdentity();
         if (identity === null) {
           throw new ConvexError({
             code: "AUTH_IDENTITY_MISSING",
@@ -2754,104 +2568,94 @@ export class EmbeddedRuntime {
     };
   }
 
-  private _buildRuntimeState(input: RuntimeInput): RuntimeState {
-    const { runtime, options } = input;
-    const schemaExport = extractConvexSchemaExport(options.schema);
-    const schema = schemaExport
-      ? parseSchema(schemaExport as SchemaExport)
-      : null;
-
-    const storageAdapter = options.storage ?? null;
-    const verifyTokenHook = options.verifyToken ?? null;
-    const crypto = options.crypto ?? createAmbientCryptoProvider();
-    const db = new Database(schema, options.storage, crypto);
-    const moduleLoader = new ModuleLoader(options.convex.modules);
-    const transactionManager = createTransactionManager();
-    const subscriptions = createSubscriptionManager();
-    const tableVersionGetter = (tableName: string): number =>
-      db.getTableVersion(tableName);
-    const protocolQueryObservers =
-      createRuntimeQueryObserverRegistry<ProtocolQueryRecord>(
-        subscriptions,
-        tableVersionGetter,
-      );
-    const localQueryWatches =
-      createRuntimeQueryObserverRegistry<LocalQueryWatchRecord>(
-        subscriptions,
-        tableVersionGetter,
-      );
-    const localPaginatedQueryWatches =
-      createRuntimeQueryObserverRegistry<LocalPaginatedWatchRecord>(
-        subscriptions,
-        tableVersionGetter,
-      );
-    const protocolQueries = createRuntimeProtocolQueryRegistry(
-      protocolQueryObservers,
-    );
-    const auth = createAuthResolver();
-    const executor = new UdfExecutor({
-      db,
-      crypto,
-      moduleLoader,
-      runUdf: (
-        type: "query" | "mutation" | "action",
-        path: FunctionPath,
-        args: Record<string, unknown>,
-        context?: { holdsTransactionLock?: boolean },
-      ) => runtime._runUdf(type, path, args, context),
-      getIdentity: () => runtime.auth.getUserIdentity(),
-      activeTimers: runtime._activeTimers,
-      runWithTransactionLock: (fn) => runtime._runWithTransactionLock(fn),
-    });
-    const syncProtocol = new ReplicationProtocolHandler({
-      executor: runtime._buildProtocolExecutor(),
-      queryStore: protocolQueries,
-      auth: runtime._buildProtocolAuth(),
-    });
-    const sessions = createSessionManager();
-    const writeFanout = options.writeBroadcast ?? createNoopWriteBroadcast();
-    const scheduler = createSchedulerExecutor({
-      db,
-      runFunction: async (path: string, args: Record<string, unknown>) => {
-        await runtime._runUdf(
-          "mutation",
-          getFunctionPath({ name: path }),
-          args,
-        );
-      },
-    });
-
-    const cronRunner = new CronRunner({
-      jobs: [],
-      runFunction: async (type, functionName, args) => {
-        await runtime._runUdf(
-          type,
-          getFunctionPath({ name: functionName }),
-          args,
-        );
-      },
-    });
-
-    return {
-      schema,
-      storageAdapter,
-      verifyTokenHook,
-      crypto,
-      db,
-      moduleLoader,
-      executor,
-      transactionManager,
-      subscriptions,
-      protocolQueryObservers,
-      localQueryWatches,
-      localPaginatedQueryWatches,
-      protocolQueries,
-      auth,
-      syncProtocol,
-      sessions,
-      writeFanout,
-      scheduler,
-      cronRunner,
-    } satisfies RuntimeState;
-  }
+  const runtime: EmbeddedRuntime = {
+    get crypto() {
+      return crypto;
+    },
+    get db() {
+      return db;
+    },
+    get moduleLoader() {
+      return moduleLoader;
+    },
+    get executor() {
+      return executor;
+    },
+    get transactionManager() {
+      return transactionManager;
+    },
+    get subscriptions() {
+      return subscriptions;
+    },
+    get protocolQueries() {
+      return protocolQueries;
+    },
+    get syncProtocol() {
+      return syncProtocol;
+    },
+    get sessions() {
+      return sessions;
+    },
+    get writeFanout() {
+      return writeFanout;
+    },
+    get auth() {
+      return auth;
+    },
+    get scheduler() {
+      return scheduler;
+    },
+    get cronRunner() {
+      return cronRunner;
+    },
+    hydrate,
+    query,
+    paginate,
+    resumePersistedState,
+    setStorageSurface,
+    setUploadQueueEnabled,
+    setStorage,
+    getStorage,
+    getUserTableSpecs,
+    extendStorageReady,
+    getStorageBlob,
+    getStorageMetadata,
+    storeUploadedBlob,
+    storeUploadedBlobWithMetadata,
+    registerUploadUrlSource,
+    consumeUploadUrlSource,
+    createTransport: makeTransport,
+    setIdentity,
+    setActiveIdentityKey,
+    getIdentity,
+    getIdentityKey: getActiveIdentityKey,
+    migrateAnonymousDataToIdentity,
+    teardownSession,
+    handleMessage,
+    onMutationCommit,
+    pushLocalQueryUpdates,
+    ingestDocuments,
+    writeDocsFromCache,
+    canonicalizeMappedCreate,
+    getDocumentsForTable,
+    getDocumentsForScope,
+    hasLocalDocumentId,
+    getDocument,
+    subscribeTableWrites,
+    watchLocalQuery,
+    watchLocalPaginatedQuery,
+    refreshLocalQueryWatches,
+    executeLocal,
+    shutdown,
+    dispatchHttpRequest,
+    [Symbol.asyncDispose]: asyncDispose,
+    _runUdf: runUdf,
+    _evaluateLocalQuery: evaluateLocalQuery,
+    _evaluateLocalPaginatedPage: evaluateLocalPaginatedPage,
+    _buildProtocolAuth: buildProtocolAuth,
+    get _crossTabSyncChain() {
+      return crossTabSyncChain;
+    },
+  };
+  return runtime;
 }

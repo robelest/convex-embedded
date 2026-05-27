@@ -1,4 +1,7 @@
-import { EmbeddedRuntime } from "@embedded/runtime/embedded";
+import {
+  createEmbeddedRuntime,
+  type EmbeddedRuntime,
+} from "@embedded/runtime/embedded";
 import { remoteOnly } from "@embedded/server/markers";
 import { installInMemoryTracing } from "@embedded/tracing/memory";
 import { recordCounter, registerGauge } from "@embedded/tracing/metrics";
@@ -9,7 +12,7 @@ function startRuntime(
   track: TestFixtures["track"],
   router: ReturnType<typeof httpRouter>,
 ): Promise<EmbeddedRuntime> {
-  const runtime = new EmbeddedRuntime({
+  const runtime = createEmbeddedRuntime({
     convex: {
       modules: {
         "_generated/api": () => Promise.resolve({}),

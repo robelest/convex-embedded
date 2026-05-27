@@ -1,5 +1,9 @@
-import { EmbeddedRuntime } from "@embedded/runtime/embedded";
-import type { LocalExecutionRequest } from "@embedded/runtime/embedded";
+import { getEmbeddedClientEntry } from "@embedded/client/entry";
+import type {
+  EmbeddedRuntime,
+  LocalExecutionRequest,
+} from "@embedded/runtime/embedded";
+import type { ConvexClient } from "convex/browser";
 import type { EngineStatus } from "@embedded/shared/types";
 import { createTestIdentity } from "@embedded/test";
 import {
@@ -125,9 +129,36 @@ function createSyncModules() {
   };
 }
 
-function mockIdentityQueries(resolver: (path: string) => unknown) {
+function clientRuntime(client: ConvexClient): EmbeddedRuntime {
+  const runtime = getEmbeddedClientEntry(client)?.runtime;
+  if (!runtime) {
+    throw new Error("[test] expected embedded runtime entry on client");
+  }
+  return runtime;
+}
+
+function installDefaultIdentityStub(client: ConvexClient) {
   return vi
-    .spyOn(EmbeddedRuntime.prototype, "executeLocal")
+    .spyOn(clientRuntime(client), "executeLocal")
+    .mockImplementation(async (request: LocalExecutionRequest) => {
+      if (request.kind === "query") {
+        if (request.path === "_system:authStateGetActive") {
+          return null;
+        }
+        if (request.path === "_system:pendingListIdentityKeys") {
+          return [];
+        }
+      }
+      return null;
+    });
+}
+
+function mockIdentityQueries(
+  client: ConvexClient,
+  resolver: (path: string) => unknown,
+) {
+  return vi
+    .spyOn(clientRuntime(client), "executeLocal")
     .mockImplementation(async (request: LocalExecutionRequest) => {
       if (request.kind === "query") {
         return resolver(request.path);
@@ -149,20 +180,6 @@ describe("auth state transitions", () => {
       writable: true,
       configurable: true,
     });
-
-    vi.spyOn(EmbeddedRuntime.prototype, "executeLocal").mockImplementation(
-      async (request: LocalExecutionRequest) => {
-        if (request.kind === "query") {
-          if (request.path === "_system:authStateGetActive") {
-            return null;
-          }
-          if (request.path === "_system:pendingListIdentityKeys") {
-            return [];
-          }
-        }
-        return null;
-      },
-    );
   });
 
   afterEach(() => {
@@ -180,6 +197,7 @@ describe("auth state transitions", () => {
         auth: { getUserIdentity: async () => identity },
       }),
     );
+    installDefaultIdentityStub(client);
 
     await vi.waitFor(() => {
       expect(getAuthState(client)).toEqual({
@@ -220,6 +238,7 @@ describe("auth state transitions", () => {
         auth: { fetchToken, getUserIdentity: async () => identity },
       }),
     );
+    installDefaultIdentityStub(client);
 
     const embeddedClient = (await mockBrowserModule()).__mock.instances()[0]!;
 
@@ -251,6 +270,7 @@ describe("auth state transitions", () => {
         auth: { fetchToken, getUserIdentity: async () => currentIdentity },
       }),
     );
+    installDefaultIdentityStub(client);
 
     const embeddedClient = (await mockBrowserModule()).__mock.instances()[0]!;
 
@@ -261,7 +281,7 @@ describe("auth state transitions", () => {
       identityKey: currentIdentity.tokenIdentifier,
     });
 
-    mockIdentityQueries((path) => {
+    mockIdentityQueries(client, (path) => {
       if (path === "_system:authStateGetActive") {
         return null;
       }
@@ -294,11 +314,12 @@ describe("auth state transitions", () => {
         auth: { getUserIdentity: async () => alice },
       }),
     );
+    installDefaultIdentityStub(client);
 
     await vi.waitFor(() => {
       expect(getAuthState(client).status).toBe("authenticated");
     });
-    mockIdentityQueries((path) => {
+    mockIdentityQueries(client, (path) => {
       if (path === "_system:authStateGetActive") {
         return null;
       }
@@ -331,12 +352,13 @@ describe("auth state transitions", () => {
         auth: { getUserIdentity: async () => alice },
       }),
     );
+    installDefaultIdentityStub(client);
 
     await vi.waitFor(() => {
       expect(getAuthState(client).status).toBe("authenticated");
     });
 
-    const executeLocalSpy = mockIdentityQueries((path) => {
+    const executeLocalSpy = mockIdentityQueries(client, (path) => {
       if (path === "_system:authStateGetActive") {
         return null;
       }

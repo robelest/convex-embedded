@@ -7,7 +7,10 @@ import type {
   SerializedQuery,
   SerializedRangeExpression,
 } from "@embedded/runtime/db/types";
-import { EmbeddedRuntime } from "@embedded/runtime/embedded";
+import {
+  createEmbeddedRuntime,
+  type EmbeddedRuntime,
+} from "@embedded/runtime/embedded";
 import { schema as crdtSchema } from "@embedded/server/schema/fields";
 import { define, type Definition } from "@embedded/shared/schema";
 import { buildUserTableSpecs } from "@embedded/storage/sqlite/factory";
@@ -334,7 +337,7 @@ export async function seededSqliteRuntime(size: Size): Promise<SeededRuntime> {
   trackFile(file);
 
   const storage = await openNodeStorage({ filename: file });
-  const runtime = new EmbeddedRuntime({
+  const runtime = createEmbeddedRuntime({
     convex: { modules: COMPUTE_MODULES },
     schema: tasksSchema,
     storage,

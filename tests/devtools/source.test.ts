@@ -1,7 +1,10 @@
 import { registerEmbeddedClientEntry } from "@embedded/client/entry";
 import { createEmbeddedDevtoolsSource } from "@embedded/devtools/core/source";
 import type { EmbeddedDevtoolsSource } from "@embedded/devtools/core/types";
-import { EmbeddedRuntime } from "@embedded/runtime/embedded";
+import {
+  createEmbeddedRuntime,
+  type EmbeddedRuntime,
+} from "@embedded/runtime/embedded";
 import { afterEach, beforeEach, describe, expect, it } from "@tests/testkit";
 import type { ConvexClient } from "convex/browser";
 import {
@@ -58,7 +61,7 @@ describe("createEmbeddedDevtoolsSource", () => {
   let source: EmbeddedDevtoolsSource;
 
   beforeEach(async () => {
-    runtime = new EmbeddedRuntime({
+    runtime = createEmbeddedRuntime({
       convex: { modules: NOTE_MODULES },
       schema: notesSchema,
     });

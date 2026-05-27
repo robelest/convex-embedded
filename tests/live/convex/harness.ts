@@ -137,15 +137,6 @@ export async function describeLiveClientState(
   };
 }
 
-async function logLiveClientState(
-  label: string,
-  client: Awaited<ReturnType<typeof createLiveClient>>["client"],
-): Promise<void> {
-  console.error(
-    `[live-debug] ${label}: ${safeJson(await describeLiveClientState(client))}`,
-  );
-}
-
 function createLiveModules(): ConvexModuleRegistry {
   return {
     "_generated/api": () => import("../../../convex/_generated/api.js"),

@@ -7,7 +7,7 @@ import type {
   FunctionPath,
 } from "@embedded/kernel/modules";
 import { getFunctionPath } from "@embedded/kernel/modules";
-import { EmbeddedRuntime } from "@embedded/runtime/embedded";
+import { createEmbeddedRuntime } from "@embedded/runtime/embedded";
 import { describe, expect, it } from "@tests/testkit";
 import { ConvexError } from "convex/values";
 
@@ -92,7 +92,7 @@ describe("EmbeddedRuntime component dispatch (alpha guard)", () => {
   it("throws NESTED_COMPONENT_LOCAL_UNSUPPORTED when invoked with a component path", async ({
     track,
   }) => {
-    const runtime = new EmbeddedRuntime({ convex: { modules: STUB_MODULES } });
+    const runtime = createEmbeddedRuntime({ convex: { modules: STUB_MODULES } });
     track({ close: () => runtime.shutdown() });
     await runtime.hydrate();
 

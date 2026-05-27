@@ -4,8 +4,6 @@ import { register as registerResolveComponent } from "@robelest/convex-embedded/
 import type { TestConvex } from "convex-test";
 import { convexTest } from "convex-test";
 import type { GenericSchema, SchemaDefinition } from "convex/server";
-import * as Y from "yjs";
-
 const appModules = {
   "_generated/api": () => import("../../convex/_generated/api.js"),
   "_generated/server": () => import("../../convex/_generated/server.js"),
@@ -35,31 +33,3 @@ export function toArrayBuffer(data: Uint8Array): ArrayBuffer {
   return buffer;
 }
 
-function emptyStateVector(): ArrayBuffer {
-  const doc = new Y.Doc();
-  return toArrayBuffer(Y.encodeStateVector(doc));
-}
-
-interface RegisterEntry {
-  value: unknown;
-  timestamp?: number;
-}
-
-function readRegister(fields: Y.Map<unknown>, key: string): unknown {
-  const registerMap = fields.get(key);
-  if (!(registerMap instanceof Y.Map)) {
-    return undefined;
-  }
-
-  return Array.from(registerMap.values() as Iterable<RegisterEntry>).reduce<
-    RegisterEntry | undefined
-  >(
-    (winner, entry) =>
-      !winner ||
-      (entry.timestamp !== undefined &&
-        entry.timestamp > (winner.timestamp ?? -Infinity))
-        ? entry
-        : winner,
-    undefined,
-  )?.value;
-}

@@ -3,7 +3,10 @@ import { createSubscriptionManager, type SubscriptionManager } from "@embedded/r
 import { createAmbientCryptoProvider } from "@embedded/runtime/crypto";
 import { Database } from "@embedded/runtime/db/database";
 import type { DocumentId } from "@embedded/runtime/db/types";
-import { EmbeddedRuntime } from "@embedded/runtime/embedded";
+import {
+  createEmbeddedRuntime,
+  type EmbeddedRuntime,
+} from "@embedded/runtime/embedded";
 import { createSchedulerExecutor } from "@embedded/scheduler/executor";
 import { bench, describe } from "@tests/testkit";
 
@@ -51,7 +54,7 @@ function createExecutor() {
 }
 
 async function seedSystemRuntime(): Promise<EmbeddedRuntime> {
-  const runtime = new EmbeddedRuntime({ convex: { modules: STUB_MODULES } });
+  const runtime = createEmbeddedRuntime({ convex: { modules: STUB_MODULES } });
   await runtime.hydrate();
 
   for (let index = 0; index < 1_000; index += 1) {

@@ -1,4 +1,7 @@
-import { EmbeddedRuntime } from "@embedded/runtime/embedded";
+import {
+  createEmbeddedRuntime,
+  type EmbeddedRuntime,
+} from "@embedded/runtime/embedded";
 import { flushMicrotasks } from "@tests/helpers/time";
 import { afterEach, describe, expect, it } from "@tests/testkit";
 import {
@@ -34,7 +37,7 @@ const handlerCalls = { list: 0, listDesc: 0 };
 function makeRuntime(): EmbeddedRuntime {
   handlerCalls.list = 0;
   handlerCalls.listDesc = 0;
-  return new EmbeddedRuntime({
+  return createEmbeddedRuntime({
     schema,
     convex: {
       modules: {

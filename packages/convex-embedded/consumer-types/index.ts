@@ -34,12 +34,12 @@ import {
 } from "../dist/crdt/index.js";
 import {
   AuthResolver,
-  EmbeddedRuntime,
   createEmbeddedClient,
   createEmbeddedRuntime,
   createTransport,
   type EmbeddedClientOptions,
   type EmbeddedPlatformAdapter,
+  type EmbeddedRuntime,
   type EmbeddedRuntimeOptions,
 } from "../dist/index.js";
 import {
@@ -58,7 +58,7 @@ import { createTestIdentity, register } from "../dist/test.js";
 
 type _RootSurface = {
   AuthResolver: typeof AuthResolver;
-  EmbeddedRuntime: typeof EmbeddedRuntime;
+  embeddedRuntime: EmbeddedRuntime | null;
   createEmbeddedClient: typeof createEmbeddedClient;
   createEmbeddedRuntime: typeof createEmbeddedRuntime;
   createTestIdentity: typeof createTestIdentity;
@@ -122,7 +122,7 @@ type _ServerSurface = {
 
 void (<_RootSurface>{
   AuthResolver,
-  EmbeddedRuntime,
+  embeddedRuntime: null,
   createEmbeddedClient,
   createEmbeddedRuntime,
   createTestIdentity,

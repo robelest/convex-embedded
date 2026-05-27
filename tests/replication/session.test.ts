@@ -1,7 +1,6 @@
 import {
   createSession,
   createSessionManager,
-  type Session,
 } from "@embedded/replication/session";
 import { describe, expect, it, vi } from "@tests/testkit";
 

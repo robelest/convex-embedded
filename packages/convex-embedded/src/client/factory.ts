@@ -37,8 +37,11 @@ import { asError, getFunctionRefName } from "@/client/routing/refs";
 import { type ConvexInput, normalizeModuleRegistry } from "@/kernel/modules";
 import { STORAGE_METADATA_STORE_MIGRATIONS } from "@/kernel/syscalls";
 import { createAmbientCryptoProvider } from "@/runtime/crypto";
-import { EmbeddedRuntime } from "@/runtime/embedded";
-import type { EmbeddedRuntimeOptions } from "@/runtime/embedded";
+import { createEmbeddedRuntime } from "@/runtime/embedded";
+import type {
+  EmbeddedRuntime,
+  EmbeddedRuntimeOptions,
+} from "@/runtime/embedded";
 import { createLoadCoordinator } from "@/runtime/load";
 import {
   PENDING_STORE_MIGRATIONS,
@@ -227,7 +230,7 @@ export function createEmbeddedClient(input: {
     name: dbName,
   });
 
-  const runtime = new EmbeddedRuntime({
+  const runtime = createEmbeddedRuntime({
     convex,
     schema: options.schema as EmbeddedRuntimeOptions["schema"],
     crypto: platform.crypto ?? createAmbientCryptoProvider(),

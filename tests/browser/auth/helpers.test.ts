@@ -1,4 +1,3 @@
-import { EmbeddedRuntime } from "@embedded/runtime/embedded";
 import { createTestIdentity } from "@embedded/test";
 import {
   createConvexClient,
@@ -135,7 +134,6 @@ describe("auth state accessors", () => {
     track,
   }) => {
     const identity = createTestIdentity({ subject: "alice" });
-    const setIdentitySpy = vi.spyOn(EmbeddedRuntime.prototype, "setIdentity");
 
     const client = track(
       createConvexClient({
@@ -145,12 +143,11 @@ describe("auth state accessors", () => {
     );
 
     await vi.waitFor(() => {
-      expect(setIdentitySpy).toHaveBeenCalledWith(identity);
-    });
-    expect(getAuthState(client)).toEqual({
-      status: "authenticated",
-      identity,
-      identityKey: identity.tokenIdentifier,
+      expect(getAuthState(client)).toEqual({
+        status: "authenticated",
+        identity,
+        identityKey: identity.tokenIdentifier,
+      });
     });
   });
 
@@ -158,7 +155,6 @@ describe("auth state accessors", () => {
     track,
   }) => {
     const identity = createTestIdentity({ subject: "bob" });
-    const setIdentitySpy = vi.spyOn(EmbeddedRuntime.prototype, "setIdentity");
     const fetchToken = vi.fn(async () => "token");
 
     const client = track(
@@ -178,7 +174,6 @@ describe("auth state accessors", () => {
 
     expect(token).toBe("token");
     expect(fetchToken).toHaveBeenCalledWith({ forceRefreshToken: false });
-    expect(setIdentitySpy).toHaveBeenLastCalledWith(identity);
     expect(getAuthState(client)).toEqual({
       status: "authenticated",
       identity,
@@ -189,8 +184,6 @@ describe("auth state accessors", () => {
   it("clears local identity when fetchToken returns null", async ({
     track,
   }) => {
-    const setIdentitySpy = vi.spyOn(EmbeddedRuntime.prototype, "setIdentity");
-
     const client = track(
       createConvexClient({
         convex: { modules: createModules() },
@@ -208,16 +201,11 @@ describe("auth state accessors", () => {
     });
 
     expect(token).toBeNull();
-    expect(setIdentitySpy).toHaveBeenLastCalledWith(null);
     expect(getAuthState(client)).toEqual({ status: "unauthenticated" });
   });
 
   it("supports custom identity keys", async ({ track }) => {
     const identity = createTestIdentity({ subject: "carol" });
-    const setActiveIdentityKeySpy = vi.spyOn(
-      EmbeddedRuntime.prototype,
-      "setActiveIdentityKey",
-    );
 
     const client = track(
       createConvexClient({
@@ -231,12 +219,11 @@ describe("auth state accessors", () => {
     );
 
     await vi.waitFor(() => {
-      expect(setActiveIdentityKeySpy).toHaveBeenCalledWith("workspace:carol");
-    });
-    expect(getAuthState(client)).toEqual({
-      status: "authenticated",
-      identity,
-      identityKey: "workspace:carol",
+      expect(getAuthState(client)).toEqual({
+        status: "authenticated",
+        identity,
+        identityKey: "workspace:carol",
+      });
     });
   });
 

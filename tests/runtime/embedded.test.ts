@@ -7,11 +7,13 @@ import {
 } from "@embedded/runtime/db/database";
 import type {
   DocumentId,
-  QueryDependency,
   Source,
   StoredDocument,
 } from "@embedded/runtime/db/types";
-import { EmbeddedRuntime } from "@embedded/runtime/embedded";
+import {
+  createEmbeddedRuntime,
+  type EmbeddedRuntime,
+} from "@embedded/runtime/embedded";
 import { LocalQueryEvaluationError } from "@embedded/runtime/registry";
 import type { Definition } from "@embedded/shared/schema";
 import type {
@@ -64,46 +66,8 @@ class MockBroadcastChannel {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Private members reached into by watch/auth tests.
-// ---------------------------------------------------------------------------
-
-interface LocalEvaluation {
-  result: unknown;
-  tablesRead: Set<string>;
-  dependencies: QueryDependency[];
-}
-
-interface PaginatedEvaluation {
-  result: { page: unknown[]; isDone: boolean; continueCursor: string };
-  tablesRead: Set<string>;
-  dependencies: QueryDependency[];
-}
-
-interface VerifiedIdentity {
-  identity: ReturnType<typeof createTestIdentity>;
-  identityKey: string;
-}
-
-interface RuntimeInternals {
-  _evaluateLocalQuery(
-    pathName: string,
-    args: Record<string, unknown>,
-  ): Promise<LocalEvaluation>;
-  _evaluateLocalPaginatedPage(
-    pathName: string,
-    args: Record<string, unknown>,
-    cursor: string | null,
-    numItems: number,
-  ): Promise<PaginatedEvaluation>;
-  _buildProtocolAuth(): {
-    verifyToken(token: string): Promise<VerifiedIdentity>;
-  };
-  _crossTabSyncChain: Promise<void>;
-}
-
-function internals(runtime: EmbeddedRuntime): RuntimeInternals {
-  return runtime as unknown as RuntimeInternals;
+function internals(runtime: EmbeddedRuntime): EmbeddedRuntime {
+  return runtime;
 }
 
 // ---------------------------------------------------------------------------
@@ -257,7 +221,7 @@ const it = itBase.extend<EmbeddedFixtures>({
     await use(MockBroadcastChannel);
   },
   runtime: async ({ broadcast: _broadcast, onTestFinished }, use) => {
-    const runtime = new EmbeddedRuntime({ convex: { modules: STUB_MODULES } });
+    const runtime = createEmbeddedRuntime({ convex: { modules: STUB_MODULES } });
     onTestFinished(() => runtime.shutdown());
     await use(runtime);
   },
@@ -301,7 +265,7 @@ describe("Construction", () => {
     broadcast: _broadcast,
     onTestFinished,
   }) => {
-    const failingRuntime = new EmbeddedRuntime({
+    const failingRuntime = createEmbeddedRuntime({
       convex: { modules: STUB_MODULES },
       storage: mockAdapter({
         kind: "opaque",
@@ -331,7 +295,7 @@ describe("Action execution", () => {
   }) => {
     const firstGate = deferredPromise<void>();
     const events: string[] = [];
-    const serialRuntime = new EmbeddedRuntime({
+    const serialRuntime = createEmbeddedRuntime({
       convex: {
         modules: {
           api: () =>
@@ -394,7 +358,7 @@ describe("Blob storage", () => {
     broadcast: _broadcast,
     onTestFinished,
   }) => {
-    const blobRuntime = new EmbeddedRuntime({
+    const blobRuntime = createEmbeddedRuntime({
       convex: { modules: STUB_MODULES },
       storage: mockAdapter({
         kind: "opaque",
@@ -567,11 +531,11 @@ describe("onMutationCommit", () => {
     broadcast: _broadcast,
     onTestFinished,
   }) => {
-    const runtimeA = new EmbeddedRuntime({
+    const runtimeA = createEmbeddedRuntime({
       convex: { modules: STUB_MODULES },
       writeBroadcast: createBrowserWriteBroadcast("shared-runtime"),
     });
-    const runtimeB = new EmbeddedRuntime({
+    const runtimeB = createEmbeddedRuntime({
       convex: { modules: STUB_MODULES },
       writeBroadcast: createBrowserWriteBroadcast("shared-runtime"),
     });
@@ -607,11 +571,11 @@ describe("onMutationCommit", () => {
     broadcast: _broadcast,
     onTestFinished,
   }) => {
-    const runtimeA = new EmbeddedRuntime({
+    const runtimeA = createEmbeddedRuntime({
       convex: { modules: STUB_MODULES },
       writeBroadcast: createBrowserWriteBroadcast("shared-runtime-burst"),
     });
-    const runtimeB = new EmbeddedRuntime({
+    const runtimeB = createEmbeddedRuntime({
       convex: { modules: STUB_MODULES },
       writeBroadcast: createBrowserWriteBroadcast("shared-runtime-burst"),
     });
@@ -654,7 +618,7 @@ describe("transaction locking", () => {
     const releaseFirst = deferredPromise<void>();
     const firstStarted = deferredPromise<void>();
     const order: string[] = [];
-    const localRuntime = new EmbeddedRuntime({
+    const localRuntime = createEmbeddedRuntime({
       convex: {
         modules: {
           ...STUB_MODULES,
@@ -727,7 +691,7 @@ describe("sql storage hydration", () => {
   }) => {
     const getDocumentsByTable = vi.fn(async () => []);
     const getAllDocuments = vi.fn(async () => []);
-    const localRuntime = new EmbeddedRuntime({
+    const localRuntime = createEmbeddedRuntime({
       convex: { modules: STUB_MODULES },
       storage: mockAdapter({
         kind: "sql",
@@ -763,7 +727,7 @@ describe("sql storage hydration", () => {
   }) => {
     const tablesLoadedByName: string[] = [];
     const getAllDocuments = vi.fn(async () => []);
-    const localRuntime = new EmbeddedRuntime({
+    const localRuntime = createEmbeddedRuntime({
       convex: { modules: STUB_MODULES },
       storage: mockAdapter({
         kind: "sql",
@@ -819,7 +783,7 @@ describe("sql storage hydration", () => {
     onTestFinished,
   }) => {
     const { storage } = createSqlStorage({});
-    const localRuntime = new EmbeddedRuntime({
+    const localRuntime = createEmbeddedRuntime({
       convex: { modules: STUB_MODULES },
       storage,
     });
@@ -1039,7 +1003,7 @@ describe("lazy windowed ingest", () => {
     onTestFinished,
   }) => {
     const { storage, list, getDocument } = seedLargeTable();
-    const localRuntime = new EmbeddedRuntime({
+    const localRuntime = createEmbeddedRuntime({
       convex: { modules: STUB_MODULES },
       storage,
     });
@@ -1081,7 +1045,7 @@ describe("lazy windowed ingest", () => {
     onTestFinished,
   }) => {
     const { storage, list } = seedLargeTable();
-    const localRuntime = new EmbeddedRuntime({
+    const localRuntime = createEmbeddedRuntime({
       convex: { modules: STUB_MODULES },
       storage,
     });
@@ -1133,7 +1097,7 @@ describe("executeLocal query", () => {
         }),
       ],
     });
-    const localRuntime = new EmbeddedRuntime({
+    const localRuntime = createEmbeddedRuntime({
       convex: { modules: STUB_MODULES },
       storage,
     });
@@ -1191,7 +1155,7 @@ describe("executeLocal query", () => {
         }),
       ],
     });
-    const localRuntime = new EmbeddedRuntime({
+    const localRuntime = createEmbeddedRuntime({
       convex: { modules: STUB_MODULES },
       storage,
     });
@@ -1257,7 +1221,7 @@ describe("executeLocal query", () => {
         }),
       ],
     });
-    const localRuntime = new EmbeddedRuntime({
+    const localRuntime = createEmbeddedRuntime({
       convex: { modules: STUB_MODULES },
       storage,
     });
@@ -1339,7 +1303,7 @@ describe("watchLocalQuery", () => {
   }) => {
     const gate =
       deferredPromise<Array<{ tableName: string; doc: StoredDocument }>>();
-    const localRuntime = new EmbeddedRuntime({
+    const localRuntime = createEmbeddedRuntime({
       convex: { modules: STUB_MODULES },
       storage: mockAdapter({
         kind: "opaque",
@@ -1431,7 +1395,7 @@ describe("watchLocalQuery", () => {
   }) => {
     const gate =
       deferredPromise<Array<{ tableName: string; doc: StoredDocument }>>();
-    const localRuntime = new EmbeddedRuntime({
+    const localRuntime = createEmbeddedRuntime({
       convex: { modules: STUB_MODULES },
       storage: mockAdapter({
         kind: "opaque",
@@ -1695,11 +1659,15 @@ describe("watchLocalPaginatedQuery", () => {
               page: [{ _id: "task-1" }],
               isDone: false,
               continueCursor: "cursor-2",
+              splitCursor: null,
+              pageStatus: null,
             }
           : {
               page: [{ _id: "task-2" }],
               isDone: true,
               continueCursor: "_end_cursor",
+              splitCursor: null,
+              pageStatus: null,
             },
       tablesRead: new Set(["tasks"]),
       dependencies: [{ type: "FullTableScan", tableName: "tasks" }],
@@ -1748,6 +1716,8 @@ describe("watchLocalPaginatedQuery", () => {
           page: [{ _id: "issue-1" }],
           isDone: true,
           continueCursor: "_end_cursor",
+          splitCursor: null,
+          pageStatus: null,
         },
         tablesRead: new Set(["projects", "issues"]),
         dependencies: [
@@ -1796,7 +1766,7 @@ describe("protocol auth", () => {
     onTestFinished,
   }) => {
     const identity = createTestIdentity({ subject: "verified" });
-    const runtime = new EmbeddedRuntime({
+    const runtime = createEmbeddedRuntime({
       convex: { modules: { "_generated/api": async () => ({}) } },
       verifyToken: async (token) => (token === "good" ? identity : null),
     });
@@ -1849,7 +1819,7 @@ describe("executeLocal system mutation", () => {
         }),
       ],
     });
-    const localRuntime = new EmbeddedRuntime({
+    const localRuntime = createEmbeddedRuntime({
       convex: { modules: STUB_MODULES },
       storage,
     });
@@ -1892,7 +1862,7 @@ describe("executeLocal system mutation", () => {
       _resolve_collection_metadata: [],
       _resolve_document_metadata: [],
     });
-    const localRuntime = new EmbeddedRuntime({
+    const localRuntime = createEmbeddedRuntime({
       convex: { modules: STUB_MODULES },
       storage,
     });

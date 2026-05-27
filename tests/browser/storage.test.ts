@@ -1,5 +1,5 @@
 import type { DocumentId } from "@embedded/runtime/db/types";
-import { EmbeddedRuntime } from "@embedded/runtime/embedded";
+import { createEmbeddedRuntime } from "@embedded/runtime/embedded";
 import {
   createBrowserStorageSurface,
   createBrowserUploadFetch,
@@ -10,7 +10,7 @@ const uploadFetch = createBrowserUploadFetch();
 
 function createSurface(track: <T extends { close: () => unknown }>(c: T) => T) {
   const runtime = track({
-    runtime: new EmbeddedRuntime({ convex: { modules: {} } }),
+    runtime: createEmbeddedRuntime({ convex: { modules: {} } }),
     close() {
       this.runtime.shutdown();
     },

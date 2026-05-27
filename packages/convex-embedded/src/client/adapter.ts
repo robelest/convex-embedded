@@ -90,7 +90,9 @@ export function createNoopUnsubscribe(): SubscriptionHandle {
   return noop;
 }
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
+export function isPlainObject(
+  value: unknown,
+): value is Record<string, unknown> {
   if (value === null || typeof value !== "object") {
     return false;
   }
@@ -938,7 +940,7 @@ function createCacheOnUpdate(input: {
   };
 }
 
-interface PageResultShape {
+export interface PageResultShape {
   page: unknown[];
   isDone: boolean;
   continueCursor: string;
@@ -946,7 +948,7 @@ interface PageResultShape {
   pageStatus?: "SplitRecommended" | "SplitRequired" | null;
 }
 
-function isPageResultShape(value: unknown): value is PageResultShape {
+export function isPageResultShape(value: unknown): value is PageResultShape {
   return (
     isPlainObject(value) &&
     Array.isArray((value as { page?: unknown }).page) &&
@@ -1690,12 +1692,12 @@ export function patchRoutedConvexClient(input: RoutedClientInput): {
       }
     : () => createNoopUnsubscribe();
 
-  const patchable = input.client as unknown as PatchableConvexClient;
-
-  // mutation/query/action/onUpdate/onPaginatedUpdate_experimental are
-  // implemented as real methods on EmbeddedClient (see client/embedded.ts).
-  // Install routing state + subscription helpers on the class instance so
-  // those methods can read their deps from `this._routing` / `this._subscriptions`.
+  // All routed methods (mutation/query/action/onUpdate/onPaginated/peek*/
+  // applyOptimisticTransition/registerOptimisticUpdate/setWorkScheduler/
+  // getWorkScheduler/dispatchHttpRequest) are real methods on
+  // EmbeddedClient (see client/embedded.ts). Install routing state +
+  // subscription helpers on the class instance so those methods can read
+  // their deps from `this._routing` / `this._subscriptions`.
   if (input.client instanceof EmbeddedClient) {
     const { client: _client, ...routing } = input;
     input.client._installRouting(routing, pipeline, explicitOptimistic, {
@@ -1706,73 +1708,10 @@ export function patchRoutedConvexClient(input: RoutedClientInput): {
     });
   }
 
-  patchable.peekCurrentValue = (ref: unknown, args: unknown): unknown => {
-    if (!pipeline) return undefined;
-    const refName = input.getRefName(ref);
-    const raw = pipeline.getCurrentValue(refName, args ?? {});
-    if (raw === undefined) return undefined;
-    return toClientResult(raw, input.translateLocalResultToClient);
-  };
-
-  patchable.peekPaginatedCurrentValue = (
-    ref: unknown,
-    args: unknown,
-    options: { initialNumItems: number },
-  ): unknown => {
-    if (!pipeline) return undefined;
-    const refName = input.getRefName(ref);
-    const argRecord = (args ?? {}) as Record<string, unknown>;
-    const existingPaginationOpts = isPlainObject(argRecord.paginationOpts)
-      ? (argRecord.paginationOpts as Record<string, unknown>)
-      : {};
-    const { paginationOpts: _ignored, ...restArgs } = argRecord;
-    void _ignored;
-    const firstPageArgs: Record<string, unknown> = {
-      ...restArgs,
-      paginationOpts: {
-        ...existingPaginationOpts,
-        cursor: null,
-        endCursor: null,
-        numItems: options.initialNumItems,
-      },
-    };
-    const raw = pipeline.getCurrentValue(refName, firstPageArgs);
-    if (raw === undefined || !isPageResultShape(raw)) return undefined;
-    const snapshot: LocalPaginatedQueryResult = {
-      results: raw.page,
-      status: raw.isDone ? "Exhausted" : "CanLoadMore",
-      loadMore: () => false,
-    };
-    return toClientResult(snapshot, input.translateLocalResultToClient);
-  };
-
-  patchable.applyOptimisticTransition = (
-    updates: Array<{ refName: string; args: unknown; value: unknown }>,
-  ): void => {
-    if (!pipeline) return;
-    pipeline.applyOptimisticTransition(updates);
-  };
-
-  patchable.registerOptimisticUpdate = (
-    ref: unknown,
-    callback: (
-      store: { getQuery: (refName: string, args: unknown) => unknown },
-      args: Record<string, unknown>,
-    ) => Array<{ refName: string; args: unknown; value: unknown }>,
-  ): void => {
-    if (typeof ref !== "object" || ref === null) return;
-    explicitOptimistic.set(ref, callback);
-  };
-
-  patchable.setWorkScheduler = (scheduler: WorkScheduler | null): void => {
-    pipeline?.setWorkScheduler(scheduler);
-  };
-
-  patchable.getWorkScheduler = (): WorkScheduler | undefined =>
-    pipeline?.getWorkScheduler();
-
-  patchable.dispatchHttpRequest = (request: Request): Promise<Response> =>
-    input.runtime.dispatchHttpRequest(request);
+  // peekCurrentValue, peekPaginatedCurrentValue, applyOptimisticTransition,
+  // registerOptimisticUpdate, setWorkScheduler, getWorkScheduler, and
+  // dispatchHttpRequest are implemented as real methods on EmbeddedClient
+  // (see client/embedded.ts).
 
   return {
     dispose: () => {

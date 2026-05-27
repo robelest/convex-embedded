@@ -10,6 +10,8 @@ import { ConvexError } from "convex/values";
 import {
   createNoopUnsubscribe,
   deferSubscription,
+  isPageResultShape,
+  isPlainObject,
   toClientResult,
 } from "@/client/adapter";
 import type {
@@ -20,8 +22,10 @@ import type {
 import { effectToTransitions } from "@/client/optimistic/apply";
 import { deriveOptimisticEffect } from "@/client/optimistic/derive";
 import { assertRemotePlanOnline } from "@/client/routing/plan";
+import type { LocalPaginatedQueryResult } from "@/runtime/embedded";
 import { isConnectivityOffline } from "@/runtime/platform";
 import { createLogger } from "@/shared/logger";
+import type { WorkScheduler } from "@/shared/work";
 
 const log = createLogger("embedded-client");
 
@@ -248,6 +252,82 @@ export class EmbeddedClient extends ConvexClient {
         throw routing.asError(error);
       }
     });
+  }
+
+  peekCurrentValue(ref: unknown, args: unknown): unknown {
+    const routing = this._routing;
+    if (!routing || !this._pipeline) return undefined;
+    const refName = routing.getRefName(ref);
+    const raw = this._pipeline.getCurrentValue(refName, args ?? {});
+    if (raw === undefined) return undefined;
+    return toClientResult(raw, routing.translateLocalResultToClient);
+  }
+
+  peekPaginatedCurrentValue(
+    ref: unknown,
+    args: unknown,
+    options: { initialNumItems: number },
+  ): unknown {
+    const routing = this._routing;
+    if (!routing || !this._pipeline) return undefined;
+    const refName = routing.getRefName(ref);
+    const argRecord = (args ?? {}) as Record<string, unknown>;
+    const existingPaginationOpts = isPlainObject(argRecord.paginationOpts)
+      ? (argRecord.paginationOpts as Record<string, unknown>)
+      : {};
+    const { paginationOpts: _ignored, ...restArgs } = argRecord;
+    void _ignored;
+    const firstPageArgs: Record<string, unknown> = {
+      ...restArgs,
+      paginationOpts: {
+        ...existingPaginationOpts,
+        cursor: null,
+        endCursor: null,
+        numItems: options.initialNumItems,
+      },
+    };
+    const raw = this._pipeline.getCurrentValue(refName, firstPageArgs);
+    if (raw === undefined || !isPageResultShape(raw)) return undefined;
+    const snapshot: LocalPaginatedQueryResult = {
+      results: raw.page,
+      status: raw.isDone ? "Exhausted" : "CanLoadMore",
+      loadMore: () => false,
+    };
+    return toClientResult(snapshot, routing.translateLocalResultToClient);
+  }
+
+  applyOptimisticTransition(
+    updates: Array<{ refName: string; args: unknown; value: unknown }>,
+  ): void {
+    this._pipeline?.applyOptimisticTransition(updates);
+  }
+
+  registerOptimisticUpdate(
+    ref: unknown,
+    callback: ExplicitOptimisticCallback,
+  ): void {
+    if (typeof ref !== "object" || ref === null) return;
+    this._explicitOptimistic.set(ref, callback);
+  }
+
+  setWorkScheduler(scheduler: WorkScheduler | null): void {
+    this._pipeline?.setWorkScheduler(scheduler);
+  }
+
+  getWorkScheduler(): WorkScheduler | undefined {
+    return this._pipeline?.getWorkScheduler();
+  }
+
+  dispatchHttpRequest(request: Request): Promise<Response> {
+    const routing = this._routing;
+    if (!routing) {
+      return Promise.reject(
+        new Error(
+          "[convex-embedded] EmbeddedClient.dispatchHttpRequest called before routing was installed.",
+        ),
+      );
+    }
+    return routing.runtime.dispatchHttpRequest(request);
   }
 
   private _routedOnUpdate(...args: unknown[]): unknown {

@@ -18,10 +18,6 @@ import { ReplayLoopState } from "@/client/engine/replay";
 import { CycleScheduler } from "@/client/engine/scheduler";
 import { ScopeRegistry, type ActiveScope } from "@/client/engine/scope";
 import { SnapshotIngest } from "@/client/engine/snapshot";
-import {
-  EngineStatusEmitter,
-  type ChangeListener,
-} from "@/client/engine/status";
 import { IdMap, extractSchemaIdFields } from "@/client/ids";
 import { MAX_REPLAY_RETRIES, PendingQueue } from "@/client/pending/queue";
 import type { PendingEntry } from "@/client/pending/queue";
@@ -59,6 +55,43 @@ import { runDetached } from "@/utils/detached";
 import { retryWithBackoff } from "@/utils/retry";
 
 const log = createLogger("resolve");
+
+export type ChangeListener = (status: EngineStatus) => void;
+
+class EngineStatusEmitter {
+  private currentStatus: EngineStatus = { status: "idle" };
+  private readonly listeners = new Set<ChangeListener>();
+
+  get(): EngineStatus {
+    return this.currentStatus;
+  }
+
+  emit(next: EngineStatus): void {
+    if (
+      next.status === "resolved" &&
+      this.currentStatus.status !== "resolved"
+    ) {
+      recordCounter("sync.cycle");
+    }
+    this.currentStatus = next;
+    for (const listener of this.listeners) {
+      try {
+        listener(next);
+      } catch (err) {
+        log.error("sync: listener threw", err);
+      }
+    }
+  }
+
+  on(listener: ChangeListener): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  clearListeners(): void {
+    this.listeners.clear();
+  }
+}
 
 interface RemoteCallable {
   onUpdate(...args: unknown[]): () => void;
@@ -1664,9 +1697,31 @@ class EngineImpl implements EngineInstance {
   /** @internal */ readonly _cycleScheduler!: CycleScheduler;
   /** @internal */ readonly _replayLoop!: ReplayLoopState;
 
-  // The closure-captured methods that the constructor body assembles.
-  // Each is bound in the constructor's `this.impl = { ... }` block.
-  private impl!: EngineInstance;
+  start!: () => void;
+  stop!: () => void;
+  mutation!: (
+    ref: unknown,
+    args: Record<string, unknown>,
+    options?: { enqueueForReplay?: boolean },
+  ) => Promise<unknown>;
+  pullNow!: () => Promise<void>;
+  ensureTableReady!: (tableName: string) => Promise<void>;
+  ensureScopeReady!: (
+    tableName: string,
+    scopeArgs?: Record<string, unknown>,
+    readKey?: string,
+  ) => Promise<void>;
+  releaseScopeRead!: (
+    tableName: string,
+    scopeArgs: Record<string, unknown> | undefined,
+    readKey: string,
+  ) => void;
+  onScopeResolved!: (
+    tableName: string,
+    scopeArgs: Record<string, unknown> | undefined,
+    cb: () => void,
+  ) => () => void;
+  reloadIdentity!: () => Promise<void>;
   constructor(config: EngineConfig) {
     const {
       embedded,
@@ -3788,278 +3843,237 @@ class EngineImpl implements EngineInstance {
     this._cycleScheduler = cycleScheduler;
     this._replayLoop = replayLoop;
 
-    this.impl = {
-      start() {
-        if (started) return;
-        started = true;
+    this.start = () => {
+      if (started) return;
+      started = true;
 
-        log.info("sync: started");
-        startProcessorHeartbeat();
+      log.info("sync: started");
+      startProcessorHeartbeat();
 
-        const hydrationPromise = hydrateIdentityState();
+      const hydrationPromise = hydrateIdentityState();
 
-        const runOnlineAfterHydration = createHydrationAwareOnlineHandler({
-          handleOnline,
-          hydrationPromise,
-          isStarted: () => started,
-        });
+      const runOnlineAfterHydration = createHydrationAwareOnlineHandler({
+        handleOnline,
+        hydrationPromise,
+        isStarted: () => started,
+      });
 
-        const connectivity = getConnectivityAdapter(config.connectivity);
+      const connectivity = getConnectivityAdapter(config.connectivity);
 
-        const startRoute = getStartLifecycleRoute({
-          hasNavigator: true,
-          navigatorOnline: connectivity?.isOnline(),
-        });
+      const startRoute = getStartLifecycleRoute({
+        hasNavigator: true,
+        navigatorOnline: connectivity?.isOnline(),
+      });
 
-        matchTag(startRoute, "_tag", {
-          Offline: () => {
-            connectivityState.markOffline();
-            emit({ status: "offline" });
-          },
-          WaitForHydrationThenOnline: () => {
-            runOnlineAfterHydration();
-          },
-        });
+      matchTag(startRoute, "_tag", {
+        Offline: () => {
+          connectivityState.markOffline();
+          emit({ status: "offline" });
+        },
+        WaitForHydrationThenOnline: () => {
+          runOnlineAfterHydration();
+        },
+      });
 
-        if (connectivity.onOnline && connectivity.onOffline) {
-          onOnline = runOnlineAfterHydration;
-          onOffline = handleOffline;
-          cleanupOnlineListener = connectivity.onOnline(onOnline);
-          cleanupOfflineListener = connectivity.onOffline(onOffline);
-        }
-      },
+      if (connectivity.onOnline && connectivity.onOffline) {
+        onOnline = runOnlineAfterHydration;
+        onOffline = handleOffline;
+        cleanupOnlineListener = connectivity.onOnline(onOnline);
+        cleanupOfflineListener = connectivity.onOffline(onOffline);
+      }
+    };
 
-      stop() {
-        if (!started) return;
-        started = false;
+    this.stop = () => {
+      if (!started) return;
+      started = false;
 
-        log.info("sync: stopped");
-        stopProcessorHeartbeat();
-        unregisterPendingDepth();
-        unregisterPendingUploadsDepth();
+      log.info("sync: stopped");
+      stopProcessorHeartbeat();
+      unregisterPendingDepth();
+      unregisterPendingUploadsDepth();
 
-        cycleScheduler.abortCurrent();
-        const claimedEntry = replayLoop.activeEntry();
-        if (claimedEntry) {
-          replayLoop.setActiveEntry(null);
-          runDetached(
-            () => pendingQueue.release(claimedEntry, processorIdForReplay),
-            "[sync] release pending claim:",
-          );
-        }
-
-        stopRemoteSubscriptions();
-        clearBufferedSnapshots();
-        scopeGate.resetResolved();
-
-        cleanupOnlineListener?.();
-        cleanupOfflineListener?.();
-        cleanupOnlineListener = null;
-        cleanupOfflineListener = null;
-        onOnline = null;
-        onOffline = null;
-
-        emit({ status: "idle" });
-        statusEmitter.clearListeners();
-      },
-
-      on(_event: "change", listener: ChangeListener): () => void {
-        return statusEmitter.on(listener);
-      },
-
-      getStatus(): EngineStatus {
-        return statusEmitter.get();
-      },
-
-      async mutation(
-        ref: unknown,
-        args: Record<string, unknown>,
-        options?: { enqueueForReplay?: boolean },
-      ): Promise<unknown> {
-        const enqueueForReplay = options?.enqueueForReplay ?? true;
-        const executeMutationLocally = executeLocalMutationWithEffects
-          ? executeLocalMutationWithEffects
-          : (r: unknown, a: Record<string, unknown>) =>
-              (localClient as unknown as LocalPathCallable).mutation(
-                r,
-                a,
-              ) as Promise<unknown>;
-
-        const refName = getFunctionName(
-          ref as Parameters<typeof getFunctionName>[0],
+      cycleScheduler.abortCurrent();
+      const claimedEntry = replayLoop.activeEntry();
+      if (claimedEntry) {
+        replayLoop.setActiveEntry(null);
+        runDetached(
+          () => pendingQueue.release(claimedEntry, processorIdForReplay),
+          "[sync] release pending claim:",
         );
-        const localArgs = idMap.translateRemoteIdsToLocal(args);
+      }
 
-        const __mutStart = globalThis.performance?.now?.() ?? Date.now();
-        let localResult: unknown = undefined;
-        let localFailed = false;
-        try {
-          localResult = await executeMutationLocally(ref, localArgs);
-        } catch (err) {
-          if (!connectivityState.isOnline()) {
-            throw err;
-          }
-          localFailed = true;
-          log.debug(
-            `sync: local mutation "${refName}" failed; falling back to remote`,
-            err,
-          );
+      stopRemoteSubscriptions();
+      clearBufferedSnapshots();
+      scopeGate.resetResolved();
+
+      cleanupOnlineListener?.();
+      cleanupOfflineListener?.();
+      cleanupOnlineListener = null;
+      cleanupOfflineListener = null;
+      onOnline = null;
+      onOffline = null;
+
+      emit({ status: "idle" });
+      statusEmitter.clearListeners();
+    };
+
+    this.mutation = async (
+      ref: unknown,
+      args: Record<string, unknown>,
+      options?: { enqueueForReplay?: boolean },
+    ): Promise<unknown> => {
+      const enqueueForReplay = options?.enqueueForReplay ?? true;
+      const executeMutationLocally = executeLocalMutationWithEffects
+        ? executeLocalMutationWithEffects
+        : (r: unknown, a: Record<string, unknown>) =>
+            (localClient as unknown as LocalPathCallable).mutation(
+              r,
+              a,
+            ) as Promise<unknown>;
+
+      const refName = getFunctionName(
+        ref as Parameters<typeof getFunctionName>[0],
+      );
+      const localArgs = idMap.translateRemoteIdsToLocal(args);
+
+      const __mutStart = globalThis.performance?.now?.() ?? Date.now();
+      let localResult: unknown = undefined;
+      let localFailed = false;
+      try {
+        localResult = await executeMutationLocally(ref, localArgs);
+      } catch (err) {
+        if (!connectivityState.isOnline()) {
+          throw err;
         }
-
-        const __localDone = globalThis.performance?.now?.() ?? Date.now();
+        localFailed = true;
         log.debug(
-          `engine.mutation local-done t+${(__localDone - __mutStart).toFixed(1)}ms ref=${refName}`,
+          `sync: local mutation "${refName}" failed; falling back to remote`,
+          err,
         );
+      }
 
-        if (localFailed) {
-          const remoteResult = await (
-            remoteClient as unknown as RemoteCallable
-          ).mutation(ref, args);
-          return remoteResult;
-        }
+      const __localDone = globalThis.performance?.now?.() ?? Date.now();
+      log.debug(
+        `engine.mutation local-done t+${(__localDone - __mutStart).toFixed(1)}ms ref=${refName}`,
+      );
 
-        if (isLocalUploadUrl(localResult)) {
-          registerUploadUrlSource?.(localResult, refName);
-          return localResult;
-        }
+      if (localFailed) {
+        const remoteResult = await (
+          remoteClient as unknown as RemoteCallable
+        ).mutation(ref, args);
+        return remoteResult;
+      }
 
-        if (enqueueForReplay) {
-          const table = inferTableFromRef(ref, tables);
-          if (!table) {
-            throw new Error(
-              `[convex-embedded] could not infer table for mutation ref "${refName}".`,
-            );
-          }
-          // Detach pending-queue persistence so the user mutation returns
-          // immediately after local memory commit. Subsequent mutations may
-          // race their pending-pushes through the runtime's transaction lock
-          // (which already serialises commits), preserving ordering.
-          const replayPayloadVersion = getReplayPayloadVersion?.(refName) ?? 1;
-          const __pushStart = globalThis.performance?.now?.() ?? Date.now();
-          await pendingQueue.push(
-            ref,
-            args,
-            localResult,
-            table,
-            replayPayloadVersion,
-          );
-          const __pushDone = globalThis.performance?.now?.() ?? Date.now();
-          log.debug(
-            `engine.mutation queue.push push=${(__pushDone - __pushStart).toFixed(1)}ms ref=${refName}`,
-          );
-          if (!connectivityState.isOnline() && crdt.shouldTrack(table)) {
-            const docId =
-              typeof localResult === "string"
-                ? localResult
-                : ((localArgs?.id as string | undefined) ??
-                  (localArgs?._id as string | undefined));
-            if (docId) {
-              crdt.mark(table, docId);
-            }
-          }
-          if (connectivityState.isOnline()) {
-            ensureReplayProcessing();
-          } else {
-            log.debug("sync: offline — mutation queued for later push");
-          }
-        }
-
-        const __chainDone = globalThis.performance?.now?.() ?? Date.now();
-        log.debug(
-          `engine.mutation chain-done t+${(__chainDone - __mutStart).toFixed(1)}ms ref=${refName}`,
-        );
+      if (isLocalUploadUrl(localResult)) {
+        registerUploadUrlSource?.(localResult, refName);
         return localResult;
-      },
+      }
 
-      pullNow(): Promise<void> {
+      if (enqueueForReplay) {
+        const table = inferTableFromRef(ref, tables);
+        if (!table) {
+          throw new Error(
+            `[convex-embedded] could not infer table for mutation ref "${refName}".`,
+          );
+        }
+        // Detach pending-queue persistence so the user mutation returns
+        // immediately after local memory commit. Subsequent mutations may
+        // race their pending-pushes through the runtime's transaction lock
+        // (which already serialises commits), preserving ordering.
+        const replayPayloadVersion = getReplayPayloadVersion?.(refName) ?? 1;
+        const __pushStart = globalThis.performance?.now?.() ?? Date.now();
+        await pendingQueue.push(
+          ref,
+          args,
+          localResult,
+          table,
+          replayPayloadVersion,
+        );
+        const __pushDone = globalThis.performance?.now?.() ?? Date.now();
+        log.debug(
+          `engine.mutation queue.push push=${(__pushDone - __pushStart).toFixed(1)}ms ref=${refName}`,
+        );
+        if (!connectivityState.isOnline() && crdt.shouldTrack(table)) {
+          const docId =
+            typeof localResult === "string"
+              ? localResult
+              : ((localArgs?.id as string | undefined) ??
+                (localArgs?._id as string | undefined));
+          if (docId) {
+            crdt.mark(table, docId);
+          }
+        }
         if (connectivityState.isOnline()) {
-          stopRemoteSubscriptions();
+          ensureReplayProcessing();
+        } else {
+          log.debug("sync: offline — mutation queued for later push");
         }
-        return runReplicationCycle({ forceResolve: true });
-      },
+      }
 
-      ensureTableReady(tableName: string): Promise<void> {
-        return activateScope(tableName);
-      },
+      const __chainDone = globalThis.performance?.now?.() ?? Date.now();
+      log.debug(
+        `engine.mutation chain-done t+${(__chainDone - __mutStart).toFixed(1)}ms ref=${refName}`,
+      );
+      return localResult;
+    };
 
-      ensureScopeReady(
-        tableName: string,
-        scopeArgs?: Record<string, unknown>,
-        readKey?: string,
-      ): Promise<void> {
-        if (readKey !== undefined) {
-          registerScopeReader(tableName, scopeArgs, readKey);
-        }
-        return activateScope(tableName, scopeArgs);
-      },
+    this.pullNow = (): Promise<void> => {
+      if (connectivityState.isOnline()) {
+        stopRemoteSubscriptions();
+      }
+      return runReplicationCycle({ forceResolve: true });
+    };
 
-      releaseScopeRead(
-        tableName: string,
-        scopeArgs: Record<string, unknown> | undefined,
-        readKey: string,
-      ): void {
-        releaseScopeRead(tableName, scopeArgs, readKey);
-      },
+    this.ensureTableReady = (tableName: string): Promise<void> => {
+      return activateScope(tableName);
+    };
 
-      onScopeResolved(
-        tableName: string,
-        scopeArgs: Record<string, unknown> | undefined,
-        cb: () => void,
-      ): () => void {
-        return onScopeResolved(tableName, scopeArgs, cb);
-      },
+    this.ensureScopeReady = (
+      tableName: string,
+      scopeArgs?: Record<string, unknown>,
+      readKey?: string,
+    ): Promise<void> => {
+      if (readKey !== undefined) {
+        registerScopeReader(tableName, scopeArgs, readKey);
+      }
+      return activateScope(tableName, scopeArgs);
+    };
 
-      async reloadIdentity(): Promise<void> {
-        await hydrateIdentityState();
-        clearBufferedSnapshots();
-        scopeGate.resetResolved();
-        await pendingQueue.unblockAll();
+    this.releaseScopeRead = (
+      tableName: string,
+      scopeArgs: Record<string, unknown> | undefined,
+      readKey: string,
+    ): void => {
+      releaseScopeRead(tableName, scopeArgs, readKey);
+    };
 
-        if (!started) {
-          return;
-        }
+    this.onScopeResolved = (
+      tableName: string,
+      scopeArgs: Record<string, unknown> | undefined,
+      cb: () => void,
+    ): (() => void) => {
+      return onScopeResolved(tableName, scopeArgs, cb);
+    };
 
-        if (connectivityState.isOnline()) {
-          stopRemoteSubscriptions();
-          await runReplicationCycle({ forceResolve: true });
-          return;
-        }
+    this.reloadIdentity = async (): Promise<void> => {
+      await hydrateIdentityState();
+      clearBufferedSnapshots();
+      scopeGate.resetResolved();
+      await pendingQueue.unblockAll();
 
-        emit({ status: "offline" });
-      },
+      if (!started) {
+        return;
+      }
 
-      pendingCount(): number {
-        return pendingQueue.length;
-      },
+      if (connectivityState.isOnline()) {
+        stopRemoteSubscriptions();
+        await runReplicationCycle({ forceResolve: true });
+        return;
+      }
 
-      get idMap() {
-        return idMap;
-      },
-
-      get pendingQueue() {
-        return pendingQueue;
-      },
-
-      async [Symbol.asyncDispose](): Promise<void> {
-        this.stop();
-      },
+      emit({ status: "offline" });
     };
   } // end constructor
-
-  // The complex methods that depend on closure scope (mutation, start,
-  // stop, pullNow, reloadIdentity, ensureTableReady, ensureScopeReady,
-  // releaseScopeRead, onScopeResolved) still delegate to this.impl
-  // because their bodies close over locals built during construction.
-  // The simple subsystem-getter methods bypass impl and use class fields
-  // directly.
-
-  start(): void {
-    this.impl.start();
-  }
-
-  stop(): void {
-    this.impl.stop();
-  }
 
   on(_event: "change", listener: ChangeListener): () => void {
     return this._statusEmitter.on(listener);
@@ -4067,50 +4081,6 @@ class EngineImpl implements EngineInstance {
 
   getStatus(): EngineStatus {
     return this._statusEmitter.get();
-  }
-
-  mutation(
-    ref: unknown,
-    args: Record<string, unknown>,
-    options?: { enqueueForReplay?: boolean },
-  ): Promise<unknown> {
-    return this.impl.mutation(ref, args, options);
-  }
-
-  pullNow(): Promise<void> {
-    return this.impl.pullNow();
-  }
-
-  ensureTableReady(tableName: string): Promise<void> {
-    return this.impl.ensureTableReady(tableName);
-  }
-
-  ensureScopeReady(
-    tableName: string,
-    scopeArgs?: Record<string, unknown>,
-    readKey?: string,
-  ): Promise<void> {
-    return this.impl.ensureScopeReady(tableName, scopeArgs, readKey);
-  }
-
-  releaseScopeRead(
-    tableName: string,
-    scopeArgs: Record<string, unknown> | undefined,
-    readKey: string,
-  ): void {
-    this.impl.releaseScopeRead(tableName, scopeArgs, readKey);
-  }
-
-  onScopeResolved(
-    tableName: string,
-    scopeArgs: Record<string, unknown> | undefined,
-    cb: () => void,
-  ): () => void {
-    return this.impl.onScopeResolved(tableName, scopeArgs, cb);
-  }
-
-  reloadIdentity(): Promise<void> {
-    return this.impl.reloadIdentity();
   }
 
   pendingCount(): number {

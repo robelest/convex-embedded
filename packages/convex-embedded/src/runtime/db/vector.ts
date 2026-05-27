@@ -310,53 +310,27 @@ function compareResultsByWorst(
   return compareValues(right._id, left._id);
 }
 
-class TopKHeap {
-  private _values: VectorSearchResult[] = [];
+interface TopKHeap {
+  push(value: VectorSearchResult): void;
+  toSortedArray(): VectorSearchResult[];
+}
 
-  constructor(private _limit: number) {}
+function createTopKHeap(limit: number): TopKHeap {
+  const values: VectorSearchResult[] = [];
 
-  push(value: VectorSearchResult): void {
-    if (this._limit === 0) {
-      return;
-    }
-
-    if (this._values.length < this._limit) {
-      this._values.push(value);
-      this._bubbleUp(this._values.length - 1);
-      return;
-    }
-
-    if (compareResultsByBest(value, this._values[0]!) >= 0) {
-      return;
-    }
-
-    this._values[0] = value;
-    this._bubbleDown(0);
-  }
-
-  toSortedArray(): VectorSearchResult[] {
-    return [...this._values].sort(compareResultsByBest);
-  }
-
-  private _bubbleUp(index: number): void {
+  function bubbleUp(index: number): void {
     let current = index;
     while (current > 0) {
       const parent = (current - 1) >> 1;
-      if (
-        compareResultsByWorst(this._values[current]!, this._values[parent]!) >=
-        0
-      ) {
+      if (compareResultsByWorst(values[current]!, values[parent]!) >= 0) {
         break;
       }
-      [this._values[current], this._values[parent]] = [
-        this._values[parent]!,
-        this._values[current]!,
-      ];
+      [values[current], values[parent]] = [values[parent]!, values[current]!];
       current = parent;
     }
   }
 
-  private _bubbleDown(index: number): void {
+  function bubbleDown(index: number): void {
     let current = index;
     for (;;) {
       const left = current * 2 + 1;
@@ -364,14 +338,14 @@ class TopKHeap {
       let next = current;
 
       if (
-        left < this._values.length &&
-        compareResultsByWorst(this._values[left]!, this._values[next]!) < 0
+        left < values.length &&
+        compareResultsByWorst(values[left]!, values[next]!) < 0
       ) {
         next = left;
       }
       if (
-        right < this._values.length &&
-        compareResultsByWorst(this._values[right]!, this._values[next]!) < 0
+        right < values.length &&
+        compareResultsByWorst(values[right]!, values[next]!) < 0
       ) {
         next = right;
       }
@@ -379,13 +353,27 @@ class TopKHeap {
         return;
       }
 
-      [this._values[current], this._values[next]] = [
-        this._values[next]!,
-        this._values[current]!,
-      ];
+      [values[current], values[next]] = [values[next]!, values[current]!];
       current = next;
     }
   }
+
+  return {
+    push(value: VectorSearchResult): void {
+      if (limit === 0) return;
+      if (values.length < limit) {
+        values.push(value);
+        bubbleUp(values.length - 1);
+        return;
+      }
+      if (compareResultsByBest(value, values[0]!) >= 0) return;
+      values[0] = value;
+      bubbleDown(0);
+    },
+    toSortedArray(): VectorSearchResult[] {
+      return [...values].sort(compareResultsByBest);
+    },
+  };
 }
 
 export function getVectorIndexDefinition(
@@ -577,7 +565,7 @@ export function executeVectorSearch(
   const plan = buildVectorFilterPlan(input.filter, state.definition);
   const candidateIds = getCandidateIds(state, plan);
 
-  const heap = new TopKHeap(limit);
+  const heap = createTopKHeap(limit);
   for (const docId of candidateIds) {
     const doc = state.docs.get(docId);
     if (!doc || doc.identityKey !== input.activeIdentityKey) {
@@ -614,7 +602,7 @@ export function executeOverlayVectorSearch(
     overlay.state.definition,
   );
 
-  const heap = new TopKHeap(limit);
+  const heap = createTopKHeap(limit);
 
   for (const docId of getCandidateIds(baseState, basePlan)) {
     if (overlay.shadowedIds.has(docId)) {

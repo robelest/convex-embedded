@@ -513,50 +513,27 @@ function compareScoredDocsWorst(left: ScoredDoc, right: ScoredDoc): number {
   return -compareScoredDocs(left, right);
 }
 
-class SearchTopKHeap {
-  private _values: ScoredDoc[] = [];
+interface SearchTopKHeap {
+  push(value: ScoredDoc): void;
+  toSortedArray(): ScoredDoc[];
+}
 
-  constructor(private _limit: number) {}
+function createSearchTopKHeap(limit: number): SearchTopKHeap {
+  const values: ScoredDoc[] = [];
 
-  push(value: ScoredDoc): void {
-    if (this._limit === 0) {
-      return;
-    }
-    if (this._values.length < this._limit) {
-      this._values.push(value);
-      this._bubbleUp(this._values.length - 1);
-      return;
-    }
-    if (compareScoredDocs(value, this._values[0]!) >= 0) {
-      return;
-    }
-    this._values[0] = value;
-    this._bubbleDown(0);
-  }
-
-  toSortedArray(): ScoredDoc[] {
-    return [...this._values].sort(compareScoredDocs);
-  }
-
-  private _bubbleUp(index: number): void {
+  function bubbleUp(index: number): void {
     let current = index;
     while (current > 0) {
       const parent = (current - 1) >> 1;
-      if (
-        compareScoredDocsWorst(this._values[current]!, this._values[parent]!) >=
-        0
-      ) {
+      if (compareScoredDocsWorst(values[current]!, values[parent]!) >= 0) {
         break;
       }
-      [this._values[current], this._values[parent]] = [
-        this._values[parent]!,
-        this._values[current]!,
-      ];
+      [values[current], values[parent]] = [values[parent]!, values[current]!];
       current = parent;
     }
   }
 
-  private _bubbleDown(index: number): void {
+  function bubbleDown(index: number): void {
     let current = index;
     for (;;) {
       const left = current * 2 + 1;
@@ -564,28 +541,40 @@ class SearchTopKHeap {
       let next = current;
 
       if (
-        left < this._values.length &&
-        compareScoredDocsWorst(this._values[left]!, this._values[next]!) < 0
+        left < values.length &&
+        compareScoredDocsWorst(values[left]!, values[next]!) < 0
       ) {
         next = left;
       }
       if (
-        right < this._values.length &&
-        compareScoredDocsWorst(this._values[right]!, this._values[next]!) < 0
+        right < values.length &&
+        compareScoredDocsWorst(values[right]!, values[next]!) < 0
       ) {
         next = right;
       }
-      if (next === current) {
-        return;
-      }
+      if (next === current) return;
 
-      [this._values[current], this._values[next]] = [
-        this._values[next]!,
-        this._values[current]!,
-      ];
+      [values[current], values[next]] = [values[next]!, values[current]!];
       current = next;
     }
   }
+
+  return {
+    push(value: ScoredDoc): void {
+      if (limit === 0) return;
+      if (values.length < limit) {
+        values.push(value);
+        bubbleUp(values.length - 1);
+        return;
+      }
+      if (compareScoredDocs(value, values[0]!) >= 0) return;
+      values[0] = value;
+      bubbleDown(0);
+    },
+    toSortedArray(): ScoredDoc[] {
+      return [...values].sort(compareScoredDocs);
+    },
+  };
 }
 
 function scoreCandidateDocs(input: {
@@ -602,7 +591,7 @@ function scoreCandidateDocs(input: {
 }): ScoredDoc[] {
   const scored: ScoredDoc[] = [];
   const heap =
-    input.limit === undefined ? null : new SearchTopKHeap(input.limit);
+    input.limit === undefined ? null : createSearchTopKHeap(input.limit);
   for (const docId of input.candidateIds) {
     if (input.shadowedIds?.has(docId)) {
       continue;

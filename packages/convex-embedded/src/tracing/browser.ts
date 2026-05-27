@@ -7,7 +7,7 @@ import {
 import type { SpanProcessor } from "@opentelemetry/sdk-trace-base";
 import { WebTracerProvider } from "@opentelemetry/sdk-trace-web";
 
-import { setLogCaptureActive } from "@/tracing/spans";
+import { setLogCaptureActive, setTracingActive } from "@/tracing/spans";
 
 export interface BrowserTracingOptions {
   resource?: Resource;
@@ -27,6 +27,7 @@ export async function installBrowserTracing(
     spanProcessors: options.spanProcessors,
   });
   provider.register();
+  setTracingActive(true);
 
   let loggerProvider: LoggerProvider | null = null;
   if (options.logRecordProcessors && options.logRecordProcessors.length > 0) {
@@ -45,6 +46,7 @@ export async function installBrowserTracing(
         await loggerProvider.shutdown();
         setLogCaptureActive(false);
       }
+      setTracingActive(false);
     },
   };
 }

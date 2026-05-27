@@ -20,7 +20,7 @@ import {
   type BufferedSpan,
   type BufferingTracingHandle,
 } from "@/tracing/buffer";
-import { setLogCaptureActive } from "@/tracing/spans";
+import { setLogCaptureActive, setTracingActive } from "@/tracing/spans";
 
 /**
  * Options for {@link installInMemoryTracing}.
@@ -66,6 +66,7 @@ export function installInMemoryTracing(
   contextManager.enable();
   context.setGlobalContextManager(contextManager);
   trace.setGlobalTracerProvider(provider);
+  setTracingActive(true);
 
   const metricExporter = new InMemoryMetricExporter(
     AggregationTemporality.CUMULATIVE,
@@ -112,6 +113,7 @@ export function installInMemoryTracing(
       metrics.disable();
       logs.disable();
       setLogCaptureActive(false);
+      setTracingActive(false);
       await Promise.all([
         processor.shutdown(),
         provider.shutdown(),

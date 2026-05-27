@@ -10,12 +10,14 @@
  */
 
 import {
+  INVALID_SPAN_CONTEXT,
   metrics,
   trace,
   SpanStatusCode,
   type Attributes,
   type Meter,
   type Span,
+  type SpanContext,
   type SpanOptions,
 } from "@opentelemetry/api";
 import { logs, type Logger } from "@opentelemetry/api-logs";
@@ -27,6 +29,58 @@ export const TRACER_NAME = "convex-embedded";
 export const METER_NAME = "convex-embedded";
 
 let logCaptureActive = false;
+let tracingActive = false;
+
+/**
+ * Whether a tracer provider has been wired up. When false, {@link withSpan} /
+ * {@link withSpanSync} skip span allocation entirely and invoke `fn` with a
+ * shared no-op {@link Span}. The runtime's `installInMemoryTracing`,
+ * `installNodeTracing`, and `installBrowserTracing` helpers flip this on
+ * during setup and back off in their `close()` handlers.
+ */
+export function isTracingActive(): boolean {
+  return tracingActive;
+}
+
+/**
+ * Toggle the {@link withSpan} / {@link withSpanSync} fast path. Internal
+ * helper called by the tracing install/close helpers.
+ */
+export function setTracingActive(active: boolean): void {
+  tracingActive = active;
+}
+
+const NOOP_SPAN: Span = {
+  spanContext(): SpanContext {
+    return INVALID_SPAN_CONTEXT;
+  },
+  setAttribute() {
+    return this;
+  },
+  setAttributes() {
+    return this;
+  },
+  addEvent() {
+    return this;
+  },
+  addLink() {
+    return this;
+  },
+  addLinks() {
+    return this;
+  },
+  setStatus() {
+    return this;
+  },
+  updateName() {
+    return this;
+  },
+  end() {},
+  isRecording(): boolean {
+    return false;
+  },
+  recordException() {},
+};
 
 /**
  * Whether a logger provider is installed and UDF console capture should run.
@@ -94,6 +148,9 @@ export async function withSpan<T>(
   fn: (span: Span) => Promise<T> | T,
   options?: SpanOptions,
 ): Promise<T> {
+  if (!tracingActive) {
+    return fn(NOOP_SPAN);
+  }
   const tracer = getTracer();
   return tracer.startActiveSpan(name, options ?? {}, async (span) => {
     try {
@@ -125,6 +182,9 @@ export function withSpanSync<T>(
   fn: (span: Span) => T,
   options?: SpanOptions,
 ): T {
+  if (!tracingActive) {
+    return fn(NOOP_SPAN);
+  }
   const tracer = getTracer();
   return tracer.startActiveSpan(name, options ?? {}, (span) => {
     try {

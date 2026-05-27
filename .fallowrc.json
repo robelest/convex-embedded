@@ -22,7 +22,6 @@
     "packages/convex-embedded/src/component/public/cleanup.ts",
     "packages/convex-embedded/src/component/public/marks.ts",
     "packages/convex-embedded/src/expo/shims/**",
-    "packages/convex-embedded/src/utils/cache.ts",
     "scripts/**",
     "tests/setup.ts",
     "demos/expo/src/global.css"

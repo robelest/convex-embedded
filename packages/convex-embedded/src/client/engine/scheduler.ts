@@ -1,4 +1,5 @@
-import type { CrdtDirtyState } from "@/client/engine/crdt";
+import * as pull from "@/client/engine/pull";
+import type { MergeState } from "@/client/engine/pull";
 import type { PendingQueue } from "@/client/pending/queue";
 import { createLogger } from "@/shared/logger";
 import type { EngineStatus } from "@/shared/types";
@@ -30,7 +31,7 @@ export interface SchedulerDeps {
   clearBufferedSnapshots: () => void;
   emit: (status: EngineStatus) => void;
   pendingQueue: PendingQueue;
-  crdt: CrdtDirtyState;
+  mergeState: MergeState;
   isStarted: () => boolean;
   heartbeatMs: number;
   heartbeat: () => Promise<void>;
@@ -171,7 +172,7 @@ export function run(
         isOnline: state.online,
         started: deps.isStarted(),
         offlineTransitionsSinceBoot: state.offlineTransitions,
-        hasDirtyCrdtRows: deps.crdt.hasDirty(),
+        hasDirtyCrdtRows: pull.hasDirty(deps.mergeState),
       });
 
       if (route._tag === "Skip") {
@@ -186,14 +187,14 @@ export function run(
       } else if (route._tag === "Pull") {
         if (
           !options?.forcePull &&
-          deps.crdt.hasDirty() &&
+          pull.hasDirty(deps.mergeState) &&
           state.offlineTransitions > 0
         ) {
           await deps.mergeDirtyCrdtRows(signal);
         } else {
           await deps.pullAll(signal);
           if (!signal.aborted) {
-            deps.crdt.clearAll();
+            pull.clearAllDirty(deps.mergeState);
           }
         }
       }

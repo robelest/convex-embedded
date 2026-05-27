@@ -39,49 +39,41 @@ export interface UserIdentity {
 /**
  * Holds the current user identity for the embedded runtime.
  *
- * Call {@link setIdentity} to simulate a logged-in user; pass `null` to
- * simulate an unauthenticated state.
+ * Call {@link AuthResolver.setIdentity} to simulate a logged-in user; pass
+ * `null` to simulate an unauthenticated state.
+ *
+ * @example
+ * ```ts
+ * const auth = createAuthResolver();
+ * auth.setIdentity({
+ *   subject: "user_123",
+ *   issuer: "https://example.auth",
+ *   tokenIdentifier: "tok_123",
+ * });
+ * ```
  */
-export class AuthResolver {
-  private _identity: UserIdentity | null = null;
+export interface AuthResolver {
+  /** Replace the current embedded identity. */
+  setIdentity(identity: UserIdentity | null): void;
+  /** Resolve the current user identity asynchronously. */
+  getUserIdentity(): Promise<UserIdentity | null>;
+  /** Read the current identity synchronously. */
+  peekUserIdentity(): UserIdentity | null;
+}
 
-  /**
-   * Replace the current embedded identity.
-   *
-   * @param identity - Identity to expose to local functions, or `null` for an
-   * unauthenticated state.
-   *
-   * @example
-   * ```ts
-   * const auth = new AuthResolver();
-   * auth.setIdentity({
-   *   subject: "user_123",
-   *   issuer: "https://example.auth",
-   *   tokenIdentifier: "tok_123",
-   * });
-   * ```
-   */
-  setIdentity(identity: UserIdentity | null): void {
-    this._identity = identity;
-  }
-
-  /**
-   * Resolve the current user identity asynchronously.
-   *
-   * @returns The current identity, or `null` when no identity has been set.
-   */
-  async getUserIdentity(): Promise<UserIdentity | null> {
-    return this._identity;
-  }
-
-  /**
-   * Read the current identity synchronously.
-   *
-   * @returns The current identity, or `null` when unauthenticated.
-   */
-  peekUserIdentity(): UserIdentity | null {
-    return this._identity;
-  }
+export function createAuthResolver(): AuthResolver {
+  let identity: UserIdentity | null = null;
+  return {
+    setIdentity(next: UserIdentity | null): void {
+      identity = next;
+    },
+    async getUserIdentity(): Promise<UserIdentity | null> {
+      return identity;
+    },
+    peekUserIdentity(): UserIdentity | null {
+      return identity;
+    },
+  };
 }
 
 /**

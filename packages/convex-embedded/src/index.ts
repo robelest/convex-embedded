@@ -53,8 +53,8 @@ export type {
   ConvexModuleRegistry,
 } from "@/kernel/modules";
 
-export { AuthResolver, getIdentityKey } from "@/auth";
-export type { UserIdentity } from "@/auth";
+export { createAuthResolver, getIdentityKey } from "@/auth";
+export type { AuthResolver, UserIdentity } from "@/auth";
 
 export {
   type StorageAdapter,

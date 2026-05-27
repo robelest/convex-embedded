@@ -16,7 +16,7 @@ import type {
 import { getFunctionName } from "convex/server";
 import { ConvexError, type JSONValue } from "convex/values";
 
-import { AuthResolver, getIdentityKey } from "@/auth";
+import { createAuthResolver, getIdentityKey, type AuthResolver } from "@/auth";
 import type { UserIdentity } from "@/auth";
 import { ModuleLoader } from "@/kernel/modules";
 import type { ConvexInput, FunctionPath } from "@/kernel/modules";
@@ -2777,7 +2777,7 @@ export class EmbeddedRuntime {
     const protocolQueries = new RuntimeProtocolQueryRegistry(
       protocolQueryObservers,
     );
-    const auth = new AuthResolver();
+    const auth = createAuthResolver();
     const executor = new UdfExecutor({
       db,
       crypto,

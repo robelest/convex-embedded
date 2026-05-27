@@ -1,5 +1,5 @@
 import {
-  AuthResolver,
+  createAuthResolver,
   getIdentityKey,
   type UserIdentity,
 } from "@embedded/auth";
@@ -8,13 +8,13 @@ import { describe, expect, it } from "@tests/testkit";
 
 describe("AuthResolver", () => {
   it("returns null before any identity is set", async () => {
-    const auth = new AuthResolver();
+    const auth = createAuthResolver();
 
     await expect(auth.getUserIdentity()).resolves.toBeNull();
   });
 
   it("returns the identity passed to setIdentity", async () => {
-    const auth = new AuthResolver();
+    const auth = createAuthResolver();
     const identity = createTestIdentity();
     auth.setIdentity(identity);
 
@@ -22,7 +22,7 @@ describe("AuthResolver", () => {
   });
 
   it("clears the identity when set to null", async () => {
-    const auth = new AuthResolver();
+    const auth = createAuthResolver();
     auth.setIdentity(createTestIdentity());
     auth.setIdentity(null);
 
@@ -30,7 +30,7 @@ describe("AuthResolver", () => {
   });
 
   it("exposes the current identity synchronously via peekUserIdentity", () => {
-    const auth = new AuthResolver();
+    const auth = createAuthResolver();
     const identity = createTestIdentity();
     auth.setIdentity(identity);
 

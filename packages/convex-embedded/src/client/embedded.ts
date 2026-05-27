@@ -7,7 +7,11 @@ import type {
 } from "convex/server";
 import { ConvexError } from "convex/values";
 
-import { toClientResult } from "@/client/adapter";
+import {
+  createNoopUnsubscribe,
+  deferSubscription,
+  toClientResult,
+} from "@/client/adapter";
 import type {
   CachePipeline,
   ExplicitOptimisticCallback,
@@ -16,11 +20,21 @@ import type {
 import { effectToTransitions } from "@/client/optimistic/apply";
 import { deriveOptimisticEffect } from "@/client/optimistic/derive";
 import { assertRemotePlanOnline } from "@/client/routing/plan";
+import { isConnectivityOffline } from "@/runtime/platform";
 import { createLogger } from "@/shared/logger";
 
 const log = createLogger("embedded-client");
 
 type RoutingConfig = Omit<RoutedClientInput, "client">;
+
+type SubscribeFn = (...args: unknown[]) => unknown;
+
+export interface SubscriptionHelpers {
+  localOnUpdate: SubscribeFn;
+  localPaginatedOnUpdate: SubscribeFn;
+  remoteOnUpdate: SubscribeFn;
+  remotePaginatedOnUpdate: SubscribeFn;
+}
 
 export class EmbeddedClient extends ConvexClient {
   /** @internal — set by patchRoutedConvexClient during installation. */
@@ -30,6 +44,8 @@ export class EmbeddedClient extends ConvexClient {
   /** @internal */
   _explicitOptimistic: WeakMap<object, ExplicitOptimisticCallback> =
     new WeakMap();
+  /** @internal */
+  _subscriptions: SubscriptionHelpers | null = null;
 
   constructor(address: string, options?: ConvexClientOptions) {
     super(address, options);
@@ -39,6 +55,10 @@ export class EmbeddedClient extends ConvexClient {
     this.mutation = this._routedMutation.bind(this) as ConvexClient["mutation"];
     this.query = this._routedQuery.bind(this) as ConvexClient["query"];
     this.action = this._routedAction.bind(this) as ConvexClient["action"];
+    this.onUpdate = this._routedOnUpdate.bind(this) as ConvexClient["onUpdate"];
+    (
+      this as unknown as Record<string, SubscribeFn>
+    ).onPaginatedUpdate_experimental = this._routedOnPaginatedUpdate.bind(this);
   }
 
   /** @internal */
@@ -46,10 +66,12 @@ export class EmbeddedClient extends ConvexClient {
     routing: RoutingConfig,
     pipeline: CachePipeline | null,
     explicitOptimistic: WeakMap<object, ExplicitOptimisticCallback>,
+    subscriptions: SubscriptionHelpers,
   ): void {
     this._routing = routing;
     this._pipeline = pipeline;
     this._explicitOptimistic = explicitOptimistic;
+    this._subscriptions = subscriptions;
   }
 
   private async _routedMutation<M extends FunctionReference<"mutation">>(
@@ -225,6 +247,68 @@ export class EmbeddedClient extends ConvexClient {
       } catch (error) {
         throw routing.asError(error);
       }
+    });
+  }
+
+  private _routedOnUpdate(...args: unknown[]): unknown {
+    return this._routedSubscribe(args, "update");
+  }
+
+  private _routedOnPaginatedUpdate(...args: unknown[]): unknown {
+    return this._routedSubscribe(args, "paginated");
+  }
+
+  private _routedSubscribe(
+    args: unknown[],
+    kind: "update" | "paginated",
+  ): unknown {
+    const routing = this._routing;
+    const subs = this._subscriptions;
+    if (!routing || !subs) {
+      throw new Error(
+        "[convex-embedded] EmbeddedClient subscription called before routing was installed.",
+      );
+    }
+    const localSubscribe =
+      kind === "update" ? subs.localOnUpdate : subs.localPaginatedOnUpdate;
+    const remoteSubscribe =
+      kind === "update" ? subs.remoteOnUpdate : subs.remotePaginatedOnUpdate;
+    const errorArgIndex = kind === "update" ? 3 : 4;
+
+    const subscribeWithRoute = (): unknown => {
+      const route = routing.planRead(args[0]);
+      if (route.kind === "local") return localSubscribe(...args);
+      if (route.kind === "error") throw route.error;
+      if (isConnectivityOffline(routing.connectivity)) {
+        let error: Error;
+        try {
+          assertRemotePlanOnline(route, routing.connectivity);
+          error = new Error("unreachable");
+        } catch (current) {
+          error = routing.asError(current);
+        }
+        const onError = args[errorArgIndex];
+        if (typeof onError === "function") {
+          (onError as (err: Error) => void)(error);
+          return createNoopUnsubscribe();
+        }
+        throw error;
+      }
+      return remoteSubscribe(...args);
+    };
+
+    const isReady = routing.isReady ?? (() => true);
+    if (isReady()) return subscribeWithRoute();
+
+    const onInitError = args[errorArgIndex];
+    const waitUntilReady = routing.waitUntilReady ?? ((run) => run());
+    return deferSubscription({
+      factory: () => waitUntilReady(async () => subscribeWithRoute()),
+      asError: routing.asError,
+      onInitError:
+        typeof onInitError === "function"
+          ? (onInitError as (error: Error) => void)
+          : undefined,
     });
   }
 }

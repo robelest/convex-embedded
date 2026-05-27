@@ -2,11 +2,7 @@ import type { ConvexClient } from "convex/browser";
 
 import type { CachedEntry, EmbeddedQueryCache } from "@/client/cache";
 import { EmbeddedClient } from "@/client/embedded";
-import {
-  assertRemotePlanOnline,
-  type MutationPlan,
-  type ReadPlan,
-} from "@/client/routing/plan";
+import { type MutationPlan, type ReadPlan } from "@/client/routing/plan";
 import type {
   EmbeddedRuntime,
   LocalPaginatedQueryResult,
@@ -25,7 +21,7 @@ import { withSpanSync } from "@/tracing/spans";
 
 const log = createLogger("cache");
 
-interface SubscriptionHandle {
+export interface SubscriptionHandle {
   (): void;
   unsubscribe?: () => void;
   getCurrentValue?: () => unknown;
@@ -86,7 +82,7 @@ function callUnsubscribe(handle: unknown): void {
   }
 }
 
-function createNoopUnsubscribe(): SubscriptionHandle {
+export function createNoopUnsubscribe(): SubscriptionHandle {
   const noop = (() => {}) as SubscriptionHandle;
   noop.unsubscribe = noop;
   noop.getCurrentValue = () => undefined;
@@ -1421,7 +1417,7 @@ function patchBaseClientLocalQueryAccess(input: {
   }
 }
 
-function deferSubscription(input: {
+export function deferSubscription(input: {
   factory: () => Promise<unknown>;
   asError: (error: unknown) => Error;
   onInitError?: (error: Error) => void;
@@ -1669,9 +1665,6 @@ export function patchRoutedConvexClient(input: RoutedClientInput): {
     );
   };
 
-  const waitUntilReady = input.waitUntilReady ?? ((run) => run());
-  const isReady = input.isReady ?? (() => true);
-
   const translateRemoteArgs = (args: unknown): unknown => {
     if (!isPlainObject(args)) return args;
     return input.translateClientArgsToRemote?.(args) ?? args;
@@ -1697,74 +1690,21 @@ export function patchRoutedConvexClient(input: RoutedClientInput): {
       }
     : () => createNoopUnsubscribe();
 
-  const createSubscriptionFactory = (
-    localSubscribe: (...args: unknown[]) => unknown,
-    remoteSubscribe: (...args: unknown[]) => unknown,
-    errorArgIndex: number,
-  ) => {
-    const subscribeWithRoute = (...args: unknown[]): unknown => {
-      const route = input.planRead(args[0]);
-      if (route.kind === "local") {
-        return localSubscribe(...args);
-      }
-      if (route.kind === "error") {
-        throw route.error;
-      }
-
-      if (isConnectivityOffline(input.connectivity)) {
-        let error: Error;
-        try {
-          assertRemotePlanOnline(route, input.connectivity);
-          error = new Error("unreachable");
-        } catch (current) {
-          error = input.asError(current);
-        }
-        const onError = args[errorArgIndex];
-        if (typeof onError === "function") {
-          onError(error);
-          return createNoopUnsubscribe();
-        }
-        throw error;
-      }
-
-      return remoteSubscribe(...args);
-    };
-
-    return (...args: unknown[]): unknown => {
-      if (isReady()) {
-        return subscribeWithRoute(...args);
-      }
-
-      const onInitError = args[errorArgIndex];
-      return deferSubscription({
-        factory: () => waitUntilReady(async () => subscribeWithRoute(...args)),
-        asError: input.asError,
-        onInitError:
-          typeof onInitError === "function"
-            ? (onInitError as (error: Error) => void)
-            : undefined,
-      });
-    };
-  };
-
   const patchable = input.client as unknown as PatchableConvexClient;
 
-  // `mutation` is implemented as a real method on EmbeddedClient
-  // (see client/embedded.ts). Install the routing state on the class
-  // instance so the method can read its deps from `this._routing`.
+  // mutation/query/action/onUpdate/onPaginatedUpdate_experimental are
+  // implemented as real methods on EmbeddedClient (see client/embedded.ts).
+  // Install routing state + subscription helpers on the class instance so
+  // those methods can read their deps from `this._routing` / `this._subscriptions`.
   if (input.client instanceof EmbeddedClient) {
     const { client: _client, ...routing } = input;
-    input.client._installRouting(routing, pipeline, explicitOptimistic);
+    input.client._installRouting(routing, pipeline, explicitOptimistic, {
+      localOnUpdate,
+      localPaginatedOnUpdate,
+      remoteOnUpdate,
+      remotePaginatedOnUpdate,
+    });
   }
-
-  // `query` and `action` are implemented as real methods on EmbeddedClient
-  // (see client/embedded.ts).
-
-  patchable.onUpdate = createSubscriptionFactory(
-    localOnUpdate,
-    remoteOnUpdate,
-    3,
-  );
 
   patchable.peekCurrentValue = (ref: unknown, args: unknown): unknown => {
     if (!pipeline) return undefined;
@@ -1833,14 +1773,6 @@ export function patchRoutedConvexClient(input: RoutedClientInput): {
 
   patchable.dispatchHttpRequest = (request: Request): Promise<Response> =>
     input.runtime.dispatchHttpRequest(request);
-
-  if (typeof patchable.onPaginatedUpdate_experimental === "function") {
-    patchable.onPaginatedUpdate_experimental = createSubscriptionFactory(
-      localPaginatedOnUpdate,
-      remotePaginatedOnUpdate,
-      4,
-    );
-  }
 
   return {
     dispose: () => {

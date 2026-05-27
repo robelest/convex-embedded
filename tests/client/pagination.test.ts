@@ -1,5 +1,6 @@
 import { patchRoutedConvexClient } from "@resolve/client/adapter";
 import { EmbeddedQueryCache } from "@resolve/client/cache";
+import { EmbeddedClient } from "@resolve/client/embedded";
 import type { EmbeddedRuntime } from "@resolve/index";
 import { flushMicrotasks } from "@tests/helpers/time";
 import { describe, expect, it, vi } from "@tests/testkit";
@@ -52,17 +53,7 @@ function createHarness() {
     onPaginatedUpdate_experimental: vi.fn(() => () => {}),
   } as unknown as ConvexClient;
 
-  const client = {
-    query: vi.fn(),
-    mutation: vi.fn(),
-    action: vi.fn(),
-    onUpdate: vi.fn(),
-    onPaginatedUpdate_experimental: vi.fn(),
-    client: {
-      localQueryResult: vi.fn(),
-      localQueryLogs: vi.fn(() => []),
-    },
-  } as unknown as ConvexClient;
+  const client = new EmbeddedClient("http://embedded.local");
 
   patchRoutedConvexClient({
     client,
@@ -203,14 +194,7 @@ function dedupHarness(
     onPaginatedUpdate_experimental: vi.fn(() => () => {}),
   } as unknown as ConvexClient;
 
-  const client = {
-    query: vi.fn(),
-    mutation: vi.fn(),
-    action: vi.fn(),
-    onUpdate: vi.fn(),
-    onPaginatedUpdate_experimental: vi.fn(),
-    client: { localQueryResult: vi.fn(), localQueryLogs: vi.fn(() => []) },
-  } as unknown as ConvexClient;
+  const client = new EmbeddedClient("http://embedded.local");
 
   patchRoutedConvexClient({
     client,

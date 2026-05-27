@@ -1,11 +1,11 @@
-import { BrowserSessionBroadcast } from "@/browser/session";
+import { createBrowserSessionBroadcast } from "@/browser/session";
 import { openBrowserStorage } from "@/browser/sqlite/adapter";
 import {
   createBrowserStorageSurface,
   createBrowserUploadFetch,
 } from "@/browser/storage";
 import { createBrowserWorkScheduler } from "@/browser/work";
-import { BrowserWriteBroadcast } from "@/browser/write";
+import { createBrowserWriteBroadcast } from "@/browser/write";
 import { createAmbientCryptoProvider } from "@/runtime/crypto";
 import {
   createAmbientConnectivityAdapter,
@@ -161,10 +161,10 @@ export function createBrowserPlatformAdapter(): EmbeddedPlatformAdapter {
       }
     },
     createSessionBroadcast({ name }) {
-      return new BrowserSessionBroadcast(`${name}:session`);
+      return createBrowserSessionBroadcast(`${name}:session`);
     },
     createWriteBroadcast({ name }) {
-      return new BrowserWriteBroadcast(`${name}:writes`);
+      return createBrowserWriteBroadcast(`${name}:writes`);
     },
     createStorageSurface({ runtime, crypto }) {
       return createBrowserStorageSurface(runtime, crypto);

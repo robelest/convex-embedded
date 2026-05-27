@@ -15,91 +15,81 @@ function isValidStoredWritePayload(
   );
 }
 
-export class BrowserWriteBroadcast implements WriteBroadcast {
-  private _channelName: string;
-  private _bc: BroadcastChannel | null = null;
-  private _callbacks: Set<(tablesWritten: Set<string>) => void> = new Set();
-  private _storageHandler: ((ev: StorageEvent) => void) | null = null;
-  private _closed = false;
-  private _senderId =
+export function createBrowserWriteBroadcast(
+  channelName: string = DEFAULT_CHANNEL_NAME,
+): WriteBroadcast {
+  let bc: BroadcastChannel | null = null;
+  const callbacks: Set<(tablesWritten: Set<string>) => void> = new Set();
+  let storageHandler: ((ev: StorageEvent) => void) | null = null;
+  let closed = false;
+  const senderId =
     typeof globalThis.crypto?.randomUUID === "function"
       ? globalThis.crypto.randomUUID()
       : `sender-${Math.random().toString(36).slice(2)}`;
-  private _seq = 0;
+  let seq = 0;
 
-  constructor(channelName: string = DEFAULT_CHANNEL_NAME) {
-    this._channelName = channelName;
-    this._init();
-  }
-
-  notify(tablesWritten: Set<string>): void {
-    if (this._closed) return;
-
-    const payload = Array.from(tablesWritten);
-    if (this._bc) {
-      this._bc.postMessage(payload);
-    } else if (typeof localStorage !== "undefined") {
-      try {
-        this._seq += 1;
-        localStorage.setItem(
-          this._channelName,
-          JSON.stringify({
-            tables: payload,
-            sender: this._senderId,
-            seq: this._seq,
-          }),
-        );
-      } catch {}
-    }
-  }
-
-  onNotification(callback: (tablesWritten: Set<string>) => void): () => void {
-    this._callbacks.add(callback);
-    return () => {
-      this._callbacks.delete(callback);
-    };
-  }
-
-  close(): void {
-    if (this._closed) return;
-    this._closed = true;
-    this._bc?.close();
-    this._bc = null;
-    if (this._storageHandler && typeof window !== "undefined") {
-      window.removeEventListener("storage", this._storageHandler);
-      this._storageHandler = null;
-    }
-    this._callbacks.clear();
-  }
-
-  private _init(): void {
-    if (typeof BroadcastChannel !== "undefined") {
-      this._bc = new BroadcastChannel(this._channelName);
-      this._bc.onmessage = (ev: MessageEvent<string[]>) => {
-        this._dispatch(new Set(ev.data));
-      };
-      return;
-    }
-
-    if (typeof window !== "undefined") {
-      this._storageHandler = (ev: StorageEvent) => {
-        if (ev.key !== this._channelName || ev.newValue === null) return;
-        try {
-          const parsed = JSON.parse(ev.newValue);
-          if (isValidStoredWritePayload(parsed)) {
-            this._dispatch(new Set(parsed.tables));
-          }
-        } catch {}
-      };
-      window.addEventListener("storage", this._storageHandler);
-    }
-  }
-
-  private _dispatch(tablesWritten: Set<string>): void {
-    for (const cb of this._callbacks) {
+  function dispatch(tablesWritten: Set<string>): void {
+    for (const cb of callbacks) {
       try {
         cb(tablesWritten);
       } catch {}
     }
   }
+
+  if (typeof BroadcastChannel !== "undefined") {
+    bc = new BroadcastChannel(channelName);
+    bc.onmessage = (ev: MessageEvent<string[]>) => {
+      dispatch(new Set(ev.data));
+    };
+  } else if (typeof window !== "undefined") {
+    storageHandler = (ev: StorageEvent) => {
+      if (ev.key !== channelName || ev.newValue === null) return;
+      try {
+        const parsed = JSON.parse(ev.newValue);
+        if (isValidStoredWritePayload(parsed)) {
+          dispatch(new Set(parsed.tables));
+        }
+      } catch {}
+    };
+    window.addEventListener("storage", storageHandler);
+  }
+
+  return {
+    notify(tablesWritten: Set<string>): void {
+      if (closed) return;
+      const payload = Array.from(tablesWritten);
+      if (bc) {
+        bc.postMessage(payload);
+      } else if (typeof localStorage !== "undefined") {
+        try {
+          seq += 1;
+          localStorage.setItem(
+            channelName,
+            JSON.stringify({
+              tables: payload,
+              sender: senderId,
+              seq,
+            }),
+          );
+        } catch {}
+      }
+    },
+    onNotification(callback: (tablesWritten: Set<string>) => void): () => void {
+      callbacks.add(callback);
+      return () => {
+        callbacks.delete(callback);
+      };
+    },
+    close(): void {
+      if (closed) return;
+      closed = true;
+      bc?.close();
+      bc = null;
+      if (storageHandler && typeof window !== "undefined") {
+        window.removeEventListener("storage", storageHandler);
+        storageHandler = null;
+      }
+      callbacks.clear();
+    },
+  };
 }

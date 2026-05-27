@@ -1,4 +1,4 @@
-import { BrowserSessionBroadcast } from "@embedded/browser/session";
+import { createBrowserSessionBroadcast } from "@embedded/browser/session";
 import type { SessionEvent } from "@embedded/runtime/platform";
 import {
   afterEach,
@@ -55,7 +55,7 @@ afterEach(() => {
 
 describe("BrowserSessionBroadcast", () => {
   it("does not notify its own callbacks on self notify", ({ track }) => {
-    const fanout = track(new BrowserSessionBroadcast());
+    const fanout = track(createBrowserSessionBroadcast());
     const callback = vi.fn();
 
     fanout.onNotification(callback);
@@ -65,8 +65,8 @@ describe("BrowserSessionBroadcast", () => {
   });
 
   it("notifies another tab on the same channel", ({ track }) => {
-    const fanoutA = track(new BrowserSessionBroadcast("shared-session"));
-    const fanoutB = track(new BrowserSessionBroadcast("shared-session"));
+    const fanoutA = track(createBrowserSessionBroadcast("shared-session"));
+    const fanoutB = track(createBrowserSessionBroadcast("shared-session"));
     const callback = vi.fn();
 
     fanoutA.onNotification(callback);
@@ -77,8 +77,8 @@ describe("BrowserSessionBroadcast", () => {
   });
 
   it("ignores notifications from a different channel", ({ track }) => {
-    const fanoutA = track(new BrowserSessionBroadcast("session-a"));
-    const fanoutB = track(new BrowserSessionBroadcast("session-b"));
+    const fanoutA = track(createBrowserSessionBroadcast("session-a"));
+    const fanoutB = track(createBrowserSessionBroadcast("session-b"));
     const callback = vi.fn();
 
     fanoutA.onNotification(callback);
@@ -88,8 +88,8 @@ describe("BrowserSessionBroadcast", () => {
   });
 
   it("unsubscribe removes only that callback", ({ track }) => {
-    const fanoutA = track(new BrowserSessionBroadcast("session-unsub"));
-    const fanoutB = track(new BrowserSessionBroadcast("session-unsub"));
+    const fanoutA = track(createBrowserSessionBroadcast("session-unsub"));
+    const fanoutB = track(createBrowserSessionBroadcast("session-unsub"));
     const callbackA = vi.fn();
     const callbackB = vi.fn();
 
@@ -104,8 +104,8 @@ describe("BrowserSessionBroadcast", () => {
   });
 
   it("close() is idempotent and clears callbacks", ({ track }) => {
-    const fanoutA = track(new BrowserSessionBroadcast("session-close"));
-    const fanoutB = track(new BrowserSessionBroadcast("session-close"));
+    const fanoutA = track(createBrowserSessionBroadcast("session-close"));
+    const fanoutB = track(createBrowserSessionBroadcast("session-close"));
     const callback = vi.fn();
 
     fanoutA.onNotification(callback);
@@ -126,7 +126,7 @@ describe("BrowserSessionBroadcast", () => {
     const localStorageMock = { setItem: vi.fn() };
     vi.stubGlobal("localStorage", localStorageMock);
     const fanout = track(
-      new BrowserSessionBroadcast("session-storage-fallback"),
+      createBrowserSessionBroadcast("session-storage-fallback"),
     );
 
     fanout.notify(authChanged);

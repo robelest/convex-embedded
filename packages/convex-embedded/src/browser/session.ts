@@ -24,90 +24,80 @@ function isValidStoredSessionPayload(
   );
 }
 
-export class BrowserSessionBroadcast implements SessionBroadcast {
-  private _channelName: string;
-  private _bc: BroadcastChannel | null = null;
-  private _callbacks: Set<(event: SessionEvent) => void> = new Set();
-  private _storageHandler: ((ev: StorageEvent) => void) | null = null;
-  private _closed = false;
-  private _scope = createDisposableScope();
-  private _senderId =
+export function createBrowserSessionBroadcast(
+  channelName: string = DEFAULT_CHANNEL_NAME,
+): SessionBroadcast {
+  let bc: BroadcastChannel | null = null;
+  const callbacks: Set<(event: SessionEvent) => void> = new Set();
+  let storageHandler: ((ev: StorageEvent) => void) | null = null;
+  let closed = false;
+  const scope = createDisposableScope();
+  const senderId =
     typeof globalThis.crypto?.randomUUID === "function"
       ? globalThis.crypto.randomUUID()
       : `sender-${Math.random().toString(36).slice(2)}`;
-  private _seq = 0;
+  let seq = 0;
 
-  constructor(channelName: string = DEFAULT_CHANNEL_NAME) {
-    this._channelName = channelName;
-    this._init();
-  }
-
-  notify(event: SessionEvent): void {
-    if (this._closed) return;
-
-    if (this._bc) {
-      this._bc.postMessage(event);
-    } else if (typeof localStorage !== "undefined") {
-      try {
-        this._seq += 1;
-        localStorage.setItem(
-          this._channelName,
-          JSON.stringify({ event, sender: this._senderId, seq: this._seq }),
-        );
-      } catch {}
-    }
-  }
-
-  onNotification(callback: (event: SessionEvent) => void): () => void {
-    this._callbacks.add(callback);
-    return () => this._callbacks.delete(callback);
-  }
-
-  close(): void {
-    if (this._closed) return;
-    this._closed = true;
-    void this._scope.close();
-    this._callbacks.clear();
-  }
-
-  private _init(): void {
-    if (typeof BroadcastChannel !== "undefined") {
-      this._bc = new BroadcastChannel(this._channelName);
-      this._bc.onmessage = (ev: MessageEvent<SessionEvent>) => {
-        this._dispatch(ev.data);
-      };
-      this._scope.addFinalizer(() => {
-        this._bc?.close();
-        this._bc = null;
-      });
-      return;
-    }
-
-    if (typeof window !== "undefined") {
-      this._storageHandler = (ev: StorageEvent) => {
-        if (ev.key !== this._channelName || ev.newValue === null) return;
-        try {
-          const parsed = JSON.parse(ev.newValue);
-          if (isValidStoredSessionPayload(parsed)) {
-            this._dispatch(parsed.event);
-          }
-        } catch {}
-      };
-      window.addEventListener("storage", this._storageHandler);
-      this._scope.addFinalizer(() => {
-        if (this._storageHandler && typeof window !== "undefined") {
-          window.removeEventListener("storage", this._storageHandler);
-          this._storageHandler = null;
-        }
-      });
-    }
-  }
-
-  private _dispatch(event: SessionEvent): void {
-    for (const callback of this._callbacks) {
+  function dispatch(event: SessionEvent): void {
+    for (const callback of callbacks) {
       try {
         callback(event);
       } catch {}
     }
   }
+
+  if (typeof BroadcastChannel !== "undefined") {
+    bc = new BroadcastChannel(channelName);
+    bc.onmessage = (ev: MessageEvent<SessionEvent>) => {
+      dispatch(ev.data);
+    };
+    scope.addFinalizer(() => {
+      bc?.close();
+      bc = null;
+    });
+  } else if (typeof window !== "undefined") {
+    storageHandler = (ev: StorageEvent) => {
+      if (ev.key !== channelName || ev.newValue === null) return;
+      try {
+        const parsed = JSON.parse(ev.newValue);
+        if (isValidStoredSessionPayload(parsed)) {
+          dispatch(parsed.event);
+        }
+      } catch {}
+    };
+    window.addEventListener("storage", storageHandler);
+    scope.addFinalizer(() => {
+      if (storageHandler && typeof window !== "undefined") {
+        window.removeEventListener("storage", storageHandler);
+        storageHandler = null;
+      }
+    });
+  }
+
+  return {
+    notify(event: SessionEvent): void {
+      if (closed) return;
+      if (bc) {
+        bc.postMessage(event);
+      } else if (typeof localStorage !== "undefined") {
+        try {
+          seq += 1;
+          localStorage.setItem(
+            channelName,
+            JSON.stringify({ event, sender: senderId, seq }),
+          );
+        } catch {}
+      }
+    },
+    onNotification(callback: (event: SessionEvent) => void): () => void {
+      callbacks.add(callback);
+      return () => callbacks.delete(callback);
+    },
+    close(): void {
+      if (closed) return;
+      closed = true;
+      void scope.close();
+      callbacks.clear();
+    },
+  };
 }

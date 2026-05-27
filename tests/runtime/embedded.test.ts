@@ -1,4 +1,4 @@
-import { BrowserWriteBroadcast } from "@embedded/browser/write";
+import { createBrowserWriteBroadcast } from "@embedded/browser/write";
 import type { ConvexModuleRegistry } from "@embedded/kernel/modules";
 import type { AsyncReadBackend } from "@embedded/runtime/db/backend";
 import {
@@ -569,11 +569,11 @@ describe("onMutationCommit", () => {
   }) => {
     const runtimeA = new EmbeddedRuntime({
       convex: { modules: STUB_MODULES },
-      writeBroadcast: new BrowserWriteBroadcast("shared-runtime"),
+      writeBroadcast: createBrowserWriteBroadcast("shared-runtime"),
     });
     const runtimeB = new EmbeddedRuntime({
       convex: { modules: STUB_MODULES },
-      writeBroadcast: new BrowserWriteBroadcast("shared-runtime"),
+      writeBroadcast: createBrowserWriteBroadcast("shared-runtime"),
     });
     onTestFinished(() => {
       runtimeA.shutdown();
@@ -609,11 +609,11 @@ describe("onMutationCommit", () => {
   }) => {
     const runtimeA = new EmbeddedRuntime({
       convex: { modules: STUB_MODULES },
-      writeBroadcast: new BrowserWriteBroadcast("shared-runtime-burst"),
+      writeBroadcast: createBrowserWriteBroadcast("shared-runtime-burst"),
     });
     const runtimeB = new EmbeddedRuntime({
       convex: { modules: STUB_MODULES },
-      writeBroadcast: new BrowserWriteBroadcast("shared-runtime-burst"),
+      writeBroadcast: createBrowserWriteBroadcast("shared-runtime-burst"),
     });
     onTestFinished(() => {
       runtimeA.shutdown();

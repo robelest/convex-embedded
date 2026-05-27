@@ -1,4 +1,4 @@
-import { BrowserWriteBroadcast } from "@embedded/browser/write";
+import { createBrowserWriteBroadcast } from "@embedded/browser/write";
 import {
   afterEach,
   beforeEach,
@@ -53,7 +53,7 @@ afterEach(() => {
 describe("BrowserWriteBroadcast", () => {
   describe("onNotification", () => {
     it("returns an unsubscribe function", ({ track }) => {
-      const fanout = track(new BrowserWriteBroadcast());
+      const fanout = track(createBrowserWriteBroadcast());
       const callback = vi.fn();
 
       const unsubscribe = fanout.onNotification(callback);
@@ -64,7 +64,7 @@ describe("BrowserWriteBroadcast", () => {
 
   describe("notify + onNotification (cross-tab)", () => {
     it("does not fire the callback for its own notify", ({ track }) => {
-      const fanout = track(new BrowserWriteBroadcast());
+      const fanout = track(createBrowserWriteBroadcast());
       const callback = vi.fn();
       fanout.onNotification(callback);
 
@@ -76,8 +76,8 @@ describe("BrowserWriteBroadcast", () => {
     it("fires when a different broadcast on the same channel notifies", ({
       track,
     }) => {
-      const fanout1 = track(new BrowserWriteBroadcast("test-channel"));
-      const fanout2 = track(new BrowserWriteBroadcast("test-channel"));
+      const fanout1 = track(createBrowserWriteBroadcast("test-channel"));
+      const fanout2 = track(createBrowserWriteBroadcast("test-channel"));
       const callback = vi.fn<(tablesWritten: Set<string>) => void>();
       fanout1.onNotification(callback);
 
@@ -89,8 +89,8 @@ describe("BrowserWriteBroadcast", () => {
     });
 
     it("does not fire for a different channel name", ({ track }) => {
-      const fanout1 = track(new BrowserWriteBroadcast("channel-a"));
-      const fanout2 = track(new BrowserWriteBroadcast("channel-b"));
+      const fanout1 = track(createBrowserWriteBroadcast("channel-a"));
+      const fanout2 = track(createBrowserWriteBroadcast("channel-b"));
       const callback = vi.fn();
       fanout1.onNotification(callback);
 
@@ -102,8 +102,8 @@ describe("BrowserWriteBroadcast", () => {
 
   describe("unsubscribe", () => {
     it("removes the callback", ({ track }) => {
-      const fanout1 = track(new BrowserWriteBroadcast("test-unsub"));
-      const fanout2 = track(new BrowserWriteBroadcast("test-unsub"));
+      const fanout1 = track(createBrowserWriteBroadcast("test-unsub"));
+      const fanout2 = track(createBrowserWriteBroadcast("test-unsub"));
       const callback = vi.fn();
       const unsubscribe = fanout1.onNotification(callback);
 
@@ -114,8 +114,8 @@ describe("BrowserWriteBroadcast", () => {
     });
 
     it("does not affect other callbacks", ({ track }) => {
-      const fanout1 = track(new BrowserWriteBroadcast("test-multi"));
-      const fanout2 = track(new BrowserWriteBroadcast("test-multi"));
+      const fanout1 = track(createBrowserWriteBroadcast("test-multi"));
+      const fanout2 = track(createBrowserWriteBroadcast("test-multi"));
       const callback1 = vi.fn();
       const callback2 = vi.fn();
       const unsubscribe1 = fanout1.onNotification(callback1);
@@ -131,8 +131,8 @@ describe("BrowserWriteBroadcast", () => {
 
   describe("close", () => {
     it("clears callbacks so they no longer fire", ({ track }) => {
-      const fanout1 = track(new BrowserWriteBroadcast("test-close"));
-      const fanout2 = track(new BrowserWriteBroadcast("test-close"));
+      const fanout1 = track(createBrowserWriteBroadcast("test-close"));
+      const fanout2 = track(createBrowserWriteBroadcast("test-close"));
       const callback = vi.fn();
       fanout1.onNotification(callback);
 
@@ -143,7 +143,7 @@ describe("BrowserWriteBroadcast", () => {
     });
 
     it("is idempotent", ({ track }) => {
-      const fanout = track(new BrowserWriteBroadcast());
+      const fanout = track(createBrowserWriteBroadcast());
       fanout.close();
       expect(() => fanout.close()).not.toThrow();
     });
@@ -151,15 +151,15 @@ describe("BrowserWriteBroadcast", () => {
 
   describe("notify after close", () => {
     it("is a no-op and does not throw", ({ track }) => {
-      const fanout = track(new BrowserWriteBroadcast());
+      const fanout = track(createBrowserWriteBroadcast());
       fanout.close();
 
       expect(() => fanout.notify(new Set(["users"]))).not.toThrow();
     });
 
     it("does not post to BroadcastChannel after close", ({ track }) => {
-      const fanout1 = track(new BrowserWriteBroadcast("test-closed-notify"));
-      const fanout2 = track(new BrowserWriteBroadcast("test-closed-notify"));
+      const fanout1 = track(createBrowserWriteBroadcast("test-closed-notify"));
+      const fanout2 = track(createBrowserWriteBroadcast("test-closed-notify"));
       const callback = vi.fn();
       fanout2.onNotification(callback);
 
@@ -178,7 +178,7 @@ describe("BrowserWriteBroadcast", () => {
       );
       const localStorageMock = { setItem: vi.fn() };
       vi.stubGlobal("localStorage", localStorageMock);
-      const fanout = track(new BrowserWriteBroadcast("storage-fallback"));
+      const fanout = track(createBrowserWriteBroadcast("storage-fallback"));
 
       fanout.notify(new Set(["users"]));
       fanout.notify(new Set(["users"]));

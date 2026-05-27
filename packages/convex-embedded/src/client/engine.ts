@@ -1647,6 +1647,15 @@ function getQueueEntryRoute(input: {
 }
 
 class EngineImpl implements EngineInstance {
+  // Subsystem instances — hoisted from constructor closure consts so
+  // class methods outside the constructor can reach them without going
+  // through `this.impl`. Only the ones consumed by class methods are
+  // declared; new declarations are added as more methods migrate off
+  // this.impl.
+  private readonly _statusEmitter!: EngineStatusEmitter;
+  private readonly _idMap!: IdMap;
+  private readonly _pendingQueue!: PendingQueue;
+
   // The closure-captured methods that the constructor body assembles.
   // Each is bound in the constructor's `this.impl = { ... }` block.
   private impl!: EngineInstance;
@@ -1747,6 +1756,7 @@ class EngineImpl implements EngineInstance {
       : undefined;
 
     const statusEmitter = new EngineStatusEmitter();
+    this._statusEmitter = statusEmitter;
     let started = false;
     let scopeActivationEpoch = 0;
     const cycleScheduler = new CycleScheduler();
@@ -3757,6 +3767,12 @@ class EngineImpl implements EngineInstance {
       );
     }
 
+    // Publish subsystem instances as class fields so methods outside the
+    // constructor can reach them without going through `this.impl`. New
+    // assignments are added as more class methods migrate off this.impl.
+    this._idMap = idMap;
+    this._pendingQueue = pendingQueue;
+
     this.impl = {
       start() {
         if (started) return;
@@ -4023,12 +4039,12 @@ class EngineImpl implements EngineInstance {
     this.impl.stop();
   }
 
-  on(event: "change", listener: ChangeListener): () => void {
-    return this.impl.on(event, listener);
+  on(_event: "change", listener: ChangeListener): () => void {
+    return this._statusEmitter.on(listener);
   }
 
   getStatus(): EngineStatus {
-    return this.impl.getStatus();
+    return this._statusEmitter.get();
   }
 
   mutation(
@@ -4076,15 +4092,15 @@ class EngineImpl implements EngineInstance {
   }
 
   pendingCount(): number {
-    return this.impl.pendingCount();
+    return this._pendingQueue.length;
   }
 
   get idMap(): IdMap {
-    return this.impl.idMap;
+    return this._idMap;
   }
 
   get pendingQueue(): PendingQueue {
-    return this.impl.pendingQueue;
+    return this._pendingQueue;
   }
 
   [Symbol.asyncDispose](): Promise<void> {

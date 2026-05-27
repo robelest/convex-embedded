@@ -11,11 +11,11 @@
 import type { ConvexClient } from "convex/browser";
 import * as Y from "yjs";
 
-import { ConnectivityState } from "@/client/engine/connectivity";
 import { CrdtDirtyState } from "@/client/engine/crdt";
 import { PullBatchCoordinator } from "@/client/engine/pullbatch";
 import { ReplayLoopState } from "@/client/engine/replay";
-import { CycleScheduler } from "@/client/engine/scheduler";
+import * as scheduler from "@/client/engine/scheduler";
+import type { SchedulerDeps, SchedulerState } from "@/client/engine/scheduler";
 import { ScopeRegistry, type ActiveScope } from "@/client/engine/scope";
 import { SnapshotIngest } from "@/client/engine/snapshot";
 import { IdMap, extractSchemaIdFields } from "@/client/ids";
@@ -720,19 +720,10 @@ export interface EngineConfig {
   getReplayPayloadVersion?: (refName: string) => number;
 }
 
-type ReplicationCycleRoute =
-  | { _tag: "Skip" }
-  | { _tag: "DeferUntilQueueDrains" }
-  | { _tag: "Resolve" };
-
 type QueueEntryRoute =
   | { _tag: "Stop" }
   | { _tag: "DropMappedCreate"; localResult: string }
   | { _tag: "Push"; localResult: unknown };
-
-type StartLifecycleRoute =
-  | { _tag: "Offline" }
-  | { _tag: "WaitForHydrationThenOnline" };
 
 type LocalYjsEntry = {
   localDoc: Record<string, unknown>;
@@ -900,57 +891,6 @@ function inferTableFromRef(
   }
 
   return null;
-}
-
-function getReplicationCycleRoute(input: {
-  aborted: boolean;
-  forceResolve: boolean;
-  hasPending: boolean;
-  isOnline: boolean;
-  started: boolean;
-  offlineTransitionsSinceBoot: number;
-  hasDirtyCrdtRows: boolean;
-}): ReplicationCycleRoute {
-  if (input.aborted) return { _tag: "Skip" };
-  if (!input.forceResolve && (!input.started || !input.isOnline)) {
-    return { _tag: "Skip" };
-  }
-  if (input.hasPending) {
-    return { _tag: "DeferUntilQueueDrains" };
-  }
-  if (
-    !input.forceResolve &&
-    input.offlineTransitionsSinceBoot === 0 &&
-    !input.hasDirtyCrdtRows
-  ) {
-    return { _tag: "Skip" };
-  }
-  return { _tag: "Resolve" };
-}
-
-function shouldStartRemoteSubscriptions(input: {
-  aborted: boolean;
-  forceResolve: boolean;
-  hasPending: boolean;
-  isOnline: boolean;
-  started: boolean;
-}): boolean {
-  return (
-    !input.aborted &&
-    input.started &&
-    input.isOnline &&
-    !input.hasPending &&
-    !input.forceResolve
-  );
-}
-
-function getStartLifecycleRoute(input: {
-  hasNavigator: boolean;
-  navigatorOnline: boolean | undefined;
-}): StartLifecycleRoute {
-  return input.hasNavigator && input.navigatorOnline === false
-    ? { _tag: "Offline" }
-    : { _tag: "WaitForHydrationThenOnline" };
 }
 
 function createHydrationAwareOnlineHandler(input: {
@@ -1689,12 +1629,11 @@ class EngineImpl implements EngineInstance {
   /** @internal */ readonly _idMap!: IdMap;
   /** @internal */ readonly _pendingQueue!: PendingQueue;
   /** @internal */ readonly _pendingUploadQueue!: PendingUploadQueue;
-  /** @internal */ readonly _connectivityState!: ConnectivityState;
+  /** @internal */ readonly _schedulerState!: SchedulerState;
   /** @internal */ readonly _crdt!: CrdtDirtyState;
   /** @internal */ readonly _pullBatch!: PullBatchCoordinator;
   /** @internal */ readonly _scopeGate!: ScopeRegistry;
   /** @internal */ readonly _snapshotIngest!: SnapshotIngest;
-  /** @internal */ readonly _cycleScheduler!: CycleScheduler;
   /** @internal */ readonly _replayLoop!: ReplayLoopState;
 
   start!: () => void;
@@ -1822,7 +1761,7 @@ class EngineImpl implements EngineInstance {
     this._statusEmitter = statusEmitter;
     let started = false;
     let scopeActivationEpoch = 0;
-    const cycleScheduler = new CycleScheduler();
+    const schedulerState = scheduler.createSchedulerState();
 
     const schemaIdFields = extractSchemaIdFields(
       Object.values(tables)
@@ -1860,7 +1799,6 @@ class EngineImpl implements EngineInstance {
     const processorIdForReplay =
       processorId ?? `processor_${Math.random().toString(36).slice(2)}`;
 
-    const connectivityState = new ConnectivityState();
     const crdt = new CrdtDirtyState(tables);
 
     let onOnline: (() => void) | null = null;
@@ -1940,7 +1878,7 @@ class EngineImpl implements EngineInstance {
     const clearBufferedSnapshots = () => snapshotIngest.clearAll();
 
     function ensureReplayProcessing(): void {
-      if (!connectivityState.isOnline()) return;
+      if (!scheduler.isOnline(schedulerState)) return;
       const hasPendingMutation = !pendingQueue.isEmpty;
       const hasPendingUpload = pendingUploadQueue.length > 0;
       if (!hasPendingMutation && !hasPendingUpload) return;
@@ -1953,7 +1891,7 @@ class EngineImpl implements EngineInstance {
         if (pendingQueue.isEmpty) {
           snapshotIngest.softResetBuffers();
           if (!hasActiveSubscriptions() && started) {
-            void runReplicationCycle();
+            void scheduler.run(schedulerState, schedulerDeps);
           }
           return;
         }
@@ -2182,11 +2120,14 @@ class EngineImpl implements EngineInstance {
 
       const cyclePromise = (async () => {
         try {
-          outer: while (connectivityState.isOnline() && !signal?.aborted) {
+          outer: while (
+            scheduler.isOnline(schedulerState) &&
+            !signal?.aborted
+          ) {
             replayLoop.setRequestedWhileActive(false);
             while (
               !pendingQueue.isEmpty &&
-              connectivityState.isOnline() &&
+              scheduler.isOnline(schedulerState) &&
               !signal?.aborted
             ) {
               const entry = await pendingQueue.claimNext(
@@ -2211,7 +2152,7 @@ class EngineImpl implements EngineInstance {
                 hasActiveLocalDocument: (localId: string) =>
                   embedded.hasLocalDocumentId?.(localId) ?? false,
                 getRemoteId: (localId: string) => idMap.getRemoteId(localId),
-                isOnline: connectivityState.isOnline(),
+                isOnline: scheduler.isOnline(schedulerState),
                 signal,
               });
               await runSpan({
@@ -2381,7 +2322,7 @@ class EngineImpl implements EngineInstance {
             if (
               !replayLoop.requestedWhileActive() ||
               pendingQueue.isEmpty ||
-              !connectivityState.isOnline() ||
+              !scheduler.isOnline(schedulerState) ||
               signal?.aborted
             ) {
               break;
@@ -2431,89 +2372,6 @@ class EngineImpl implements EngineInstance {
           );
         }
       }
-    }
-
-    function runReplicationCycle(options?: {
-      forceResolve?: boolean;
-    }): Promise<void> {
-      const inFlight = cycleScheduler.inFlight();
-      if (inFlight) {
-        if (options?.forceResolve) {
-          return inFlight.then(() => runReplicationCycle(options));
-        }
-        return inFlight;
-      }
-
-      cycleScheduler.abortCurrent();
-      const controller = cycleScheduler.newAbortController();
-      const signal = controller.signal;
-
-      const cyclePromise = (async () => {
-        try {
-          await processUploadQueue(signal);
-          const deadLettered = await processQueue(signal);
-          await rollbackDeadLetteredTables(deadLettered, signal);
-
-          const route = getReplicationCycleRoute({
-            aborted: signal.aborted,
-            forceResolve: options?.forceResolve ?? false,
-            hasPending: !pendingQueue.isEmpty,
-            isOnline: connectivityState.isOnline(),
-            started,
-            offlineTransitionsSinceBoot:
-              connectivityState.offlineTransitionsSinceBoot(),
-            hasDirtyCrdtRows: crdt.hasDirty(),
-          });
-
-          if (route._tag === "Skip") {
-            if (connectivityState.isOnline() && started && !signal.aborted) {
-              emit({ status: "resolved" });
-            }
-          } else if (route._tag === "DeferUntilQueueDrains") {
-            stopRemoteSubscriptions();
-            log.warn(
-              "sync: deferring resolve and remote subscriptions until pending queue drains",
-            );
-          } else if (route._tag === "Resolve") {
-            if (
-              !options?.forceResolve &&
-              crdt.hasDirty() &&
-              connectivityState.offlineTransitionsSinceBoot() > 0
-            ) {
-              await mergeDirtyCrdtRows(signal);
-            } else {
-              await pullAll(signal);
-              if (!signal.aborted) {
-                crdt.clearAll();
-              }
-            }
-          }
-
-          if (
-            shouldStartRemoteSubscriptions({
-              aborted: signal.aborted,
-              forceResolve: options?.forceResolve ?? false,
-              hasPending: !pendingQueue.isEmpty,
-              isOnline: connectivityState.isOnline(),
-              started,
-            })
-          ) {
-            startRemoteSubscriptions();
-          }
-        } catch (err) {
-          if (!(err instanceof DOMException && err.name === "AbortError")) {
-            log.error("sync: online cycle failed", err);
-          }
-        }
-      })().finally(() => {
-        cycleScheduler.setInFlight(null);
-        if (cycleScheduler.currentSignal() === signal) {
-          cycleScheduler.abortCurrent();
-        }
-      });
-
-      cycleScheduler.setInFlight(cyclePromise);
-      return cyclePromise;
     }
 
     async function mergeDirtyCrdtRows(signal?: AbortSignal): Promise<void> {
@@ -3519,7 +3377,11 @@ class EngineImpl implements EngineInstance {
         scopeArgs: normalizedScope,
       };
       if (!existing) activeScopes.set(key, entry);
-      if (!connectivityState.isOnline() || !started || !pendingQueue.isEmpty) {
+      if (
+        !scheduler.isOnline(schedulerState) ||
+        !started ||
+        !pendingQueue.isEmpty
+      ) {
         return;
       }
 
@@ -3535,7 +3397,7 @@ class EngineImpl implements EngineInstance {
           await getTableSpec(
             tableName,
             tableConfig,
-            cycleScheduler.currentSignal(),
+            scheduler.currentSignal(schedulerState),
             normalizedScope,
           );
         }
@@ -3591,24 +3453,6 @@ class EngineImpl implements EngineInstance {
           entry.pendingActivation = undefined;
         }
       }
-    }
-
-    function handleOnline() {
-      log.info("sync: online event — flushing queue, resolving, subscribing");
-      connectivityState.markOnline();
-      recordCounter("connectivity.transition", { state: "online" });
-
-      runDetached(() => runReplicationCycle(), "[sync] handleOnline:");
-    }
-
-    function handleOffline() {
-      log.info("sync: offline event");
-      connectivityState.markOffline();
-      recordCounter("connectivity.transition", { state: "offline" });
-      cycleScheduler.abortCurrent();
-      stopRemoteSubscriptions();
-      clearBufferedSnapshots();
-      emit({ status: "offline" });
     }
 
     async function hydrateIdentityState(): Promise<void> {
@@ -3803,23 +3647,37 @@ class EngineImpl implements EngineInstance {
       });
     }
 
-    async function heartbeatProcessorSafe(): Promise<void> {
-      try {
-        await heartbeatProcessor();
-      } catch (err) {
-        log.debug("sync: processor heartbeat failed", err);
-      }
+    const schedulerDeps: SchedulerDeps = {
+      processUploadQueue,
+      processQueue,
+      rollbackDeadLetteredTables,
+      mergeDirtyCrdtRows,
+      pullAll,
+      stopRemoteSubscriptions,
+      startRemoteSubscriptions,
+      clearBufferedSnapshots,
+      emit,
+      pendingQueue,
+      crdt,
+      isStarted: () => started,
+      heartbeatMs: processorHeartbeatMs,
+      heartbeat: heartbeatProcessor,
+    };
+
+    function handleOnline(): void {
+      scheduler.handleOnline(schedulerState, schedulerDeps);
+    }
+
+    function handleOffline(): void {
+      scheduler.handleOffline(schedulerState, schedulerDeps);
     }
 
     function startProcessorHeartbeat(): void {
-      cycleScheduler.startHeartbeat(
-        processorHeartbeatMs,
-        heartbeatProcessorSafe,
-      );
+      scheduler.startHeartbeat(schedulerState, schedulerDeps);
     }
 
     function stopProcessorHeartbeat(): void {
-      cycleScheduler.stopHeartbeat();
+      scheduler.stopHeartbeat(schedulerState);
       runDetached(
         () =>
           runLocalSystemMutation(SystemPaths.processorRemove, {
@@ -3830,17 +3688,14 @@ class EngineImpl implements EngineInstance {
       );
     }
 
-    // Publish subsystem instances as class fields so methods outside the
-    // constructor can reach them without going through `this.impl`.
     this._idMap = idMap;
     this._pendingQueue = pendingQueue;
     this._pendingUploadQueue = pendingUploadQueue;
-    this._connectivityState = connectivityState;
+    this._schedulerState = schedulerState;
     this._crdt = crdt;
     this._pullBatch = pullBatch;
     this._scopeGate = scopeGate;
     this._snapshotIngest = snapshotIngest;
-    this._cycleScheduler = cycleScheduler;
     this._replayLoop = replayLoop;
 
     this.start = () => {
@@ -3860,14 +3715,14 @@ class EngineImpl implements EngineInstance {
 
       const connectivity = getConnectivityAdapter(config.connectivity);
 
-      const startRoute = getStartLifecycleRoute({
+      const startRoute = scheduler.getStartLifecycleRoute({
         hasNavigator: true,
         navigatorOnline: connectivity?.isOnline(),
       });
 
       matchTag(startRoute, "_tag", {
         Offline: () => {
-          connectivityState.markOffline();
+          scheduler.markOffline(schedulerState);
           emit({ status: "offline" });
         },
         WaitForHydrationThenOnline: () => {
@@ -3892,7 +3747,7 @@ class EngineImpl implements EngineInstance {
       unregisterPendingDepth();
       unregisterPendingUploadsDepth();
 
-      cycleScheduler.abortCurrent();
+      scheduler.abortCurrent(schedulerState);
       const claimedEntry = replayLoop.activeEntry();
       if (claimedEntry) {
         replayLoop.setActiveEntry(null);
@@ -3942,7 +3797,7 @@ class EngineImpl implements EngineInstance {
       try {
         localResult = await executeMutationLocally(ref, localArgs);
       } catch (err) {
-        if (!connectivityState.isOnline()) {
+        if (!scheduler.isOnline(schedulerState)) {
           throw err;
         }
         localFailed = true;
@@ -3993,7 +3848,7 @@ class EngineImpl implements EngineInstance {
         log.debug(
           `engine.mutation queue.push push=${(__pushDone - __pushStart).toFixed(1)}ms ref=${refName}`,
         );
-        if (!connectivityState.isOnline() && crdt.shouldTrack(table)) {
+        if (!scheduler.isOnline(schedulerState) && crdt.shouldTrack(table)) {
           const docId =
             typeof localResult === "string"
               ? localResult
@@ -4003,7 +3858,7 @@ class EngineImpl implements EngineInstance {
             crdt.mark(table, docId);
           }
         }
-        if (connectivityState.isOnline()) {
+        if (scheduler.isOnline(schedulerState)) {
           ensureReplayProcessing();
         } else {
           log.debug("sync: offline — mutation queued for later push");
@@ -4018,10 +3873,10 @@ class EngineImpl implements EngineInstance {
     };
 
     this.pullNow = (): Promise<void> => {
-      if (connectivityState.isOnline()) {
+      if (scheduler.isOnline(schedulerState)) {
         stopRemoteSubscriptions();
       }
-      return runReplicationCycle({ forceResolve: true });
+      return scheduler.run(schedulerState, schedulerDeps, { forcePull: true });
     };
 
     this.ensureTableReady = (tableName: string): Promise<void> => {
@@ -4065,9 +3920,9 @@ class EngineImpl implements EngineInstance {
         return;
       }
 
-      if (connectivityState.isOnline()) {
+      if (scheduler.isOnline(schedulerState)) {
         stopRemoteSubscriptions();
-        await runReplicationCycle({ forceResolve: true });
+        await scheduler.run(schedulerState, schedulerDeps, { forcePull: true });
         return;
       }
 

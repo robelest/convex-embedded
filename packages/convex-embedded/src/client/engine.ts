@@ -14,6 +14,7 @@ import * as Y from "yjs";
 import { ConnectivityState } from "@/client/engine/connectivity";
 import { CrdtDirtyState } from "@/client/engine/crdt";
 import { PullBatchCoordinator } from "@/client/engine/pullbatch";
+import { SnapshotIngest } from "@/client/engine/snapshot";
 import {
   EngineStatusEmitter,
   type ChangeListener,
@@ -216,20 +217,6 @@ function createRemoteSubscriptionErrorHandler(tableName: string) {
     log.error(`sync: remote subscription error for "${tableName}"`, err);
   };
 }
-
-type TableRemoteSyncState = {
-  tableName: string;
-  scopeArgs: Record<string, unknown>;
-  bufferedSnapshot: Array<Record<string, unknown>> | null;
-  flushScheduled: boolean;
-  epoch: number;
-  retryTimer: ReturnType<typeof setTimeout> | null;
-  retryCount: number;
-};
-
-const MAX_BUFFERED_SNAPSHOT_RETRIES = 8;
-const BUFFERED_SNAPSHOT_RETRY_BASE_MS = 25;
-const BUFFERED_SNAPSHOT_RETRY_MAX_MS = 1000;
 
 function extractPendingLogicalId(entry: PendingEntry): string | null {
   try {
@@ -1834,8 +1821,6 @@ function createEngine(config: EngineConfig): EngineInstance {
   let cleanupOnlineListener: (() => void) | null = null;
   let cleanupOfflineListener: (() => void) | null = null;
   let processorHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
-  let bufferedFlushScheduled = false;
-  let bufferedFlushTimer: ReturnType<typeof setTimeout> | null = null;
   const activeScopes = new Map<string, ActiveScope>();
   const scopeTeardownTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const SCOPE_TEARDOWN_DEBOUNCE_MS = config.scopeTeardownDebounceMs ?? 3000;
@@ -1907,217 +1892,36 @@ function createEngine(config: EngineConfig): EngineInstance {
   function hasActiveSubscriptions(): boolean {
     return activeScopes.size > 0;
   }
-  const tableRemoteSyncStateMap = new Map<string, TableRemoteSyncState>();
 
-  function getTableReplicationState(
-    tableName: string,
-    scopeArgs?: Record<string, unknown>,
-  ): TableRemoteSyncState {
-    const normalizedScope = canonicalizeScopeArgs(scopeArgs);
-    const scopeKey = buildScopeKey(tableName, normalizedScope);
-    let state = tableRemoteSyncStateMap.get(scopeKey);
-    if (!state) {
-      state = {
-        tableName,
-        scopeArgs: normalizedScope,
-        bufferedSnapshot: null,
-        flushScheduled: false,
-        epoch: 0,
-        retryTimer: null,
-        retryCount: 0,
-      };
-      tableRemoteSyncStateMap.set(scopeKey, state);
-    }
-    return state;
-  }
-
-  function scheduleBufferedSnapshotFlush(delayMs = 0): void {
-    if (delayMs > 0) {
-      // Backoff retry. Skip if any flush is already pending: a pending
-      // immediate flush will pick up the still-buffered docs, and we never
-      // stack multiple backoff timers.
-      if (bufferedFlushScheduled) {
-        return;
-      }
-      bufferedFlushScheduled = true;
-      bufferedFlushTimer = setTimeout(() => {
-        bufferedFlushTimer = null;
-        void flushBufferedSnapshots();
-      }, delayMs);
-      return;
-    }
-
-    // Immediate flush. Preempt a pending backoff retry so a fresh snapshot for
-    // one table is not held back by another table's retry timer.
-    if (bufferedFlushTimer !== null) {
-      clearTimeout(bufferedFlushTimer);
-      bufferedFlushTimer = null;
-      bufferedFlushScheduled = false;
-    }
-    if (bufferedFlushScheduled) {
-      return;
-    }
-    bufferedFlushScheduled = true;
-    runDetached(() => flushBufferedSnapshots(), "[sync] flush buffered:");
-  }
-
-  async function flushBufferedSnapshot(scopeKey: string): Promise<void> {
-    const state = tableRemoteSyncStateMap.get(scopeKey);
-    if (!state) {
-      return;
-    }
-    if (state.bufferedSnapshot === null) {
-      state.flushScheduled = false;
-      return;
-    }
-
-    const snapshot = state.bufferedSnapshot;
-    state.bufferedSnapshot = null;
-    state.flushScheduled = false;
-    const { scopeArgs, tableName } = state;
-
-    const projected = projectRemoteSnapshot({
-      localDocs: await getDocumentsForTable(tableName),
-      remoteDocs: snapshot,
-      pendingEntries: pendingQueue.entries(),
-      recentlyReplayedIds: getRecentlyReplayedIdSet(),
-      tableName,
+  const snapshotIngest = new SnapshotIngest(
+    {
+      orderedTables,
+      canonicalizeScopeArgs,
+      buildScopeKey,
+      projectRemoteSnapshot,
+      getDocumentsForTable,
+      filterAfterHydratingReferences,
+      ingestDocuments: (table, docs, scopeArgs) =>
+        ingestDocuments(table, docs, scopeArgs),
+      runSpan,
+      yieldToEventLoop,
+    },
+    {
+      getRecentlyReplayedIdSet: () => getRecentlyReplayedIdSet(),
+      getPendingEntries: () => pendingQueue.entries(),
       getAliases: (id) => idMap.getAliases(id),
-    });
-    const { accepted, skipped } = await filterAfterHydratingReferences({
-      docs: projected,
-      tableName,
-    });
-    try {
-      if (accepted.length > 0) {
-        await runSpan({
-          name: "convex_embedded.remote.buffered_snapshot.ingest",
-          attributes: {
-            table: tableName,
-            accepted_count: accepted.length,
-            projected_count: projected.length,
-          },
-          run: () =>
-            ingestDocuments(
-              tableName,
-              accepted,
-              Object.keys(scopeArgs).length > 0 ? scopeArgs : undefined,
-            ),
-        });
-      }
+      clearPullBatch: () => pullBatch.clearAll(),
+    },
+  );
 
-      if (skipped.length > 0) {
-        await runSpan({
-          name: "convex_embedded.remote.buffered_snapshot.defer",
-          attributes: {
-            table: tableName,
-            accepted_count: accepted.length,
-            skipped_count: skipped.length,
-            retry_count: state.retryCount,
-          },
-          run: async () => undefined,
-        });
-        state.bufferedSnapshot = skipped;
-        state.flushScheduled = false;
-        if (state.retryCount >= MAX_BUFFERED_SNAPSHOT_RETRIES) {
-          log.error(
-            `sync: giving up buffered snapshot ingest for "${tableName}" after ${state.retryCount} retries due to unresolved references`,
-          );
-          return;
-        }
-        state.retryCount += 1;
-        const delayMs = Math.min(
-          BUFFERED_SNAPSHOT_RETRY_BASE_MS * 2 ** (state.retryCount - 1),
-          BUFFERED_SNAPSHOT_RETRY_MAX_MS,
-        );
-        scheduleBufferedSnapshotFlush(delayMs);
-        log.warn(
-          `sync: deferred ${skipped.length} "${tableName}" snapshot doc(s) with unresolved references`,
-        );
-        return;
-      }
-
-      state.retryCount = 0;
-    } catch (error) {
-      state.bufferedSnapshot = snapshot;
-      state.flushScheduled = false;
-
-      if (state.retryCount >= MAX_BUFFERED_SNAPSHOT_RETRIES) {
-        log.error(
-          `sync: giving up buffered snapshot ingest for "${tableName}" after ${state.retryCount} retries`,
-          error,
-        );
-        return;
-      }
-
-      state.retryCount += 1;
-      const delayMs = Math.min(
-        BUFFERED_SNAPSHOT_RETRY_BASE_MS * 2 ** (state.retryCount - 1),
-        BUFFERED_SNAPSHOT_RETRY_MAX_MS,
-      );
-      scheduleBufferedSnapshotFlush(delayMs);
-      log.warn(
-        `sync: delayed buffered snapshot ingest for "${tableName}" (retry ${state.retryCount}/${MAX_BUFFERED_SNAPSHOT_RETRIES})`,
-        error,
-      );
-      return;
-    }
-
-    if (state.bufferedSnapshot !== null && !state.flushScheduled) {
-      scheduleBufferedSnapshotFlush();
-    }
-  }
-
-  async function flushBufferedSnapshots(): Promise<void> {
-    bufferedFlushScheduled = false;
-    const bufferedTables = new Set(
-      Array.from(tableRemoteSyncStateMap.values()).map(
-        (state) => state.tableName,
-      ),
-    );
-    const flushOrder = [
-      ...orderedTables.filter((tableName) => bufferedTables.has(tableName)),
-      ...Array.from(bufferedTables).filter(
-        (tableName) => !orderedTables.includes(tableName),
-      ),
-    ];
-    for (const tableName of flushOrder) {
-      const scopeKeys = Array.from(tableRemoteSyncStateMap.entries())
-        .filter(([, state]) => state.tableName === tableName)
-        .map(([scopeKey]) => scopeKey);
-      for (const scopeKey of scopeKeys) {
-        await flushBufferedSnapshot(scopeKey);
-        await yieldToEventLoop();
-      }
-    }
-  }
-
-  async function bufferRemoteSnapshot(
+  // Legacy aliases for callers (Scope subsystem + several engine top-level
+  // methods) that haven't been migrated to the class API yet.
+  const bufferRemoteSnapshot = (
     tableName: string,
     docs: Array<Record<string, unknown>>,
     scopeArgs?: Record<string, unknown>,
-  ): Promise<void> {
-    const state = getTableReplicationState(tableName, scopeArgs);
-    state.bufferedSnapshot = docs;
-    state.retryCount = 0;
-    scheduleBufferedSnapshotFlush();
-  }
-
-  function clearBufferedSnapshots(): void {
-    bufferedFlushScheduled = false;
-    if (bufferedFlushTimer !== null) {
-      clearTimeout(bufferedFlushTimer);
-      bufferedFlushTimer = null;
-    }
-    for (const state of tableRemoteSyncStateMap.values()) {
-      if (state.retryTimer !== null) {
-        clearTimeout(state.retryTimer);
-      }
-      state.retryCount = 0;
-    }
-    tableRemoteSyncStateMap.clear();
-    pullBatch.clearAll();
-  }
+  ) => snapshotIngest.bufferRemoteSnapshot(tableName, docs, scopeArgs);
+  const clearBufferedSnapshots = () => snapshotIngest.clearAll();
 
   function ensureReplayProcessing(): void {
     if (!connectivityState.isOnline()) return;
@@ -2131,9 +1935,7 @@ function createEngine(config: EngineConfig): EngineInstance {
       await rollbackDeadLetteredTables(deadLettered);
 
       if (pendingQueue.isEmpty) {
-        for (const state of tableRemoteSyncStateMap.values()) {
-          state.bufferedSnapshot = null;
-        }
+        snapshotIngest.softResetBuffers();
         if (!hasActiveSubscriptions() && started) {
           void runReplicationCycle();
         }

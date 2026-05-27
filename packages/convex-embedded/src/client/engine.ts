@@ -13,7 +13,8 @@ import type { ConvexClient } from "convex/browser";
 import * as pull from "@/client/engine/pull";
 import type { PullDeps } from "@/client/engine/pull";
 import * as replay from "@/client/engine/replay";
-import type { ReplayDeps } from "@/client/engine/replay";
+import { createReplay } from "@/client/engine/replay";
+import type { Replay, ReplayRefs } from "@/client/engine/replay";
 import {
   createScheduler,
   getStartLifecycleRoute,
@@ -822,9 +823,8 @@ class EngineImpl implements EngineInstance {
     const activatedRemoteTables = new Set(rootTablesByDependencies(tables));
     const processorHeartbeatMs = Math.max(1_000, Math.floor(leaseMs / 3));
 
-    const replayState = replay.createReplayState();
-    const getRecentlyReplayedIdSet = () =>
-      replay.recentlyReplayedIdSet(replayState);
+    let replayInst!: Replay;
+    const getRecentlyReplayedIdSet = () => replayInst.recentlyReplayedIdSet();
     const pullServices: EngineResolveInput = {
       remoteClient,
       ingestDocuments,
@@ -1342,7 +1342,7 @@ class EngineImpl implements EngineInstance {
       getCurrentIdentityKey,
     };
 
-    const replayDeps: ReplayDeps = {
+    const replayRefs: ReplayRefs = {
       pendingQueue,
       pendingUploadQueue,
       embedded,
@@ -1350,8 +1350,6 @@ class EngineImpl implements EngineInstance {
       remoteClient,
       tables,
       tableSchemas,
-      maxRetries,
-      retryDelayMs,
       processorId: processorIdForReplay,
       leaseMs,
       uploadUrlRef,
@@ -1359,7 +1357,6 @@ class EngineImpl implements EngineInstance {
       pullState,
       softResetSubsBuffers: () => subs.softResetBuffers(),
       hasActiveSubs: () => subs.hasActive(),
-      emit,
       isOnline: () => schedulerInst.isOnline(),
       isStarted: () => started,
       runScheduler: () => schedulerInst.run(),
@@ -1367,19 +1364,13 @@ class EngineImpl implements EngineInstance {
       pullTable: (tableName, tableConfig, signal) =>
         getTableSpec(tableName, tableConfig, signal),
     };
+    replayInst = createReplay(replayRefs);
 
     const schedulerRefs: SchedulerRefs = {
-      processUploadQueue: (signal) =>
-        replay.processUploadQueue(replayState, replayDeps, signal),
-      processQueue: (signal) =>
-        replay.processQueue(replayState, replayDeps, signal),
+      processUploadQueue: (signal) => replayInst.processUploadQueue(signal),
+      processQueue: (signal) => replayInst.processQueue(signal),
       rollbackDeadLetteredTables: (deadLettered, signal) =>
-        replay.rollbackDeadLetteredTables(
-          replayState,
-          replayDeps,
-          deadLettered,
-          signal,
-        ),
+        replayInst.rollbackDeadLetteredTables(deadLettered, signal),
       mergeDirtyCrdtRows: (signal) =>
         pull.runMerge(pullState, mergeState, pullDeps, signal),
       pullAll: (signal) => pull.pullAll(pullState, pullDeps, signal),
@@ -1465,9 +1456,9 @@ class EngineImpl implements EngineInstance {
       unregisterPendingUploadsDepth();
 
       schedulerInst.abortCurrent();
-      const claimedEntry = replay.activeEntry(replayState);
+      const claimedEntry = replayInst.activeEntry();
       if (claimedEntry) {
-        replay.setActiveEntry(replayState, null);
+        replayInst.setActiveEntry(null);
         runDetached(
           () => pendingQueue.release(claimedEntry, processorIdForReplay),
           "[sync] release pending claim:",
@@ -1579,7 +1570,7 @@ class EngineImpl implements EngineInstance {
           }
         }
         if (schedulerInst.isOnline()) {
-          replay.ensureProcessing(replayState, replayDeps);
+          replayInst.ensureProcessing();
         } else {
           log.debug("sync: offline — mutation queued for later push");
         }

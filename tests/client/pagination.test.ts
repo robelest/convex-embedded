@@ -1,4 +1,4 @@
-import { EmbeddedQueryCache } from "@resolve/client/cache";
+import { createEmbeddedQueryCache } from "@resolve/client/cache";
 import { EmbeddedClient } from "@resolve/client/embedded";
 import type { EmbeddedRuntime } from "@resolve/index";
 import { flushMicrotasks } from "@tests/helpers/time";
@@ -65,7 +65,7 @@ function createHarness() {
     planReadByName: () => ({ kind: "local" }),
     executeLocalMutation: vi.fn(async () => null),
     ensureReadReady,
-    cache: new EmbeddedQueryCache(),
+    cache: createEmbeddedQueryCache(),
   });
 
   return { client: client as unknown as PaginatedClient, ensureReadReady };
@@ -205,7 +205,7 @@ function dedupHarness(
     planReadByName: () => ({ kind: "local" }),
     executeLocalMutation: vi.fn(async () => null),
     ensureReadReady: vi.fn(async () => undefined),
-    cache: new EmbeddedQueryCache(),
+    cache: createEmbeddedQueryCache(),
   });
 
   return client as unknown as PaginatedClient;

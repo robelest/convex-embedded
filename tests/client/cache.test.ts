@@ -1,4 +1,4 @@
-import { EmbeddedQueryCache } from "@resolve/client/cache";
+import { createEmbeddedQueryCache } from "@resolve/client/cache";
 import type { CachedEntry } from "@resolve/client/cache";
 import { describe, expect, it } from "@tests/testkit";
 
@@ -15,12 +15,12 @@ function makeEntry(
 
 describe("EmbeddedQueryCache", () => {
   it("get returns undefined for unknown keys", () => {
-    const cache = new EmbeddedQueryCache();
+    const cache = createEmbeddedQueryCache();
     expect(cache.get("queries:list", { user: "u1" })).toBeUndefined();
   });
 
   it("get/set basics: stores and retrieves entries", () => {
-    const cache = new EmbeddedQueryCache();
+    const cache = createEmbeddedQueryCache();
     const entry = makeEntry([1, 2, 3], { receivedAtMs: 100, ts: 5 });
 
     expect(cache.set("queries:list", { user: "u1" }, entry)).toBe(true);
@@ -31,7 +31,7 @@ describe("EmbeddedQueryCache", () => {
   });
 
   it("delete removes entries", () => {
-    const cache = new EmbeddedQueryCache();
+    const cache = createEmbeddedQueryCache();
     cache.set("queries:list", { user: "u1" }, makeEntry("v1"));
     cache.set("queries:list", { user: "u2" }, makeEntry("v2"));
 
@@ -42,14 +42,14 @@ describe("EmbeddedQueryCache", () => {
   });
 
   it("delete is a no-op for unknown keys", () => {
-    const cache = new EmbeddedQueryCache();
+    const cache = createEmbeddedQueryCache();
     cache.set("queries:list", { user: "u1" }, makeEntry("v1"));
     cache.delete("queries:list", { user: "missing" });
     expect(cache.size()).toBe(1);
   });
 
   it("uses canonical args (key ordering doesn't matter)", () => {
-    const cache = new EmbeddedQueryCache();
+    const cache = createEmbeddedQueryCache();
     cache.set("queries:list", { a: 1, b: 2 }, makeEntry("v"));
 
     expect(cache.get("queries:list", { b: 2, a: 1 })).toEqual(makeEntry("v"));
@@ -62,7 +62,7 @@ describe("EmbeddedQueryCache", () => {
   });
 
   it("treats different refNames as distinct keys", () => {
-    const cache = new EmbeddedQueryCache();
+    const cache = createEmbeddedQueryCache();
     cache.set("queries:a", { x: 1 }, makeEntry("av"));
     cache.set("queries:b", { x: 1 }, makeEntry("bv"));
 
@@ -72,7 +72,7 @@ describe("EmbeddedQueryCache", () => {
   });
 
   it("set returns false when value is structurally equal", () => {
-    const cache = new EmbeddedQueryCache();
+    const cache = createEmbeddedQueryCache();
     cache.set(
       "queries:list",
       { user: "u1" },
@@ -88,7 +88,7 @@ describe("EmbeddedQueryCache", () => {
   });
 
   it("set returns true when value differs", () => {
-    const cache = new EmbeddedQueryCache();
+    const cache = createEmbeddedQueryCache();
     cache.set("queries:list", { user: "u1" }, makeEntry([1, 2]));
     expect(
       cache.set("queries:list", { user: "u1" }, makeEntry([1, 2, 3])),
@@ -97,7 +97,7 @@ describe("EmbeddedQueryCache", () => {
   });
 
   it("set returns true when ts differs even if value matches", () => {
-    const cache = new EmbeddedQueryCache();
+    const cache = createEmbeddedQueryCache();
     cache.set("queries:list", { user: "u1" }, makeEntry("v", { ts: 1 }));
     expect(
       cache.set("queries:list", { user: "u1" }, makeEntry("v", { ts: 2 })),
@@ -105,7 +105,7 @@ describe("EmbeddedQueryCache", () => {
   });
 
   it("set returns true when pagination cursor differs", () => {
-    const cache = new EmbeddedQueryCache();
+    const cache = createEmbeddedQueryCache();
     cache.set(
       "queries:list",
       { user: "u1" },
@@ -121,7 +121,7 @@ describe("EmbeddedQueryCache", () => {
   });
 
   it("set returns false when pagination metadata matches", () => {
-    const cache = new EmbeddedQueryCache();
+    const cache = createEmbeddedQueryCache();
     cache.set(
       "queries:list",
       { user: "u1" },
@@ -137,7 +137,7 @@ describe("EmbeddedQueryCache", () => {
   });
 
   it("clear empties the cache", () => {
-    const cache = new EmbeddedQueryCache();
+    const cache = createEmbeddedQueryCache();
     cache.set("queries:list", { user: "u1" }, makeEntry("v1"));
     cache.set("queries:list", { user: "u2" }, makeEntry("v2"));
     cache.setTablesRead("queries:list", { user: "u1" }, new Set(["users"]));
@@ -149,7 +149,7 @@ describe("EmbeddedQueryCache", () => {
   });
 
   it("applyTransition writes all entries and reports changed list", () => {
-    const cache = new EmbeddedQueryCache();
+    const cache = createEmbeddedQueryCache();
     cache.set("queries:a", { x: 1 }, makeEntry("av1", { ts: 1 }));
     cache.set("queries:b", { x: 2 }, makeEntry("bv1", { ts: 1 }));
     cache.set("queries:c", { x: 3 }, makeEntry("cv1", { ts: 1 }));
@@ -182,7 +182,7 @@ describe("EmbeddedQueryCache", () => {
   });
 
   it("applyTransition is atomic: writes all entries before returning", () => {
-    const cache = new EmbeddedQueryCache();
+    const cache = createEmbeddedQueryCache();
 
     const updates: Array<{
       refName: string;
@@ -208,7 +208,7 @@ describe("EmbeddedQueryCache", () => {
   });
 
   it("applyTransition deduplicates same key, last write wins", () => {
-    const cache = new EmbeddedQueryCache();
+    const cache = createEmbeddedQueryCache();
 
     const { changed } = cache.applyTransition([
       {
@@ -228,7 +228,7 @@ describe("EmbeddedQueryCache", () => {
   });
 
   it("applyTransition with no actual changes returns empty changed list", () => {
-    const cache = new EmbeddedQueryCache();
+    const cache = createEmbeddedQueryCache();
     cache.set("queries:a", { x: 1 }, makeEntry("v"));
 
     const { changed } = cache.applyTransition([
@@ -243,7 +243,7 @@ describe("EmbeddedQueryCache", () => {
   });
 
   it("entriesByTable returns dependents", () => {
-    const cache = new EmbeddedQueryCache();
+    const cache = createEmbeddedQueryCache();
     cache.set("queries:a", { x: 1 }, makeEntry("av"));
     cache.set("queries:b", { x: 2 }, makeEntry("bv"));
     cache.set("queries:c", { x: 3 }, makeEntry("cv"));
@@ -270,7 +270,7 @@ describe("EmbeddedQueryCache", () => {
   });
 
   it("setTablesRead replaces previous table dependencies", () => {
-    const cache = new EmbeddedQueryCache();
+    const cache = createEmbeddedQueryCache();
     cache.set("queries:a", { x: 1 }, makeEntry("av"));
 
     cache.setTablesRead("queries:a", { x: 1 }, new Set(["users"]));
@@ -282,7 +282,7 @@ describe("EmbeddedQueryCache", () => {
   });
 
   it("getTablesRead returns the registered tables", () => {
-    const cache = new EmbeddedQueryCache();
+    const cache = createEmbeddedQueryCache();
     cache.set("queries:a", { x: 1 }, makeEntry("av"));
     cache.setTablesRead("queries:a", { x: 1 }, new Set(["users", "posts"]));
 
@@ -294,13 +294,13 @@ describe("EmbeddedQueryCache", () => {
   });
 
   it("setTablesRead is a no-op when entry is missing", () => {
-    const cache = new EmbeddedQueryCache();
+    const cache = createEmbeddedQueryCache();
     cache.setTablesRead("queries:a", { x: 1 }, new Set(["users"]));
     expect(cache.entriesByTable("users")).toEqual([]);
   });
 
   it("delete clears table dependency tracking", () => {
-    const cache = new EmbeddedQueryCache();
+    const cache = createEmbeddedQueryCache();
     cache.set("queries:a", { x: 1 }, makeEntry("av"));
     cache.setTablesRead("queries:a", { x: 1 }, new Set(["users"]));
 
@@ -310,7 +310,7 @@ describe("EmbeddedQueryCache", () => {
   });
 
   it("entries() yields all cached records", () => {
-    const cache = new EmbeddedQueryCache();
+    const cache = createEmbeddedQueryCache();
     cache.set("queries:a", { x: 1 }, makeEntry("av"));
     cache.set("queries:b", { x: 2 }, makeEntry("bv"));
 
@@ -321,7 +321,7 @@ describe("EmbeddedQueryCache", () => {
   });
 
   it("size reflects current entry count", () => {
-    const cache = new EmbeddedQueryCache();
+    const cache = createEmbeddedQueryCache();
     expect(cache.size()).toBe(0);
     cache.set("queries:a", { x: 1 }, makeEntry("av"));
     expect(cache.size()).toBe(1);

@@ -19,7 +19,7 @@ import {
   refreshAuthFromSource,
   registerAuthEntry,
 } from "@/client/auth";
-import { EmbeddedQueryCache } from "@/client/cache";
+import { createEmbeddedQueryCache, type EmbeddedQueryCache } from "@/client/cache";
 import { EmbeddedClient } from "@/client/embedded";
 import {
   deleteEmbeddedClientEntry,
@@ -346,7 +346,7 @@ export function createEmbeddedClient(input: {
     unsavedChangesWarning: false,
   });
 
-  const queryCache = new EmbeddedQueryCache();
+  const queryCache = createEmbeddedQueryCache();
 
   registerEmbeddedClientEntry(client, {
     runtime,

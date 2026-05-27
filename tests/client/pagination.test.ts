@@ -1,4 +1,3 @@
-import { patchRoutedConvexClient } from "@resolve/client/adapter";
 import { EmbeddedQueryCache } from "@resolve/client/cache";
 import { EmbeddedClient } from "@resolve/client/embedded";
 import type { EmbeddedRuntime } from "@resolve/index";
@@ -55,12 +54,11 @@ function createHarness() {
 
   const client = new EmbeddedClient("http://embedded.local");
 
-  patchRoutedConvexClient({
-    client,
+  client.installRouting({
     runtime,
     remoteClient,
-    getRefName: (ref) => String(ref),
-    asError: (error) =>
+    getRefName: (ref: unknown) => String(ref),
+    asError: (error: unknown) =>
       error instanceof Error ? error : new Error(String(error)),
     planMutation: () => ({ kind: "local", enqueueForReplay: false }),
     planRead: () => ({ kind: "local" }),
@@ -196,12 +194,11 @@ function dedupHarness(
 
   const client = new EmbeddedClient("http://embedded.local");
 
-  patchRoutedConvexClient({
-    client,
+  client.installRouting({
     runtime,
     remoteClient,
-    getRefName: (ref) => String(ref),
-    asError: (error) =>
+    getRefName: (ref: unknown) => String(ref),
+    asError: (error: unknown) =>
       error instanceof Error ? error : new Error(String(error)),
     planMutation: () => ({ kind: "local", enqueueForReplay: false }),
     planRead: () => ({ kind: "local" }),

@@ -8,7 +8,6 @@
 import type { ConvexClient } from "convex/browser";
 import type { BaseConvexClientOptions } from "convex/browser";
 
-import { patchRoutedConvexClient } from "@/client/adapter";
 import {
   type AuthEntry,
   type AuthOptions,
@@ -238,7 +237,7 @@ export function createEmbeddedClient(input: {
 
   let clientClosed = false;
   let installedStorageSurface: { close(): void } | null = null;
-  let client!: ConvexClient;
+  let client!: EmbeddedClient;
   const rootScope = new DisposableScope();
 
   const platformConfig: PlatformConfig = {
@@ -406,8 +405,7 @@ export function createEmbeddedClient(input: {
   }
 
   if (!options.remote) {
-    const patchHandle = patchRoutedConvexClient({
-      client,
+    const patchHandle = client.installRouting({
       runtime,
       getRefName: getFunctionRefName,
       asError,

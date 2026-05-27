@@ -2,7 +2,6 @@ import { ConvexClient } from "convex/browser";
 import type { FunctionReference } from "convex/server";
 import { jsonToConvex, type JSONValue } from "convex/values";
 
-import { patchRoutedConvexClient } from "@/client/adapter";
 import {
   restoreAuthenticatedIfNeeded,
   setOfflineStaleIfNeeded,
@@ -15,6 +14,7 @@ import {
   type ModuleLoadFailure,
   warnModuleLoadFailures,
 } from "@/client/discovery";
+import { EmbeddedClient } from "@/client/embedded";
 import type { IdMap } from "@/client/ids";
 import type { Preloaded } from "@/client/preload";
 import {
@@ -661,8 +661,12 @@ export function attachResolve(input: {
     runtime.setUploadQueueEnabled(false);
   });
 
-  const patchHandle = patchRoutedConvexClient({
-    client,
+  if (!(client instanceof EmbeddedClient)) {
+    throw new Error(
+      "[convex-embedded] attachResolve requires an EmbeddedClient instance.",
+    );
+  }
+  const patchHandle = client.installRouting({
     runtime,
     remoteClient,
     getRefName: getFunctionRefName,

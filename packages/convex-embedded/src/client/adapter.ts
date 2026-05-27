@@ -1,7 +1,6 @@
 import type { ConvexClient } from "convex/browser";
 
 import type { CachedEntry, EmbeddedQueryCache } from "@/client/cache";
-import { EmbeddedClient } from "@/client/embedded";
 import { type MutationPlan, type ReadPlan } from "@/client/routing/plan";
 import type {
   EmbeddedRuntime,
@@ -155,7 +154,7 @@ export function toClientResult<T>(value: T, translate?: <U>(value: U) => U): T {
   return normalizeClientResult(value, translated) as T;
 }
 
-function isSystemRefName(refName: string): boolean {
+export function isSystemRefName(refName: string): boolean {
   return refName.startsWith("_system:");
 }
 
@@ -873,7 +872,7 @@ export class CachePipeline {
   }
 }
 
-function createCacheOnUpdate(input: {
+export function createCacheOnUpdate(input: {
   pipeline: CachePipeline;
   getRefName: (ref: unknown) => string;
   asError: (error: unknown) => Error;
@@ -964,7 +963,7 @@ interface ManagedPage {
   subscribedKey: string | null;
 }
 
-function createCachePaginatedOnUpdate(input: {
+export function createCachePaginatedOnUpdate(input: {
   pipeline: CachePipeline;
   getRefName: (ref: unknown) => string;
   asError: (error: unknown) => Error;
@@ -1225,7 +1224,7 @@ function createCachePaginatedOnUpdate(input: {
   };
 }
 
-function createRuntimeLocalOnUpdate(input: {
+export function createRuntimeLocalOnUpdate(input: {
   runtime: EmbeddedRuntime;
   getRefName: (ref: unknown) => string;
   asError: (error: unknown) => Error;
@@ -1284,7 +1283,7 @@ function createRuntimeLocalOnUpdate(input: {
   };
 }
 
-function createRuntimeLocalPaginatedOnUpdate(input: {
+export function createRuntimeLocalPaginatedOnUpdate(input: {
   runtime: EmbeddedRuntime;
   getRefName: (ref: unknown) => string;
   asError: (error: unknown) => Error;
@@ -1423,14 +1422,14 @@ function getActiveSubscriptionAccessorStore() {
   return globalState[ACTIVE_SUBSCRIPTION_ACCESSORS];
 }
 
-function registerActiveSubscriptionsAccessor(
+export function registerActiveSubscriptionsAccessor(
   client: ConvexClient,
   accessor: ActiveSubscriptionsAccessor,
 ): void {
   getActiveSubscriptionAccessorStore().set(client, accessor);
 }
 
-function deleteActiveSubscriptionsAccessor(client: ConvexClient): void {
+export function deleteActiveSubscriptionsAccessor(client: ConvexClient): void {
   getActiveSubscriptionAccessorStore().delete(client);
 }
 
@@ -1491,159 +1490,7 @@ export type ExplicitOptimisticCallback = (
   args: Record<string, unknown>,
 ) => Array<{ refName: string; args: unknown; value: unknown }>;
 
-export function patchRoutedConvexClient(input: RoutedClientInput): {
-  dispose: () => void;
-} {
-  // The cache-aware localQueryResult/localQueryLogs overrides are installed
-  // by EmbeddedClient._installLocalQueryAccess (see client/embedded.ts).
-
-  const cache = input.cache ?? null;
-  const getCacheStorage = input.getCacheStorage ?? (() => null);
-  const remoteClient = input.remoteClient ?? null;
-
-  const explicitOptimistic = new WeakMap<object, ExplicitOptimisticCallback>();
-
-  const pipeline = cache
-    ? new CachePipeline({
-        cache,
-        getCacheStorage,
-        remoteClient,
-        connectivity: input.connectivity,
-        asError: input.asError,
-        runtime: input.runtime,
-        ensureReadReady: input.ensureReadReady,
-        releaseRead: input.releaseRead,
-        translateLocalArgsToRuntime: input.translateLocalArgsToRuntime,
-      })
-    : null;
-
-  if (pipeline) {
-    registerActiveSubscriptionsAccessor(input.client, {
-      list: () => pipeline.listActiveSubscriptions(),
-      onChange: (listener) => pipeline.onSubscriptionsChange(listener),
-    });
-  }
-
-  const runtimeLocalOnUpdate = createRuntimeLocalOnUpdate({
-    runtime: input.runtime,
-    getRefName: input.getRefName,
-    asError: input.asError,
-    ensureReadReady: input.ensureReadReady,
-    translateLocalArgsToRuntime: input.translateLocalArgsToRuntime,
-    translateLocalResultToClient: input.translateLocalResultToClient,
-  });
-  const runtimeLocalPaginatedOnUpdate = createRuntimeLocalPaginatedOnUpdate({
-    runtime: input.runtime,
-    getRefName: input.getRefName,
-    asError: input.asError,
-    ensureReadReady: input.ensureReadReady,
-    translateLocalArgsToRuntime: input.translateLocalArgsToRuntime,
-    translateLocalResultToClient: input.translateLocalResultToClient,
-  });
-  const cacheOnUpdate = pipeline
-    ? createCacheOnUpdate({
-        pipeline,
-        getRefName: input.getRefName,
-        asError: input.asError,
-        translateLocalResultToClient: input.translateLocalResultToClient,
-      })
-    : null;
-  const cachePaginatedOnUpdate = pipeline
-    ? createCachePaginatedOnUpdate({
-        pipeline,
-        getRefName: input.getRefName,
-        asError: input.asError,
-        translateLocalResultToClient: input.translateLocalResultToClient,
-      })
-    : null;
-
-  const localOnUpdate = (...args: unknown[]): unknown => {
-    const [ref, queryArgs, callback, onError] = args as [
-      unknown,
-      Record<string, unknown>,
-      (result: unknown, meta?: unknown) => unknown,
-      ((error: Error, meta?: unknown) => unknown) | undefined,
-    ];
-    const refName = input.getRefName(ref);
-    if (cacheOnUpdate && !isSystemRefName(refName)) {
-      return cacheOnUpdate(ref, queryArgs, callback, onError);
-    }
-    return runtimeLocalOnUpdate(ref, queryArgs, callback, onError);
-  };
-
-  const localPaginatedOnUpdate = (...args: unknown[]): unknown => {
-    const [ref, queryArgs, options, callback, onError] = args as [
-      unknown,
-      Record<string, unknown>,
-      { initialNumItems: number },
-      (result: unknown, meta?: unknown) => unknown,
-      ((error: Error, meta?: unknown) => unknown) | undefined,
-    ];
-    const refName = input.getRefName(ref);
-    if (cachePaginatedOnUpdate && !isSystemRefName(refName)) {
-      return cachePaginatedOnUpdate(ref, queryArgs, options, callback, onError);
-    }
-    return runtimeLocalPaginatedOnUpdate(
-      ref,
-      queryArgs,
-      options,
-      callback,
-      onError,
-    );
-  };
-
-  const translateRemoteArgs = (args: unknown): unknown => {
-    if (!isPlainObject(args)) return args;
-    return input.translateClientArgsToRemote?.(args) ?? args;
-  };
-
-  const remotePatchable = remoteClient
-    ? (remoteClient as unknown as PatchableConvexClient)
-    : null;
-
-  const remoteOnUpdate = remotePatchable
-    ? (...args: unknown[]): unknown => {
-        const remoteArgs = [...args];
-        remoteArgs[1] = translateRemoteArgs(remoteArgs[1] ?? {});
-        return remotePatchable.onUpdate(...remoteArgs);
-      }
-    : () => createNoopUnsubscribe();
-
-  const remotePaginatedOnUpdate = remotePatchable
-    ? (...args: unknown[]): unknown => {
-        const remoteArgs = [...args];
-        remoteArgs[1] = translateRemoteArgs(remoteArgs[1] ?? {});
-        return remotePatchable.onPaginatedUpdate_experimental?.(...remoteArgs);
-      }
-    : () => createNoopUnsubscribe();
-
-  // All routed methods (mutation/query/action/onUpdate/onPaginated/peek*/
-  // applyOptimisticTransition/registerOptimisticUpdate/setWorkScheduler/
-  // getWorkScheduler/dispatchHttpRequest) are real methods on
-  // EmbeddedClient (see client/embedded.ts). Install routing state +
-  // subscription helpers on the class instance so those methods can read
-  // their deps from `this._routing` / `this._subscriptions`.
-  if (input.client instanceof EmbeddedClient) {
-    const { client: _client, ...routing } = input;
-    input.client._installRouting(routing, pipeline, explicitOptimistic, {
-      localOnUpdate,
-      localPaginatedOnUpdate,
-      remoteOnUpdate,
-      remotePaginatedOnUpdate,
-    });
-  }
-
-  // peekCurrentValue, peekPaginatedCurrentValue, applyOptimisticTransition,
-  // registerOptimisticUpdate, setWorkScheduler, getWorkScheduler, and
-  // dispatchHttpRequest are implemented as real methods on EmbeddedClient
-  // (see client/embedded.ts).
-
-  return {
-    dispose: () => {
-      if (pipeline) {
-        deleteActiveSubscriptionsAccessor(input.client);
-        pipeline.dispose();
-      }
-    },
-  };
-}
+// Embedded routing is installed via `EmbeddedClient.installRouting(...)`
+// (see client/embedded.ts). The legacy `patchRoutedConvexClient` factory
+// function has been removed; call sites now invoke the class method
+// directly.

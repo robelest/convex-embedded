@@ -1,4 +1,3 @@
-import { patchRoutedConvexClient } from "@resolve/client/adapter";
 import { EmbeddedClient } from "@resolve/client/embedded";
 import type { EmbeddedRuntime } from "@resolve/index";
 import { describe, expect, it, vi } from "@tests/testkit";
@@ -65,11 +64,10 @@ function createPatchedClient(result: IssuesResult) {
 
   const client = new EmbeddedClient("http://embedded.local");
 
-  patchRoutedConvexClient({
-    client,
+  client.installRouting({
     runtime,
-    getRefName: (ref) => String(ref),
-    asError: (error) =>
+    getRefName: (ref: unknown) => String(ref),
+    asError: (error: unknown) =>
       error instanceof Error ? error : new Error(String(error)),
     planMutation: () => ({ kind: "local", enqueueForReplay: false }),
     planRead: () => ({ kind: "local" }),

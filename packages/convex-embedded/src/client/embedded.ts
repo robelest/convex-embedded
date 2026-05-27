@@ -8,14 +8,21 @@ import type {
 import { ConvexError } from "convex/values";
 
 import {
+  CachePipeline,
+  createCacheOnUpdate,
+  createCachePaginatedOnUpdate,
   createNoopUnsubscribe,
+  createRuntimeLocalOnUpdate,
+  createRuntimeLocalPaginatedOnUpdate,
   deferSubscription,
+  deleteActiveSubscriptionsAccessor,
   isPageResultShape,
   isPlainObject,
+  isSystemRefName,
+  registerActiveSubscriptionsAccessor,
   toClientResult,
 } from "@/client/adapter";
 import type {
-  CachePipeline,
   ExplicitOptimisticCallback,
   RoutedClientInput,
 } from "@/client/adapter";
@@ -65,18 +72,166 @@ export class EmbeddedClient extends ConvexClient {
     ).onPaginatedUpdate_experimental = this._routedOnPaginatedUpdate.bind(this);
   }
 
-  /** @internal */
-  _installRouting(
-    routing: RoutingConfig,
-    pipeline: CachePipeline | null,
-    explicitOptimistic: WeakMap<object, ExplicitOptimisticCallback>,
-    subscriptions: SubscriptionHelpers,
-  ): void {
-    this._routing = routing;
+  /**
+   * Install embedded routing on this client. Builds the cache pipeline (if
+   * a cache is provided), the optimistic-update registry, the four
+   * subscription helper closures (local/remote × update/paginated), and the
+   * cache-aware localQueryResult/localQueryLogs overrides. Returns a
+   * dispose handle that tears down the pipeline + accessor registration.
+   */
+  installRouting(input: RoutingConfig): { dispose: () => void } {
+    const cache = input.cache ?? null;
+    const getCacheStorage = input.getCacheStorage ?? (() => null);
+    const remoteClient = input.remoteClient ?? null;
+
+    const explicitOptimistic = new WeakMap<
+      object,
+      ExplicitOptimisticCallback
+    >();
+
+    const pipeline = cache
+      ? new CachePipeline({
+          cache,
+          getCacheStorage,
+          remoteClient,
+          connectivity: input.connectivity,
+          asError: input.asError,
+          runtime: input.runtime,
+          ensureReadReady: input.ensureReadReady,
+          releaseRead: input.releaseRead,
+          translateLocalArgsToRuntime: input.translateLocalArgsToRuntime,
+        })
+      : null;
+
+    if (pipeline) {
+      registerActiveSubscriptionsAccessor(this, {
+        list: () => pipeline.listActiveSubscriptions(),
+        onChange: (listener) => pipeline.onSubscriptionsChange(listener),
+      });
+    }
+
+    const runtimeLocalOnUpdate = createRuntimeLocalOnUpdate({
+      runtime: input.runtime,
+      getRefName: input.getRefName,
+      asError: input.asError,
+      ensureReadReady: input.ensureReadReady,
+      translateLocalArgsToRuntime: input.translateLocalArgsToRuntime,
+      translateLocalResultToClient: input.translateLocalResultToClient,
+    });
+    const runtimeLocalPaginatedOnUpdate = createRuntimeLocalPaginatedOnUpdate({
+      runtime: input.runtime,
+      getRefName: input.getRefName,
+      asError: input.asError,
+      ensureReadReady: input.ensureReadReady,
+      translateLocalArgsToRuntime: input.translateLocalArgsToRuntime,
+      translateLocalResultToClient: input.translateLocalResultToClient,
+    });
+    const cacheOnUpdate = pipeline
+      ? createCacheOnUpdate({
+          pipeline,
+          getRefName: input.getRefName,
+          asError: input.asError,
+          translateLocalResultToClient: input.translateLocalResultToClient,
+        })
+      : null;
+    const cachePaginatedOnUpdate = pipeline
+      ? createCachePaginatedOnUpdate({
+          pipeline,
+          getRefName: input.getRefName,
+          asError: input.asError,
+          translateLocalResultToClient: input.translateLocalResultToClient,
+        })
+      : null;
+
+    const localOnUpdate: SubscribeFn = (...args) => {
+      const [ref, queryArgs, callback, onError] = args as [
+        unknown,
+        Record<string, unknown>,
+        (result: unknown, meta?: unknown) => unknown,
+        ((error: Error, meta?: unknown) => unknown) | undefined,
+      ];
+      const refName = input.getRefName(ref);
+      if (cacheOnUpdate && !isSystemRefName(refName)) {
+        return cacheOnUpdate(ref, queryArgs, callback, onError);
+      }
+      return runtimeLocalOnUpdate(ref, queryArgs, callback, onError);
+    };
+
+    const localPaginatedOnUpdate: SubscribeFn = (...args) => {
+      const [ref, queryArgs, options, callback, onError] = args as [
+        unknown,
+        Record<string, unknown>,
+        { initialNumItems: number },
+        (result: unknown, meta?: unknown) => unknown,
+        ((error: Error, meta?: unknown) => unknown) | undefined,
+      ];
+      const refName = input.getRefName(ref);
+      if (cachePaginatedOnUpdate && !isSystemRefName(refName)) {
+        return cachePaginatedOnUpdate(
+          ref,
+          queryArgs,
+          options,
+          callback,
+          onError,
+        );
+      }
+      return runtimeLocalPaginatedOnUpdate(
+        ref,
+        queryArgs,
+        options,
+        callback,
+        onError,
+      );
+    };
+
+    const translateRemoteArgs = (args: unknown): unknown => {
+      if (!isPlainObject(args)) return args;
+      return input.translateClientArgsToRemote?.(args) ?? args;
+    };
+
+    const remoteOnUpdate: SubscribeFn = remoteClient
+      ? (...args) => {
+          const remoteArgs = [...args];
+          remoteArgs[1] = translateRemoteArgs(remoteArgs[1] ?? {});
+          return (
+            remoteClient as unknown as {
+              onUpdate(...args: unknown[]): unknown;
+            }
+          ).onUpdate(...remoteArgs);
+        }
+      : () => createNoopUnsubscribe();
+
+    const remotePaginatedOnUpdate: SubscribeFn = remoteClient
+      ? (...args) => {
+          const remoteArgs = [...args];
+          remoteArgs[1] = translateRemoteArgs(remoteArgs[1] ?? {});
+          return (
+            remoteClient as unknown as {
+              onPaginatedUpdate_experimental?(...args: unknown[]): unknown;
+            }
+          ).onPaginatedUpdate_experimental?.(...remoteArgs);
+        }
+      : () => createNoopUnsubscribe();
+
+    this._routing = input;
     this._pipeline = pipeline;
     this._explicitOptimistic = explicitOptimistic;
-    this._subscriptions = subscriptions;
+    this._subscriptions = {
+      localOnUpdate,
+      localPaginatedOnUpdate,
+      remoteOnUpdate,
+      remotePaginatedOnUpdate,
+    };
     this._installLocalQueryAccess();
+
+    return {
+      dispose: () => {
+        if (pipeline) {
+          deleteActiveSubscriptionsAccessor(this);
+          pipeline.dispose();
+        }
+      },
+    };
   }
 
   /**

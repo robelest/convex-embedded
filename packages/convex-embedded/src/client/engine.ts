@@ -49,39 +49,40 @@ const log = createLogger("resolve");
 
 export type ChangeListener = (status: EngineStatus) => void;
 
-class EngineStatusEmitter {
-  private currentStatus: EngineStatus = { status: "idle" };
-  private readonly listeners = new Set<ChangeListener>();
+interface EngineStatusEmitter {
+  get(): EngineStatus;
+  emit(next: EngineStatus): void;
+  on(listener: ChangeListener): () => void;
+  clearListeners(): void;
+}
 
-  get(): EngineStatus {
-    return this.currentStatus;
-  }
+function createEngineStatusEmitter(): EngineStatusEmitter {
+  let currentStatus: EngineStatus = { status: "idle" };
+  const listeners = new Set<ChangeListener>();
 
-  emit(next: EngineStatus): void {
-    if (
-      next.status === "resolved" &&
-      this.currentStatus.status !== "resolved"
-    ) {
-      recordCounter("sync.cycle");
-    }
-    this.currentStatus = next;
-    for (const listener of this.listeners) {
-      try {
-        listener(next);
-      } catch (err) {
-        log.error("sync: listener threw", err);
+  return {
+    get: () => currentStatus,
+    emit(next: EngineStatus): void {
+      if (next.status === "resolved" && currentStatus.status !== "resolved") {
+        recordCounter("sync.cycle");
       }
-    }
-  }
-
-  on(listener: ChangeListener): () => void {
-    this.listeners.add(listener);
-    return () => this.listeners.delete(listener);
-  }
-
-  clearListeners(): void {
-    this.listeners.clear();
-  }
+      currentStatus = next;
+      for (const listener of listeners) {
+        try {
+          listener(next);
+        } catch (err) {
+          log.error("sync: listener threw", err);
+        }
+      }
+    },
+    on(listener: ChangeListener): () => void {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    clearListeners(): void {
+      listeners.clear();
+    },
+  };
 }
 
 interface RemoteCallable {
@@ -852,7 +853,7 @@ class EngineImpl implements EngineInstance {
           })
       : undefined;
 
-    const statusEmitter = new EngineStatusEmitter();
+    const statusEmitter = createEngineStatusEmitter();
     this._statusEmitter = statusEmitter;
     let started = false;
     const schedulerState = scheduler.createSchedulerState();

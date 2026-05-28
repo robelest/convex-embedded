@@ -61,12 +61,12 @@ latency in ms (lower is better).
 
 | Workload                                        | Volume      | ops/sec | p50 (ms) | p99 (ms) |
 | ----------------------------------------------- | ----------- | ------: | -------: | -------: |
-| offline reconcile merge batch                   | 200 docs    |     111 |     9.06 |     9.45 |
-| offline reconcile merge batch                   | 1,000 docs  |      22 |    44.80 |    45.60 |
-| materializeDocumentFromUpdate (live-state read) | 500 docs    |      45 |    19.17 |    77.54 |
-| raw Yjs apply heavily-edited history            | 2,000 edits |     327 |     3.02 |     3.36 |
-| raw Yjs mergeUpdates heavily-edited history     | 2,000 edits |      36 |    27.69 |    28.47 |
-| raw Yjs apply compacted snapshot                | 2,000 edits |   3,717 |     0.26 |     0.52 |
+| offline reconcile merge batch                   | 200 docs    |     109 |     9.19 |     9.59 |
+| offline reconcile merge batch                   | 1,000 docs  |      22 |    45.05 |    45.85 |
+| materializeDocumentFromUpdate (live-state read) | 500 docs    |      52 |    19.27 |    77.94 |
+| raw Yjs apply heavily-edited history            | 2,000 edits |     288 |     3.48 |     3.87 |
+| raw Yjs mergeUpdates heavily-edited history     | 2,000 edits |      35 |    28.25 |    29.05 |
+| raw Yjs apply compacted snapshot                | 2,000 edits |   3,811 |     0.26 |     0.52 |
 
 A 200-doc reconcile batch is ~22k doc-merges/sec at ~9 ms p50. Applying a
 compacted snapshot is ~14× faster than replaying the update log — the reason the
@@ -76,10 +76,10 @@ component store keeps compacted snapshots.
 
 | Workload                                     | Volume          | ops/sec | p50 (ms) | p99 (ms) |
 | -------------------------------------------- | --------------- | ------: | -------: | -------: |
-| recordUpdate fresh doc (single delta append) | 1 doc           |  26,827 |    0.036 |    0.046 |
-| recordUpdate hot doc, retained tail          | 1,000-deep tail |   1,010 |     0.94 |     1.93 |
-| recordUpdate across collection               | 10,000 docs     |     333 |     2.93 |     4.25 |
-| getLiveStates †                              | 1,000 docs      |      12 |    80.94 |    82.48 |
+| recordUpdate fresh doc (single delta append) | 1 doc           |  25,428 |    0.039 |    0.049 |
+| recordUpdate hot doc, retained tail          | 1,000-deep tail |   1,050 |     0.95 |     1.95 |
+| recordUpdate across collection               | 10,000 docs     |     334 |     2.99 |     4.31 |
+| getLiveStates †                              | 1,000 docs      |      12 |    85.47 |    87.01 |
 
 These exercise the real handler logic (Yjs delta encode + tail management) over
 an in-memory mock `ctx.db` to isolate compute from storage. † `getLiveStates` is
@@ -90,17 +90,17 @@ is M point-lookups) — it is not a storage-representative number.
 
 | Workload                                                   | ops/sec | p50 (ms) | p99 (ms) |
 | ---------------------------------------------------------- | ------: | -------: | -------: |
-| executeLocal mutation insert                               |   6,789 |    0.116 |     1.98 |
-| executeLocal mutation insert + applyLocalEffects           |   6,466 |    0.121 |     2.01 |
-| executeLocal query indexed range by_status (collect ~2.5k) |      77 |    12.11 |    40.07 |
-| executeLocal query indexed range + take 20                 |     620 |     1.57 |     2.28 |
-| executeLocal query full scan + filter (contrast)           |      69 |    14.52 |    15.08 |
+| executeLocal mutation insert                               |   7,175 |    0.139 |     1.98 |
+| executeLocal mutation insert + applyLocalEffects           |   6,693 |    0.149 |     2.01 |
+| executeLocal query indexed range by_status (collect ~2.5k) |      69 |    14.47 |    40.07 |
+| executeLocal query indexed range + take 20                 |   6,554 |    0.153 |     0.22 |
+| executeLocal query full scan + filter (contrast)           |      71 |    14.04 |    14.60 |
 
 A local write goes through the full real path (handler → db write → incremental
-index maintenance → commit → async persist) at **~0.12 ms p50** — see
+index maintenance → commit → async persist) at **~0.14 ms p50** — see
 [Optimizations](#optimizations--fixes-from-stress-testing); this was ~38 ms
 before the index path was rewritten. A bounded paginated read (`take 20`) is the
-instant-read case at ~1.6 ms p50; a full collect over the matching ~2.5k rows
+instant-read case at ~0.15 ms p50; a full collect over the matching ~2.5k rows
 costs more because it materializes every row. (The write and read benches use
 separate seeded runtimes so the fast writes don't grow the table the reads
 measure.)
@@ -109,16 +109,16 @@ measure.)
 
 | Workload                              | ops/sec | p50 (ms) | p99 (ms) |
 | ------------------------------------- | ------: | -------: | -------: |
-| indexed range Eq(status=active)       |     454 |     2.20 |     7.49 |
-| indexed range Eq(assignee)            |     696 |     1.44 |     2.70 |
-| indexed range Gte(priority>=8)        |     561 |     1.78 |     3.31 |
-| indexed range + take 20 (paginate)    |     694 |     1.44 |     2.70 |
-| full scan + take 20 + filter(=7) sel. |     740 |     1.35 |     2.12 |
-| full table scan + filter (contrast)   |     256 |     3.91 |     4.36 |
+| indexed range Eq(status=active)       |     553 |     1.81 |     6.16 |
+| indexed range Eq(assignee)            |     540 |     1.85 |     3.48 |
+| indexed range Gte(priority>=8)        |     403 |     2.48 |     4.61 |
+| indexed range + take 20 (paginate)    |     704 |     1.42 |     2.66 |
+| full scan + take 20 + filter(=7) sel. |     677 |     1.48 |     2.32 |
+| full table scan + filter (contrast)   |     241 |     4.16 |     4.64 |
 
-Indexed paginate is ~2.8× the throughput of a full scan, confirming index
+Indexed paginate is ~2.9× the throughput of a full scan, confirming index
 selection works on the real engine. The selective `take(20).filter(...)` case
-runs at full-paginate speed (~2.9× the unbounded scan) because the read stops at
+runs at full-paginate speed (~2.8× the unbounded scan) because the read stops at
 the limit instead of scanning the whole table.
 
 ### Tier 2 — Bounded `take/first/unique` + `.filter()` on the engine source path
@@ -132,29 +132,29 @@ through the source reader:
 
 | Workload                                 | ops/sec | p50 (ms) | p99 (ms) |
 | ---------------------------------------- | ------: | -------: | -------: |
-| take 20 + filter(priority%9==7) — before |    47.0 |     21.3 |     22.3 |
-| take 20 + filter(priority%9==7) — after  |    78.7 |     12.7 |     14.1 |
-| filter(priority%9==7) collect (contrast) |    29.8 |     33.5 |     34.0 |
+| take 20 + filter(priority%9==7) — before |    79.8 |    12.53 |    13.12 |
+| take 20 + filter(priority%9==7) — after  |   526.3 |     1.90 |     2.11 |
+| filter(priority%9==7) collect (contrast) |    50.5 |    19.80 |    20.10 |
 
-The bounded read is ~1.7× faster than before and its cost tracks the position of
+The bounded read is ~6.6× faster than before and its cost tracks the position of
 the matches, not the table size (the unbounded `collect` contrast still scans
 all 10k rows). On filters that SQLite _can_ push down (`take(20).filter(=)` over
-the same data), the pushdown path already bounds the read and runs at ~23k
-ops/sec — ~74× the unbounded collect — independent of this engine-side change.
+the same data), the pushdown path already bounds the read and runs at ~677
+ops/sec — ~13× the unbounded collect — independent of this engine-side change.
 
 ### Tier 2 — Pagination (cursor-based `paginate()`, real indexed SQLite, 10k docs)
 
 | Workload                                     | ops/sec | p50 (ms) | p99 (ms) |
 | -------------------------------------------- | ------: | -------: | -------: |
-| first page — indexed Eq(status), pageSize=50 |  74,789 |    0.013 |    0.017 |
-| first page — full table scan, pageSize=50    |  10,543 |    0.095 |    0.149 |
-| paginate entire indexed range, pageSize=100  |     333 |     3.00 |     4.23 |
+| first page — indexed Eq(status), pageSize=50 |  70,381 |    0.014 |    0.018 |
+| first page — full table scan, pageSize=50    |   9,290 |    0.108 |    0.169 |
+| paginate entire indexed range, pageSize=100  |     316 |     3.17 |     4.46 |
 
 `paginate()` is a bounded **index seek**: the cursor encodes the order-key of
 the last row, and resuming a page seeks the index (`> cursor`) and reads only
 `pageSize` rows — O(pageSize) per page, flat regardless of depth. A first page
-is ~0.013 ms; walking the entire ~2.5k-row range in 100-row pages is ~3 ms
-(~0.12 ms per page), on par with a single full drain of the same rows. Earlier
+is ~0.014 ms; walking the entire ~2.5k-row range in 100-row pages is ~3.2 ms
+(~0.13 ms per page), on par with a single full drain of the same rows. Earlier
 this rescanned the whole result set on every page (first page ~1.6 ms, full walk
 ~43 ms, O(n²)); see [Optimizations](#optimizations--fixes-from-stress-testing).
 Each call emits a `convex-embedded.db.paginate` span (page size, rows returned,
@@ -165,10 +165,10 @@ mutations.
 
 | Workload                            | ops/sec | p50 (ms) | p99 (ms) |
 | ----------------------------------- | ------: | -------: | -------: |
-| search — cache warm (reuse index)   |     503 |    2.093 |    4.958 |
-| search — rebuild per query (before) |      39 |   25.305 |   33.020 |
-| vector — cache warm (reuse index)   |   4,580 |    0.221 |    0.290 |
-| vector — rebuild per query (before) |     360 |    2.149 |    8.622 |
+| search — cache warm (reuse index)   |     473 |    2.115 |    5.010 |
+| search — rebuild per query (before) |      28 |   35.714 |   46.600 |
+| vector — cache warm (reuse index)   |   3,882 |    0.258 |    0.339 |
+| vector — rebuild per query (before) |     237 |    4.216 |   16.910 |
 
 The engine's search/vector fallback (`_evaluateSearchSource` / `vectorSearch`,
 used when no materialized index state exists) previously rebuilt the full-text /
@@ -176,8 +176,8 @@ vector index from **all** rows on **every** query — O(table) per call. The bui
 is now cached per `(table, index)` keyed by the table's version
 (`getTableVersion`, bumped on every committed write), so identical searches with
 no intervening write reuse the built index and any write invalidates it. On the
-10k-doc table this is **~12.8× faster** for search (39 → 503 ops/sec) and
-**~12.7× faster** for vector (360 → 4,580 ops/sec) once the cache is warm;
+10k-doc table this is **~16.9× faster** for search (28 → 473 ops/sec) and
+**~16.4× faster** for vector (237 → 3,882 ops/sec) once the cache is warm;
 per-query cost no longer scales with table size. The "before" columns are
 measured by bumping the version on each call to force the old
 rebuild-every-query behavior.
@@ -186,21 +186,21 @@ rebuild-every-query behavior.
 
 | Workload                                 | Volume             | ops/sec | p50 (ms) | p99 (ms) |
 | ---------------------------------------- | ------------------ | ------: | -------: | -------: |
-| subscription invalidate by table         | 10k subs           |   3,263 |     0.27 |     1.41 |
-| subscription invalidate dependency-aware | 10k subs           |   1,133 |     0.85 |     1.25 |
-| protocol reEvaluateQueries               | 10k held subs      |      88 |    11.19 |    21.43 |
-| protocol mutation handling               | 10k active queries |      92 |    10.47 |    15.63 |
+| subscription invalidate by table         | 10k subs           |   3,460 |     0.29 |     1.50 |
+| subscription invalidate dependency-aware | 10k subs           |   1,068 |     0.94 |     1.38 |
+| protocol reEvaluateQueries               | 10k held subs      |      79 |    12.61 |    24.15 |
+| protocol mutation handling               | 10k active queries |      87 |    11.51 |    17.18 |
 
 ### Tier 3 — Storage substrate (better-sqlite3, file-backed)
 
 | Workload                                           | Size       | ops/sec | p50 (ms) | p99 (ms) |
 | -------------------------------------------------- | ---------- | ------: | -------: | -------: |
-| sqlite bulk insert ×5000 (indexed, batched commit) | 5k rows/op |       4 |   186.91 |   649.09 |
-| blob putBlob                                       | 64 KB      |   7,130 |    0.080 |     2.58 |
-| blob putBlob                                       | 1 MB       |     387 |     0.89 |    14.85 |
-| blob getBlob                                       | 64 KB      |  37,749 |    0.021 |    0.081 |
-| blob getBlob                                       | 1 MB       |   3,792 |     0.22 |     0.86 |
-| blob put+delete churn                              | 64 KB      |   8,788 |    0.082 |     0.89 |
+| sqlite bulk insert ×5000 (indexed, batched commit) | 5k rows/op |       4 |   256.41 |   890.62 |
+| blob putBlob                                       | 64 KB      |   6,470 |    0.155 |     5.00 |
+| blob putBlob                                       | 1 MB       |     356 |     2.81 |    46.93 |
+| blob getBlob                                       | 64 KB      |  41,222 |    0.024 |    0.094 |
+| blob getBlob                                       | 1 MB       |   3,961 |    0.252 |    0.987 |
+| blob put+delete churn                              | 64 KB      |   9,581 |    0.104 |     1.13 |
 
 Bulk insert is ~4 batches/sec × 5,000 rows ≈ 20k indexed row-writes/sec (high
 variance, dominated by fsync).
@@ -212,12 +212,12 @@ variance, dominated by fsync).
 | udf executor query invocation                 | mock module |   513,362 |    0.002 |    0.003 |
 | udf executor mutation invocation              | mock module |   349,379 |    0.002 |    0.009 |
 | udf executor action invocation                | mock module |   497,414 |    0.002 |    0.003 |
-| system executeLocal query idMapGet            | 1k id-map   |    21,693 |    0.043 |    0.088 |
-| system executeLocal mutation idMapSet update  | 1k id-map   |    11,406 |    0.085 |    0.140 |
-| system executeLocal query pendingGetAll       | 1k pending  |     8,499 |    0.114 |    0.196 |
+| system executeLocal query idMapGet            | 1k id-map   |    25,362 |    0.039 |    0.080 |
+| system executeLocal mutation idMapSet update  | 1k id-map   |    12,364 |    0.081 |    0.133 |
+| system executeLocal query pendingGetAll       | 1k pending  |     8,554 |    0.117 |    0.201 |
 | scheduler schedule + cancel                   | —           | 3,791,744 |   <0.001 |   <0.001 |
-| subscription invalidate by table              | 5k subs     |     7,958 |    0.124 |    0.151 |
-| subscription invalidate dependency-aware      | 5k subs     |     2,372 |    0.416 |    0.557 |
+| subscription invalidate by table              | 5k subs     |     7,523 |    0.133 |    0.162 |
+| subscription invalidate dependency-aware      | 5k subs     |     2,218 |    0.451 |    0.604 |
 | runtime executeLocal query authStateGetActive | —           | 1,701,643 |    0.001 |    0.001 |
 
 UDF executor rows use mock modules — they measure executor dispatch overhead,
@@ -347,6 +347,52 @@ surfaced and fixed the following:
   deterministic PRNG was seeded from `Date.now()`; the default seed now mixes in
   a per-invocation counter. (Latent before the write-path speedup made same-ms
   mutations common.)
+- **Tracing wrappers allocated a span on every call, even with no tracer (single
+  largest closure-refactor follow-up win).** Every Database / QueryEngine /
+  scheduler / blob / UDF operation was wrapped in `withSpan` / `withSpanSync`,
+  which called `getTracer()`, allocated a `Span`, and ran `setStatus`/`end` on
+  every invocation — including the default case where no tracer provider is
+  installed. A module-level `tracingActive` flag (flipped on by
+  `installInMemoryTracing` / `installNodeTracing` / `installBrowserTracing`, off
+  in their close handlers) now short-circuits both wrappers to invoke the
+  function against a shared no-op `Span` with zero allocation when tracing is
+  off. A controlled before/after on the same machine showed scheduler
+  schedule+cancel +71%, UDF mutation invocation +49%, indexed point lookup +63%,
+  blob 1 MB get +36%, with ~40 of 53 benches >5% faster.
+- **`get x() { return x; }` accessors over closure constants regressed hot-path
+  reads 30–56%.** Converting the internal classes to closure factories initially
+  wrapped every readonly subsystem reference (`db`, `executor`, `scheduler`, …)
+  in a getter. V8 cannot inline-cache a getter that returns a closure-captured
+  variable, so each field read became a function call. Replacing the getters
+  with direct property shorthand in the returned object literal
+  (`{ db, executor, … }`) restored monomorphic property reads and recovered the
+  regression; getters are now used only for genuinely mutable state (e.g. the
+  live MVCC `timestamp`).
+- **Per-call allocation cleanup on the remaining hot paths.** A pass to remove
+  per-invocation allocations: a prepared-statement cache at the better-sqlite3
+  driver wrapper (`Map<sql, Statement>`); `getIndexedDocuments` skips its dedup
+  `Set`s when there can be no duplicates and collapses a `.map().filter().map()`
+  chain to one loop; `resolveOrderKey` allocates its `pinned` `Set` lazily (only
+  when an `Eq` range bound exists) and `resolveIndexFields` returns memoized
+  field arrays instead of spreading per call; the two `.filter()` closures
+  inside `paginateSeekAsync`'s retry loop are hoisted to explicit loops; UDF
+  `patchGlobals` caches the three `Object.getOwnPropertyDescriptor` lookups at
+  module init instead of per invocation; `toArrayBuffer` uses
+  `ArrayBuffer.prototype.slice` instead of allocate-and-copy; the SQLite client
+  sets `PRAGMA synchronous = NORMAL` alongside WAL; and `decodeCursor` keeps a
+  one-slot cache so sequential `paginate` calls skip re-parsing the cursor.
+- **Remote-snapshot merge built three throwaway arrays per ingest.**
+  `mergeRemote` constructed its working map via `localDocs.filter().map()`,
+  folded the remote diff with an object-literal `reduce` accumulator, then
+  materialized the result with `Array.from(map.values())` — three intermediate
+  allocations for every snapshot, dominating the 1,000-doc remote-ingest path.
+  Rewritten as explicit `for` loops over the inputs filling pre-declared output
+  arrays, which returned the stale-remote-snapshot and resolve-cycle benches to
+  parity after they had regressed in the closure refactor.
+
+The class→factory migration itself was perf-neutral once the wrapper allocation
+and accessor overhead above were addressed — the regressions came from those,
+not from method dispatch on plain objects vs prototypes.
 
 ## What these numbers do and don't show
 

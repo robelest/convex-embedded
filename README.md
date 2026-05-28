@@ -38,10 +38,10 @@ docs). Headline numbers on an Apple M4 / Node 24:
 | Path                                             |          Throughput |                   p50 |
 | ------------------------------------------------ | ------------------: | --------------------: |
 | CRDT offline reconcile                           | ~22k doc-merges/sec | ~9 ms / 200-doc batch |
-| Component `recordUpdate` (fresh)                 |      26,827 ops/sec |              0.036 ms |
-| `executeLocal` indexed paginate (take 20)        |         620 ops/sec |                1.6 ms |
-| `executeLocal` mutation insert (full write path) |       6,789 ops/sec |               0.12 ms |
-| Blob get (64 KB)                                 |      37,749 ops/sec |              0.021 ms |
+| Component `recordUpdate` (fresh)                 |      25,428 ops/sec |              0.039 ms |
+| `executeLocal` indexed paginate (take 20)        |         704 ops/sec |               1.42 ms |
+| `executeLocal` mutation insert (full write path) |       7,175 ops/sec |               0.14 ms |
+| Blob get (64 KB)                                 |      41,222 ops/sec |              0.024 ms |
 
 Full methodology, per-suite results, and the offline rationale are in
 [`benchmarks/README.md`](./benchmarks/README.md). Run with

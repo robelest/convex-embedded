@@ -1,0 +1,74 @@
+name: bench
+
+on:
+  workflow_dispatch:
+  pull_request:
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version: lts
+          cache: true
+
+      - name: Resolve base/head SHAs
+        run: |
+          HEAD_SHA="$(git rev-parse HEAD)"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          else
+            BASE_SHA="$(git rev-parse HEAD~1)"
+          fi
+          echo "HEAD_SHA=$HEAD_SHA" >> "$GITHUB_ENV"
+          echo "BASE_SHA=$BASE_SHA" >> "$GITHUB_ENV"
+          echo "base=$BASE_SHA head=$HEAD_SHA"
+
+      # Baseline run on the base commit. Same runner VM as the head run
+      # below, so the base-vs-head delta is valid even though absolute
+      # numbers vary between CI runs.
+      - name: Bench base
+        run: |
+          git checkout --quiet "$BASE_SHA"
+          vp install
+          cd benchmarks
+          vp exec vitest bench --run --outputJson="$RUNNER_TEMP/base.json"
+
+      - name: Bench head (compare)
+        run: |
+          git checkout --quiet "$HEAD_SHA"
+          vp install
+          cd benchmarks
+          vp exec vitest bench --run \
+            --compare="$RUNNER_TEMP/base.json" \
+            --outputJson="$RUNNER_TEMP/head.json" | tee "$RUNNER_TEMP/cmp.txt"
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "### Benchmark: base \`${BASE_SHA:0:8}\` → head \`${HEAD_SHA:0:8}\`"
+            echo ""
+            echo '```'
+            cat "$RUNNER_TEMP/cmp.txt" 2>/dev/null || echo "no comparison output"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-results
+          path: |
+            ${{ runner.temp }}/base.json
+            ${{ runner.temp }}/head.json
+            ${{ runner.temp }}/cmp.txt
+          if-no-files-found: ignore

@@ -15,6 +15,11 @@ concurrency:
 jobs:
   live:
     runs-on: ubuntu-latest
+    # Job-level env can read secrets; step `if` can read job env. When the
+    # preview deploy key isn't configured, skip the deploy step cleanly
+    # instead of failing every push.
+    env:
+      CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
     steps:
       - uses: actions/checkout@v4
 
@@ -31,5 +36,4 @@ jobs:
       # runs the live suite with CONVEX_URL pointed at the preview.
       # CONVEX_DEPLOY_KEY must be a Preview Deploy Key (repo secret).
       - run: vp run test:live
-        env:
-          CONVEX_DEPLOY_KEY: ${{ secrets.CONVEX_DEPLOY_KEY }}
+        if: ${{ env.CONVEX_DEPLOY_KEY != '' }}

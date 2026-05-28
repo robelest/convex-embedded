@@ -152,12 +152,9 @@ async function listPendingRowsByIdentity<Row>(
   table: "_resolve_pending" | "_resolve_pending_uploads",
   identityKey: string | null,
 ): Promise<Row[]> {
-  return allByIndex<Row>(
-    db,
-    table,
-    "by_identity_key_and_creation_time",
-    [{ type: "Eq", fieldPath: "identityKey", value: identityKey }],
-  );
+  return allByIndex<Row>(db, table, "by_identity_key_and_creation_time", [
+    { type: "Eq", fieldPath: "identityKey", value: identityKey },
+  ]);
 }
 
 async function releasePendingEntry(

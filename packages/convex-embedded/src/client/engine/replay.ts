@@ -55,7 +55,10 @@ export interface ReplayRefs {
   leaseMs: number;
   uploadUrlRef?: unknown;
   uploadFetch?: typeof globalThis.fetch;
-  recordExpectedSelfCausedSignal: (table: string, postCommitSeq: number) => void;
+  recordExpectedSelfCausedSignal: (
+    table: string,
+    postCommitSeq: number,
+  ) => void;
   nextExpectedSelfCausedSeq: (table: string) => number;
   softResetSubsBuffers: () => void;
   hasActiveSubs: () => boolean;
@@ -800,7 +803,9 @@ export function createReplay(refs: ReplayRefs): Replay {
               }
               if (err instanceof ReplayLeaseLostError) {
                 activeEntryRef = null;
-                log.warn(`sync: replay lease lost while processing ${entry.ref}`);
+                log.warn(
+                  `sync: replay lease lost while processing ${entry.ref}`,
+                );
                 recordCounter("replay.outcome", {
                   result: "lease_lost",
                   "convex.table": entry.table,

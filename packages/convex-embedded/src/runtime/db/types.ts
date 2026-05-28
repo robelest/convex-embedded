@@ -125,7 +125,6 @@ export type QueryDependency =
       filter: VectorSearchExpression | null;
     };
 
-
 /**
  * Monotonic timestamp for MVCC versioning.
  * Increments on each committed mutation.

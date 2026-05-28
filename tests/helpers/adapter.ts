@@ -170,7 +170,6 @@ export class OpaqueTestAdapter implements StorageAdapter {
   async close(): Promise<void> {
     await this.opts.close?.();
   }
-
 }
 
 class QueryableTestAdapter

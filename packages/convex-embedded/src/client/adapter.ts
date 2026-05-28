@@ -288,10 +288,7 @@ export function createCachePipeline(
     if (!config.remoteClient) return;
     if (isConnectivityOffline(config.connectivity)) return;
     for (const entry of active.values()) {
-      if (
-        entry.remoteUnsubscribe === null &&
-        opensRemoteSubscription(entry)
-      ) {
+      if (entry.remoteUnsubscribe === null && opensRemoteSubscription(entry)) {
         openRemoteSubscription(entry);
       }
     }

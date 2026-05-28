@@ -473,8 +473,7 @@ export function createDatabase(
       }
       const { documents: loaded, meta } = await withSpan(
         "convex-embedded.db.hydrate.fetch",
-        () =>
-          store.load(scopedHydration ? { tables: tableNames } : undefined),
+        () => store.load(scopedHydration ? { tables: tableNames } : undefined),
       );
       const fetched = performance.now();
       span.setAttributes({
@@ -901,15 +900,15 @@ export function createDatabase(
     return stripIdentityScope(document);
   }
 
-  function insert(table: TableName, value: Record<string, unknown>): DocumentId {
+  function insert(
+    table: TableName,
+    value: Record<string, unknown>,
+  ): DocumentId {
     validate(table, value as GenericDocument);
     let _id: DocumentId | null = null;
     for (let attempt = 0; attempt < 8; attempt += 1) {
       const candidate = cryptoProvider.randomUUID() as unknown as DocumentId;
-      if (
-        !idTableMap.has(candidate as string) &&
-        getRaw(candidate) === null
-      ) {
+      if (!idTableMap.has(candidate as string) && getRaw(candidate) === null) {
         _id = candidate;
         break;
       }
@@ -924,10 +923,7 @@ export function createDatabase(
     const _creationTime =
       now <= lastCreationTime ? lastCreationTime + 0.001 : now;
     lastCreationTime = _creationTime;
-    addWrite(
-      _id,
-      withIdentityScope(table, { ...value, _id, _creationTime }),
-    );
+    addWrite(_id, withIdentityScope(table, { ...value, _id, _creationTime }));
     return _id;
   }
 
@@ -1047,10 +1043,7 @@ export function createDatabase(
     );
   }
 
-  function deleteDoc(
-    tableName: TableName | undefined,
-    id: DocumentId,
-  ): void {
+  function deleteDoc(tableName: TableName | undefined, id: DocumentId): void {
     if (!validateId(tableName, id)) {
       throw new Error("Delete on non-existent doc");
     }
@@ -1218,9 +1211,7 @@ export function createDatabase(
 
   function normalizeId(table: TableName, idString: string): DocumentId | null {
     if (typeof idString !== "string") return null;
-    return idTableMap.get(idString) === table
-      ? (idString as DocumentId)
-      : null;
+    return idTableMap.get(idString) === table ? (idString as DocumentId) : null;
   }
 
   function getTableForId(id: string): string | undefined {
@@ -1318,10 +1309,7 @@ export function createDatabase(
   function countAsync(tableName: string): Promise<number> {
     if (!hasPendingWritesForTable(tableName)) {
       return store
-        .countDocuments(
-          tableName as TableName,
-          storageReadOptions(tableName),
-        )
+        .countDocuments(tableName as TableName, storageReadOptions(tableName))
         .then((c) => c ?? count(tableName));
     }
     return Promise.resolve(count(tableName));
@@ -2530,9 +2518,7 @@ export function createDatabase(
       const docs = hasPending
         ? getMergedIndexedDocuments(tableName, indexName)
         : getIndexedDocuments(tableName, indexName);
-      const start = lower
-        ? binarySearchLowerBound(docs, fields, lower)
-        : 0;
+      const start = lower ? binarySearchLowerBound(docs, fields, lower) : 0;
       const end = upper
         ? binarySearchUpperBound(docs, fields, upper)
         : docs.length;
@@ -3195,7 +3181,9 @@ export function createDatabase(
       }
     }
 
-    for (const { indexName, fields } of getIndexDefinitionsInternal(tableName)) {
+    for (const { indexName, fields } of getIndexDefinitionsInternal(
+      tableName,
+    )) {
       if (ids.length === 0) {
         indexDocuments.set(`${tableName}.${indexName}`, []);
         continue;
@@ -3248,9 +3236,7 @@ export function createDatabase(
     const rawDocs = [...(tableDocuments.get(tableName) ?? [])]
       .map(
         (id) =>
-          documents.get(id as DocumentId) as
-            | IdentityScopedDocument
-            | undefined,
+          documents.get(id as DocumentId) as IdentityScopedDocument | undefined,
       )
       .filter((doc): doc is IdentityScopedDocument => doc !== undefined);
 
@@ -3286,9 +3272,7 @@ export function createDatabase(
     const rawDocs = [...(tableDocuments.get(tableName) ?? [])]
       .map(
         (id) =>
-          documents.get(id as DocumentId) as
-            | IdentityScopedDocument
-            | undefined,
+          documents.get(id as DocumentId) as IdentityScopedDocument | undefined,
       )
       .filter((doc): doc is IdentityScopedDocument => doc !== undefined);
 
@@ -3366,9 +3350,7 @@ export function createDatabase(
   }
 
   function storageReadOptions(tableName: string): ReadOptions | undefined {
-    return isSystemTable(tableName)
-      ? undefined
-      : { activeIdentityKey };
+    return isSystemTable(tableName) ? undefined : { activeIdentityKey };
   }
 
   function isQueryableTable(tableName: string): boolean {
@@ -3379,7 +3361,9 @@ export function createDatabase(
     tableName: string,
     changes: CommittedStateChange[],
   ): void {
-    for (const { indexName, fields } of getIndexDefinitionsInternal(tableName)) {
+    for (const { indexName, fields } of getIndexDefinitionsInternal(
+      tableName,
+    )) {
       const key = `${tableName}.${indexName}`;
       const ids = indexDocuments.get(key);
       if (!ids) {

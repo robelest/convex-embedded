@@ -92,7 +92,9 @@ describe("EmbeddedRuntime component dispatch (alpha guard)", () => {
   it("throws NESTED_COMPONENT_LOCAL_UNSUPPORTED when invoked with a component path", async ({
     track,
   }) => {
-    const runtime = createEmbeddedRuntime({ convex: { modules: STUB_MODULES } });
+    const runtime = createEmbeddedRuntime({
+      convex: { modules: STUB_MODULES },
+    });
     track({ close: () => runtime.shutdown() });
     await runtime.hydrate();
 

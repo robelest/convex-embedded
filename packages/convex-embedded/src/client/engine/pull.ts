@@ -1032,11 +1032,7 @@ export function createPull(refs: PullRefs): Pull {
       log.warn(
         `sync: remote resolve for "${input.tableName}" does not support exact doc hydration; falling back to full table resolve`,
       );
-      await getTableSpec(
-        input.tableName,
-        tableConfig,
-        input.signal,
-      );
+      await getTableSpec(input.tableName, tableConfig, input.signal);
       return;
     }
     const pullResult = canonicalizePullResponse(rawResolveResult, null);
@@ -1199,8 +1195,7 @@ export function createPull(refs: PullRefs): Pull {
 
     {
       const pendingSelfCaused = hasPendingSelfCausedSignal(tableName);
-      const cachedCollectionSeq =
-        lastKnownCollectionSeqByTable.get(tableName);
+      const cachedCollectionSeq = lastKnownCollectionSeqByTable.get(tableName);
       const metadata =
         pendingSelfCaused && typeof cachedCollectionSeq === "number"
           ? await readPullMetadataFastPath(
@@ -1465,8 +1460,7 @@ export function createPull(refs: PullRefs): Pull {
       try {
         await withSpan(
           "convex-embedded.getTableSpec",
-          () =>
-            getTablePagePlan(tableName, tableConfig, signal, scopeArgs),
+          () => getTablePagePlan(tableName, tableConfig, signal, scopeArgs),
           {
             attributes: {
               "convex.table": tableName,

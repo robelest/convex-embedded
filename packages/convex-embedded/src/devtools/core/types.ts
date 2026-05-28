@@ -130,4 +130,3 @@ export interface EmbeddedDevtoolsSource {
   clearActivity(): void;
   dispose(): void;
 }
-

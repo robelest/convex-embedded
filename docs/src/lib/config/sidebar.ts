@@ -55,4 +55,3 @@ export const sidebar: SidebarGroup[] = [
     ],
   },
 ];
-

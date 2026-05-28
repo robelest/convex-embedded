@@ -1,5 +1,8 @@
 import { UdfExecutor } from "@embedded/kernel/udf";
-import { createSubscriptionManager, type SubscriptionManager } from "@embedded/replication/subscriptions";
+import {
+  createSubscriptionManager,
+  type SubscriptionManager,
+} from "@embedded/replication/subscriptions";
 import { createAmbientCryptoProvider } from "@embedded/runtime/crypto";
 import { createDatabase } from "@embedded/runtime/db/database";
 import type { DocumentId } from "@embedded/runtime/db/types";

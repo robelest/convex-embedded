@@ -215,7 +215,9 @@ const it = itBase.extend<EmbeddedFixtures>({
     await use(MockBroadcastChannel);
   },
   runtime: async ({ broadcast: _broadcast, onTestFinished }, use) => {
-    const runtime = createEmbeddedRuntime({ convex: { modules: STUB_MODULES } });
+    const runtime = createEmbeddedRuntime({
+      convex: { modules: STUB_MODULES },
+    });
     onTestFinished(() => runtime.shutdown());
     await use(runtime);
   },

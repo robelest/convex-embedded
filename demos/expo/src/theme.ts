@@ -45,4 +45,3 @@ export const statusColors = {
   done: colors.success,
   cancelled: colors.warm[300],
 } as const;
-

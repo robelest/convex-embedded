@@ -1,6 +1,9 @@
 import type { ProtocolExecutor } from "@embedded/replication/protocol";
 import { ReplicationProtocolHandler } from "@embedded/replication/protocol";
-import { createSubscriptionManager, type SubscriptionManager } from "@embedded/replication/subscriptions";
+import {
+  createSubscriptionManager,
+  type SubscriptionManager,
+} from "@embedded/replication/subscriptions";
 import type { DocumentId } from "@embedded/runtime/db/types";
 import {
   createRuntimeProtocolQueryRegistry,

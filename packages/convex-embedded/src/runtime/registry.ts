@@ -113,9 +113,7 @@ export interface RuntimeQueryObserverRegistry<TMeta> {
   get(token: string): RuntimeQueryObserver<TMeta> | undefined;
   values(): RuntimeQueryObserver<TMeta>[];
   subscribe(token: string, callback: () => void): () => void;
-  refresh(
-    tokenOrObserver: string | RuntimeQueryObserver<TMeta>,
-  ): Promise<void>;
+  refresh(tokenOrObserver: string | RuntimeQueryObserver<TMeta>): Promise<void>;
   replicationState(
     tokenOrObserver: string | RuntimeQueryObserver<TMeta>,
     state: QueryObserverStateInput,

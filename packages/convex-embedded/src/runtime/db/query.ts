@@ -769,10 +769,7 @@ export function createQueryEngine(
   function evaluateIndexRangeSource(
     src: Extract<Source, { type: "IndexRange" }>,
   ): SourceEvaluation {
-    const [tableName, indexName] = src.indexName.split(".") as [
-      string,
-      string,
-    ];
+    const [tableName, indexName] = src.indexName.split(".") as [string, string];
     const fields = resolveIndexFields(tableName, indexName);
     validateIndexRangeExpression(src, fields);
     const rangePredicate = buildRangePredicate(src.range);
@@ -788,10 +785,7 @@ export function createQueryEngine(
     src: Extract<Source, { type: "Search" }>,
     limit: number | null,
   ): SourceEvaluation {
-    const [tableName, indexName] = src.indexName.split(".") as [
-      string,
-      string,
-    ];
+    const [tableName, indexName] = src.indexName.split(".") as [string, string];
     const definition = getSearchIndexDefinition(
       schema?.tables.get(tableName)?.searchIndexes,
       tableName,
@@ -966,10 +960,7 @@ export function createQueryEngine(
         order: src.order ?? "asc",
       };
     }
-    const [tableName, indexName] = src.indexName.split(".") as [
-      string,
-      string,
-    ];
+    const [tableName, indexName] = src.indexName.split(".") as [string, string];
     const fields = resolveIndexFields(tableName, indexName);
     let pinned: Set<string> | null = null;
     for (const expr of src.range) {
@@ -1165,11 +1156,7 @@ export function createQueryEngine(
             : Math.min(readLimit, rowCap);
       const effectiveLimit =
         unboundedRead && rowCap === null ? null : cappedLimit;
-      const src = await evaluateSourceAsync(
-        query.source,
-        effectiveLimit,
-        seek,
-      );
+      const src = await evaluateSourceAsync(query.source, effectiveLimit, seek);
       const rowsExceeded = rowCap !== null && src.results.length >= rowCap;
       const { results: budgetedRaw, bytesExceeded } = applyByteBudget(
         src.results,
@@ -1202,11 +1189,7 @@ export function createQueryEngine(
             ...pageSplit(orderKey, afterStart, target),
           };
         }
-        const inRange = filterDocsBeforeOrEq(
-          orderKey,
-          afterStart,
-          endDecoded,
-        );
+        const inRange = filterDocsBeforeOrEq(orderKey, afterStart, endDecoded);
         const sawBeyondEnd = inRange.length < afterStart.length;
         if (sawBeyondEnd || exhausted) {
           return {

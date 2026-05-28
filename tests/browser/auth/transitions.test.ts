@@ -3,7 +3,6 @@ import type {
   EmbeddedRuntime,
   LocalExecutionRequest,
 } from "@embedded/runtime/embedded";
-import type { ConvexClient } from "convex/browser";
 import type { EngineStatus } from "@embedded/shared/types";
 import { createTestIdentity } from "@embedded/test";
 import {
@@ -12,6 +11,7 @@ import {
   switchIdentity,
 } from "@resolve/browser/index";
 import { afterEach, beforeEach, describe, expect, it } from "@tests/testkit";
+import type { ConvexClient } from "convex/browser";
 
 type AuthFetcher = (args: {
   forceRefreshToken: boolean;

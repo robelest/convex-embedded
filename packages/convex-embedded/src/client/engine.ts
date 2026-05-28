@@ -951,14 +951,9 @@ export function createEngine(config: EngineConfig): EngineInstance {
         scopeArgs: entry.scopeArgs,
         consumeExpectedSelfCausedSignal: (table, signalSeq) =>
           pullInst.consumeExpectedSelfCausedSignal(table, signalSeq),
-        scheduleTableCoalesce: (input) =>
-          pullInst.scheduleTableCoalesce(input),
+        scheduleTableCoalesce: (input) => pullInst.scheduleTableCoalesce(input),
         shouldSkipRedundantPartialPull: (table, scopeArgs, signalSeq) =>
-          pullInst.shouldSkipRedundantPartialPull(
-            table,
-            scopeArgs,
-            signalSeq,
-          ),
+          pullInst.shouldSkipRedundantPartialPull(table, scopeArgs, signalSeq),
         onPartialResponse: () => {
           runDetached(
             () =>
@@ -1104,11 +1099,7 @@ export function createEngine(config: EngineConfig): EngineInstance {
       tableName,
       scopeArgs: normalizedScope,
     });
-    if (
-      !schedulerInst.isOnline() ||
-      !started ||
-      !pendingQueue.isEmpty
-    ) {
+    if (!schedulerInst.isOnline() || !started || !pendingQueue.isEmpty) {
       return;
     }
 
@@ -1149,23 +1140,13 @@ export function createEngine(config: EngineConfig): EngineInstance {
         scopeArgs: normalizedScope,
         consumeExpectedSelfCausedSignal: (table, signalSeq) =>
           pullInst.consumeExpectedSelfCausedSignal(table, signalSeq),
-        scheduleTableCoalesce: (input) =>
-          pullInst.scheduleTableCoalesce(input),
+        scheduleTableCoalesce: (input) => pullInst.scheduleTableCoalesce(input),
         shouldSkipRedundantPartialPull: (table, scopeArgs, signalSeq) =>
-          pullInst.shouldSkipRedundantPartialPull(
-            table,
-            scopeArgs,
-            signalSeq,
-          ),
+          pullInst.shouldSkipRedundantPartialPull(table, scopeArgs, signalSeq),
         onPartialResponse: () => {
           runDetached(
             () =>
-              getTableSpec(
-                tableName,
-                tableConfig,
-                undefined,
-                normalizedScope,
-              ),
+              getTableSpec(tableName, tableConfig, undefined, normalizedScope),
             `[sync] paginated resolve for scoped "${tableName}":`,
           );
         },
@@ -1475,10 +1456,7 @@ export function createEngine(config: EngineConfig): EngineInstance {
       log.debug(
         `engine.mutation queue.push push=${(__pushDone - __pushStart).toFixed(1)}ms ref=${refName}`,
       );
-      if (
-        !schedulerInst.isOnline() &&
-        pullInst.shouldTrackCrdt(table)
-      ) {
+      if (!schedulerInst.isOnline() && pullInst.shouldTrackCrdt(table)) {
         const docId =
           typeof localResult === "string"
             ? localResult

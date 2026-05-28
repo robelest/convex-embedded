@@ -198,4 +198,3 @@ export interface PullDocumentResponse {
   /** Marker for hard deletes. */
   deleted?: true;
 }
-

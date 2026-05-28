@@ -32,4 +32,3 @@ export function toArrayBuffer(data: Uint8Array): ArrayBuffer {
   new Uint8Array(buffer).set(data);
   return buffer;
 }
-

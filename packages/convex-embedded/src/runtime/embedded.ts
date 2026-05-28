@@ -35,7 +35,10 @@ import type {
   ProtocolExecutor,
   ServerMessage,
 } from "@/replication/protocol";
-import { createSessionManager, type SessionManager } from "@/replication/session";
+import {
+  createSessionManager,
+  type SessionManager,
+} from "@/replication/session";
 import {
   createSubscriptionManager,
   type SubscriptionManager,
@@ -395,9 +398,7 @@ export interface EmbeddedRuntime {
     tableName: string;
     schemas: Record<string, Definition>;
   }): Promise<void>;
-  getDocumentsForTable(
-    table: string,
-  ): Promise<Array<Record<string, unknown>>>;
+  getDocumentsForTable(table: string): Promise<Array<Record<string, unknown>>>;
   getDocumentsForScope(
     table: string,
     scopeArgs: Record<string, unknown>,
@@ -1108,18 +1109,14 @@ export function createEmbeddedRuntime(
     }
   }
 
-  async function handleCrossTabSync(
-    tablesWritten: Set<string>,
-  ): Promise<void> {
+  async function handleCrossTabSync(tablesWritten: Set<string>): Promise<void> {
     try {
       const tablesToSync = Array.from(tablesWritten).filter(
         (table) =>
           !(storageAdapter != null && isQueryable(storageAdapter)) ||
           db.isTableHydrationAttempted(table),
       );
-      await Promise.all(
-        tablesToSync.map((table) => db.replicateTable(table)),
-      );
+      await Promise.all(tablesToSync.map((table) => db.replicateTable(table)));
 
       const updates = await syncProtocol.reEvaluateQueries(
         Array.from(tablesWritten).map((tableName) => ({
@@ -1613,12 +1610,9 @@ export function createEmbeddedRuntime(
         const functionPath = getFunctionPath({ name: current.path });
         const systemFn = SYSTEM_FUNCTIONS[functionPath.udfPath];
         if (systemFn !== undefined) {
-          return await runSystemFunction(
-            systemFn,
-            "mutation",
-            current.args,
-            { holdsTransactionLock: false },
-          );
+          return await runSystemFunction(systemFn, "mutation", current.args, {
+            holdsTransactionLock: false,
+          });
         }
         return withSpan(
           "convex-embedded.executeLocal.mutation",
@@ -1642,11 +1636,7 @@ export function createEmbeddedRuntime(
         );
       },
       action: (current) =>
-        runUdf(
-          "action",
-          getFunctionPath({ name: current.path }),
-          current.args,
-        ),
+        runUdf("action", getFunctionPath({ name: current.path }), current.args),
     });
   }
 
@@ -1704,10 +1694,8 @@ export function createEmbeddedRuntime(
       pageCache: new Map(),
     };
 
-    const observer = localPaginatedQueryWatches.ensure(
-      token,
-      initialMeta,
-      () => evaluateHydratedLocalPaginatedWatch(observer),
+    const observer = localPaginatedQueryWatches.ensure(token, initialMeta, () =>
+      evaluateHydratedLocalPaginatedWatch(observer),
     );
     void localPaginatedQueryWatches.refresh(observer);
     return observer;
@@ -2015,12 +2003,9 @@ export function createEmbeddedRuntime(
         const systemFn = SYSTEM_FUNCTIONS[path.udfPath];
 
         if (systemFn !== undefined) {
-          const result = await runSystemFunction(
-            systemFn,
-            "query",
-            args,
-            { holdsTransactionLock: false },
-          );
+          const result = await runSystemFunction(systemFn, "query", args, {
+            holdsTransactionLock: false,
+          });
           span.setAttributes({
             "convex.query.system": true,
             "convex.query.tables_read": 0,

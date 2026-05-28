@@ -265,10 +265,7 @@ export function createSubscriptionManager(): SubscriptionManager {
         );
         if (!tokens) {
           tokens = new Set();
-          indexRangeBroadSubscriptionsByTable.set(
-            dependency.tableName,
-            tokens,
-          );
+          indexRangeBroadSubscriptionsByTable.set(dependency.tableName, tokens);
         }
         tokens.add(queryToken);
       }

@@ -109,12 +109,6 @@ const noopHttpDispatcher: HttpDispatcher = {
   hasRoutes: () => false,
 };
 
-function readDebugEnvFlag(): boolean {
-  if (typeof process === "undefined") return false;
-  const env = (process as { env?: Record<string, string | undefined> }).env;
-  return env?.CONVEX_EMBEDDED_DEBUG === "1";
-}
-
 export type LocalExecutionRequest =
   | {
       kind: "query";
@@ -469,7 +463,11 @@ export interface EmbeddedRuntime {
 export function createEmbeddedRuntime(
   options: EmbeddedRuntimeOptions,
 ): EmbeddedRuntime {
-  if (options.debug === true || readDebugEnvFlag()) {
+  const debugEnvFlag =
+    typeof process !== "undefined" &&
+    (process as { env?: Record<string, string | undefined> }).env
+      ?.CONVEX_EMBEDDED_DEBUG === "1";
+  if (options.debug === true || debugEnvFlag) {
     setLoggerDebug(true);
   }
   runtimeLog.debug(
@@ -565,23 +563,7 @@ export function createEmbeddedRuntime(
       )
     : null;
   if (storageAdapter && userTableSpecs) {
-    const setUserTableSpecs = (
-      storageAdapter as {
-        setUserTableSpecs?: (
-          specs: Map<string, InternalTableSpec> | undefined,
-        ) => void;
-      }
-    ).setUserTableSpecs;
-    if (typeof setUserTableSpecs === "function") {
-      try {
-        setUserTableSpecs.call(storageAdapter, userTableSpecs);
-      } catch (error) {
-        runtimeLog.warn(
-          "failed to install user table specs on storage adapter",
-          error,
-        );
-      }
-    }
+    storageAdapter.setUserTableSpecs?.(userTableSpecs);
   }
 
   writeFanout.onNotification((tablesWritten) => {
@@ -704,23 +686,7 @@ export function createEmbeddedRuntime(
 
   function setStorage(storage: StorageAdapter | null): void {
     if (storage && userTableSpecs) {
-      const setUserTableSpecs = (
-        storage as {
-          setUserTableSpecs?: (
-            specs: Map<string, InternalTableSpec> | undefined,
-          ) => void;
-        }
-      ).setUserTableSpecs;
-      if (typeof setUserTableSpecs === "function") {
-        try {
-          setUserTableSpecs.call(storage, userTableSpecs);
-        } catch (error) {
-          runtimeLog.warn(
-            "failed to install user table specs on storage adapter",
-            error,
-          );
-        }
-      }
+      storage.setUserTableSpecs?.(userTableSpecs);
     }
     storageAdapter = storage;
     db.setStorage(storage);
@@ -749,10 +715,10 @@ export function createEmbeddedRuntime(
 
   async function getStorageBlob(storageId: string): Promise<Blob | null> {
     await storageHydratedRef.current;
-    const started = globalThis.performance?.now?.() ?? Date.now();
+    const started = performance.now();
     const blob = await db.loadFile(storageId as DocumentId);
     storageLog.debug(
-      `getStorageBlob(${storageId}) -> ${blob === null ? "null" : `${blob.size} bytes`} in ${((globalThis.performance?.now?.() ?? Date.now()) - started).toFixed(1)}ms`,
+      `getStorageBlob(${storageId}) -> ${blob === null ? "null" : `${blob.size} bytes`} in ${(performance.now() - started).toFixed(1)}ms`,
     );
     return blob;
   }

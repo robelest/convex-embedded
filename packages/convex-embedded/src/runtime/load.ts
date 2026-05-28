@@ -9,7 +9,7 @@ import { withSpan } from "@/tracing/spans";
 
 const log = createLogger("storage-attach");
 
-const now = () => globalThis.performance?.now?.() ?? Date.now();
+const now = () => performance.now();
 
 export interface LoadCoordinatorInput {
   runtime: EmbeddedRuntime;

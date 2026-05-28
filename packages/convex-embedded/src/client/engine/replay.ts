@@ -11,6 +11,7 @@ import {
   type PendingUploadEntry,
   type PendingUploadQueue,
 } from "@/client/pending/uploads";
+import { toErrorMessage } from "@/shared/error";
 import { parseErrorMetadata } from "@/shared/errors";
 import { createLogger } from "@/shared/logger";
 import { makeFunctionReference } from "@/shared/refs";
@@ -168,17 +169,6 @@ class ReplayLeaseLostError extends Error {
   }
 }
 
-function toErrorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (typeof error === "string") return error;
-  if (error == null) return "unknown error";
-  try {
-    return JSON.stringify(error);
-  } catch {
-    return "unknown error";
-  }
-}
-
 function classifyReplayError(
   error: Error,
 ): "reauthRequired" | "authorizationDenied" | "scopeChanged" | "unknown" {
@@ -232,10 +222,7 @@ function startReplayLeaseHeartbeat(input: {
   const intervalMs = Math.max(1_000, Math.floor(input.leaseMs / 3));
   let stopped = false;
   let timer: ReturnType<typeof setTimeout> | null = null;
-  let rejectLost!: (error: Error) => void;
-  const lost = new Promise<never>((_, reject) => {
-    rejectLost = reject;
-  });
+  const { promise: lost, reject: rejectLost } = Promise.withResolvers<never>();
   lost.catch(() => undefined);
 
   const schedule = (): void => {

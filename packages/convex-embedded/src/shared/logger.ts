@@ -1,10 +1,9 @@
 import {
+  logs,
   SeverityNumber,
   type AnyValue,
   type AnyValueMap,
 } from "@opentelemetry/api-logs";
-
-import { getLogger } from "@/tracing/spans";
 
 const PREFIX = "convex-embedded";
 
@@ -51,7 +50,7 @@ function emitLog(
   msg: string,
   args: unknown[],
 ): void {
-  getLogger().emit({
+  logs.getLogger(PREFIX).emit({
     severityNumber,
     severityText,
     body: msg,
@@ -75,11 +74,15 @@ export function createLogger(category: string) {
     },
     warn: (msg: string, ...args: unknown[]) => {
       emitLog(category, SeverityNumber.WARN, "warn", msg, args);
-      console.warn(formatLogLine(category, msg), ...args);
+      if (debugEnabled) {
+        console.warn(formatLogLine(category, msg), ...args);
+      }
     },
     error: (msg: string, ...args: unknown[]) => {
       emitLog(category, SeverityNumber.ERROR, "error", msg, args);
-      console.error(formatLogLine(category, msg), ...args);
+      if (debugEnabled) {
+        console.error(formatLogLine(category, msg), ...args);
+      }
     },
   };
 }

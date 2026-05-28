@@ -7,9 +7,16 @@ import type { IdMap } from "@/client/ids";
 import { materializeYjsDoc } from "@/client/schema";
 import { SystemPaths } from "@/kernel/system";
 import type { IngestDocumentsOptions } from "@/runtime/embedded";
+import { toArrayBuffer } from "@/shared/buffer";
 import { unwrapSchemaField } from "@/shared/canonicalize";
+import { toErrorMessage } from "@/shared/error";
+import { getFieldValueByPath } from "@/shared/fieldpath";
 import { createLogger } from "@/shared/logger";
-import { getCrdtType, type Definition } from "@/shared/schema";
+import {
+  getCrdtType,
+  stripOmittedFields,
+  type Definition,
+} from "@/shared/schema";
 import type {
   EngineStatus,
   PullDocumentResponse,
@@ -180,44 +187,6 @@ function retryable<T>(
       signal: opts.signal,
     },
   );
-}
-
-function stripOmittedFields(
-  schemaDef: Definition,
-  docs: Array<Record<string, unknown>>,
-): Array<Record<string, unknown>> {
-  const omittedFields = schemaDef.getOmittedFields();
-  if (omittedFields.length === 0) return docs;
-  return docs.map((doc) => {
-    const stripped = { ...doc };
-    for (const field of omittedFields) {
-      delete stripped[field];
-    }
-    return stripped;
-  });
-}
-
-function getFieldValueByPath(
-  doc: Record<string, unknown>,
-  fieldPath: string,
-): unknown {
-  return fieldPath.split(".").reduce<unknown>((current, segment) => {
-    if (current === null || typeof current !== "object") {
-      return undefined;
-    }
-    return (current as Record<string, unknown>)[segment];
-  }, doc);
-}
-
-function toErrorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (typeof error === "string") return error;
-  if (error == null) return "unknown error";
-  try {
-    return JSON.stringify(error);
-  } catch {
-    return "unknown error";
-  }
 }
 
 function isUnsupportedDocIdsPullError(error: unknown): boolean {
@@ -459,13 +428,6 @@ function filterDocumentsWithResolvableReferences(input: {
   return { accepted, skipped };
 }
 
-function toArrayBuffer(data: Uint8Array): ArrayBuffer {
-  return data.buffer.slice(
-    data.byteOffset,
-    data.byteOffset + data.byteLength,
-  ) as ArrayBuffer;
-}
-
 function preparePullInput(
   schemaDef: Definition,
   localDocs: Array<Record<string, unknown>>,
@@ -617,11 +579,7 @@ function mergePullResult(input: {
     }
   }
 
-  const mergedDocs = new Array<Record<string, unknown>>(mergedDocsById.size);
-  let mergedIndex = 0;
-  for (const value of mergedDocsById.values()) {
-    mergedDocs[mergedIndex++] = value;
-  }
+  const mergedDocs = Array.from(mergedDocsById.values());
   return { deletedDocIds, diffCount, mergedDocs, metadataEntries };
 }
 

@@ -157,7 +157,7 @@ export class EmbeddedConvexReactClient extends ConvexReactClient {
         query,
         args,
         () => {
-          const ts = globalThis.performance?.now?.() ?? Date.now();
+          const ts = performance.now();
           log.debug(
             `react-notify listeners=${listeners.size} ts=${ts.toFixed(1)}`,
           );

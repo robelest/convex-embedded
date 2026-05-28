@@ -1,5 +1,6 @@
 import type { GenericDataModel, GenericQueryCtx } from "convex/server";
 
+import { getFieldValueByPath } from "@/shared/fieldpath";
 import type { QueryPageRange } from "@/shared/types";
 
 import type { PullSpec } from "./types";
@@ -46,18 +47,6 @@ export function parseScopeCursor(cursor: string | null): number {
 
 export function encodeScopeCursor(offset: number): string {
   return `${SCOPE_CURSOR_PREFIX}${offset}`;
-}
-
-function getFieldValueByPath(
-  doc: Record<string, unknown>,
-  fieldPath: string,
-): unknown {
-  return fieldPath.split(".").reduce<unknown>((current, segment) => {
-    if (current === null || typeof current !== "object") {
-      return undefined;
-    }
-    return (current as Record<string, unknown>)[segment];
-  }, doc);
 }
 
 export function matchesScopeArgs(

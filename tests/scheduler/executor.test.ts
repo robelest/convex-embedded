@@ -95,24 +95,16 @@ describe("SchedulerExecutor", () => {
     });
   });
 
-  it("catches and logs an error thrown by the scheduled function", async ({
-    db,
-  }) => {
+  it("swallows an error thrown by the scheduled function", async ({ db }) => {
     await withFakeTimers(async () => {
       const error = new Error("boom");
       const runFunction = vi.fn<RunFunction>().mockRejectedValue(error);
-      const consoleSpy = vi
-        .spyOn(console, "error")
-        .mockImplementation(() => {});
       const scheduler = createSchedulerExecutor({ db, runFunction });
 
       scheduler.schedule("failing:task", { x: 1 }, 500);
       await vi.advanceTimersByTimeAsync(500);
 
-      expect(consoleSpy).toHaveBeenCalledWith(
-        '[convex-embedded:scheduler] Scheduled function "failing:task" failed:',
-        error,
-      );
+      expect(runFunction).toHaveBeenCalledWith("failing:task", { x: 1 });
     });
   });
 });

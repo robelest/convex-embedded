@@ -2,16 +2,7 @@ import type { FunctionReference } from "convex/server";
 
 import type { Definition } from "./core.js";
 
-/**
- * Metadata symbol attached to embedded resolve/list queries for remote sync.
- */
-export const REMOTE_META = Symbol.for("convex-embedded:remoteMeta");
-/**
- * Metadata symbol attached to mutations that define replay migration behavior.
- */
-export const PENDING_REPLAY_META = Symbol.for(
-  "convex-embedded:pendingReplayMeta",
-);
+export { REMOTE_META, PENDING_REPLAY_META } from "@/shared/symbols";
 
 /**
  * Metadata describing the remote-sync exports attached to a bound table.

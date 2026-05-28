@@ -1,6 +1,7 @@
 import type { GenericDataModel, GenericQueryCtx } from "convex/server";
 import type { GenericId } from "convex/values";
 
+import { toArrayBuffer } from "@/shared/buffer";
 import type { PullResponse } from "@/shared/types";
 import { computeDiff, isDiffEmpty } from "@/shared/yjs";
 
@@ -11,13 +12,6 @@ interface CollectionChanges {
   mode: "full" | "incremental";
   collectionSeq: number;
   changes: Array<{ docId: string; kind: "upsert" | "delete" }>;
-}
-
-function toArrayBuffer(data: Uint8Array): ArrayBuffer {
-  return data.buffer.slice(
-    data.byteOffset,
-    data.byteOffset + data.byteLength,
-  ) as ArrayBuffer;
 }
 
 export async function runPullIncremental(

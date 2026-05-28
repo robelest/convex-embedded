@@ -6,6 +6,7 @@ import type {
 import type { GenericId } from "convex/values";
 
 import type { ComponentBinding, EmbeddedMutationDef } from "@/server/schema";
+import { toArrayBuffer } from "@/shared/buffer";
 import { createLogger } from "@/shared/logger";
 import { type Definition, getCrdtType } from "@/shared/schema";
 import { encodeDocumentState } from "@/shared/yjs";
@@ -13,13 +14,6 @@ import { encodeDocumentState } from "@/shared/yjs";
 import type { RuntimeDetector } from "./detect";
 
 const log = createLogger("server-runtime");
-
-function toArrayBuffer(data: Uint8Array): ArrayBuffer {
-  return data.buffer.slice(
-    data.byteOffset,
-    data.byteOffset + data.byteLength,
-  ) as ArrayBuffer;
-}
 
 function pickCrdtFields(
   schemaDef: Definition,

@@ -1,13 +1,147 @@
-import {
-  OCC_MAX_RETRIES,
-  OccConflictError,
-  OccTransaction,
-  createTransactionManager,
-  type TransactionDatabase,
-} from "@embedded/kernel/transaction";
+import { createTransactionManager } from "@embedded/kernel/transaction";
 import type { DocumentId, Timestamp } from "@embedded/runtime/db/types";
+import { retryWithBackoff } from "@embedded/utils/retry";
 import { flushMicrotasks } from "@tests/helpers/time";
 import { describe, expect, it, vi, type Mock } from "@tests/testkit";
+
+interface TransactionDatabase {
+  readonly timestamp: Timestamp;
+  startTransaction(): void;
+  commitAsync(): Promise<unknown>;
+  rollbackWrites(): void;
+  getDocumentTimestamp(id: DocumentId): Timestamp | null;
+  getTableLastWriteTimestamp(tableName: string): Timestamp | null;
+  getTableForId(id: string): string | undefined;
+}
+
+const OCC_MAX_RETRIES = 5;
+const OCC_BASE_DELAY_MS = 50;
+
+class OccConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "OccConflictError";
+  }
+}
+
+interface OccTransactionOptions {
+  db: TransactionDatabase;
+  maxRetries?: number;
+}
+
+class OccTransaction {
+  private readonly _db: TransactionDatabase;
+  private readonly _maxRetries: number;
+
+  private _readSet: Map<DocumentId, Timestamp> = new Map();
+  private _tablesRead: Set<string> = new Set();
+  private _startTs: Timestamp = 0;
+
+  constructor(opts: OccTransactionOptions) {
+    this._db = opts.db;
+    this._maxRetries = opts.maxRetries ?? OCC_MAX_RETRIES;
+  }
+
+  addRead(id: DocumentId, timestamp: Timestamp): void {
+    const existing = this._readSet.get(id);
+    if (existing === undefined || timestamp < existing) {
+      this._readSet.set(id, timestamp);
+    }
+  }
+
+  addTableRead(tableName: string): void {
+    this._tablesRead.add(tableName);
+  }
+
+  async execute<T>(fn: () => Promise<T>): Promise<T> {
+    return retryWithBackoff(
+      async () => {
+        this._readSet.clear();
+        this._tablesRead.clear();
+        this._startTs = this._db.timestamp;
+
+        this._db.startTransaction();
+
+        let result: T;
+        try {
+          result = await fn();
+        } catch (err) {
+          this._db.rollbackWrites();
+          throw err;
+        }
+
+        try {
+          this._validateReadSet();
+          await this._db.commitAsync();
+          return result;
+        } catch (err) {
+          this._db.rollbackWrites();
+          if (err instanceof OccConflictError) {
+            throw err;
+          }
+          throw err;
+        }
+      },
+      {
+        maxRetries: this._maxRetries,
+        baseMs: OCC_BASE_DELAY_MS,
+        jitter: true,
+        shouldRetry: (err) => err instanceof OccConflictError,
+      },
+    );
+  }
+
+  private _validateReadSet(): void {
+    for (const [id, readTs] of this._readSet) {
+      const currentTs: Timestamp | null = this._db.getDocumentTimestamp(id);
+
+      if (currentTs === null) {
+        throw new OccConflictError(
+          `OCC conflict: document ${id} was deleted after being read at ts=${readTs}`,
+        );
+      }
+
+      if (currentTs !== readTs) {
+        throw new OccConflictError(
+          `OCC conflict: document ${id} changed (read ts=${readTs}, current ts=${currentTs})`,
+        );
+      }
+    }
+
+    for (const tableName of this._tablesRead) {
+      const tableTs: Timestamp | null =
+        this._db.getTableLastWriteTimestamp(tableName);
+
+      if (tableTs === null) {
+        continue;
+      }
+
+      for (const [id, readTs] of this._readSet) {
+        if (!this._belongsToTable(id, tableName)) {
+          continue;
+        }
+        if (tableTs > readTs) {
+          throw new OccConflictError(
+            `OCC conflict: table "${tableName}" was written (ts=${tableTs}) after scan read at ts=${readTs}`,
+          );
+        }
+      }
+
+      const hasDocReadsInTable = [...this._readSet.keys()].some((id) =>
+        this._belongsToTable(id, tableName),
+      );
+      if (!hasDocReadsInTable && tableTs > this._startTs) {
+        throw new OccConflictError(
+          `OCC conflict: table "${tableName}" was written (ts=${tableTs}) after transaction started (ts=${this._startTs}) but scan returned no rows`,
+        );
+      }
+    }
+  }
+
+  private _belongsToTable(id: DocumentId, tableName: string): boolean {
+    return this._db.getTableForId(id as string) === tableName;
+  }
+}
 
 function docId(value: string): DocumentId {
   return value as unknown as DocumentId;

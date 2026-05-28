@@ -138,14 +138,14 @@ async function handleInit(name: string) {
   }
 
   try {
-    const started = globalThis.performance?.now?.() ?? Date.now();
+    const started = performance.now();
     const module = await SQLiteESMFactory();
-    const moduleReady = globalThis.performance?.now?.() ?? Date.now();
+    const moduleReady = performance.now();
     const sqlite = WaSqlite.Factory(module);
     const vfs = (await withRetryOps(() =>
       OPFSCoopSyncVFS.create("opfs", module as never),
     )) as { close?: () => void };
-    const vfsReady = globalThis.performance?.now?.() ?? Date.now();
+    const vfsReady = performance.now();
     sqlite.vfs_register(
       vfs as unknown as Parameters<typeof sqlite.vfs_register>[0],
       true,
@@ -155,7 +155,7 @@ async function handleInit(name: string) {
     const openedDb = await withRetryOps(async () =>
       Promise.resolve(sqlite.open_v2(name, undefined, "opfs")),
     );
-    const openReady = globalThis.performance?.now?.() ?? Date.now();
+    const openReady = performance.now();
     sqlite3 = sqlite;
     db = openedDb;
     closeVfs = () => {
@@ -187,7 +187,7 @@ async function handleInit(name: string) {
     await execute("PRAGMA temp_store = MEMORY");
     await execute("PRAGMA cache_size = -8000");
     await execute("PRAGMA busy_timeout = 5000");
-    const ended = globalThis.performance?.now?.() ?? Date.now();
+    const ended = performance.now();
     log.debug(
       `init: wasm=${(moduleReady - started).toFixed(1)}ms vfs=${(vfsReady - moduleReady).toFixed(1)}ms open=${(openReady - vfsReady).toFixed(1)}ms schema=${(ended - openReady).toFixed(1)}ms total=${(ended - started).toFixed(1)}ms`,
     );

@@ -8,7 +8,7 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "noEmit": true,
-    "lib": ["ES2022", "DOM", "ESNext.Disposable"],
+    "lib": ["ES2024", "DOM", "ESNext.Disposable"],
     "types": ["vitest/globals", "node"],
     "paths": {
       "@/*": ["../packages/convex-embedded/src/*"],

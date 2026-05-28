@@ -12,6 +12,7 @@ import { asError } from "@/client/routing/refs";
 import type { ConvexInput, ConvexModule } from "@/kernel/modules";
 import { createLogger } from "@/shared/logger";
 import { getRouteMode, type RouteMode } from "@/shared/route";
+import { REMOTE_META, STORAGE_UPLOAD_URL_META } from "@/shared/symbols";
 
 const log = createLogger("discovery");
 
@@ -171,10 +172,6 @@ function scanModuleExports(
   mod: ConvexModule,
   accumulator: DiscoveredRemoteMetadata,
 ): void {
-  const REMOTE_META = Symbol.for("convex-embedded:remoteMeta");
-  const STORAGE_UPLOAD_URL_META = Symbol.for(
-    "convex-embedded:storageUploadUrlMeta",
-  );
   let replicationMetaTagged = false;
 
   for (const [exportName, exportValue] of Object.entries(mod)) {

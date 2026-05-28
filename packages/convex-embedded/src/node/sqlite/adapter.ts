@@ -8,7 +8,7 @@ import type { InternalTableSpec } from "@/storage/sqlite/factory";
 
 const log = createLogger("node-sqlite");
 
-const now = () => globalThis.performance?.now?.() ?? Date.now();
+const now = () => performance.now();
 
 export async function openNodeStorage(options: {
   filename: string;

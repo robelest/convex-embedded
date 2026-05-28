@@ -50,33 +50,9 @@ export type RunUdfFn = (
 
 type JsonArgs = Record<string, unknown>;
 
-type TaggedJsonSyscall = Readonly<{
-  op: string;
-  args: JsonArgs;
-}>;
-
-type TaggedJsSyscall = Readonly<{
-  op: string;
-  args: Record<string, unknown>;
-}>;
-
 type SyncSyscallHandler = (args: JsonArgs) => string;
 type AsyncSyscallHandler = (args: JsonArgs) => Promise<string>;
 type JsSyscallHandler = (args: Record<string, unknown>) => Promise<unknown>;
-
-function decodeJsonSyscall(op: string, jsonArgs: string): TaggedJsonSyscall {
-  return {
-    op,
-    args: JSON.parse(jsonArgs) as JsonArgs,
-  };
-}
-
-function decodeJsSyscall(
-  op: string,
-  args: Record<string, unknown>,
-): TaggedJsSyscall {
-  return { op, args };
-}
 
 function extractQueryDependencies(query: unknown): QueryDependency[] {
   const current = query as SerializedQuery | undefined;
@@ -119,60 +95,20 @@ function extractQueryDependencies(query: unknown): QueryDependency[] {
   return [];
 }
 
-function dispatchSyncSyscall(
-  request: TaggedJsonSyscall,
-  handlers: Record<string, SyncSyscallHandler>,
-): string {
-  const handler = handlers[request.op];
-  if (handler) {
-    return handler(request.args);
-  }
-
+function lookupSyscall<H>(
+  handlers: Record<string, H>,
+  op: string,
+  kind: "sync" | "async" | "js",
+): H {
+  const handler = handlers[op];
+  if (handler) return handler;
   throw new ConvexError({
     code: "LOCAL_SYSCALL_UNSUPPORTED",
     message:
-      `[convex-embedded] Local execution does not support syscall "${request.op}" in alpha. ` +
+      `[convex-embedded] Local execution does not support ${kind === "sync" ? "" : `${kind} `}syscall "${op}" in alpha. ` +
       "Use route.remote() or mark the caller remoteOnly().",
-    op: request.op,
-    kind: "sync",
-  });
-}
-
-async function dispatchAsyncSyscall(
-  request: TaggedJsonSyscall,
-  handlers: Record<string, AsyncSyscallHandler>,
-): Promise<string> {
-  const handler = handlers[request.op];
-  if (handler) {
-    return await handler(request.args);
-  }
-
-  throw new ConvexError({
-    code: "LOCAL_SYSCALL_UNSUPPORTED",
-    message:
-      `[convex-embedded] Local execution does not support async syscall "${request.op}" in alpha. ` +
-      "Use route.remote() or mark the caller remoteOnly().",
-    op: request.op,
-    kind: "async",
-  });
-}
-
-async function dispatchJsSyscall(
-  request: TaggedJsSyscall,
-  handlers: Record<string, JsSyscallHandler>,
-): Promise<unknown> {
-  const handler = handlers[request.op];
-  if (handler) {
-    return await handler(request.args);
-  }
-
-  throw new ConvexError({
-    code: "LOCAL_SYSCALL_UNSUPPORTED",
-    message:
-      `[convex-embedded] Local execution does not support js syscall "${request.op}" in alpha. ` +
-      "Use route.remote() or mark the caller remoteOnly().",
-    op: request.op,
-    kind: "js",
+    op,
+    kind,
   });
 }
 
@@ -210,7 +146,7 @@ export function createSyncSyscall(
   };
 
   return (op: string, jsonArgs: string): string =>
-    dispatchSyncSyscall(decodeJsonSyscall(op, jsonArgs), handlers);
+    lookupSyscall(handlers, op, "sync")(JSON.parse(jsonArgs) as JsonArgs);
 }
 
 /**
@@ -635,7 +571,7 @@ export function createAsyncSyscall(
   };
 
   const self = async (op: string, jsonArgs: string): Promise<string> =>
-    dispatchAsyncSyscall(decodeJsonSyscall(op, jsonArgs), handlers);
+    lookupSyscall(handlers, op, "async")(JSON.parse(jsonArgs) as JsonArgs);
 
   return self;
 }
@@ -703,6 +639,6 @@ export function createJsSyscall(
     op: string,
     args: Record<string, unknown>,
   ): Promise<unknown> => {
-    return await dispatchJsSyscall(decodeJsSyscall(op, args), handlers);
+    return await lookupSyscall(handlers, op, "js")(args);
   };
 }

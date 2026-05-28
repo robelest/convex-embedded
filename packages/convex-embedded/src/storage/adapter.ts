@@ -18,6 +18,7 @@ import type {
   StoredDocument,
   VectorSearchExpression,
 } from "@/runtime/db/types";
+import type { InternalTableSpec } from "@/storage/sqlite/factory";
 
 export interface StorageMetadata {
   timestamp: number;
@@ -111,6 +112,7 @@ export interface StorageAdapter {
   deleteBlob(id: string): Promise<void>;
   clearAll(): Promise<void>;
   close?(): Promise<void>;
+  setUserTableSpecs?(specs: Map<string, InternalTableSpec> | undefined): void;
 }
 
 /**

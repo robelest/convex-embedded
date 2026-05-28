@@ -19,7 +19,7 @@ import {
   refreshAuthFromSource,
   registerAuthEntry,
 } from "@/client/auth";
-import { createEmbeddedQueryCache, type EmbeddedQueryCache } from "@/client/cache";
+import { createEmbeddedQueryCache } from "@/client/cache";
 import { EmbeddedClient } from "@/client/embedded";
 import {
   deleteEmbeddedClientEntry,
@@ -54,33 +54,11 @@ import { SCHEDULED_FUNCTIONS_STORE_MIGRATIONS } from "@/scheduler/executor";
 import { createLogger } from "@/shared/logger";
 import { extractEmbeddedTableDefinitions } from "@/shared/schema";
 import type { PendingReplayMeta } from "@/shared/symbols";
-import type { StorageAdapter } from "@/storage/adapter";
 import type { SqliteDriver } from "@/storage/sqlite/driver";
 import { createPubSub, type PubSub } from "@/utils/pubsub";
 import { createDisposableScope } from "@/utils/scope";
 
 const log = createLogger("setup");
-
-/**
- * Pull the raw SQLite driver out of a storage adapter when one is present.
- *
- * The embedded `SqliteAdapter` exposes `getDriver()` so callers can reuse
- * the same SQLite connection for sibling persistence concerns (here: the
- * disk-backed query result cache). Non-SQLite adapters omit the method and
- * we fall back to a memory-only cache.
- */
-function trySqliteDriverFor(
-  adapter: StorageAdapter | null,
-): SqliteDriver | null {
-  if (!adapter) return null;
-  const getDriver = (adapter as { getDriver?: () => SqliteDriver }).getDriver;
-  if (typeof getDriver !== "function") return null;
-  try {
-    return getDriver.call(adapter);
-  } catch {
-    return null;
-  }
-}
 
 interface PlatformConfig {
   readonly runtime: EmbeddedRuntime;
@@ -124,78 +102,6 @@ function installStorageSurface(
     `storage surface installed after storage attach (${storageSurface ? "enabled" : "none"})`,
   );
   return storageSurface;
-}
-
-function createAuthEntry(
-  platformConfig: PlatformConfig,
-): Pick<
-  AuthEntry,
-  | "runtime"
-  | "getPendingCount"
-  | "refreshSync"
-  | "activeIdentityKey"
-  | "sessionBroadcast"
-  | "state"
-  | "stateHub"
-> {
-  const { runtime, sessionBroadcast } = platformConfig;
-  return {
-    runtime,
-    getPendingCount: () => 0,
-    refreshSync: () => Promise.resolve(),
-    activeIdentityKey: null,
-    sessionBroadcast: sessionBroadcast ?? undefined,
-    state: { status: "idle" } as AuthState,
-    stateHub: createPubSub<AuthState>(),
-  };
-}
-
-function createPullAttachment(input: {
-  client: ConvexClient;
-  authEntry: AuthEntry;
-  resolveOpts: RemoteOptions;
-  convex: ConvexInput;
-  getIdentityKeyForSync: () => string | null;
-  getReplayPayloadVersion: (refName: string) => number;
-  platformConfig: PlatformConfig;
-  cache: EmbeddedQueryCache;
-  getCacheStorage: () => QueryCacheStorage | null;
-  knownTables: ReadonlySet<string>;
-  uploadFetch?: typeof globalThis.fetch;
-  leaderLock?: <T>(fn: () => Promise<T>) => Promise<T>;
-}): PullAttachment {
-  const { runtime, connectivity, processorId } = input.platformConfig;
-
-  return attachResolve({
-    client: input.client,
-    runtime,
-    authEntry: input.authEntry,
-    resolveOpts: input.resolveOpts,
-    convex: input.convex,
-    getIdentityKeyForSync: input.getIdentityKeyForSync,
-    getReplayPayloadVersion: input.getReplayPayloadVersion,
-    connectivity,
-    processorId,
-    cache: input.cache,
-    getCacheStorage: input.getCacheStorage,
-    knownTables: input.knownTables,
-    uploadFetch: input.uploadFetch,
-    leaderLock: input.leaderLock,
-  });
-}
-
-function installSessionFanout(
-  authEntry: AuthEntry,
-  platformConfig: PlatformConfig,
-): () => void {
-  const { sessionBroadcast } = platformConfig;
-  if (!sessionBroadcast) {
-    return () => {};
-  }
-
-  return sessionBroadcast.onNotification(() => {
-    void refreshAuthFromSource(authEntry);
-  });
 }
 
 export interface EmbeddedClientOptions {
@@ -273,10 +179,13 @@ export function createEmbeddedClient(input: {
   };
 
   const authEntry: AuthEntry = {
-    ...(createAuthEntry(platformConfig) as Omit<
-      AuthEntry,
-      "getIdentityKey" | "getUserIdentitySource" | "currentAuthFetcher"
-    >),
+    runtime,
+    getPendingCount: () => 0,
+    refreshSync: () => Promise.resolve(),
+    activeIdentityKey: null,
+    sessionBroadcast: sessionBroadcast ?? undefined,
+    state: { status: "idle" } as AuthState,
+    stateHub: createPubSub<AuthState>(),
     getIdentityKey: options.auth?.getIdentityKey,
   };
 
@@ -332,7 +241,18 @@ export function createEmbeddedClient(input: {
       // persistent query-result cache. Adapters that don't expose a driver
       // (in-memory test doubles, future remote-only modes) just leave the
       // cache disk-less — the in-memory EmbeddedQueryCache still applies.
-      const driver = trySqliteDriverFor(runtime.getStorage());
+      const adapter = runtime.getStorage();
+      let driver: SqliteDriver | null = null;
+      if (adapter) {
+        try {
+          driver =
+            (adapter as { getDriver?: () => SqliteDriver }).getDriver?.call(
+              adapter,
+            ) ?? null;
+        } catch {
+          driver = null;
+        }
+      }
       if (driver) {
         queryCacheStorage = createQueryCacheStorage(driver);
       }
@@ -379,15 +299,17 @@ export function createEmbeddedClient(input: {
   });
 
   const pullAttachment: PullAttachment | null = options.remote
-    ? createPullAttachment({
+    ? attachResolve({
         client,
+        runtime,
         authEntry,
         resolveOpts: options.remote,
         convex,
         getIdentityKeyForSync: () => authEntry.activeIdentityKey,
         getReplayPayloadVersion: (refName) =>
           replayMetadata.get(refName)?.version ?? 1,
-        platformConfig,
+        connectivity: platform.connectivity,
+        processorId,
         cache: queryCache,
         getCacheStorage: () => queryCacheStorage,
         knownTables: new Set(tableDefinitions.keys()),
@@ -448,10 +370,11 @@ export function createEmbeddedClient(input: {
       : undefined,
   });
 
-  const unsubscribeSessionFanout = installSessionFanout(
-    authEntry,
-    platformConfig,
-  );
+  const unsubscribeSessionFanout = sessionBroadcast
+    ? sessionBroadcast.onNotification(() => {
+        void refreshAuthFromSource(authEntry);
+      })
+    : () => {};
   rootScope.addFinalizer(() => unsubscribeSessionFanout());
 
   if (platform.workScheduler) {

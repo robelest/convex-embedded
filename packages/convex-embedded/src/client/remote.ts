@@ -32,6 +32,7 @@ import type { ConvexInput } from "@/kernel/modules";
 import type { EmbeddedRuntime } from "@/runtime/embedded";
 import type { ConnectivityAdapter } from "@/runtime/platform";
 import type { QueryCacheStorage } from "@/runtime/sqlite/cache";
+import { toErrorMessage } from "@/shared/error";
 import { createLogger } from "@/shared/logger";
 import type { RouteMode } from "@/shared/route";
 import type { EngineStatus } from "@/shared/types";
@@ -434,17 +435,6 @@ function toDiscoveryResult(
 function notifyPullListeners(entry: PullEntry, state: RemoteState): void {
   entry.state = state;
   entry.stateHub.publish(state);
-}
-
-function toErrorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (typeof error === "string") return error;
-  if (error == null) return "unknown error";
-  try {
-    return JSON.stringify(error);
-  } catch {
-    return "unknown error";
-  }
 }
 
 function toPullPhase(

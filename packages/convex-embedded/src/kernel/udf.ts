@@ -40,10 +40,10 @@ const loaderLog = createLogger("loader");
 
 const MATH_RANDOM_DESCRIPTOR = Object.getOwnPropertyDescriptor(Math, "random");
 const DATE_NOW_DESCRIPTOR = Object.getOwnPropertyDescriptor(Date, "now");
-const CRYPTO_RANDOM_UUID_DESCRIPTOR =
-  typeof crypto !== "undefined"
-    ? Object.getOwnPropertyDescriptor(crypto, "randomUUID")
-    : undefined;
+const CRYPTO_RANDOM_UUID_DESCRIPTOR = Object.getOwnPropertyDescriptor(
+  crypto,
+  "randomUUID",
+);
 
 declare global {
   var Convex:
@@ -61,9 +61,7 @@ declare global {
 interface SavedGlobals {
   mathRandom: typeof Math.random;
   dateNow: typeof Date.now;
-  cryptoRandomUUID:
-    | (() => `${string}-${string}-${string}-${string}-${string}`)
-    | undefined;
+  cryptoRandomUUID: () => `${string}-${string}-${string}-${string}-${string}`;
   mathRandomDescriptor: PropertyDescriptor | undefined;
   dateNowDescriptor: PropertyDescriptor | undefined;
   cryptoRandomUUIDDescriptor: PropertyDescriptor | undefined;
@@ -81,10 +79,7 @@ function patchGlobals(ops: OpsContext): SavedGlobals {
   const saved: SavedGlobals = {
     mathRandom: Math.random,
     dateNow: Date.now,
-    cryptoRandomUUID:
-      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
-        ? crypto.randomUUID.bind(crypto)
-        : undefined,
+    cryptoRandomUUID: crypto.randomUUID.bind(crypto),
     mathRandomDescriptor: MATH_RANDOM_DESCRIPTOR,
     dateNowDescriptor: DATE_NOW_DESCRIPTOR,
     cryptoRandomUUIDDescriptor: CRYPTO_RANDOM_UUID_DESCRIPTOR,
@@ -97,15 +92,12 @@ function patchGlobals(ops: OpsContext): SavedGlobals {
     ops.random(),
   );
   saved.patchedDateNow = patchObjectProperty(Date, "now", () => ops.now());
-
-  if (typeof crypto !== "undefined") {
-    saved.patchedCryptoRandomUUID = patchObjectProperty(
-      crypto,
-      "randomUUID",
-      () =>
-        ops.randomUUID() as `${string}-${string}-${string}-${string}-${string}`,
-    );
-  }
+  saved.patchedCryptoRandomUUID = patchObjectProperty(
+    crypto,
+    "randomUUID",
+    () =>
+      ops.randomUUID() as `${string}-${string}-${string}-${string}-${string}`,
+  );
 
   return saved;
 }
@@ -125,22 +117,13 @@ function restoreGlobals(saved: SavedGlobals): void {
     saved.dateNowDescriptor,
     saved.patchedDateNow,
   );
-  if (typeof crypto !== "undefined") {
-    if (saved.cryptoRandomUUID !== undefined) {
-      restoreObjectProperty(
-        crypto,
-        "randomUUID",
-        saved.cryptoRandomUUID,
-        saved.cryptoRandomUUIDDescriptor,
-        saved.patchedCryptoRandomUUID,
-      );
-    } else if (
-      saved.patchedCryptoRandomUUID &&
-      saved.cryptoRandomUUIDDescriptor?.configurable
-    ) {
-      delete (crypto as { randomUUID?: unknown }).randomUUID;
-    }
-  }
+  restoreObjectProperty(
+    crypto,
+    "randomUUID",
+    saved.cryptoRandomUUID,
+    saved.cryptoRandomUUIDDescriptor,
+    saved.patchedCryptoRandomUUID,
+  );
 }
 
 function patchObjectProperty<T extends object, K extends keyof T>(
@@ -373,7 +356,7 @@ export class UdfExecutor {
       try {
         const func = await this._resolveFunc(functionPath, "query");
 
-        if (typeof func.invokeQuery === "function") {
+        if (func.invokeQuery !== undefined) {
           const argsStr = JSON.stringify(convexToJson([(args ?? {}) as Value]));
           const rawResult = await (
             func.invokeQuery as (s: string) => Promise<string>
@@ -414,7 +397,7 @@ export class UdfExecutor {
         const func = await this._resolveFunc(functionPath, "mutation");
 
         let result: unknown;
-        if (typeof func.invokeMutation === "function") {
+        if (func.invokeMutation !== undefined) {
           const invokeMutation = func.invokeMutation as (
             argsStr: string,
           ) => Promise<string>;
@@ -452,10 +435,14 @@ export class UdfExecutor {
     return this._runWithGlobals(async () => {
       const func = await this._resolveFunc(functionPath, "action");
 
-      if (typeof func.invokeAction === "function") {
+      if (func.invokeAction !== undefined) {
+        const invokeAction = func.invokeAction as (
+          requestId: string,
+          argsStr: string,
+        ) => Promise<string>;
         const requestId = "action_" + ++this._actionRequestCounter;
         const argsStr = JSON.stringify(convexToJson([(args ?? {}) as Value]));
-        const rawResult = await func.invokeAction(requestId, argsStr);
+        const rawResult = await invokeAction(requestId, argsStr);
         return jsonToConvex(JSON.parse(rawResult));
       }
 
@@ -504,14 +491,8 @@ export class UdfExecutor {
     fn: () => Promise<T>,
     executionContext: ExecutionContext = {},
   ): Promise<T> {
-    const db = this._db as Database & {
-      getActiveIdentityKey?: () => string | null;
-      setActiveIdentityKey?: (key: string | null) => void;
-    };
-    const previousIdentityKey =
-      typeof db.getActiveIdentityKey === "function"
-        ? db.getActiveIdentityKey()
-        : null;
+    const db = this._db;
+    const previousIdentityKey = db.getActiveIdentityKey();
 
     const ops = createOpsContext();
     const savedGlobals = patchGlobals(ops);
@@ -522,9 +503,7 @@ export class UdfExecutor {
     );
     const previousConvex = globalThis.Convex;
     this._contextStack.push(executionContext);
-    if (typeof db.setActiveIdentityKey === "function") {
-      db.setActiveIdentityKey(executionContext.identityKey ?? null);
-    }
+    db.setActiveIdentityKey(executionContext.identityKey ?? null);
     installGlobalConvex(this._installedConvex);
 
     try {
@@ -532,9 +511,7 @@ export class UdfExecutor {
     } finally {
       restoreGlobalConvex(previousConvex, previousConvexDescriptor);
       this._contextStack.pop();
-      if (typeof db.setActiveIdentityKey === "function") {
-        db.setActiveIdentityKey(previousIdentityKey);
-      }
+      db.setActiveIdentityKey(previousIdentityKey);
       restoreConsole();
       restoreGlobals(savedGlobals);
     }

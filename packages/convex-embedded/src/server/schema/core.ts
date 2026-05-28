@@ -1,5 +1,6 @@
 import type { OptionalProperty, Validator } from "convex/values";
 
+const CRDT_FIELD = Symbol.for("convex-embedded:crdt-field");
 import {
   CrdtType,
   type Conflict,
@@ -67,8 +68,6 @@ export type OmittedFieldDescriptor<T> = TypedFieldDescriptor<
   typeof CrdtType.Omitted,
   Validator<T, OptionalProperty, string>
 >;
-
-const CRDT_FIELD = Symbol.for("convex-embedded:crdt-field");
 
 /**
  * Check whether an arbitrary value is an embedded CRDT field descriptor.

@@ -140,22 +140,28 @@ export function createSubscriptionManager(): SubscriptionManager {
     return { candidateTokens, changes, tablesWritten };
   }
 
-  function unsubscribe(queryToken: string): void {
-    const existing = subscriptions.get(queryToken);
-    if (!existing) return;
-    subscriptions.delete(queryToken);
-    for (const table of existing.tables) {
-      const tokens = subscriptionsByTable.get(table);
-      if (!tokens) continue;
-      tokens.delete(queryToken);
-      if (tokens.size === 0) subscriptionsByTable.delete(table);
+  function removeTokenFromTableIndex(
+    index: Map<string, Set<string>>,
+    table: string,
+    queryToken: string,
+  ): void {
+    const tokens = index.get(table);
+    if (!tokens) return;
+    tokens.delete(queryToken);
+    if (tokens.size === 0) index.delete(table);
+  }
 
-      const fallback = tableFallbackSubscriptionsByTable.get(table);
-      if (fallback) {
-        fallback.delete(queryToken);
-        if (fallback.size === 0)
-          tableFallbackSubscriptionsByTable.delete(table);
-      }
+  function removeTokenFromAllIndexes(
+    queryToken: string,
+    existing: Subscription,
+  ): void {
+    for (const table of existing.tables) {
+      removeTokenFromTableIndex(subscriptionsByTable, table, queryToken);
+      removeTokenFromTableIndex(
+        tableFallbackSubscriptionsByTable,
+        table,
+        queryToken,
+      );
     }
     for (const dependency of getIndexRangeEqDependencies(
       existing.dependencies,
@@ -176,15 +182,20 @@ export function createSubscriptionManager(): SubscriptionManager {
         dependency.range.length === 0 ||
         dependency.range.some((filter) => filter.type !== "Eq")
       ) {
-        const tokens = indexRangeBroadSubscriptionsByTable.get(
+        removeTokenFromTableIndex(
+          indexRangeBroadSubscriptionsByTable,
           dependency.tableName,
+          queryToken,
         );
-        if (!tokens) continue;
-        tokens.delete(queryToken);
-        if (tokens.size === 0)
-          indexRangeBroadSubscriptionsByTable.delete(dependency.tableName);
       }
     }
+  }
+
+  function unsubscribe(queryToken: string): void {
+    const existing = subscriptions.get(queryToken);
+    if (!existing) return;
+    subscriptions.delete(queryToken);
+    removeTokenFromAllIndexes(queryToken, existing);
   }
 
   function subscribe(

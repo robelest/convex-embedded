@@ -5,7 +5,7 @@ const perfLog = createLogger("perf");
 const DEFAULT_SLOW_THRESHOLD_MS = 32;
 
 export function nowMs(): number {
-  return globalThis.performance?.now?.() ?? Date.now();
+  return performance.now();
 }
 
 export function logSlow(

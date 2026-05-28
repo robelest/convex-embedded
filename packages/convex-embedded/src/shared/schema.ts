@@ -1,9 +1,8 @@
 import type { MigrationsMap } from "@/shared/migrations/types";
 import { targetVersionFromMigrations } from "@/shared/migrations/types";
+const CRDT_FIELD = Symbol.for("convex-embedded:crdt-field");
 import type { CrdtFieldDescriptor } from "@/shared/types";
 import { CrdtType } from "@/shared/types";
-
-const CRDT_FIELD = Symbol.for("convex-embedded:crdt-field");
 
 export function isCrdtField(
   value: unknown,
@@ -102,6 +101,21 @@ export function extractEmbeddedTableDefinitions(
   }
 
   return definitions;
+}
+
+export function stripOmittedFields(
+  schemaDef: Definition,
+  docs: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+  const omittedFields = schemaDef.getOmittedFields();
+  if (omittedFields.length === 0) return docs;
+  return docs.map((doc) => {
+    const stripped = { ...doc };
+    for (const field of omittedFields) {
+      delete stripped[field];
+    }
+    return stripped;
+  });
 }
 
 export function define(options: DefineOptions): Definition {

@@ -128,7 +128,6 @@ export function createSubscriptions(
   const pulledScopes = new Set<string>();
   const pullListeners = new Map<string, Set<() => void>>();
   let activationEpoch = 0;
-  let flushScheduled = false;
   let flushTimer: ReturnType<typeof setTimeout> | null = null;
 
   function get(scopeKey: string): ScopeRecord | undefined {
@@ -299,8 +298,7 @@ export function createSubscriptions(
 
   function scheduleFlush(delayMs = 0): void {
     if (delayMs > 0) {
-      if (flushScheduled) return;
-      flushScheduled = true;
+      if (flushTimer !== null) return;
       flushTimer = setTimeout(() => {
         flushTimer = null;
         void flushAll();
@@ -310,15 +308,11 @@ export function createSubscriptions(
     if (flushTimer !== null) {
       clearTimeout(flushTimer);
       flushTimer = null;
-      flushScheduled = false;
     }
-    if (flushScheduled) return;
-    flushScheduled = true;
     runDetached(() => flushAll(), "[sync] flush buffered:");
   }
 
   async function flushAll(): Promise<void> {
-    flushScheduled = false;
     const bufferedTables = new Set<string>();
     for (const record of scopesMap.values()) {
       if (record.bufferedSnapshot !== undefined) {
@@ -442,7 +436,7 @@ export function createSubscriptions(
       return;
     }
 
-    if (record.bufferedSnapshot !== undefined && !flushScheduled) {
+    if (record.bufferedSnapshot !== undefined && flushTimer === null) {
       scheduleFlush();
     }
   }
@@ -454,7 +448,6 @@ export function createSubscriptions(
   }
 
   function clearAll(): void {
-    flushScheduled = false;
     if (flushTimer !== null) {
       clearTimeout(flushTimer);
       flushTimer = null;

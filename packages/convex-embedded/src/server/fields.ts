@@ -12,10 +12,9 @@ import { v } from "convex/values";
 
 import { createConflict } from "@/shared/conflict";
 import { define, getCrdtType, isCrdtField } from "@/shared/schema";
+const CRDT_FIELD = Symbol.for("convex-embedded:crdt-field");
 import type { Conflict, CrdtFieldDescriptor } from "@/shared/types";
 import { CrdtType } from "@/shared/types";
-
-const CRDT_FIELD = Symbol.for("convex-embedded:crdt-field");
 
 /**
  * Conflict-resolution options for register fields.

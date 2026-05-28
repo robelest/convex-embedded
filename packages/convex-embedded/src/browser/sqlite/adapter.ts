@@ -5,7 +5,7 @@ import type { InternalTableSpec } from "@/storage/sqlite/factory";
 
 const log = createLogger("browser-sqlite");
 
-const now = () => globalThis.performance?.now?.() ?? Date.now();
+const now = () => performance.now();
 
 export async function openBrowserStorage(options: {
   name: string;

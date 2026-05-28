@@ -458,7 +458,7 @@ export function createDatabase(
       return inFlight;
     }
     const promise = withSpan("convex-embedded.db.hydrate", async (span) => {
-      const started = globalThis.performance?.now?.() ?? Date.now();
+      const started = performance.now();
 
       const tableNames = options?.tables;
       const scopedHydration = tableNames !== undefined;
@@ -476,7 +476,7 @@ export function createDatabase(
         () =>
           store.load(scopedHydration ? { tables: tableNames } : undefined),
       );
-      const fetched = globalThis.performance?.now?.() ?? Date.now();
+      const fetched = performance.now();
       span.setAttributes({
         "convex.db.hydrate.docs": loaded.length,
         "convex.db.hydrate.fetch_ms": +(fetched - started).toFixed(1),
@@ -545,7 +545,7 @@ export function createDatabase(
         lastCreationTime = meta.lastCreationTime;
       }
 
-      const ended = globalThis.performance?.now?.() ?? Date.now();
+      const ended = performance.now();
       span.setAttributes({
         "convex.db.hydrate.total_ms": +(ended - started).toFixed(1),
         "convex.db.hydrate.rebuild_ms": +(ended - fetched).toFixed(1),
@@ -592,12 +592,9 @@ export function createDatabase(
     if (existing !== undefined) {
       return existing;
     }
-    let resolver: () => void = () => {};
-    const promise = new Promise<void>((resolve) => {
-      resolver = resolve;
-    });
+    const { promise, resolve } = Promise.withResolvers<void>();
     tableHydrationPromises.set(tableName, promise);
-    tableHydrationResolvers.set(tableName, resolver);
+    tableHydrationResolvers.set(tableName, resolve);
     return promise;
   }
 

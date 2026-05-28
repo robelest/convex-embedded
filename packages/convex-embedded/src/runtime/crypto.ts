@@ -28,9 +28,7 @@ export function createAmbientCryptoProvider(): EmbeddedCryptoProvider {
 
   return {
     randomUUID() {
-      return typeof webCrypto.randomUUID === "function"
-        ? webCrypto.randomUUID()
-        : formatUuidV4(webCrypto.getRandomValues(new Uint8Array(16)));
+      return webCrypto.randomUUID();
     },
     getRandomValues(bytes) {
       return webCrypto.getRandomValues(

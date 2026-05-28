@@ -123,17 +123,63 @@ async function firstByIndex<T = StoredDocument>(
   return next.done ? null : (next.value as T);
 }
 
+async function readPendingEntryById<
+  T extends StoredDocument & {
+    owner?: string;
+    state?: string;
+    localStorageId?: string;
+  },
+>(
+  db: Database,
+  table: "_resolve_pending" | "_resolve_pending_uploads",
+  id: string,
+): Promise<T | null> {
+  if (db.getTableForId(id) !== table) {
+    return null;
+  }
+  return (await db.getAsync(table, id as DocumentId)) as T | null;
+}
+
 async function readPendingById(
   db: Database,
   id: string,
 ): Promise<(StoredDocument & { owner?: string; state?: string }) | null> {
-  if (db.getTableForId(id) !== "_resolve_pending") {
-    return null;
-  }
+  return readPendingEntryById(db, "_resolve_pending", id);
+}
 
-  return (await db.getAsync("_resolve_pending", id as DocumentId)) as
-    | (StoredDocument & { owner?: string; state?: string })
-    | null;
+async function listPendingRowsByIdentity<Row>(
+  db: Database,
+  table: "_resolve_pending" | "_resolve_pending_uploads",
+  identityKey: string | null,
+): Promise<Row[]> {
+  return allByIndex<Row>(
+    db,
+    table,
+    "by_identity_key_and_creation_time",
+    [{ type: "Eq", fieldPath: "identityKey", value: identityKey }],
+  );
+}
+
+async function releasePendingEntry(
+  db: Database,
+  table: "_resolve_pending" | "_resolve_pending_uploads",
+  id: string,
+  owner: string | undefined,
+): Promise<void> {
+  const doc = await readPendingEntryById(db, table, id);
+  if (doc === null || (owner !== undefined && doc.owner !== owner)) {
+    return;
+  }
+  const patch: Record<string, unknown> = {
+    state: "pending",
+    owner: { $undefined: true },
+    processingStartedAt: { $undefined: true },
+    leaseExpiresAt: { $undefined: true },
+  };
+  if (table === "_resolve_pending") {
+    patch.blockedReason = { $undefined: true };
+  }
+  db.patch(table, id as DocumentId, patch);
 }
 
 async function readProcessor(
@@ -413,30 +459,26 @@ const pendingGetAll: SystemFunctionDef = {
   type: "query",
   handler: async (db, args) => {
     const { identityKey } = args as { identityKey?: string | null };
-    return (
-      await allByIndex<PendingRow>(
-        db,
-        "_resolve_pending",
-        "by_identity_key_and_creation_time",
-        [{ type: "Eq", fieldPath: "identityKey", value: identityKey ?? null }],
-      )
-    ).map((row) => {
-      return {
-        _id: row._id,
-        ref: row.ref,
-        args: row.args,
-        localResult: row.localResult,
-        table: row.table,
-        payloadVersion: row.payloadVersion,
-        identityKey: row.identityKey,
-        state: row.state,
-        owner: row.owner,
-        processingStartedAt: row.processingStartedAt,
-        leaseExpiresAt: row.leaseExpiresAt,
-        blockedReason: row.blockedReason,
-        createdAt: row.createdAt,
-      };
-    });
+    const rows = await listPendingRowsByIdentity<PendingRow>(
+      db,
+      "_resolve_pending",
+      identityKey ?? null,
+    );
+    return rows.map((row) => ({
+      _id: row._id,
+      ref: row.ref,
+      args: row.args,
+      localResult: row.localResult,
+      table: row.table,
+      payloadVersion: row.payloadVersion,
+      identityKey: row.identityKey,
+      state: row.state,
+      owner: row.owner,
+      processingStartedAt: row.processingStartedAt,
+      leaseExpiresAt: row.leaseExpiresAt,
+      blockedReason: row.blockedReason,
+      createdAt: row.createdAt,
+    }));
   },
 };
 
@@ -569,16 +611,7 @@ const pendingRelease: SystemFunctionDef = {
   type: "mutation",
   handler: async (db, args) => {
     const { id, owner } = args as { id: string; owner?: string };
-    const doc = await readPendingById(db, id);
-    if (doc !== null && (owner === undefined || doc.owner === owner)) {
-      db.patch("_resolve_pending", id as DocumentId, {
-        state: "pending",
-        owner: { $undefined: true },
-        processingStartedAt: { $undefined: true },
-        leaseExpiresAt: { $undefined: true },
-        blockedReason: { $undefined: true },
-      });
-    }
+    await releasePendingEntry(db, "_resolve_pending", id, owner);
     return null;
   },
 };
@@ -663,16 +696,7 @@ async function readPendingUploadById(
     })
   | null
 > {
-  if (db.getTableForId(id) !== "_resolve_pending_uploads") {
-    return null;
-  }
-  return (await db.getAsync("_resolve_pending_uploads", id as DocumentId)) as
-    | (StoredDocument & {
-        owner?: string;
-        state?: string;
-        localStorageId?: string;
-      })
-    | null;
+  return readPendingEntryById(db, "_resolve_pending_uploads", id);
 }
 
 const pendingUploadPush: SystemFunctionDef = {
@@ -705,34 +729,24 @@ const pendingUploadGetAll: SystemFunctionDef = {
   type: "query",
   handler: async (db, args) => {
     const { identityKey } = args as { identityKey?: string | null };
-    return (
-      await allByIndex<PendingUploadRow>(
-        db,
-        "_resolve_pending_uploads",
-        "by_identity_key_and_creation_time",
-        [
-          {
-            type: "Eq",
-            fieldPath: "identityKey",
-            value: identityKey ?? null,
-          },
-        ],
-      )
-    ).map((row) => {
-      return {
-        _id: row._id,
-        localStorageId: row.localStorageId,
-        sha256: row.sha256,
-        size: row.size,
-        contentType: row.contentType,
-        identityKey: row.identityKey,
-        state: row.state,
-        owner: row.owner,
-        processingStartedAt: row.processingStartedAt,
-        leaseExpiresAt: row.leaseExpiresAt,
-        createdAt: row.createdAt,
-      };
-    });
+    const rows = await listPendingRowsByIdentity<PendingUploadRow>(
+      db,
+      "_resolve_pending_uploads",
+      identityKey ?? null,
+    );
+    return rows.map((row) => ({
+      _id: row._id,
+      localStorageId: row.localStorageId,
+      sha256: row.sha256,
+      size: row.size,
+      contentType: row.contentType,
+      identityKey: row.identityKey,
+      state: row.state,
+      owner: row.owner,
+      processingStartedAt: row.processingStartedAt,
+      leaseExpiresAt: row.leaseExpiresAt,
+      createdAt: row.createdAt,
+    }));
   },
 };
 
@@ -844,15 +858,7 @@ const pendingUploadRelease: SystemFunctionDef = {
   type: "mutation",
   handler: async (db, args) => {
     const { id, owner } = args as { id: string; owner?: string };
-    const doc = await readPendingUploadById(db, id);
-    if (doc !== null && (owner === undefined || doc.owner === owner)) {
-      db.patch("_resolve_pending_uploads", id as DocumentId, {
-        state: "pending",
-        owner: { $undefined: true },
-        processingStartedAt: { $undefined: true },
-        leaseExpiresAt: { $undefined: true },
-      });
-    }
+    await releasePendingEntry(db, "_resolve_pending_uploads", id, owner);
     return null;
   },
 };

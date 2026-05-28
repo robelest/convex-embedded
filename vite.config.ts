@@ -276,6 +276,7 @@ export default defineConfig({
     },
   },
   test: {
+    silent: "passed-only",
     coverage: {
       reporter: ["text", "html"],
       exclude: [

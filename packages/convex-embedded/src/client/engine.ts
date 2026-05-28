@@ -43,7 +43,7 @@ import { unwrapSchemaField } from "@/shared/canonicalize";
 import { createLogger } from "@/shared/logger";
 import { matchTag } from "@/shared/match";
 import { getFunctionName } from "@/shared/refs";
-import type { Definition } from "@/shared/schema";
+import { stripOmittedFields, type Definition } from "@/shared/schema";
 import type { EngineStatus } from "@/shared/types";
 import { recordCounter, registerGauge } from "@/tracing/metrics";
 import { withSpan } from "@/tracing/spans";
@@ -98,32 +98,6 @@ interface RemoteCallable {
 interface LocalPathCallable {
   mutation(ref: unknown, args: unknown): Promise<unknown>;
   query(ref: unknown, args: unknown): Promise<unknown>;
-}
-
-/**
- * Strip fields marked with `schema.omit()` from a set of documents.
- *
- * Remote documents may contain fields that only exist on the remote
- * Convex backend and should not be synced to the local embedded
- * runtime (e.g. large blobs, server-side computed fields).
- *
- * If there are no omitted fields in the schema, returns the original
- * array as-is (no allocation).
- */
-function stripOmittedFields(
-  schemaDef: Definition,
-  docs: Array<Record<string, unknown>>,
-): Array<Record<string, unknown>> {
-  const omittedFields = schemaDef.getOmittedFields();
-  if (omittedFields.length === 0) return docs;
-
-  return docs.map((doc) => {
-    const stripped = { ...doc };
-    for (const field of omittedFields) {
-      delete stripped[field];
-    }
-    return stripped;
-  });
 }
 
 /**
@@ -717,12 +691,6 @@ async function runSpan<A>(input: {
   return withSpan(input.name, () => input.run(), { attributes });
 }
 
-function getConnectivityAdapter(
-  connectivity?: ConnectivityAdapter,
-): ConnectivityAdapter {
-  return connectivity ?? createAmbientConnectivityAdapter();
-}
-
 function isLocalUploadUrl(value: unknown): value is string {
   if (typeof value !== "string") {
     return false;
@@ -784,7 +752,10 @@ export function createEngine(config: EngineConfig): EngineInstance {
       .map(([tableName, tableConfig]) => [tableName, tableConfig.schema]),
   ) as Record<string, Definition>;
   const orderedTables = orderTablesByDependencies(tables);
-  const activatedRemoteTables = new Set(rootTablesByDependencies(tables));
+  const remoteApplyOrder = (() => {
+    const rootTables = new Set(rootTablesByDependencies(tables));
+    return orderedTables.filter((tableName) => rootTables.has(tableName));
+  })();
   const processorHeartbeatMs = Math.max(1_000, Math.floor(leaseMs / 3));
 
   let replayInst!: Replay;
@@ -865,10 +836,9 @@ export function createEngine(config: EngineConfig): EngineInstance {
   const processorIdForReplay =
     processorId ?? `processor_${Math.random().toString(36).slice(2)}`;
 
-  let onOnline: (() => void) | null = null;
-  let onOffline: (() => void) | null = null;
-  let cleanupOnlineListener: (() => void) | null = null;
-  let cleanupOfflineListener: (() => void) | null = null;
+  let connectivityListeners: {
+    cleanup: () => void;
+  } | null = null;
   const SCOPE_TEARDOWN_DEBOUNCE_MS = config.scopeTeardownDebounceMs ?? 3000;
 
   const subs: SubscriptionsSubsystem = createSubscriptions({
@@ -889,9 +859,7 @@ export function createEngine(config: EngineConfig): EngineInstance {
   });
 
   function getRemoteApplyOrder(): string[] {
-    return orderedTables.filter((tableName) =>
-      activatedRemoteTables.has(tableName),
-    );
+    return remoteApplyOrder;
   }
 
   const bufferRemoteSnapshot = async (
@@ -1371,7 +1339,8 @@ export function createEngine(config: EngineConfig): EngineInstance {
       isStarted: () => started,
     });
 
-    const connectivity = getConnectivityAdapter(config.connectivity);
+    const connectivity =
+      config.connectivity ?? createAmbientConnectivityAdapter();
 
     const startRoute = getStartLifecycleRoute({
       hasNavigator: true,
@@ -1389,10 +1358,14 @@ export function createEngine(config: EngineConfig): EngineInstance {
     });
 
     if (connectivity.onOnline && connectivity.onOffline) {
-      onOnline = runOnlineAfterHydration;
-      onOffline = handleOffline;
-      cleanupOnlineListener = connectivity.onOnline(onOnline);
-      cleanupOfflineListener = connectivity.onOffline(onOffline);
+      const cleanupOnline = connectivity.onOnline(runOnlineAfterHydration);
+      const cleanupOffline = connectivity.onOffline(handleOffline);
+      connectivityListeners = {
+        cleanup: () => {
+          cleanupOnline();
+          cleanupOffline();
+        },
+      };
     }
   };
 
@@ -1419,12 +1392,8 @@ export function createEngine(config: EngineConfig): EngineInstance {
     clearBufferedSnapshots();
     subs.resetPulled();
 
-    cleanupOnlineListener?.();
-    cleanupOfflineListener?.();
-    cleanupOnlineListener = null;
-    cleanupOfflineListener = null;
-    onOnline = null;
-    onOffline = null;
+    connectivityListeners?.cleanup();
+    connectivityListeners = null;
 
     emit({ status: "idle" });
     statusEmitter.clearListeners();
@@ -1449,7 +1418,7 @@ export function createEngine(config: EngineConfig): EngineInstance {
     );
     const localArgs = idMap.translateRemoteIdsToLocal(args);
 
-    const __mutStart = globalThis.performance?.now?.() ?? Date.now();
+    const __mutStart = performance.now();
     let localResult: unknown = undefined;
     let localFailed = false;
     try {
@@ -1465,7 +1434,7 @@ export function createEngine(config: EngineConfig): EngineInstance {
       );
     }
 
-    const __localDone = globalThis.performance?.now?.() ?? Date.now();
+    const __localDone = performance.now();
     log.debug(
       `engine.mutation local-done t+${(__localDone - __mutStart).toFixed(1)}ms ref=${refName}`,
     );
@@ -1494,7 +1463,7 @@ export function createEngine(config: EngineConfig): EngineInstance {
       // race their pending-pushes through the runtime's transaction lock
       // (which already serialises commits), preserving ordering.
       const replayPayloadVersion = getReplayPayloadVersion?.(refName) ?? 1;
-      const __pushStart = globalThis.performance?.now?.() ?? Date.now();
+      const __pushStart = performance.now();
       await pendingQueue.push(
         ref,
         args,
@@ -1502,7 +1471,7 @@ export function createEngine(config: EngineConfig): EngineInstance {
         table,
         replayPayloadVersion,
       );
-      const __pushDone = globalThis.performance?.now?.() ?? Date.now();
+      const __pushDone = performance.now();
       log.debug(
         `engine.mutation queue.push push=${(__pushDone - __pushStart).toFixed(1)}ms ref=${refName}`,
       );
@@ -1526,7 +1495,7 @@ export function createEngine(config: EngineConfig): EngineInstance {
       }
     }
 
-    const __chainDone = globalThis.performance?.now?.() ?? Date.now();
+    const __chainDone = performance.now();
     log.debug(
       `engine.mutation chain-done t+${(__chainDone - __mutStart).toFixed(1)}ms ref=${refName}`,
     );

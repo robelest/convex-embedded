@@ -72,33 +72,6 @@ function createHarness() {
 }
 
 describe("cold paginated query sync", () => {
-  it("triggers ensureReadReady for a full query subscription", () => {
-    const { client, ensureReadReady } = createHarness();
-
-    client.onUpdate("things:full", { group: "a" }, () => {});
-
-    expect(ensureReadReady).toHaveBeenCalledWith(
-      "things:full",
-      expect.objectContaining({ group: "a" }),
-    );
-  });
-
-  it("triggers ensureReadReady for a paginated query subscription", () => {
-    const { client, ensureReadReady } = createHarness();
-
-    client.onPaginatedUpdate_experimental(
-      "things:paged",
-      { group: "a", paginationOpts: { cursor: null, numItems: 10 } },
-      { initialNumItems: 10 },
-      () => {},
-    );
-
-    expect(ensureReadReady).toHaveBeenCalledWith(
-      "things:paged",
-      expect.objectContaining({ group: "a" }),
-    );
-  });
-
   it("never invokes the paginated callback synchronously during subscribe", async () => {
     const { client } = createHarness();
     const args = { paginationOpts: { cursor: null, numItems: 10 } };

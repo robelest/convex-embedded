@@ -519,88 +519,110 @@ function mergePullResult(input: {
     document: Record<string, unknown>,
   ) => Record<string, unknown>;
 }): MergeResolveOutput {
-  const seqAdvanced = (docId: string, seq: number): boolean =>
-    seq > (input.localSeqsByDocId.get(docId) ?? -Infinity);
+  const localSeqsByDocId = input.localSeqsByDocId;
+  const translateRemoteDocument = input.translateRemoteDocument;
+  const pullDocs = input.pullResult.documents;
+
   if (input.pullResult.mode === "full") {
-    const mergedDocs = input.pullResult.documents.flatMap((row) => {
-      if (!row.document) return [];
-      return [input.translateRemoteDocument(row.document)];
-    });
-    const deletedDocIds = input.pullResult.documents.flatMap((row) =>
-      row.deleted ? [row.docId] : [],
-    );
-    const metadataEntries = input.pullResult.documents.flatMap((row) =>
-      typeof row.seq === "number" && seqAdvanced(row.docId, row.seq)
-        ? [{ docId: row.docId, seq: row.seq }]
-        : [],
-    );
+    const mergedDocs: Array<Record<string, unknown>> = [];
+    const deletedDocIds: string[] = [];
+    const metadataEntries: Array<{ docId: string; seq: number }> = [];
+    for (let i = 0; i < pullDocs.length; i++) {
+      const row = pullDocs[i]!;
+      if (row.document) {
+        mergedDocs.push(translateRemoteDocument(row.document));
+      }
+      if (row.deleted) {
+        deletedDocIds.push(row.docId);
+      }
+      if (
+        typeof row.seq === "number" &&
+        row.seq > (localSeqsByDocId.get(row.docId) ?? -Infinity)
+      ) {
+        metadataEntries.push({ docId: row.docId, seq: row.seq });
+      }
+    }
     return { deletedDocIds, diffCount: 0, mergedDocs, metadataEntries };
   }
 
-  const mergedDocsById = new Map(
-    input.localDocs
-      .filter((doc) => typeof doc._id === "string")
-      .map(
-        (doc) => [String(doc._id), input.translateRemoteDocument(doc)] as const,
-      ),
-  );
+  const mergedDocsById = new Map<string, Record<string, unknown>>();
+  const localDocs = input.localDocs;
+  for (let i = 0; i < localDocs.length; i++) {
+    const doc = localDocs[i]!;
+    const id = doc._id;
+    if (typeof id === "string") {
+      mergedDocsById.set(id, translateRemoteDocument(doc));
+    }
+  }
 
-  const output = input.pullResult.documents.reduce<MergeResolveOutput>(
-    (acc, { docId, deleted, diff, document, seq }) => {
-      if (deleted) {
-        mergedDocsById.delete(docId);
-        acc.deletedDocIds.push(docId);
-        return acc;
-      }
-      const entry = input.localYjsMap.get(docId);
-      if (!entry) {
-        if (document) {
-          mergedDocsById.set(docId, input.translateRemoteDocument(document));
-          if (typeof seq === "number" && seqAdvanced(docId, seq)) {
-            acc.metadataEntries.push({ docId, seq });
-          }
-          return acc;
+  const deletedDocIds: string[] = [];
+  const metadataEntries: Array<{ docId: string; seq: number }> = [];
+  let diffCount = 0;
+  const localYjsMap = input.localYjsMap;
+  const schemaDef = input.schemaDef;
+  const tableName = input.tableName;
+  for (let i = 0; i < pullDocs.length; i++) {
+    const { docId, deleted, diff, document, seq } = pullDocs[i]!;
+    if (deleted) {
+      mergedDocsById.delete(docId);
+      deletedDocIds.push(docId);
+      continue;
+    }
+    const entry = localYjsMap.get(docId);
+    if (!entry) {
+      if (document) {
+        mergedDocsById.set(docId, translateRemoteDocument(document));
+        if (
+          typeof seq === "number" &&
+          seq > (localSeqsByDocId.get(docId) ?? -Infinity)
+        ) {
+          metadataEntries.push({ docId, seq });
         }
-        log.warn(
-          `sync: resolve returned diff for unknown doc "${docId}" in "${input.tableName}"`,
-        );
-        return acc;
+        continue;
       }
-      if (diff) {
-        const yjsDoc = initYjsDoc(input.schemaDef, entry.localDoc, 0, {
-          skipProse: true,
-        });
-        Y.applyUpdateV2(yjsDoc, new Uint8Array(diff));
-        acc.diffCount += 1;
-        const merged = mergeCrdtFieldsWithPlain(
-          input.schemaDef,
-          entry.localDoc,
-          yjsDoc,
-        );
-        yjsDoc.destroy();
-        merged._id = entry.localDoc._id;
-        merged._creationTime = entry.localDoc._creationTime;
-        mergedDocsById.set(docId, input.translateRemoteDocument(merged));
-        if (typeof seq === "number" && seqAdvanced(docId, seq)) {
-          acc.metadataEntries.push({ docId, seq });
-        }
-        return acc;
+      log.warn(
+        `sync: resolve returned diff for unknown doc "${docId}" in "${tableName}"`,
+      );
+      continue;
+    }
+    if (diff) {
+      const yjsDoc = initYjsDoc(schemaDef, entry.localDoc, 0, {
+        skipProse: true,
+      });
+      Y.applyUpdateV2(yjsDoc, new Uint8Array(diff));
+      diffCount += 1;
+      const merged = mergeCrdtFieldsWithPlain(
+        schemaDef,
+        entry.localDoc,
+        yjsDoc,
+      );
+      yjsDoc.destroy();
+      merged._id = entry.localDoc._id;
+      merged._creationTime = entry.localDoc._creationTime;
+      mergedDocsById.set(docId, translateRemoteDocument(merged));
+      if (
+        typeof seq === "number" &&
+        seq > (localSeqsByDocId.get(docId) ?? -Infinity)
+      ) {
+        metadataEntries.push({ docId, seq });
       }
-      mergedDocsById.set(docId, input.translateRemoteDocument(entry.localDoc));
-      if (typeof seq === "number" && seqAdvanced(docId, seq)) {
-        acc.metadataEntries.push({ docId, seq });
-      }
-      return acc;
-    },
-    {
-      deletedDocIds: [],
-      diffCount: 0,
-      mergedDocs: [],
-      metadataEntries: [],
-    },
-  );
-  output.mergedDocs = Array.from(mergedDocsById.values());
-  return output;
+      continue;
+    }
+    mergedDocsById.set(docId, translateRemoteDocument(entry.localDoc));
+    if (
+      typeof seq === "number" &&
+      seq > (localSeqsByDocId.get(docId) ?? -Infinity)
+    ) {
+      metadataEntries.push({ docId, seq });
+    }
+  }
+
+  const mergedDocs = new Array<Record<string, unknown>>(mergedDocsById.size);
+  let mergedIndex = 0;
+  for (const value of mergedDocsById.values()) {
+    mergedDocs[mergedIndex++] = value;
+  }
+  return { deletedDocIds, diffCount, mergedDocs, metadataEntries };
 }
 
 async function runSpan<A>(input: {
